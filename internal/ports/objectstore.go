@@ -2,8 +2,20 @@ package ports
 
 import (
 	"context"
+	"errors"
 	"io"
 	"time"
+)
+
+var (
+	ErrNotFound         = errors.New("object not found")
+	ErrConflict         = errors.New("object revision conflict")
+	ErrIntegrity        = errors.New("object integrity check failed")
+	ErrInvalidKey       = errors.New("invalid object key")
+	ErrUnsafePath       = errors.New("unsafe object path")
+	ErrInvalidCondition = errors.New("invalid write condition")
+	ErrInvalidPageToken = errors.New("invalid page token")
+	ErrAmbiguous        = errors.New("object mutation outcome is ambiguous")
 )
 
 type Revision string
@@ -25,7 +37,7 @@ type RestartableSource interface {
 	Open() (io.ReadCloser, error)
 }
 
-type ArtifactStore interface {
+type ObjectStore interface {
 	Get(ctx context.Context, key string) (io.ReadCloser, ObjectMeta, error)
 	Head(ctx context.Context, key string) (ObjectMeta, error)
 	PutImmutable(ctx context.Context, key string, source RestartableSource, expectedSHA256 string, expectedSize int64) (ObjectMeta, error)
