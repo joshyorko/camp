@@ -328,3 +328,36 @@ func TestLeaseRepositoryValidatesTheObservedPointerBeforeAcquiring(t *testing.T)
 		})
 	}
 }
+
+func TestLeaseRepositoryAcquiresAbsentBranchFromValidatedSourcePointer(t *testing.T) {
+	t.Parallel()
+	store := newObjectStore(t)
+	pointers := coordination.NewPointerRepository(store)
+	leases := coordination.NewLeaseRepository(store)
+	ctx := context.Background()
+	now := time.Date(2026, 7, 14, 12, 0, 0, 0, time.UTC)
+	sourceRef := generationRef(42, "a")
+	source, err := pointers.Create(ctx, pointerFixture("second-brain", domain.Lineage{Branch: "main"}, sourceRef, nil, now))
+	if err != nil {
+		t.Fatal(err)
+	}
+	branch := domain.Lineage{Branch: "feature-safe"}
+	token, err := leases.AcquireBranchFrom(
+		ctx,
+		"second-brain",
+		branch,
+		coordination.LeaseOwner{SessionID: "branch-session", Machine: "bluefin"},
+		source,
+		now.Add(time.Minute),
+		2*time.Minute,
+	)
+	if err != nil {
+		t.Fatalf("AcquireBranchFrom() error = %v", err)
+	}
+	if token.Lease.Lineage != branch || token.Lease.OpenedGeneration == nil || *token.Lease.OpenedGeneration != sourceRef {
+		t.Fatalf("branch lease = %#v", token.Lease)
+	}
+	if _, err := pointers.Read(ctx, "second-brain", branch); !errors.Is(err, ports.ErrNotFound) {
+		t.Fatalf("branch acquisition created or observed a pointer: %v", err)
+	}
+}

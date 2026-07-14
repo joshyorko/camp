@@ -50,17 +50,6 @@ func (r *LeaseRepository) Read(ctx context.Context, capsule string, lineage doma
 }
 
 func (r *LeaseRepository) Acquire(ctx context.Context, capsule string, lineage domain.Lineage, owner LeaseOwner, observed *PointerRecord, now time.Time, ttl time.Duration) (LeaseToken, error) {
-	key, err := lineage.LeaseKey(capsule)
-	if err != nil {
-		return LeaseToken{}, err
-	}
-	if owner.SessionID == "" || owner.Machine == "" || now.IsZero() || ttl <= 0 {
-		return LeaseToken{}, fmt.Errorf("invalid lease acquisition: %w", ErrInvalidDocument)
-	}
-	expiresAt := now.Add(ttl)
-	if !expiresAt.After(now) {
-		return LeaseToken{}, fmt.Errorf("invalid lease expiry: %w", ErrInvalidDocument)
-	}
 	var opened *domain.GenerationRef
 	if observed != nil {
 		if observed.Revision == "" {
@@ -70,6 +59,52 @@ func (r *LeaseRepository) Acquire(ctx context.Context, capsule string, lineage d
 			return LeaseToken{}, fmt.Errorf("validate observed pointer: %w", err)
 		}
 		opened = cloneGenerationRef(&observed.Pointer.Generation)
+	}
+	return r.acquire(ctx, capsule, lineage, owner, observed, opened, now, ttl)
+}
+
+func (r *LeaseRepository) AcquireBranchFrom(ctx context.Context, capsule string, lineage domain.Lineage, owner LeaseOwner, source PointerRecord, now time.Time, ttl time.Duration) (LeaseToken, error) {
+	if lineage.IsMain() || source.Pointer.Lineage == lineage || source.Revision == "" {
+		return LeaseToken{}, fmt.Errorf("invalid branch source: %w", ErrInvalidDocument)
+	}
+	if err := validatePointer(source.Pointer, capsule, source.Pointer.Lineage); err != nil {
+		return LeaseToken{}, fmt.Errorf("validate branch source pointer: %w", err)
+	}
+	pointers := NewPointerRepository(r.store)
+	if err := pointers.Revalidate(ctx, source); err != nil {
+		return LeaseToken{}, fmt.Errorf("revalidate branch source pointer: %w", err)
+	}
+	token, err := r.acquire(ctx, capsule, lineage, owner, nil, cloneGenerationRef(&source.Pointer.Generation), now, ttl)
+	if err != nil {
+		return LeaseToken{}, err
+	}
+	if err := pointers.Revalidate(ctx, source); err == nil {
+		return token, nil
+	} else {
+		observationErr := fmt.Errorf("branch source changed during lease acquisition: %w", ErrPointerChanged)
+		if releaseErr := r.releaseAcquiredLease(ctx, token); releaseErr != nil {
+			return LeaseToken{}, errors.Join(observationErr, releaseErr)
+		}
+		return LeaseToken{}, observationErr
+	}
+}
+
+func (r *LeaseRepository) acquire(ctx context.Context, capsule string, lineage domain.Lineage, owner LeaseOwner, observed *PointerRecord, opened *domain.GenerationRef, now time.Time, ttl time.Duration) (LeaseToken, error) {
+	key, err := lineage.LeaseKey(capsule)
+	if err != nil {
+		return LeaseToken{}, err
+	}
+	if owner.SessionID == "" || owner.Machine == "" || now.IsZero() || ttl <= 0 {
+		return LeaseToken{}, fmt.Errorf("invalid lease acquisition: %w", ErrInvalidDocument)
+	}
+	if opened != nil {
+		if err := validateGenerationRef(*opened); err != nil {
+			return LeaseToken{}, err
+		}
+	}
+	expiresAt := now.Add(ttl)
+	if !expiresAt.After(now) {
+		return LeaseToken{}, fmt.Errorf("invalid lease expiry: %w", ErrInvalidDocument)
 	}
 	lease := domain.WriterLease{
 		SchemaVersion:    domain.SchemaVersion,

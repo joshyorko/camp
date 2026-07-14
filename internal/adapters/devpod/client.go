@@ -49,15 +49,26 @@ type WorkspaceSource struct {
 }
 
 type UpOptions struct {
-	WorkspacePath string
-	WorkspaceID   string
-	Provider      string
-	InitEnv       []string
-	ForwardedArgv []string
+	WorkspacePath    string
+	WorkspaceID      string
+	Context          string
+	Provider         string
+	DevcontainerPath string
+	CampEnvironment  *CampEnvironment
+	InitEnv          []string
+	ForwardedArgv    []string
+}
+
+type CampEnvironment struct {
+	Registry   string
+	Fileserver string
+	Capsule    string
+	Checkpoint string
 }
 
 type SSHOptions struct {
 	WorkspaceID     string
+	Context         string
 	Workdir         string
 	User            string
 	ForwardPorts    []string
@@ -66,6 +77,8 @@ type SSHOptions struct {
 	StartServices   bool
 	ForwardedArgv   []string
 }
+
+type WorkspaceCommand = ports.WorkspaceCommand
 
 type Client struct {
 	executable string
@@ -78,11 +91,26 @@ func NewClient(executable string, runner ports.Runner) *Client {
 
 func (c *Client) Up(ctx context.Context, options UpOptions) (ports.Result, error) {
 	argv := []string{"up", "--ide", "none", "--open-ide=false"}
+	if options.Context != "" {
+		argv = append(argv, "--context", options.Context)
+	}
 	if options.WorkspaceID != "" {
 		argv = append(argv, "--id", options.WorkspaceID)
 	}
 	if options.Provider != "" {
 		argv = append(argv, "--provider", options.Provider)
+	}
+	if options.DevcontainerPath != "" {
+		argv = append(argv, "--devcontainer-path", options.DevcontainerPath)
+	}
+	if options.CampEnvironment != nil {
+		values, err := options.CampEnvironment.values()
+		if err != nil {
+			return ports.Result{}, err
+		}
+		for _, value := range values {
+			argv = append(argv, "--workspace-env", value)
+		}
 	}
 	for _, value := range options.InitEnv {
 		argv = append(argv, "--init-env", value)
@@ -93,7 +121,21 @@ func (c *Client) Up(ctx context.Context, options UpOptions) (ports.Result, error
 }
 
 func (c *Client) SSH(ctx context.Context, options SSHOptions) (ports.Result, error) {
+	command, err := c.SSHCommand(options)
+	if err != nil {
+		return ports.Result{}, err
+	}
+	return c.runner.Run(ctx, command)
+}
+
+func (c *Client) SSHCommand(options SSHOptions) (ports.Command, error) {
+	if options.WorkspaceID == "" || unsafeArgument(options.WorkspaceID) {
+		return ports.Command{}, errors.New("DevPod workspace ID is invalid")
+	}
 	argv := []string{"ssh"}
+	if options.Context != "" {
+		argv = append(argv, "--context", options.Context)
+	}
 	if options.Workdir != "" {
 		argv = append(argv, "--workdir", options.Workdir)
 	}
@@ -112,11 +154,35 @@ func (c *Client) SSH(ctx context.Context, options SSHOptions) (ports.Result, err
 	argv = append(argv, options.ForwardedArgv...)
 	argv = append(argv, "--start-services="+strconv.FormatBool(options.StartServices))
 	argv = append(argv, options.WorkspaceID)
+	return ports.Command{Executable: c.executable, Argv: argv}, nil
+}
+
+func (c *Client) Execute(ctx context.Context, command WorkspaceCommand) (ports.Result, error) {
+	if command.WorkspaceID == "" || len(command.Argv) == 0 || unsafeArgument(command.WorkspaceID) || unsafeArgument(command.Context) || unsafeArgument(command.Workdir) {
+		return ports.Result{}, errors.New("invalid structured DevPod workspace command")
+	}
+	argv := []string{"ssh"}
+	if command.Context != "" {
+		argv = append(argv, "--context", command.Context)
+	}
+	if command.Workdir != "" {
+		argv = append(argv, "--workdir", command.Workdir)
+	}
+	argv = append(argv, "--start-services=false", "--command", encodeCommand(command.Argv), command.WorkspaceID)
 	return c.run(ctx, argv)
 }
 
 func (c *Client) Status(ctx context.Context, workspaceID string) (WorkspaceStatus, error) {
-	result, err := c.run(ctx, []string{"status", "--output", "json", workspaceID})
+	return c.StatusInContext(ctx, "", workspaceID)
+}
+
+func (c *Client) StatusInContext(ctx context.Context, devpodContext, workspaceID string) (WorkspaceStatus, error) {
+	argv := []string{"status"}
+	if devpodContext != "" {
+		argv = append(argv, "--context", devpodContext)
+	}
+	argv = append(argv, "--output", "json", workspaceID)
+	result, err := c.run(ctx, argv)
 	if err != nil {
 		return WorkspaceStatus{}, err
 	}
@@ -131,7 +197,16 @@ func (c *Client) Status(ctx context.Context, workspaceID string) (WorkspaceStatu
 }
 
 func (c *Client) List(ctx context.Context) ([]Workspace, error) {
-	result, err := c.run(ctx, []string{"list", "--output", "json", "--skip-pro"})
+	return c.ListInContext(ctx, "")
+}
+
+func (c *Client) ListInContext(ctx context.Context, devpodContext string) ([]Workspace, error) {
+	argv := []string{"list"}
+	if devpodContext != "" {
+		argv = append(argv, "--context", devpodContext)
+	}
+	argv = append(argv, "--output", "json", "--skip-pro")
+	result, err := c.run(ctx, argv)
 	if err != nil {
 		return nil, err
 	}
@@ -143,21 +218,47 @@ func (c *Client) List(ctx context.Context) ([]Workspace, error) {
 }
 
 func (c *Client) Stop(ctx context.Context, workspaceID string, allowed bool) (ports.Result, error) {
+	return c.StopInContext(ctx, "", workspaceID, allowed)
+}
+
+func (c *Client) StopInContext(ctx context.Context, devpodContext, workspaceID string, allowed bool) (ports.Result, error) {
 	if !allowed {
 		return ports.Result{}, ErrLifecycleActionNotAllowed
 	}
-	return c.run(ctx, []string{"stop", workspaceID})
+	argv := []string{"stop"}
+	if devpodContext != "" {
+		argv = append(argv, "--context", devpodContext)
+	}
+	return c.run(ctx, append(argv, workspaceID))
 }
 
 func (c *Client) Delete(ctx context.Context, workspaceID string, allowed bool) (ports.Result, error) {
+	return c.DeleteInContext(ctx, "", workspaceID, allowed)
+}
+
+func (c *Client) DeleteInContext(ctx context.Context, devpodContext, workspaceID string, allowed bool) (ports.Result, error) {
 	if !allowed {
 		return ports.Result{}, ErrLifecycleActionNotAllowed
 	}
-	return c.run(ctx, []string{"delete", "--ignore-not-found", workspaceID})
+	argv := []string{"delete"}
+	if devpodContext != "" {
+		argv = append(argv, "--context", devpodContext)
+	}
+	argv = append(argv, "--ignore-not-found", workspaceID)
+	return c.run(ctx, argv)
 }
 
 func (c *Client) ResolveWorkspaceFolder(ctx context.Context, workspaceID string) (string, error) {
-	result, err := c.run(ctx, []string{"ssh", "--start-services=false", "--command", "pwd", workspaceID})
+	return c.ResolveWorkspaceFolderInContext(ctx, "", workspaceID)
+}
+
+func (c *Client) ResolveWorkspaceFolderInContext(ctx context.Context, devpodContext, workspaceID string) (string, error) {
+	argv := []string{"ssh"}
+	if devpodContext != "" {
+		argv = append(argv, "--context", devpodContext)
+	}
+	argv = append(argv, "--start-services=false", "--command", "pwd", workspaceID)
+	result, err := c.run(ctx, argv)
 	if err != nil {
 		return "", err
 	}
@@ -179,4 +280,36 @@ func validState(state WorkspaceState) bool {
 	default:
 		return false
 	}
+}
+
+func (e CampEnvironment) values() ([]string, error) {
+	values := []struct {
+		key   string
+		value string
+	}{
+		{"CAMP_REGISTRY", e.Registry},
+		{"CAMP_FILESERVER", e.Fileserver},
+		{"CAMP_CAPSULE", e.Capsule},
+		{"CAMP_CHECKPOINT", e.Checkpoint},
+	}
+	result := make([]string, 0, len(values))
+	for _, value := range values {
+		if unsafeArgument(value.value) || value.value == "" && value.key != "CAMP_CHECKPOINT" {
+			return nil, fmt.Errorf("%s workspace environment is invalid", value.key)
+		}
+		result = append(result, value.key+"="+value.value)
+	}
+	return result, nil
+}
+
+func encodeCommand(argv []string) string {
+	quoted := make([]string, len(argv))
+	for index, argument := range argv {
+		quoted[index] = "'" + strings.ReplaceAll(argument, "'", `'"'"'`) + "'"
+	}
+	return strings.Join(quoted, " ")
+}
+
+func unsafeArgument(value string) bool {
+	return strings.ContainsAny(value, "\x00\r\n")
 }

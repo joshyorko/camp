@@ -81,6 +81,95 @@ func TestExactDevPodArgv(t *testing.T) {
 	}
 }
 
+func TestTask3ScopedWorkspaceEnvironmentAndArgvExecution(t *testing.T) {
+	t.Parallel()
+	runner := &recordingRunner{result: ports.Result{Stdout: []byte("ok")}}
+	client := NewClient("/opt/devpod", runner)
+	_, err := client.Up(context.Background(), UpOptions{
+		WorkspacePath: "/tmp/root", WorkspaceID: "camp-abcd", Context: "default", Provider: "docker",
+		DevcontainerPath: "/tmp/root/.camp/runtime/devcontainer.json",
+		CampEnvironment: &CampEnvironment{
+			Registry: "127.0.0.1:5000", Fileserver: "127.0.0.1:8080", Capsule: "second-brain", Checkpoint: "42",
+		},
+	})
+	if err != nil {
+		t.Fatalf("Up() error = %v", err)
+	}
+	wantUp := []string{
+		"up", "--ide", "none", "--open-ide=false", "--context", "default", "--id", "camp-abcd", "--provider", "docker",
+		"--devcontainer-path", "/tmp/root/.camp/runtime/devcontainer.json",
+		"--workspace-env", "CAMP_REGISTRY=127.0.0.1:5000", "--workspace-env", "CAMP_FILESERVER=127.0.0.1:8080",
+		"--workspace-env", "CAMP_CAPSULE=second-brain", "--workspace-env", "CAMP_CHECKPOINT=42", "/tmp/root",
+	}
+	if !reflect.DeepEqual(runner.commands[0].Argv, wantUp) {
+		t.Fatalf("Up argv = %#v, want %#v", runner.commands[0].Argv, wantUp)
+	}
+
+	_, err = client.Execute(context.Background(), WorkspaceCommand{
+		Context: "default", WorkspaceID: "camp-abcd", Workdir: "/workspaces/root/Memory D",
+		Argv: []string{"printf", "%s", "$(touch /tmp/nope); quote' here"},
+	})
+	if err != nil {
+		t.Fatalf("Execute() error = %v", err)
+	}
+	wantExec := []string{"ssh", "--context", "default", "--workdir", "/workspaces/root/Memory D", "--start-services=false", "--command", `'printf' '%s' '$(touch /tmp/nope); quote'"'"' here'`, "camp-abcd"}
+	if !reflect.DeepEqual(runner.commands[1].Argv, wantExec) {
+		t.Fatalf("Execute argv = %#v, want %#v", runner.commands[1].Argv, wantExec)
+	}
+
+	command, err := client.SSHCommand(SSHOptions{Context: "default", WorkspaceID: "camp-abcd", ReverseForwards: []string{"127.0.0.1:5000:127.0.0.1:5000"}, StartServices: true})
+	if err != nil {
+		t.Fatalf("SSHCommand() error = %v", err)
+	}
+	if command.Executable != "/opt/devpod" || !reflect.DeepEqual(command.Argv, []string{"ssh", "--context", "default", "--reverse-forward-ports", "127.0.0.1:5000:127.0.0.1:5000", "--start-services=true", "camp-abcd"}) {
+		t.Fatalf("SSHCommand = %#v", command)
+	}
+}
+
+func TestTask3ReconciliationCallsAreContextScoped(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name string
+		run  func(*Client) error
+		want []string
+	}{
+		{"status", func(c *Client) error {
+			_, err := c.StatusInContext(context.Background(), "default", "camp")
+			return err
+		}, []string{"status", "--context", "default", "--output", "json", "camp"}},
+		{"list", func(c *Client) error { _, err := c.ListInContext(context.Background(), "default"); return err }, []string{"list", "--context", "default", "--output", "json", "--skip-pro"}},
+		{"folder", func(c *Client) error {
+			_, err := c.ResolveWorkspaceFolderInContext(context.Background(), "default", "camp")
+			return err
+		}, []string{"ssh", "--context", "default", "--start-services=false", "--command", "pwd", "camp"}},
+		{"stop", func(c *Client) error {
+			_, err := c.StopInContext(context.Background(), "default", "camp", true)
+			return err
+		}, []string{"stop", "--context", "default", "camp"}},
+		{"delete", func(c *Client) error {
+			_, err := c.DeleteInContext(context.Background(), "default", "camp", true)
+			return err
+		}, []string{"delete", "--context", "default", "--ignore-not-found", "camp"}},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			runner := &recordingRunner{result: ports.Result{Stdout: []byte(`{"id":"camp","state":"Running"}`)}}
+			if test.name == "list" {
+				runner.result.Stdout = []byte(`[]`)
+			}
+			if test.name == "folder" {
+				runner.result.Stdout = []byte("/workspaces/root\n")
+			}
+			if err := test.run(NewClient("/opt/devpod", runner)); err != nil {
+				t.Fatal(err)
+			}
+			if !reflect.DeepEqual(runner.commands[0].Argv, test.want) {
+				t.Fatalf("argv = %#v, want %#v", runner.commands[0].Argv, test.want)
+			}
+		})
+	}
+}
+
 func TestStatusParsesEveryPinnedJSONState(t *testing.T) {
 	for _, state := range []WorkspaceState{StateRunning, StateBusy, StateStopped, StateNotFound} {
 		t.Run(string(state), func(t *testing.T) {

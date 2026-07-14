@@ -67,6 +67,22 @@ func TestExactHaulerV201Argv(t *testing.T) {
 	}
 }
 
+func TestSyncFromUsesStructuredWorkingDirectory(t *testing.T) {
+	t.Parallel()
+	runner := &recordingRunner{}
+	client := NewClient("/opt/hauler", runner)
+	if _, err := client.SyncFrom(context.Background(), "/tmp/store", []string{"/tmp/root/.camp/hauler-manifest.yaml"}, "/tmp/root"); err != nil {
+		t.Fatal(err)
+	}
+	want := ports.Command{
+		Executable: "/opt/hauler", Directory: "/tmp/root",
+		Argv: []string{"store", "--store", "/tmp/store", "sync", "--filename", "/tmp/root/.camp/hauler-manifest.yaml"},
+	}
+	if len(runner.commands) != 1 || !reflect.DeepEqual(runner.commands[0], want) {
+		t.Fatalf("command = %#v, want %#v", runner.commands, want)
+	}
+}
+
 func TestExactHaulerV201ServiceArgv(t *testing.T) {
 	client := NewClient("hauler", &recordingRunner{})
 	tests := []struct {

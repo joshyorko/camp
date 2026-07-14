@@ -55,6 +55,14 @@ func (c *Client) Sync(ctx context.Context, store string, manifests []string) (po
 	return c.run(ctx, argv)
 }
 
+func (c *Client) SyncFrom(ctx context.Context, store string, manifests []string, directory string) (ports.Result, error) {
+	argv := storeArgv(store, "sync")
+	for _, manifest := range manifests {
+		argv = append(argv, "--filename", manifest)
+	}
+	return c.runner.Run(ctx, ports.Command{Executable: c.executable, Argv: argv, Directory: directory})
+}
+
 func (c *Client) AddImage(ctx context.Context, store string, options AddImageOptions) (ports.Result, error) {
 	argv := append(storeArgv(store, "add", "image"), options.Reference)
 	if options.Platform != "" {
