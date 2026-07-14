@@ -1,0 +1,31 @@
+schemaVersion: 1
+tools:
+  devpod:
+    repository: skevetter/devpod
+    version: v0.26.1
+    commit: 86b6f9f5d6713fecdeff5dd240e775a8c7e8d44e
+    assets:
+      linux:
+        amd64:
+          url: https://github.com/skevetter/devpod/releases/download/v0.26.1/devpod-linux-amd64
+          sha256: 01bbc2d88090d546e04aa435c63fc5eb95ec49ffb7ab102a67de0d6d12c82d8d
+        arm64:
+          url: https://github.com/skevetter/devpod/releases/download/v0.26.1/devpod-linux-arm64
+          sha256: 268621da428ca6d470d1812d63c9e41a1681b681861fc984648a57c5725478ee
+  hauler:
+    repository: hauler-dev/hauler
+    version: v2.0.1
+    commit: 4f47155d6f8ccec22ba6f609f2f1f4919b02fce1
+    assets:
+      linux:
+        amd64:
+          url: https://github.com/hauler-dev/hauler/releases/download/v2.0.1/hauler_2.0.1_linux_amd64.tar.gz
+          sha256: c8b65ea57f10a03f02104ebbecbf1249c41f499bc85771488824b70f6ccfc76c
+        arm64:
+          url: https://github.com/hauler-dev/hauler/releases/download/v2.0.1/hauler_2.0.1_linux_arm64.tar.gz
+          sha256: ffe9811bbb77f844200f0644b98a08b65ee2d5ffcc0e2b49b1df31719a0a052f
+fixtures:
+  room:
+    repository: joshyorko/room-of-requirement
+    version: v1.18.0
+    commit: 0aabf18ad291c590498bd8e904a7d09f66378b85
