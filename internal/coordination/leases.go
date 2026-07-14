@@ -90,11 +90,11 @@ func (r *LeaseRepository) Acquire(ctx context.Context, capsule string, lineage d
 	for {
 		meta, putErr := r.store.PutConditional(ctx, key, body, ports.WriteCondition{MustBeAbsent: true})
 		if putErr == nil {
-			return LeaseToken{Lease: lease, Revision: meta.Revision}, nil
+			return r.finishAcquire(ctx, capsule, lineage, LeaseToken{Lease: lease, Revision: meta.Revision}, observed)
 		}
 		if errors.Is(putErr, ports.ErrAmbiguous) {
 			if reconciled, ok := r.reconcileLease(ctx, lease); ok {
-				return reconciled, nil
+				return r.finishAcquire(ctx, capsule, lineage, reconciled, observed)
 			}
 			return LeaseToken{}, putErr
 		}
@@ -113,11 +113,11 @@ func (r *LeaseRepository) Acquire(ctx context.Context, capsule string, lineage d
 		}
 		meta, putErr = r.store.PutConditional(ctx, key, body, ports.WriteCondition{MatchRevision: current.Revision})
 		if putErr == nil {
-			return LeaseToken{Lease: lease, Revision: meta.Revision}, nil
+			return r.finishAcquire(ctx, capsule, lineage, LeaseToken{Lease: lease, Revision: meta.Revision}, observed)
 		}
 		if errors.Is(putErr, ports.ErrAmbiguous) {
 			if reconciled, ok := r.reconcileLease(ctx, lease); ok {
-				return reconciled, nil
+				return r.finishAcquire(ctx, capsule, lineage, reconciled, observed)
 			}
 			return LeaseToken{}, putErr
 		}
@@ -128,6 +128,49 @@ func (r *LeaseRepository) Acquire(ctx context.Context, capsule string, lineage d
 			return LeaseToken{}, err
 		}
 	}
+}
+
+func (r *LeaseRepository) finishAcquire(ctx context.Context, capsule string, lineage domain.Lineage, token LeaseToken, observed *PointerRecord) (LeaseToken, error) {
+	pointers := NewPointerRepository(r.store)
+	var observationErr error
+	if observed == nil {
+		_, err := pointers.Read(ctx, capsule, lineage)
+		switch {
+		case errors.Is(err, ports.ErrNotFound):
+			return token, nil
+		case err == nil:
+			observationErr = fmt.Errorf("pointer appeared after absent observation: %w", ErrPointerChanged)
+		default:
+			observationErr = errors.Join(fmt.Errorf("verify pointer absence: %w", ErrPointerChanged), err)
+		}
+	} else if err := pointers.Revalidate(ctx, *observed); err == nil {
+		return token, nil
+	} else if errors.Is(err, ErrPointerChanged) {
+		observationErr = err
+	} else {
+		observationErr = errors.Join(fmt.Errorf("revalidate observed pointer: %w", ErrPointerChanged), err)
+	}
+
+	releaseErr := r.releaseAcquiredLease(ctx, token)
+	if releaseErr == nil {
+		return LeaseToken{}, observationErr
+	}
+	return LeaseToken{}, errors.Join(observationErr, releaseErr)
+}
+
+func (r *LeaseRepository) releaseAcquiredLease(ctx context.Context, token LeaseToken) error {
+	key, err := token.Lease.Lineage.LeaseKey(token.Lease.Capsule)
+	if err != nil {
+		return err
+	}
+	err = r.store.DeleteConditional(ctx, key, token.Revision)
+	if err == nil {
+		return nil
+	}
+	if errors.Is(err, ports.ErrConflict) || errors.Is(err, ports.ErrNotFound) {
+		return fmt.Errorf("release acquired lease: %w", errors.Join(ErrLeaseLost, err))
+	}
+	return fmt.Errorf("release acquired lease: %w", err)
 }
 
 func (r *LeaseRepository) Revalidate(ctx context.Context, token LeaseToken, now time.Time) error {

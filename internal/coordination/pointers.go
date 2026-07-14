@@ -160,10 +160,8 @@ func validatePointer(pointer domain.LatestPointer, capsule string, lineage domai
 	if err := validateGenerationRef(pointer.Generation); err != nil {
 		return err
 	}
-	if pointer.Parent != nil {
-		if err := validateGenerationRef(*pointer.Parent); err != nil {
-			return err
-		}
+	if err := validateGenerationParent(pointer.Generation, pointer.Parent); err != nil {
+		return err
 	}
 	wantObjectKey, err := GenerationObjectKey(capsule, lineage, pointer.Generation)
 	if err != nil {

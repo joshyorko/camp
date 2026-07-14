@@ -160,10 +160,8 @@ func validateGenerationMetadata(metadata domain.GenerationMetadata, capsule stri
 	if err := validateGenerationRef(metadata.Generation); err != nil {
 		return err
 	}
-	if metadata.Parent != nil {
-		if err := validateGenerationRef(*metadata.Parent); err != nil {
-			return err
-		}
+	if err := validateGenerationParent(metadata.Generation, metadata.Parent); err != nil {
+		return err
 	}
 	wantObject, err := GenerationObjectKey(capsule, lineage, generation)
 	if err != nil {
@@ -186,6 +184,19 @@ func validateGenerationRef(generation domain.GenerationRef) error {
 	decoded, err := hex.DecodeString(generation.ArchiveSHA256)
 	if err != nil || len(decoded) != sha256.Size {
 		return fmt.Errorf("invalid generation sha256: %w", ErrInvalidDocument)
+	}
+	return nil
+}
+
+func validateGenerationParent(child domain.GenerationRef, parent *domain.GenerationRef) error {
+	if parent == nil {
+		return nil
+	}
+	if err := validateGenerationRef(*parent); err != nil {
+		return err
+	}
+	if parent.Generation >= child.Generation {
+		return fmt.Errorf("parent generation %d does not precede child generation %d: %w", parent.Generation, child.Generation, ErrInvalidDocument)
 	}
 	return nil
 }

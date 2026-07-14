@@ -132,3 +132,35 @@ func TestGenerationKeysDeriveBranchScopeFromValidatedLineage(t *testing.T) {
 		t.Fatal("unsafe lineage produced a generation key")
 	}
 }
+
+func TestGenerationRepositoryRequiresParentsOlderThanTheirChildren(t *testing.T) {
+	for _, test := range []struct {
+		name       string
+		generation uint64
+		wantErr    bool
+	}{
+		{name: "older cross-lineage branch root", generation: 41},
+		{name: "self parent", generation: 42, wantErr: true},
+		{name: "forward parent", generation: 43, wantErr: true},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			store := newObjectStore(t)
+			repository := coordination.NewGenerationRepository(store)
+			body := []byte("branch generation")
+			child := domain.GenerationRef{Generation: 42, ArchiveSHA256: sha256String(body)}
+			parent := generationRef(test.generation, "a")
+			metadata := generationMetadataFixture(t, "second-brain", domain.Lineage{Branch: "feature-safe"}, child, &parent, body, time.Date(2026, 7, 14, 12, 0, 0, 0, time.UTC))
+
+			_, err := repository.PutAndVerify(context.Background(), metadata, byteSource(body))
+			if test.wantErr {
+				if !errors.Is(err, coordination.ErrInvalidDocument) {
+					t.Fatalf("PutAndVerify error = %v, want invalid document", err)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("PutAndVerify with older external-lineage parent: %v", err)
+			}
+		})
+	}
+}

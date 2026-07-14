@@ -11,6 +11,38 @@ import (
 	"github.com/joshyorko/camp/internal/ports"
 )
 
+type mutateAfterLeaseStore struct {
+	ports.ObjectStore
+	leaseKey       string
+	afterLease     func(context.Context)
+	deleteErr      error
+	leaseRevision  ports.Revision
+	deleteRevision ports.Revision
+	deleteCalls    int
+}
+
+func (s *mutateAfterLeaseStore) PutConditional(ctx context.Context, key string, body []byte, condition ports.WriteCondition) (ports.ObjectMeta, error) {
+	meta, err := s.ObjectStore.PutConditional(ctx, key, body, condition)
+	if err == nil && key == s.leaseKey && s.leaseRevision == "" {
+		s.leaseRevision = meta.Revision
+		if s.afterLease != nil {
+			s.afterLease(ctx)
+		}
+	}
+	return meta, err
+}
+
+func (s *mutateAfterLeaseStore) DeleteConditional(ctx context.Context, key string, expected ports.Revision) error {
+	if key == s.leaseKey {
+		s.deleteCalls++
+		s.deleteRevision = expected
+		if s.deleteErr != nil {
+			return s.deleteErr
+		}
+	}
+	return s.ObjectStore.DeleteConditional(ctx, key, expected)
+}
+
 func TestLeaseRepositoryScopesLifecycleToLineage(t *testing.T) {
 	store := newObjectStore(t)
 	pointers := coordination.NewPointerRepository(store)
@@ -22,7 +54,7 @@ func TestLeaseRepositoryScopesLifecycleToLineage(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	branchRef := generationRef(42, "b")
+	branchRef := generationRef(43, "b")
 	branchPointer, err := pointers.Create(ctx, pointerFixture("second-brain", domain.Lineage{Branch: "feature-safe"}, branchRef, &mainRef, now))
 	if err != nil {
 		t.Fatal(err)
@@ -63,11 +95,144 @@ func TestLeaseRepositoryScopesLifecycleToLineage(t *testing.T) {
 		t.Fatal(err)
 	}
 	mainLeaseKey, _ := mainPointer.Pointer.Lineage.LeaseKey("second-brain")
+	branchLeaseKey, _ := branchPointer.Pointer.Lineage.LeaseKey("second-brain")
+	if mainLeaseKey != "second-brain/leases/writer.json" {
+		t.Fatalf("main lease key = %q", mainLeaseKey)
+	}
+	if branchLeaseKey != "second-brain/branches/feature-safe/leases/writer.json" {
+		t.Fatalf("branch lease key = %q", branchLeaseKey)
+	}
 	if _, err := store.Head(ctx, mainLeaseKey); !errors.Is(err, ports.ErrNotFound) {
 		t.Fatalf("released main lease still exists: %v", err)
 	}
 	if err := leases.Revalidate(ctx, branchToken, now.Add(time.Minute)); err != nil {
 		t.Fatalf("branch lease changed with main lifecycle: %v", err)
+	}
+}
+
+func TestLeaseRepositoryRevalidatesObservedPointerAfterWinningLeaseCAS(t *testing.T) {
+	for _, test := range []struct {
+		name  string
+		setup func(*testing.T, ports.ObjectStore) *coordination.PointerRecord
+	}{
+		{
+			name: "stale revision",
+			setup: func(t *testing.T, store ports.ObjectStore) *coordination.PointerRecord {
+				repository := coordination.NewPointerRepository(store)
+				record, err := repository.Create(context.Background(), pointerFixture("second-brain", domain.Lineage{Branch: "main"}, generationRef(42, "a"), nil, time.Now()))
+				if err != nil {
+					t.Fatal(err)
+				}
+				record.Revision = "stale-pointer-revision"
+				return &record
+			},
+		},
+		{
+			name: "fabricated observation",
+			setup: func(_ *testing.T, _ ports.ObjectStore) *coordination.PointerRecord {
+				return &coordination.PointerRecord{
+					Pointer:  pointerFixture("second-brain", domain.Lineage{Branch: "main"}, generationRef(42, "a"), nil, time.Now()),
+					Revision: "fabricated-pointer-revision",
+				}
+			},
+		},
+		{
+			name: "nil observation while pointer exists",
+			setup: func(t *testing.T, store ports.ObjectStore) *coordination.PointerRecord {
+				repository := coordination.NewPointerRepository(store)
+				if _, err := repository.Create(context.Background(), pointerFixture("second-brain", domain.Lineage{Branch: "main"}, generationRef(42, "a"), nil, time.Now())); err != nil {
+					t.Fatal(err)
+				}
+				return nil
+			},
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			store := newObjectStore(t)
+			lineage := domain.Lineage{Branch: "main"}
+			observed := test.setup(t, store)
+			leases := coordination.NewLeaseRepository(store)
+
+			_, err := leases.Acquire(context.Background(), "second-brain", lineage, coordination.LeaseOwner{SessionID: "session", Machine: "bluefin"}, observed, time.Now(), time.Minute)
+			if !errors.Is(err, coordination.ErrPointerChanged) {
+				t.Fatalf("Acquire error = %v, want pointer changed", err)
+			}
+			leaseKey, _ := lineage.LeaseKey("second-brain")
+			if _, headErr := store.Head(context.Background(), leaseKey); !errors.Is(headErr, ports.ErrNotFound) {
+				t.Fatalf("failed acquisition left lease behind: %v", headErr)
+			}
+		})
+	}
+}
+
+func TestLeaseRepositoryRevalidatesPointerMutationImmediatelyAfterLeaseCAS(t *testing.T) {
+	store := newObjectStore(t)
+	pointers := coordination.NewPointerRepository(store)
+	lineage := domain.Lineage{Branch: "main"}
+	now := time.Date(2026, 7, 14, 12, 0, 0, 0, time.UTC)
+	openedRef := generationRef(42, "a")
+	opened, err := pointers.Create(context.Background(), pointerFixture("second-brain", lineage, openedRef, nil, now))
+	if err != nil {
+		t.Fatal(err)
+	}
+	leaseKey, _ := lineage.LeaseKey("second-brain")
+	wrapped := &mutateAfterLeaseStore{ObjectStore: store, leaseKey: leaseKey}
+	wrapped.afterLease = func(ctx context.Context) {
+		nextRef := generationRef(43, "b")
+		if _, err := pointers.CompareAndSwap(ctx, opened, pointerFixture("second-brain", lineage, nextRef, &openedRef, now.Add(time.Minute))); err != nil {
+			t.Fatalf("mutate pointer after lease CAS: %v", err)
+		}
+	}
+
+	_, err = coordination.NewLeaseRepository(wrapped).Acquire(context.Background(), "second-brain", lineage, coordination.LeaseOwner{SessionID: "session", Machine: "bluefin"}, &opened, now, time.Minute)
+	if !errors.Is(err, coordination.ErrPointerChanged) {
+		t.Fatalf("Acquire error = %v, want pointer changed", err)
+	}
+	if wrapped.deleteCalls != 1 || wrapped.deleteRevision != wrapped.leaseRevision {
+		t.Fatalf("lease cleanup calls = %d at revision %q, want one at %q", wrapped.deleteCalls, wrapped.deleteRevision, wrapped.leaseRevision)
+	}
+	if _, headErr := store.Head(context.Background(), leaseKey); !errors.Is(headErr, ports.ErrNotFound) {
+		t.Fatalf("pointer race left lease behind: %v", headErr)
+	}
+}
+
+func TestLeaseRepositoryPreservesPostAcquireCleanupErrors(t *testing.T) {
+	for _, test := range []struct {
+		name      string
+		deleteErr error
+		wantTyped error
+	}{
+		{name: "lease conflict", deleteErr: ports.ErrConflict, wantTyped: coordination.ErrLeaseLost},
+		{name: "lease disappeared", deleteErr: ports.ErrNotFound, wantTyped: coordination.ErrLeaseLost},
+		{name: "ambiguous cleanup", deleteErr: ports.ErrAmbiguous, wantTyped: ports.ErrAmbiguous},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			store := newObjectStore(t)
+			pointers := coordination.NewPointerRepository(store)
+			lineage := domain.Lineage{Branch: "main"}
+			now := time.Date(2026, 7, 14, 12, 0, 0, 0, time.UTC)
+			openedRef := generationRef(42, "a")
+			opened, err := pointers.Create(context.Background(), pointerFixture("second-brain", lineage, openedRef, nil, now))
+			if err != nil {
+				t.Fatal(err)
+			}
+			leaseKey, _ := lineage.LeaseKey("second-brain")
+			wrapped := &mutateAfterLeaseStore{ObjectStore: store, leaseKey: leaseKey, deleteErr: test.deleteErr}
+			wrapped.afterLease = func(ctx context.Context) {
+				nextRef := generationRef(43, "b")
+				if _, err := pointers.CompareAndSwap(ctx, opened, pointerFixture("second-brain", lineage, nextRef, &openedRef, now.Add(time.Minute))); err != nil {
+					t.Fatalf("mutate pointer after lease CAS: %v", err)
+				}
+			}
+
+			_, err = coordination.NewLeaseRepository(wrapped).Acquire(context.Background(), "second-brain", lineage, coordination.LeaseOwner{SessionID: "session", Machine: "bluefin"}, &opened, now, time.Minute)
+			if !errors.Is(err, coordination.ErrPointerChanged) || !errors.Is(err, test.wantTyped) {
+				t.Fatalf("Acquire error = %v, want pointer changed and %v", err, test.wantTyped)
+			}
+			if wrapped.deleteCalls != 1 || wrapped.deleteRevision != wrapped.leaseRevision {
+				t.Fatalf("lease cleanup calls = %d at revision %q, want one at %q", wrapped.deleteCalls, wrapped.deleteRevision, wrapped.leaseRevision)
+			}
+		})
 	}
 }
 

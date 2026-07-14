@@ -4,7 +4,9 @@ import (
 	"bytes"
 	"context"
 	"crypto/sha256"
+	"encoding/base64"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -25,6 +27,51 @@ type byteSource []byte
 
 func (s byteSource) Open() (io.ReadCloser, error) {
 	return io.NopCloser(bytes.NewReader(s)), nil
+}
+
+type cancelOnCloseSource struct {
+	body   []byte
+	cancel context.CancelFunc
+}
+
+func (s cancelOnCloseSource) Open() (io.ReadCloser, error) {
+	return &cancelOnCloseReader{Reader: bytes.NewReader(s.body), cancel: s.cancel}, nil
+}
+
+type cancelOnCloseReader struct {
+	*bytes.Reader
+	cancel context.CancelFunc
+}
+
+func (r *cancelOnCloseReader) Close() error {
+	r.cancel()
+	return nil
+}
+
+type cancelOnErrContext struct {
+	calls    int
+	cancelOn int
+	done     chan struct{}
+	canceled bool
+}
+
+func (c *cancelOnErrContext) Deadline() (time.Time, bool) { return time.Time{}, false }
+func (c *cancelOnErrContext) Done() <-chan struct{}       { return c.done }
+func (c *cancelOnErrContext) Value(any) any               { return nil }
+func (c *cancelOnErrContext) Err() error {
+	c.calls++
+	if c.calls >= c.cancelOn {
+		if !c.canceled {
+			close(c.done)
+			c.canceled = true
+		}
+		return context.Canceled
+	}
+	return nil
+}
+
+func newCancelOnErrContext(cancelOn int) *cancelOnErrContext {
+	return &cancelOnErrContext{cancelOn: cancelOn, done: make(chan struct{})}
 }
 
 func digest(body []byte) string {
@@ -137,6 +184,45 @@ func TestStoreConditionalWritesAndDeletesUseRevisions(t *testing.T) {
 	}
 }
 
+func TestStorePutConditionalRequiresExactlyOneCondition(t *testing.T) {
+	for _, test := range []struct {
+		name      string
+		existing  bool
+		condition func(ports.Revision) ports.WriteCondition
+	}{
+		{name: "zero condition against absent key", condition: func(ports.Revision) ports.WriteCondition { return ports.WriteCondition{} }},
+		{name: "zero condition against existing key", existing: true, condition: func(ports.Revision) ports.WriteCondition { return ports.WriteCondition{} }},
+		{name: "both conditions", existing: true, condition: func(revision ports.Revision) ports.WriteCondition {
+			return ports.WriteCondition{MustBeAbsent: true, MatchRevision: revision}
+		}},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			store, _ := newStore(t)
+			ctx := context.Background()
+			key := "capsule/latest.json"
+			var revision ports.Revision
+			if test.existing {
+				created, err := store.PutConditional(ctx, key, []byte("original"), ports.WriteCondition{MustBeAbsent: true})
+				if err != nil {
+					t.Fatal(err)
+				}
+				revision = created.Revision
+			}
+
+			if _, err := store.PutConditional(ctx, key, []byte("replacement"), test.condition(revision)); !errors.Is(err, ports.ErrInvalidCondition) {
+				t.Fatalf("PutConditional error = %v, want invalid condition", err)
+			}
+			if test.existing {
+				if got := readObject(t, store, key); string(got) != "original" {
+					t.Fatalf("invalid condition changed object to %q", got)
+				}
+			} else if _, err := store.Head(ctx, key); !errors.Is(err, ports.ErrNotFound) {
+				t.Fatalf("invalid condition created object: %v", err)
+			}
+		})
+	}
+}
+
 func TestStorePersistsAMutationUniqueRevisionWithEachObject(t *testing.T) {
 	store, root := newStore(t)
 	ctx := context.Background()
@@ -199,6 +285,49 @@ func TestStoreDoesNotDeleteAfterContextCancellation(t *testing.T) {
 	}
 }
 
+func TestStoreChecksCancellationImmediatelyBeforeMutations(t *testing.T) {
+	t.Run("immutable rename", func(t *testing.T) {
+		store, _ := newStore(t)
+		body := []byte("immutable generation")
+		ctx, cancel := context.WithCancel(context.Background())
+		_, err := store.PutImmutable(ctx, "capsule/generations/1.tar.zst", cancelOnCloseSource{body: body, cancel: cancel}, digest(body), int64(len(body)))
+		if !errors.Is(err, context.Canceled) {
+			t.Fatalf("PutImmutable error = %v, want context canceled", err)
+		}
+		if _, err := store.Head(context.Background(), "capsule/generations/1.tar.zst"); !errors.Is(err, ports.ErrNotFound) {
+			t.Fatalf("canceled immutable write was published: %v", err)
+		}
+	})
+
+	t.Run("conditional rename", func(t *testing.T) {
+		store, _ := newStore(t)
+		ctx := newCancelOnErrContext(4)
+		_, err := store.PutConditional(ctx, "capsule/latest.json", []byte("pointer"), ports.WriteCondition{MustBeAbsent: true})
+		if !errors.Is(err, context.Canceled) {
+			t.Fatalf("PutConditional error = %v after %d context checks, want context canceled", err, ctx.calls)
+		}
+		if _, err := store.Head(context.Background(), "capsule/latest.json"); !errors.Is(err, ports.ErrNotFound) {
+			t.Fatalf("canceled conditional write was published: %v", err)
+		}
+	})
+
+	t.Run("conditional delete", func(t *testing.T) {
+		store, _ := newStore(t)
+		created, err := store.PutConditional(context.Background(), "capsule/latest.json", []byte("pointer"), ports.WriteCondition{MustBeAbsent: true})
+		if err != nil {
+			t.Fatal(err)
+		}
+		ctx := newCancelOnErrContext(2)
+		err = store.DeleteConditional(ctx, "capsule/latest.json", created.Revision)
+		if !errors.Is(err, context.Canceled) {
+			t.Fatalf("DeleteConditional error = %v after %d context checks, want context canceled", err, ctx.calls)
+		}
+		if got := readObject(t, store, "capsule/latest.json"); string(got) != "pointer" {
+			t.Fatalf("canceled conditional delete changed object to %q", got)
+		}
+	})
+}
+
 func TestStoreListPaginatesInDeterministicKeyOrder(t *testing.T) {
 	store, _ := newStore(t)
 	ctx := context.Background()
@@ -216,6 +345,7 @@ func TestStoreListPaginatesInDeterministicKeyOrder(t *testing.T) {
 
 	var got []string
 	var token string
+	var firstToken string
 	pages := 0
 	for {
 		items, next, err := store.List(ctx, "capsule/generations/", token)
@@ -232,6 +362,9 @@ func TestStoreListPaginatesInDeterministicKeyOrder(t *testing.T) {
 		if next == token {
 			t.Fatalf("pagination token did not advance: %q", token)
 		}
+		if firstToken == "" {
+			firstToken = next
+		}
 		token = next
 	}
 	if pages < 2 {
@@ -243,13 +376,40 @@ func TestStoreListPaginatesInDeterministicKeyOrder(t *testing.T) {
 	if _, _, err := store.List(ctx, "capsule/", "not-a-page-token"); !errors.Is(err, ports.ErrInvalidPageToken) {
 		t.Fatalf("invalid token error = %v, want invalid page token", err)
 	}
+	if firstToken == "" {
+		t.Fatal("paginated listing did not return a token")
+	}
+	for _, mismatchedPrefix := range []string{"capsule/", "capsule/generations/0"} {
+		if _, _, err := store.List(ctx, mismatchedPrefix, firstToken); !errors.Is(err, ports.ErrInvalidPageToken) {
+			t.Errorf("token accepted for mismatched prefix %q: %v", mismatchedPrefix, err)
+		}
+	}
+	wrongVersion, err := json.Marshal(map[string]any{
+		"version": 2,
+		"prefix":  "capsule/generations/",
+		"cursor":  "capsule/generations/099.json",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for name, invalidToken := range map[string]string{
+		"legacy cursor":  base64.RawURLEncoding.EncodeToString([]byte("capsule/generations/099.json")),
+		"malformed JSON": base64.RawURLEncoding.EncodeToString([]byte("not-json")),
+		"wrong version":  base64.RawURLEncoding.EncodeToString(wrongVersion),
+	} {
+		t.Run(name, func(t *testing.T) {
+			if _, _, err := store.List(ctx, "capsule/generations/", invalidToken); !errors.Is(err, ports.ErrInvalidPageToken) {
+				t.Fatalf("invalid token error = %v, want invalid page token", err)
+			}
+		})
+	}
 }
 
 func TestStoreRejectsTraversalAndSymlinkEscapes(t *testing.T) {
 	store, root := newStore(t)
 	ctx := context.Background()
 	for _, key := range []string{"", "/absolute", "../outside", "capsule/../../outside", "capsule//latest.json", `capsule\latest.json`, "capsule/.camp-locks/object"} {
-		if _, err := store.PutConditional(ctx, key, []byte("unsafe"), ports.WriteCondition{}); !errors.Is(err, ports.ErrInvalidKey) {
+		if _, err := store.PutConditional(ctx, key, []byte("unsafe"), ports.WriteCondition{MustBeAbsent: true}); !errors.Is(err, ports.ErrInvalidKey) {
 			t.Errorf("PutConditional(%q) error = %v, want invalid key", key, err)
 		}
 	}
@@ -264,7 +424,7 @@ func TestStoreRejectsTraversalAndSymlinkEscapes(t *testing.T) {
 	if _, _, err := store.Get(ctx, "escape/secret"); !errors.Is(err, ports.ErrUnsafePath) {
 		t.Fatalf("symlink Get error = %v, want unsafe path", err)
 	}
-	if _, err := store.PutConditional(ctx, "escape/new", []byte("outside"), ports.WriteCondition{}); !errors.Is(err, ports.ErrUnsafePath) {
+	if _, err := store.PutConditional(ctx, "escape/new", []byte("outside"), ports.WriteCondition{MustBeAbsent: true}); !errors.Is(err, ports.ErrUnsafePath) {
 		t.Fatalf("symlink PutConditional error = %v, want unsafe path", err)
 	}
 	if _, _, err := store.List(ctx, "", ""); !errors.Is(err, ports.ErrUnsafePath) {

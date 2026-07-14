@@ -7,6 +7,7 @@ import (
 	"crypto/sha256"
 	"encoding/base64"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -22,17 +23,24 @@ import (
 )
 
 const (
-	lockDirectory = ".camp-locks"
-	tempPrefix    = ".camp-tmp-"
-	revisionXattr = "user.camp.revision"
-	revisionSize  = 32
-	listPageSize  = 100
+	lockDirectory    = ".camp-locks"
+	tempPrefix       = ".camp-tmp-"
+	revisionXattr    = "user.camp.revision"
+	revisionSize     = 32
+	listPageSize     = 100
+	pageTokenVersion = 1
 )
 
 type Store struct {
 	root string
 	dev  uint64
 	ino  uint64
+}
+
+type pageToken struct {
+	Version int    `json:"version"`
+	Prefix  string `json:"prefix"`
+	Cursor  string `json:"cursor"`
 }
 
 func New(root string) (*Store, error) {
@@ -179,6 +187,9 @@ func (s *Store) PutImmutable(ctx context.Context, key string, source ports.Resta
 		return ports.ObjectMeta{}, err
 	}
 
+	if err := ctx.Err(); err != nil {
+		return ports.ObjectMeta{}, err
+	}
 	if err := syscall.Renameat(parentFD, tempName, parentFD, name); err != nil {
 		return ports.ObjectMeta{}, fmt.Errorf("publish immutable object %q: %w", key, err)
 	}
@@ -197,7 +208,7 @@ func (s *Store) PutConditional(ctx context.Context, key string, body []byte, con
 	if _, err := splitKey(key); err != nil {
 		return ports.ObjectMeta{}, err
 	}
-	if condition.MustBeAbsent && condition.MatchRevision != "" {
+	if condition.MustBeAbsent == (condition.MatchRevision != "") {
 		return ports.ObjectMeta{}, fmt.Errorf("conditional write for %q: %w", key, ports.ErrInvalidCondition)
 	}
 	lock, err := s.lockKey(ctx, key)
@@ -244,6 +255,9 @@ func (s *Store) PutConditional(ctx context.Context, key string, body []byte, con
 	if err := temp.Close(); err != nil {
 		return ports.ObjectMeta{}, fmt.Errorf("close temporary object %q: %w", key, err)
 	}
+	if err := ctx.Err(); err != nil {
+		return ports.ObjectMeta{}, err
+	}
 	if err := syscall.Renameat(parentFD, tempName, parentFD, name); err != nil {
 		return ports.ObjectMeta{}, fmt.Errorf("publish conditional object %q: %w", key, err)
 	}
@@ -281,6 +295,9 @@ func (s *Store) DeleteConditional(ctx context.Context, key string, expected port
 	}
 	if current.Revision != expected {
 		return fmt.Errorf("delete object %q at revision %q: %w", key, expected, ports.ErrConflict)
+	}
+	if err := ctx.Err(); err != nil {
+		return err
 	}
 	if err := syscall.Unlinkat(parentFD, name); err != nil {
 		return classifyPathError("delete", key, err)
@@ -330,7 +347,11 @@ func (s *Store) List(ctx context.Context, prefix, pageToken string) ([]ports.Obj
 	if !more {
 		return filtered, "", nil
 	}
-	return filtered, base64.RawURLEncoding.EncodeToString([]byte(last)), nil
+	next, err := encodePageToken(prefix, last)
+	if err != nil {
+		return nil, "", err
+	}
+	return filtered, next, nil
 }
 
 type keyLock struct {
@@ -739,11 +760,25 @@ func decodePageToken(token, prefix string) (string, error) {
 	if err != nil {
 		return "", fmt.Errorf("decode page token: %w", ports.ErrInvalidPageToken)
 	}
-	key := string(decoded)
-	if _, err := splitKey(key); err != nil || !strings.HasPrefix(key, prefix) {
+	var payload pageToken
+	if err := json.Unmarshal(decoded, &payload); err != nil {
+		return "", fmt.Errorf("decode page token document: %w", ports.ErrInvalidPageToken)
+	}
+	if payload.Version != pageTokenVersion || payload.Prefix != prefix || payload.Cursor == "" {
 		return "", fmt.Errorf("page token does not belong to prefix %q: %w", prefix, ports.ErrInvalidPageToken)
 	}
-	return key, nil
+	if _, err := splitKey(payload.Cursor); err != nil || !strings.HasPrefix(payload.Cursor, prefix) {
+		return "", fmt.Errorf("page token cursor does not belong to prefix %q: %w", prefix, ports.ErrInvalidPageToken)
+	}
+	return payload.Cursor, nil
+}
+
+func encodePageToken(prefix, cursor string) (string, error) {
+	encoded, err := json.Marshal(pageToken{Version: pageTokenVersion, Prefix: prefix, Cursor: cursor})
+	if err != nil {
+		return "", fmt.Errorf("encode page token: %w", err)
+	}
+	return base64.RawURLEncoding.EncodeToString(encoded), nil
 }
 
 func validSHA256(value string) bool {

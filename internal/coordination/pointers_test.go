@@ -34,6 +34,12 @@ func TestPointerRepositoryUsesValidatedMainAndBranchPaths(t *testing.T) {
 
 	mainKey, _ := main.Lineage.PointerKey(main.Capsule)
 	branchKey, _ := branch.Lineage.PointerKey(branch.Capsule)
+	if mainKey != "second-brain/latest.json" {
+		t.Fatalf("main pointer key = %q", mainKey)
+	}
+	if branchKey != "second-brain/branches/feature-safe/latest.json" {
+		t.Fatalf("branch pointer key = %q", branchKey)
+	}
 	if _, err := store.Head(ctx, mainKey); err != nil {
 		t.Fatalf("main pointer key %q: %v", mainKey, err)
 	}
@@ -53,6 +59,37 @@ func TestPointerRepositoryUsesValidatedMainAndBranchPaths(t *testing.T) {
 	}
 	if _, err := repository.Create(ctx, main); !errors.Is(err, ports.ErrConflict) {
 		t.Fatalf("duplicate main pointer error = %v, want conflict", err)
+	}
+}
+
+func TestPointerRepositoryRequiresParentsOlderThanTheirChildren(t *testing.T) {
+	for _, test := range []struct {
+		name       string
+		generation uint64
+		wantErr    bool
+	}{
+		{name: "older cross-lineage branch root", generation: 41},
+		{name: "self parent", generation: 42, wantErr: true},
+		{name: "forward parent", generation: 43, wantErr: true},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			store := newObjectStore(t)
+			repository := coordination.NewPointerRepository(store)
+			child := generationRef(42, "b")
+			parent := generationRef(test.generation, "a")
+			pointer := pointerFixture("second-brain", domain.Lineage{Branch: "feature-safe"}, child, &parent, time.Date(2026, 7, 14, 12, 0, 0, 0, time.UTC))
+
+			_, err := repository.Create(context.Background(), pointer)
+			if test.wantErr {
+				if !errors.Is(err, coordination.ErrInvalidDocument) {
+					t.Fatalf("Create error = %v, want invalid document", err)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("Create with older external-lineage parent: %v", err)
+			}
+		})
 	}
 }
 
