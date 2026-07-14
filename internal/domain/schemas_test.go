@@ -171,12 +171,73 @@ func TestLineagePathsKeepMainAndBranchLeasesSeparate(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			if got := tt.lineage.PointerKey(tt.capsule); got != tt.pointer {
+			got, err := tt.lineage.PointerKey(tt.capsule)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got != tt.pointer {
 				t.Fatalf("pointer key = %q, want %q", got, tt.pointer)
 			}
-			if got := tt.lineage.LeaseKey(tt.capsule); got != tt.lease {
+			got, err = tt.lineage.LeaseKey(tt.capsule)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got != tt.lease {
 				t.Fatalf("lease key = %q, want %q", got, tt.lease)
 			}
 		})
+	}
+}
+
+func TestLineagePathsRejectUnsafeObjectKeySegments(t *testing.T) {
+	tests := []struct {
+		name    string
+		capsule string
+		branch  string
+	}{
+		{name: "empty capsule", capsule: "", branch: "main"},
+		{name: "empty branch", capsule: "second-brain", branch: ""},
+		{name: "capsule dot reserved", capsule: ".", branch: "main"},
+		{name: "capsule dot-dot reserved", capsule: "..", branch: "main"},
+		{name: "branch dot reserved", capsule: "second-brain", branch: "."},
+		{name: "branch dot-dot traversal", capsule: "second-brain", branch: ".."},
+		{name: "capsule slash", capsule: "team/capsule", branch: "main"},
+		{name: "branch slash", capsule: "second-brain", branch: "feature/unsafe"},
+		{name: "capsule backslash", capsule: `team\capsule`, branch: "main"},
+		{name: "branch backslash", capsule: "second-brain", branch: `feature\unsafe`},
+		{name: "capsule NUL", capsule: "second\x00brain", branch: "main"},
+		{name: "branch NUL", capsule: "second-brain", branch: "feature\x00unsafe"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			lineage := Lineage{Branch: tt.branch}
+			if key, err := lineage.PointerKey(tt.capsule); err == nil {
+				t.Fatalf("PointerKey accepted unsafe components: %q", key)
+			}
+			if key, err := lineage.LeaseKey(tt.capsule); err == nil {
+				t.Fatalf("LeaseKey accepted unsafe components: %q", key)
+			}
+		})
+	}
+}
+
+func TestUnsafeBranchCanNeverCollapseOntoMainKeys(t *testing.T) {
+	main := Lineage{Branch: "main"}
+	mainPointer, err := main.PointerKey("second-brain")
+	if err != nil {
+		t.Fatal(err)
+	}
+	mainLease, err := main.LeaseKey("second-brain")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	unsafe := Lineage{Branch: ".."}
+	if key, err := unsafe.PointerKey("second-brain"); err == nil || key == mainPointer {
+		t.Fatalf("unsafe pointer key = %q, error = %v; must reject without colliding with %q", key, err, mainPointer)
+	}
+	if key, err := unsafe.LeaseKey("second-brain"); err == nil || key == mainLease {
+		t.Fatalf("unsafe lease key = %q, error = %v; must reject without colliding with %q", key, err, mainLease)
 	}
 }

@@ -41,7 +41,8 @@ func (r execRunner) Run(ctx context.Context, command ports.Command) (ports.Resul
 	return result, err
 }
 
-func TestInstalledToolIdentity(t *testing.T) {
+func loadDistributionLock(t *testing.T) tools.Lock {
+	t.Helper()
 	lockFile, err := os.Open("../tools.lock.yaml")
 	if err != nil {
 		t.Fatal(err)
@@ -51,6 +52,11 @@ func TestInstalledToolIdentity(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	return lock
+}
+
+func TestInstalledDevPodIdentity(t *testing.T) {
+	lock := loadDistributionLock(t)
 
 	devpodPath, err := exec.LookPath("devpod")
 	if err != nil {
@@ -77,6 +83,10 @@ func TestInstalledToolIdentity(t *testing.T) {
 	if got := fmt.Sprintf("%x", hash.Sum(nil)); got != asset.SHA256 {
 		t.Fatalf("devpod sha256 = %s, want %s", got, asset.SHA256)
 	}
+}
+
+func TestInstalledHaulerIdentity(t *testing.T) {
+	lock := loadDistributionLock(t)
 
 	haulerPath, err := exec.LookPath("hauler")
 	if err != nil {

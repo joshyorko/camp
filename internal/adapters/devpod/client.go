@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"strconv"
 	"strings"
 
 	"github.com/joshyorko/camp/internal/ports"
@@ -108,10 +109,8 @@ func (c *Client) SSH(ctx context.Context, options SSHOptions) (ports.Result, err
 	for _, value := range options.SetEnv {
 		argv = append(argv, "--set-env", value)
 	}
-	if options.StartServices {
-		argv = append(argv, "--start-services=true")
-	}
 	argv = append(argv, options.ForwardedArgv...)
+	argv = append(argv, "--start-services="+strconv.FormatBool(options.StartServices))
 	argv = append(argv, options.WorkspaceID)
 	return c.run(ctx, argv)
 }

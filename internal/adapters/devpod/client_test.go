@@ -38,12 +38,12 @@ func TestExactDevPodArgv(t *testing.T) {
 			want: []string{"up", "--ide", "none", "--open-ide=false", "--id", "camp-second-brain", "--provider", "docker", "--init-env", "CAMP_CAPSULE=second-brain", "--init-env", "CAMP_CHECKPOINT=41", "/tmp/capsule root"},
 		},
 		{
-			name: "terminal SSH preserves separate user input argv",
+			name: "terminal SSH explicitly disables services by default",
 			run: func(ctx context.Context, client *Client) error {
 				_, err := client.SSH(ctx, SSHOptions{WorkspaceID: "camp-second-brain", Workdir: "/workspaces/root; echo unsafe", User: "dev"})
 				return err
 			},
-			want: []string{"ssh", "--workdir", "/workspaces/root; echo unsafe", "--user", "dev", "camp-second-brain"},
+			want: []string{"ssh", "--workdir", "/workspaces/root; echo unsafe", "--user", "dev", "--start-services=false", "camp-second-brain"},
 		},
 		{
 			name: "reverse forwards remain repeated argv",
@@ -111,7 +111,66 @@ func TestStatusRejectsUnknownJSONState(t *testing.T) {
 }
 
 func TestListParsesPinnedJSONShape(t *testing.T) {
-	runner := &recordingRunner{result: ports.Result{Stdout: []byte(`[{"id":"camp","uid":"uid-1","provider":{"name":"docker"},"source":{"localFolder":"/tmp/root"},"context":"default"}]`)}}
+	runner := &recordingRunner{result: ports.Result{Stdout: []byte(`[
+  {
+    "id": "camp",
+    "uid": "uid-1",
+    "picture": "https://example.test/camp.png",
+    "provider": {
+      "name": "docker",
+      "options": {
+        "DOCKER_PATH": {
+          "value": "/var/run/docker.sock",
+          "userProvided": true,
+          "filled": "2026-07-14T12:00:00Z",
+          "children": ["DOCKER_HOST"]
+        }
+      }
+    },
+    "machine": {
+      "machineId": "bluefin",
+      "autoDelete": true
+    },
+    "ide": {
+      "name": "none",
+      "options": {
+        "DISABLE_TELEMETRY": {
+          "value": "true",
+          "userProvided": true,
+          "filled": "2026-07-14T12:01:00Z",
+          "children": ["TELEMETRY_LEVEL"]
+        }
+      }
+    },
+    "source": {
+      "gitRepository": "https://github.com/joshyorko/camp.git",
+      "gitBranch": "main",
+      "gitCommit": "86b6f9f5d6713fecdeff5dd240e775a8c7e8d44e",
+      "gitPRReference": "refs/pull/1/head",
+      "gitSubDir": "capsule",
+      "localFolder": "/tmp/root",
+      "image": "ghcr.io/example/camp:dev",
+      "container": "camp-container"
+    },
+    "devContainerImage": "ghcr.io/example/devcontainer:locked",
+    "devContainerPath": ".devcontainer/devcontainer.json",
+    "devContainerConfig": {
+      "name": "Camp fixture",
+      "workspaceFolder": "/workspaces/camp"
+    },
+    "creationTimestamp": "2026-07-14T12:02:00Z",
+    "lastUsed": "2026-07-14T12:03:00Z",
+    "context": "default",
+    "imported": true,
+    "pro": {
+      "instanceName": "camp-instance",
+      "project": "camp-project",
+      "displayName": "Camp Workspace"
+    },
+    "sshConfigPath": "/tmp/devpod/ssh/config",
+    "sshConfigIncludePath": "/tmp/devpod/ssh/include"
+  }
+]`)}}
 	client := NewClient("devpod", runner)
 	got, err := client.List(context.Background())
 	if err != nil {

@@ -1,25 +1,47 @@
 package domain
 
-import "path"
+import (
+	"fmt"
+	"strings"
+)
 
 type Lineage struct {
 	Branch string `json:"branch" yaml:"branch"`
 }
 
 func (l Lineage) IsMain() bool {
-	return l.Branch == "" || l.Branch == "main"
+	return l.Branch == "main"
 }
 
-func (l Lineage) PointerKey(capsule string) string {
-	if l.IsMain() {
-		return path.Join(capsule, "latest.json")
+func (l Lineage) PointerKey(capsule string) (string, error) {
+	if err := validateObjectKeySegment("capsule", capsule); err != nil {
+		return "", err
 	}
-	return path.Join(capsule, "branches", l.Branch, "latest.json")
+	if err := validateObjectKeySegment("branch", l.Branch); err != nil {
+		return "", err
+	}
+	if l.IsMain() {
+		return capsule + "/latest.json", nil
+	}
+	return capsule + "/branches/" + l.Branch + "/latest.json", nil
 }
 
-func (l Lineage) LeaseKey(capsule string) string {
-	if l.IsMain() {
-		return path.Join(capsule, "leases", "writer.json")
+func (l Lineage) LeaseKey(capsule string) (string, error) {
+	if err := validateObjectKeySegment("capsule", capsule); err != nil {
+		return "", err
 	}
-	return path.Join(capsule, "branches", l.Branch, "leases", "writer.json")
+	if err := validateObjectKeySegment("branch", l.Branch); err != nil {
+		return "", err
+	}
+	if l.IsMain() {
+		return capsule + "/leases/writer.json", nil
+	}
+	return capsule + "/branches/" + l.Branch + "/leases/writer.json", nil
+}
+
+func validateObjectKeySegment(name, value string) error {
+	if value == "" || value == "." || value == ".." || strings.ContainsAny(value, "/\\\x00") {
+		return fmt.Errorf("invalid %s object-key segment %q", name, value)
+	}
+	return nil
 }
