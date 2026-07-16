@@ -1,5 +1,7 @@
 # ADR 0003: Lock the user-selected DevPod fork and Hauler
 
+![Pinned expedition tools sit in fitted positions on a calibrated outdoor workbench](../assets/adr-0003-pinned-toolchain.png)
+
 ## Status
 
 Accepted on 2026-07-14.
@@ -12,7 +14,7 @@ Camp locks:
 - `hauler-dev/hauler` v2.0.1, commit `4f47155d6f8ccec22ba6f609f2f1f4919b02fce1`.
 - `joshyorko/room-of-requirement` v1.18.0, commit `0aabf18ad291c590498bd8e904a7d09f66378b85` as the compatibility fixture.
 
-The DevPod choice is a direct user override of the build prompt's initial v0.9.11 pin. Matching PATH binaries are preferred. Missing or mismatched tools are installed as checksum-verified Linux amd64/arm64 assets in Camp's XDG data directory without shell-piped installers.
+The DevPod choice is a direct user override of the build prompt's initial v0.9.11 pin. Matching PATH binaries are preferred. Missing or mismatched DevPod and Hauler binaries are installed as checksum-verified Linux amd64/arm64 assets in Camp's XDG data directory without shell-piped installers. The `pasta` confinement helper is the separately validated external host capability defined by ADR 0006; Camp does not install it.
 
 ## Consequences
 

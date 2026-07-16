@@ -1,5 +1,7 @@
 # ADR 0004: Preserve root configuration and retain tagged registry content
 
+![A preserved root plan anchors a basecamp beside an orderly registry of retained tagged cases](../assets/adr-0004-config-registry-contracts.png)
+
 ## Status
 
 Accepted on 2026-07-14.
