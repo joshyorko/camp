@@ -4,11 +4,12 @@ Authoritative execution ledger for `patchraptor/camp-implementation`. Update thi
 
 ## Current state
 
-- Overall Tasks 3–7: **20%**.
+- Overall Tasks 3–7: **25%**.
 - Last pushed integration: `40518c7f14f9a553fab91d2e4c9bcffa882a2bf6` (`fix: make materialization markers crash safe`).
 - Active checkpoint base: `40518c7f14f9a553fab91d2e4c9bcffa882a2bf6`, upstream `origin/patchraptor/camp-implementation`, ahead/behind `0/0` with a clean worktree immediately after push.
 - Integrator/committer: Sol (`/root`).
 - Merge authority: merge the completed, verified PR into the verified default branch; do not deploy, publish a release, or mutate external services.
+- Active pull request: draft [#2](https://github.com/joshyorko/camp/pull/2), targeting verified default branch `master`; mark ready only after final gates.
 
 ## Live lanes
 
@@ -16,10 +17,12 @@ Authoritative execution ledger for `patchraptor/camp-implementation`. Update thi
 |---|---|---|---|---|
 | PUSHED `40518c7` | Task 3 crash-safe ownership marker and owned-root cleanup | `/root/task3_ownership_marker`; integrated by Sol | `internal/capsule/ownership.go`, `internal/capsule/ownership_test.go` | Focused/race/package and Sol full gates passed |
 | PUSHED `40518c7` | Task 3 crash-safe archive provenance and hydration marker | `/root/task3_hydration_marker`; integrated by Sol | `internal/adapters/archive/{tarzstd.go,tarzstd_test.go}`, `internal/adapters/hydration/{controller.go,controller_test.go}` | Focused/race/package and Sol full gates passed |
-| READY FOR CHECKPOINT | Task 3 application hydration-intent replay | `/root/task3_app_hydration_red`; integrated by Sol in `internal/app/open.go` | `internal/app/open.go`, new focused recovery test | Original plan replay and single intent/fact regression green |
-| READY FOR CHECKPOINT | Task 4 DevPod/IDE contract including `t3-code` | `/root/task4_devpod_ide`; integrated by Sol | `internal/adapters/devpod/{client.go,client_test.go,ide.go,ide_test.go}` | Typed/repeated flags, conflict rejection, VS Code URI, T3 typed entry contract green |
-| READY FOR CHECKPOINT | Task 5 SSH transfer primitives | `/root/task5_sshtransfer`; integrated and remote-shell hardened by Sol | New `internal/adapters/sshtransfer/*` | Rsync/tar fallback/exclusions, quoted nonstandard roots, and loopback forward contract green |
-| READY FOR DOCS COMMIT | Task 7 Camp documentation artwork | `/root/docs_artwork`; integrated by Sol | Ten archive-provided `docs/assets/*.png`, matching Markdown, this ledger | Safe ZIP manifest, PNG decode/CRC/dimensions, exact links, diff check green |
+| PUSHED `744d2bf` | Task 3 hydration replay plus Task 4/5 adapter checkpoint | three prior Luna lanes; integrated by Sol | App hydration recovery, DevPod/IDE, SSH transfer adapters | Focused/race/full gates passed at pushed tip |
+| PUSHED `dfb2473` | Task 7 Camp documentation artwork | `/root/docs_artwork`; integrated by Sol | Ten archive-provided images, matching Markdown, artwork ledger | Safe ZIP/PNG/link and full repository gates passed |
+| READY FOR CHECKPOINT | Task 3 unknown Hauler outcomes | `/root/task3_hydration_unknown_red`; production fix integrated by Sol | Hydration unknown-outcome regression plus serialized controller | Exact extraction observes ambiguous Load without a second Load; Extract preservation green |
+| READY FOR CHECKPOINT | Task 4 attach use case | Sol | New `internal/app/{attach.go,attach_test.go}` | Ownership revalidation, target mapping, exactly one terminal/VS Code entry path |
+| READY FOR CHECKPOINT | Task 5 remote workspace transport | `/root/task5_remote_workspace`; integrated by Sol | New `internal/workspace/{remote.go,remote_test.go}` | Rsync/fresh tar fallback/partial discard transport contract |
+| READY FOR CHECKPOINT | Task 6 conditional S3/MinIO core | `/root/task6_s3store`; integrated by Sol | New `internal/adapters/s3store/**` | Conditional operations, pagination, verified writer capability probe |
 
 ## Task 3 — complete local lifecycle and recovery (about 70%)
 
@@ -29,7 +32,7 @@ Authoritative execution ledger for `patchraptor/camp-implementation`. Update thi
 - [x] Workspace-readiness reconciliation (`e7e7294`).
 - [x] Push crash-safe marker/archive recovery checkpoint (`40518c7`).
 - [x] Reconcile pending hydration transitions from the original durable token/stage/final plan without duplicate intent/effect/fact (current checkpoint).
-- [ ] Observe unknown Hauler load/extract outcomes without duplicate destructive work.
+- [x] Observe unknown Hauler load/extract outcomes without duplicate destructive work (current checkpoint).
 - [ ] Complete service readiness, supervisor recovery, and durable opening/recovering objectives.
 - [ ] Prove the real local open → edit/image → sync → close → reopen vertical with crash cuts.
 
@@ -38,6 +41,7 @@ Authoritative execution ledger for `patchraptor/camp-implementation`. Update thi
 - [ ] Freeze one canonical session selector/target mapper; do not duplicate `internal/app/session.go` or `internal/workspace/local.go`.
 - [x] Implement typed DevPod flags, SSH forwarding, raw-argument conflict rejection, and VS Code/Insiders/T3 IDE adapter contracts (current checkpoint; app/CLI wiring remains).
 - [ ] Implement attach/list/status/history/recover/serve/images/provider/config use cases and stable human/JSON presenters.
+- [x] Implement the ownership-safe terminal and VS Code-family `attach` application use case (current checkpoint; CLI/T3 remain).
 - [ ] Wire the complete Cobra tree, aliases, help goldens, and bash/zsh/fish completions.
 - [ ] Issue #1: add `t3-code` and `--sites` validation without changing terminal or VS Code-family behavior.
 
@@ -52,6 +56,7 @@ Authoritative execution ledger for `patchraptor/camp-implementation`. Update thi
 
 - [ ] Implement S3 object-store conditional operations, immutable multipart upload, abort, pagination, checksum/size verification, and safe capability probe.
 - [ ] Add configuration/factory wiring without persisting credentials; retain mounted `file://` behavior.
+- [x] Add a credential-free conditional S3 HTTP core with opaque revisions, pagination, and a fail-closed writer probe (current checkpoint; factory wiring and multipart remain).
 - [ ] Prove two-writer conflict behavior, retained losing generation, branch recovery, and MinIO integration.
 - [ ] Issue #1: prove MinIO/S3 is the portable truth and a fresh controller can reopen the last verified checkpoint.
 
@@ -69,6 +74,19 @@ Authoritative execution ledger for `patchraptor/camp-implementation`. Update thi
 - No concrete checkpoint blocker. The ownership fallback retains a theoretical active same-UID name-substitution window because Linux has no unlink-by-fd primitive; deterministic identity/replay tests pass and unexplained state fails closed.
 - Bind-mount fixtures skip in this container with `EPERM`; `openat2` `RESOLVE_NO_XDEV` enforcement and deterministic substitution tests pass.
 - No merge is allowed until Tasks 3–7 and issue #1 acceptance criteria have fresh evidence.
+
+## Child disposition
+
+- `019f6b47-dc00-7a90-aa74-75cbf12d4e38`: **superseded/stopped** duplicate shared-checkout owner; its unique TODO and hydration RED evidence were adopted, and its marker work is contained in `40518c7`/`744d2bf`.
+- `/root/task3_ownership_marker`: **integrated** in `40518c7`.
+- `/root/task3_hydration_marker`: **integrated** in `40518c7`.
+- `/root/task3_app_hydration_red`: **integrated** in `744d2bf`.
+- `/root/task4_devpod_ide`: **integrated** in `744d2bf`.
+- `/root/task5_sshtransfer`: **integrated** in `744d2bf`.
+- `/root/docs_artwork`: **integrated** in `dfb2473`; all ten ZIP images remain linked.
+- `/root/task3_hydration_unknown_red`: **integrated in current checkpoint**; lane stopped after handoff.
+- `/root/task5_remote_workspace`: **integrated in current checkpoint**; lane stopped after handoff.
+- `/root/task6_s3store`: **integrated in current checkpoint**; lane stopped after handoff.
 
 ## Verification ledger
 
