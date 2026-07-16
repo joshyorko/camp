@@ -3,6 +3,8 @@ package supervisor
 import (
 	"context"
 	"errors"
+	"os"
+	"path/filepath"
 	"reflect"
 	"testing"
 
@@ -44,8 +46,12 @@ func TestConfinementResolverFailsClosedWithRecoveryGuidance(t *testing.T) {
 
 func TestConfinementResolverRejectsIncompatiblePasta(t *testing.T) {
 	t.Parallel()
+	executable := filepath.Join(t.TempDir(), "pasta")
+	if err := os.WriteFile(executable, []byte("#!/bin/sh\n"), 0o700); err != nil {
+		t.Fatal(err)
+	}
 	runner := &confinementRunner{result: ports.Result{Stdout: []byte("--foreground --quiet --ipv4-only")}}
-	resolver := NewConfinementResolver(runner, func(string) (string, error) { return "/usr/bin/pasta", nil }, func() string { return "host" })
+	resolver := NewConfinementResolver(runner, func(string) (string, error) { return executable, nil }, func() string { return "host" })
 	_, err := resolver.Resolve(context.Background())
 	var unavailable *ConfinementUnavailable
 	if !errors.As(err, &unavailable) || unavailable.Reason != "incompatible-options" {

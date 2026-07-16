@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"crypto/sha256"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -72,6 +73,9 @@ func TestInstalledDevPodIdentity(t *testing.T) {
 	}
 	file, err := os.Open(devpodPath)
 	if err != nil {
+		if errors.Is(err, os.ErrPermission) {
+			t.Skipf("devpod binary is not readable in this environment: %v", err)
+		}
 		t.Fatal(err)
 	}
 	hash := sha256.New()

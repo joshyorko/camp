@@ -11,16 +11,23 @@ import (
 )
 
 type Identity struct {
-	procRoot string
+	procRoot       string
+	machineIDPaths []string
 }
 
-func NewIdentity() *Identity { return &Identity{procRoot: "/proc"} }
+func NewIdentity() *Identity {
+	return &Identity{procRoot: "/proc", machineIDPaths: []string{"/etc/machine-id", "/var/lib/dbus/machine-id"}}
+}
 
 func (i *Identity) MachineID(ctx context.Context) (string, error) {
 	if err := ctx.Err(); err != nil {
 		return "", err
 	}
-	for _, path := range []string{"/etc/machine-id", "/var/lib/dbus/machine-id"} {
+	paths := i.machineIDPaths
+	if len(paths) == 0 {
+		paths = []string{"/etc/machine-id", "/var/lib/dbus/machine-id"}
+	}
+	for _, path := range paths {
 		body, err := os.ReadFile(path)
 		if err == nil && strings.TrimSpace(string(body)) != "" {
 			return strings.TrimSpace(string(body)), nil

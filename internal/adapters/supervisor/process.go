@@ -113,7 +113,32 @@ func (m *ProcessManager) Group(ctx context.Context, pgid int) ([]ports.ProcessSt
 	if pgid <= 0 {
 		return nil, errors.New("invalid process group")
 	}
-	return m.scan(ctx, func(status ports.ProcessStatus) bool { return status.PGID == pgid })
+	entries, err := os.ReadDir(m.procRoot)
+	if err != nil {
+		return nil, err
+	}
+	var result []ports.ProcessStatus
+	for _, entry := range entries {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
+		pid, err := strconv.Atoi(entry.Name())
+		if err != nil || pid <= 0 {
+			continue
+		}
+		status, err := m.inspectPID(pid)
+		if err != nil {
+			if errors.Is(err, os.ErrNotExist) {
+				continue
+			}
+			return nil, fmt.Errorf("inspect process-group member %d: %w", pid, err)
+		}
+		if status.Running && status.PGID == pgid {
+			result = append(result, status)
+		}
+	}
+	sort.Slice(result, func(i, j int) bool { return result[i].Identity.PID < result[j].Identity.PID })
+	return result, nil
 }
 
 func (m *ProcessManager) Stop(ctx context.Context, identity domain.ProcessIdentity, grace time.Duration) error {

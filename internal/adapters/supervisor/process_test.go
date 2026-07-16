@@ -33,7 +33,11 @@ func TestProcessManagerRecordsExactIdentityAndNeverSignalsPIDReuse(t *testing.T)
 	if err != nil {
 		t.Fatalf("Inspect() error = %v", err)
 	}
-	if !status.Running || status.Identity != identity || status.Executable != "/usr/bin/sleep" || status.PGID != identity.PID || status.SID != identity.PID || status.NetNS == "" {
+	expectedExecutable, err := filepath.EvalSymlinks("/usr/bin/sleep")
+	if err != nil {
+		expectedExecutable = "/usr/bin/sleep"
+	}
+	if !status.Running || status.Identity != identity || status.Executable != expectedExecutable || status.PGID != identity.PID || status.SID != identity.PID || status.NetNS == "" {
 		t.Fatalf("status = %#v", status)
 	}
 	if len(status.Argv) != 2 || status.Argv[0] != "/usr/bin/sleep" || status.Argv[1] != "30" {
@@ -57,5 +61,22 @@ func TestProcessManagerRecordsExactIdentityAndNeverSignalsPIDReuse(t *testing.T)
 	}
 	if status, err := manager.Inspect(ctx, identity); err != nil || status.Running {
 		t.Fatalf("Inspect(after stop) = %#v, %v; want absent", status, err)
+	}
+}
+
+func TestProcessManagerGroupFailsClosedWhenMemberCannotBeInspected(t *testing.T) {
+	t.Parallel()
+	root := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(root, "123"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(root, "123", "stat"), []byte("malformed"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	manager := &ProcessManager{procRoot: root, bootID: "boot"}
+	_, err := manager.Group(context.Background(), 7)
+	if err == nil {
+		t.Fatal("Group() silently ignored an uninspectable process-group member")
 	}
 }

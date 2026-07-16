@@ -13,6 +13,9 @@ func TestBootstrapPrecedenceFlagsEnvironmentUserDefaultsAndSecretMode(t *testing
 	if err := os.WriteFile(path, body, 0o644); err != nil {
 		t.Fatal(err)
 	}
+	if err := os.Chmod(path, 0o644); err != nil {
+		t.Fatal(err)
+	}
 	_, err := ResolveBootstrap(BootstrapInput{ConfigPath: path})
 	if err == nil {
 		t.Fatal("ResolveBootstrap() accepted world-readable secret config")

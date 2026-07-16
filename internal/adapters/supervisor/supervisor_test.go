@@ -21,6 +21,8 @@ type fakeUnitProcessManager struct {
 	start      domain.ProcessIdentity
 	helper     ports.ProcessStatus
 	children   []ports.ProcessStatus
+	group      []ports.ProcessStatus
+	groupErr   error
 	stopOrder  []domain.ProcessIdentity
 }
 
@@ -42,7 +44,7 @@ func (m *fakeUnitProcessManager) Children(context.Context, domain.ProcessIdentit
 	return append([]ports.ProcessStatus(nil), m.children...), nil
 }
 func (m *fakeUnitProcessManager) Group(context.Context, int) ([]ports.ProcessStatus, error) {
-	return nil, nil
+	return append([]ports.ProcessStatus(nil), m.group...), m.groupErr
 }
 func (m *fakeUnitProcessManager) Stop(_ context.Context, identity domain.ProcessIdentity, _ time.Duration) error {
 	m.stopOrder = append(m.stopOrder, identity)
@@ -163,5 +165,39 @@ func TestServiceSupervisorFailsClosedOnUnknownPortAndStopsChildFirst(t *testing.
 	}
 	if !reflect.DeepEqual(manager.stopOrder, []domain.ProcessIdentity{child, helper}) {
 		t.Fatalf("stop order = %#v, want child then helper", manager.stopOrder)
+	}
+}
+
+func TestServiceSupervisorValidatesProcessGroupBeforeStoppingAnyMember(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	log, err := journal.NewStore(filepath.Join(t.TempDir(), "journal"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	snapshot := domain.JournalSnapshot{SchemaVersion: domain.SchemaVersion, SessionID: "session-group"}
+	if err := log.Create(ctx, snapshot); err != nil {
+		t.Fatal(err)
+	}
+	helper := domain.ProcessIdentity{PID: 11, BootID: "boot", StartTicks: 11}
+	child := domain.ProcessIdentity{PID: 12, BootID: "boot", StartTicks: 12}
+	unknown := domain.ProcessIdentity{PID: 13, BootID: "boot", StartTicks: 13}
+	manager := &fakeUnitProcessManager{group: []ports.ProcessStatus{
+		{Identity: helper, Running: true, PGID: helper.PID},
+		{Identity: child, Running: true, PGID: helper.PID},
+		{Identity: unknown, Running: true, PGID: helper.PID},
+	}}
+	controller := NewServiceSupervisor(log, manager, &fakeUnitInspector{})
+	record := domain.ServiceUnitRecord{
+		Helper: domain.ProcessRecord{Identity: helper, PGID: helper.PID},
+		Child:  domain.ProcessRecord{Identity: child, PGID: helper.PID},
+	}
+
+	err = controller.Stop(ctx, record)
+	if !errors.Is(err, ErrUnitInvariant) {
+		t.Fatalf("Stop() error = %v, want ErrUnitInvariant", err)
+	}
+	if len(manager.stopOrder) != 0 {
+		t.Fatalf("Stop() signalled members before group validation: %#v", manager.stopOrder)
 	}
 }

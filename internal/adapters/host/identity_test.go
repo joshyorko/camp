@@ -3,12 +3,18 @@ package host
 import (
 	"context"
 	"os"
+	"path/filepath"
 	"testing"
 )
 
 func TestIdentityReturnsStableMachineAndExactCurrentProcess(t *testing.T) {
 	t.Parallel()
 	identity := NewIdentity()
+	machineID := filepath.Join(t.TempDir(), "machine-id")
+	if err := os.WriteFile(machineID, []byte("machine-test-id\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	identity.machineIDPaths = []string{machineID}
 	machine, err := identity.MachineID(context.Background())
 	if err != nil {
 		t.Fatalf("MachineID() error = %v", err)

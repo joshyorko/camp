@@ -144,6 +144,15 @@ func (s *ServiceSupervisor) Ensure(ctx context.Context, snapshot domain.JournalS
 }
 
 func (s *ServiceSupervisor) Stop(ctx context.Context, record domain.ServiceUnitRecord) error {
+	if record.Helper.PGID > 0 {
+		members, err := s.processes.Group(ctx, record.Helper.PGID)
+		if err != nil {
+			return err
+		}
+		if err := validateRecordedGroup(members, record); err != nil {
+			return err
+		}
+	}
 	if record.Child.Identity.PID > 0 {
 		if err := s.processes.Stop(ctx, record.Child.Identity, 5*time.Second); err != nil && !errors.Is(err, ErrProcessIdentity) {
 			return fmt.Errorf("stop service child: %w", err)
@@ -164,6 +173,19 @@ func (s *ServiceSupervisor) Stop(ctx context.Context, record domain.ServiceUnitR
 		}
 	}
 	return s.inspector.Absent(ctx, record)
+}
+
+func validateRecordedGroup(members []ports.ProcessStatus, record domain.ServiceUnitRecord) error {
+	for _, member := range members {
+		if !member.Running {
+			continue
+		}
+		if member.Identity == record.Helper.Identity || member.Identity == record.Child.Identity {
+			continue
+		}
+		return fmt.Errorf("unexpected process-group member %d: %w", member.Identity.PID, ErrUnitInvariant)
+	}
+	return nil
 }
 
 func (s *ServiceSupervisor) discover(ctx context.Context, service ServiceSpec, processSpec ports.ProcessSpec) (domain.ServiceUnitRecord, error) {
