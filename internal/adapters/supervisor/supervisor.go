@@ -132,7 +132,7 @@ func (s *ServiceSupervisor) Ensure(ctx context.Context, snapshot domain.JournalS
 	}
 	record, err := s.observeStarted(ctx, service, processSpec, helperIdentity)
 	if err != nil {
-		_ = s.cleanupPartial(ctx, helperIdentity)
+		_ = s.cleanupPartial(ctx, service, helperIdentity)
 		return domain.ServiceUnitRecord{}, snapshot, err
 	}
 	next := upsertService(snapshot, record)
@@ -260,9 +260,27 @@ func (s *ServiceSupervisor) observe(ctx context.Context, service ServiceSpec, he
 	}, nil
 }
 
-func (s *ServiceSupervisor) cleanupPartial(ctx context.Context, helper domain.ProcessIdentity) error {
-	children, _ := s.processes.Children(ctx, helper)
-	for _, child := range children {
+func (s *ServiceSupervisor) cleanupPartial(ctx context.Context, service ServiceSpec, helper domain.ProcessIdentity) error {
+	helperStatus, err := s.processes.Inspect(ctx, helper)
+	if err != nil {
+		return err
+	}
+	if !helperStatus.Running || helperStatus.PGID <= 0 || helperStatus.SID <= 0 || helperStatus.NetNS == "" {
+		return fmt.Errorf("partial helper identity is not safely inspectable: %w", ErrUnitInvariant)
+	}
+	children, err := s.processes.Children(ctx, helper)
+	if err != nil {
+		return err
+	}
+	if len(children) > 1 {
+		return fmt.Errorf("partial helper has %d direct children: %w", len(children), ErrUnitInvariant)
+	}
+	if len(children) == 1 {
+		child := children[0]
+		wantArgv := append([]string{service.Child.Executable}, service.Child.Argv...)
+		if !child.Running || child.ParentPID != helper.PID || child.PGID != helperStatus.PGID || child.SID != helperStatus.SID || child.NetNS == "" || child.NetNS == helperStatus.NetNS || child.Executable != service.Child.Executable || !reflect.DeepEqual(child.Argv, wantArgv) {
+			return fmt.Errorf("partial child identity or command mismatch: %w", ErrUnitInvariant)
+		}
 		if err := s.processes.Stop(ctx, child.Identity, time.Second); err != nil {
 			return err
 		}

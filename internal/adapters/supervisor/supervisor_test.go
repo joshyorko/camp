@@ -201,3 +201,32 @@ func TestServiceSupervisorValidatesProcessGroupBeforeStoppingAnyMember(t *testin
 		t.Fatalf("Stop() signalled members before group validation: %#v", manager.stopOrder)
 	}
 }
+
+func TestServiceSupervisorDoesNotKillUnexpectedPartialChild(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	helper := domain.ProcessIdentity{PID: 21, BootID: "boot", StartTicks: 21}
+	child := domain.ProcessIdentity{PID: 22, BootID: "boot", StartTicks: 22}
+	manager := &fakeUnitProcessManager{
+		helper: ports.ProcessStatus{Identity: helper, Running: true, PGID: helper.PID, SID: helper.PID, NetNS: "net:[host]"},
+		children: []ports.ProcessStatus{{
+			Identity: child, Running: true, Executable: "/usr/bin/unrelated", Argv: []string{"/usr/bin/unrelated"},
+			ParentPID: helper.PID, PGID: helper.PID, SID: helper.PID, NetNS: "net:[child]",
+		}},
+	}
+	controller := NewServiceSupervisor(nil, manager, &fakeUnitInspector{})
+	service := ServiceSpec{
+		Child: ports.Command{
+			Executable: "/opt/hauler",
+			Argv:       []string{"store", "--store", "/state/store", "serve", "registry", "--directory", "/state/registry", "--port", "5100", "--readonly=false"},
+		},
+	}
+
+	err := controller.cleanupPartial(ctx, service, helper)
+	if !errors.Is(err, ErrUnitInvariant) {
+		t.Fatalf("cleanupPartial() error = %v, want ErrUnitInvariant", err)
+	}
+	if len(manager.stopOrder) != 0 {
+		t.Fatalf("cleanupPartial() stopped an unexpected child: %#v", manager.stopOrder)
+	}
+}

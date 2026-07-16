@@ -64,7 +64,7 @@ func (m *ProcessManager) Start(ctx context.Context, spec ports.ProcessSpec) (dom
 		return domain.ProcessIdentity{}, fmt.Errorf("start process: %w", err)
 	}
 	_ = log.Close()
-	identity, err := m.identity(cmd.Process.Pid)
+	identity, err := m.startedIdentity(ctx, cmd.Process.Pid)
 	if err != nil {
 		_ = cmd.Process.Kill()
 		_, _ = cmd.Process.Wait()
@@ -80,7 +80,7 @@ func (m *ProcessManager) Inspect(ctx context.Context, expected domain.ProcessIde
 	}
 	status, err := m.inspectPID(expected.PID)
 	if err != nil {
-		if errors.Is(err, os.ErrNotExist) {
+		if isProcessGone(err) {
 			return ports.ProcessStatus{Identity: expected, Running: false}, nil
 		}
 		return ports.ProcessStatus{}, err
@@ -128,7 +128,7 @@ func (m *ProcessManager) Group(ctx context.Context, pgid int) ([]ports.ProcessSt
 		}
 		status, err := m.inspectPID(pid)
 		if err != nil {
-			if errors.Is(err, os.ErrNotExist) {
+			if isProcessGone(err) {
 				continue
 			}
 			return nil, fmt.Errorf("inspect process-group member %d: %w", pid, err)
@@ -221,7 +221,7 @@ func (m *ProcessManager) scan(ctx context.Context, include func(ports.ProcessSta
 		}
 		status, err := m.inspectPID(pid)
 		if err != nil {
-			if errors.Is(err, os.ErrNotExist) || errors.Is(err, syscall.EACCES) || errors.Is(err, syscall.EPERM) {
+			if isProcessGone(err) || errors.Is(err, syscall.EACCES) || errors.Is(err, syscall.EPERM) {
 				continue
 			}
 			continue
@@ -232,6 +232,10 @@ func (m *ProcessManager) scan(ctx context.Context, include func(ports.ProcessSta
 	}
 	sort.Slice(result, func(i, j int) bool { return result[i].Identity.PID < result[j].Identity.PID })
 	return result, nil
+}
+
+func isProcessGone(err error) bool {
+	return errors.Is(err, os.ErrNotExist) || errors.Is(err, syscall.ESRCH)
 }
 
 func (m *ProcessManager) inspectPID(pid int) (ports.ProcessStatus, error) {
@@ -286,12 +290,34 @@ func (m *ProcessManager) inspectPID(pid int) (ports.ProcessStatus, error) {
 	}, nil
 }
 
-func (m *ProcessManager) identity(pid int) (domain.ProcessIdentity, error) {
-	status, err := m.inspectPID(pid)
-	if err != nil {
-		return domain.ProcessIdentity{}, fmt.Errorf("inspect started process %d: %w", pid, err)
+func (m *ProcessManager) startedIdentity(ctx context.Context, pid int) (domain.ProcessIdentity, error) {
+	deadline := time.Now().Add(time.Second)
+	var lastErr error
+	for {
+		if err := ctx.Err(); err != nil {
+			return domain.ProcessIdentity{}, err
+		}
+		status, err := m.inspectPID(pid)
+		if err == nil {
+			if !status.Running {
+				return domain.ProcessIdentity{}, fmt.Errorf("started process %d exited before identity stabilized", pid)
+			}
+			if status.Executable != "" && len(status.Argv) > 0 && status.NetNS != "" {
+				return status.Identity, nil
+			}
+			lastErr = errors.New("started process has incomplete runtime identity")
+		} else {
+			lastErr = err
+		}
+		if !time.Now().Before(deadline) {
+			return domain.ProcessIdentity{}, fmt.Errorf("inspect started process %d: %w", pid, lastErr)
+		}
+		select {
+		case <-ctx.Done():
+			return domain.ProcessIdentity{}, ctx.Err()
+		case <-time.After(time.Millisecond):
+		}
 	}
-	return status.Identity, nil
 }
 
 func splitNUL(body []byte) []string {

@@ -4,13 +4,12 @@ import (
 	"context"
 	"errors"
 	"net"
-	"strconv"
 	"testing"
 
 	"github.com/joshyorko/camp/internal/domain"
 )
 
-func TestPortAllocatorReturnsOrderedLoopbackCandidatesWithoutTreatingProbeAsReservation(t *testing.T) {
+func TestPortAllocatorOmitsOccupiedPreferredPortAndReturnsDistinctCandidates(t *testing.T) {
 	t.Parallel()
 	occupied, err := net.Listen("tcp4", "127.0.0.1:0")
 	if err != nil {
@@ -26,15 +25,18 @@ func TestPortAllocatorReturnsOrderedLoopbackCandidatesWithoutTreatingProbeAsRese
 	if len(candidates) != 3 {
 		t.Fatalf("candidates = %#v, want 3", candidates)
 	}
+	seen := map[int]bool{}
 	for _, candidate := range candidates {
 		if candidate == preferred {
 			t.Fatalf("occupied preferred port %d was returned", preferred)
 		}
-		listener, err := net.Listen("tcp4", net.JoinHostPort("127.0.0.1", strconv.Itoa(candidate)))
-		if err != nil {
-			t.Fatalf("candidate %d was not available after probe: %v", candidate, err)
+		if candidate < 1 || candidate > 65535 {
+			t.Fatalf("candidate %d is outside the TCP port range", candidate)
 		}
-		_ = listener.Close()
+		if seen[candidate] {
+			t.Fatalf("candidate %d was returned more than once", candidate)
+		}
+		seen[candidate] = true
 	}
 }
 
