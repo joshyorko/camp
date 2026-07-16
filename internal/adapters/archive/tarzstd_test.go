@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/klauspost/compress/zstd"
+	"golang.org/x/sys/unix"
 )
 
 func TestTarZstdRoundTripIsDeterministicAndExcludesOnlyRootBuildRuntime(t *testing.T) {
@@ -79,6 +80,9 @@ func TestTarZstdRoundTripIsDeterministicAndExcludesOnlyRootBuildRuntime(t *testi
 			t.Fatalf("excluded path %q exists: %v", path, err)
 		}
 	}
+	if _, err := os.Lstat(filepath.Join(destination, ".camp-extract-owner")); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("generic extraction provenance = %v, want absent", err)
+	}
 	left, _ := os.Stat(filepath.Join(destination, "nested", "file.txt"))
 	right, _ := os.Stat(filepath.Join(destination, "hardlink.txt"))
 	if !os.SameFile(left, right) {
@@ -140,6 +144,215 @@ func TestCreateRejectsDeterministicSourceMutation(t *testing.T) {
 	_, err := adapter.Create(context.Background(), root, filepath.Join(t.TempDir(), "root.tar.zst"))
 	if !errors.Is(err, ErrRootSnapshotStable) {
 		t.Fatalf("Create() error = %v, want ErrRootSnapshotStable", err)
+	}
+}
+
+func TestExtractWithProvenancePublishesDurableRequestEvidence(t *testing.T) {
+	t.Parallel()
+	sandbox := t.TempDir()
+	archivePath := filepath.Join(sandbox, "root.tar.zst")
+	writeArchive(t, archivePath, []tar.Header{{Name: "file", Typeflag: tar.TypeReg, Mode: 0o600}})
+	destination := filepath.Join(sandbox, "destination")
+	want := []byte("request-bound-provenance")
+	called := false
+
+	err := NewTarZstd().ExtractWithProvenance(context.Background(), archivePath, destination, func(root ExtractionRoot) ([]byte, error) {
+		called = true
+		if root.Path != destination+".partial" || root.Device == 0 || root.Inode == 0 {
+			t.Fatalf("provenance root = %#v", root)
+		}
+		if _, err := os.Lstat(filepath.Join(root.Path, "file")); !errors.Is(err, os.ErrNotExist) {
+			t.Fatalf("archive entry before provenance durability = %v, want absent", err)
+		}
+		return want, nil
+	})
+	if err != nil {
+		t.Fatalf("ExtractWithProvenance() error = %v", err)
+	}
+	if !called {
+		t.Fatal("provenance callback was not called")
+	}
+	body, err := os.ReadFile(filepath.Join(destination, ".camp-extract-owner"))
+	if err != nil || string(body) != string(want) {
+		t.Fatalf("published provenance = %q, %v; want %q", body, err, want)
+	}
+}
+
+func TestExtractDurablyCreatesStageBeforeExtraction(t *testing.T) {
+	sandbox := t.TempDir()
+	archivePath := filepath.Join(sandbox, "root.tar.zst")
+	writeArchive(t, archivePath, []tar.Header{{Name: "file", Typeflag: tar.TypeReg, Mode: 0o600}})
+	destination := filepath.Join(sandbox, "destination")
+	cut := errors.New("cut after durable stage creation")
+	called := false
+	adapter := NewTarZstd(WithAfterStageMkdir(func(stage string) error {
+		called = true
+		if _, err := os.Stat(stage); err != nil {
+			t.Fatalf("stage at durability cut: %v", err)
+		}
+		return cut
+	}))
+	if err := adapter.Extract(context.Background(), archivePath, destination); !errors.Is(err, cut) {
+		t.Fatalf("Extract() error = %v, want cut", err)
+	}
+	if !called {
+		t.Fatal("durable-stage hook was not called")
+	}
+}
+
+func TestExtractPublishNoReplacePreservesCollidingDestination(t *testing.T) {
+	sandbox := t.TempDir()
+	archivePath := filepath.Join(sandbox, "root.tar.zst")
+	writeArchive(t, archivePath, []tar.Header{{Name: "file", Typeflag: tar.TypeReg, Mode: 0o600}})
+	destination := filepath.Join(sandbox, "destination")
+	var collision os.FileInfo
+	adapter := NewTarZstd(WithBeforePublish(func(stage string) error {
+		if err := os.Mkdir(destination, 0o700); err != nil {
+			return err
+		}
+		var err error
+		collision, err = os.Stat(destination)
+		return err
+	}))
+	if err := adapter.Extract(context.Background(), archivePath, destination); !errors.Is(err, os.ErrExist) {
+		t.Fatalf("Extract() error = %v, want os.ErrExist", err)
+	}
+	after, err := os.Stat(destination)
+	if err != nil || !os.SameFile(collision, after) {
+		t.Fatalf("colliding destination identity changed: %v", err)
+	}
+}
+
+func TestExtractRejectsStagePathSubstitutionBeforePublish(t *testing.T) {
+	sandbox := t.TempDir()
+	archivePath := filepath.Join(sandbox, "root.tar.zst")
+	writeArchive(t, archivePath, []tar.Header{{Name: "file", Typeflag: tar.TypeReg, Mode: 0o600}})
+	destination := filepath.Join(sandbox, "destination")
+	adapter := NewTarZstd(WithBeforePublish(func(stage string) error {
+		if err := os.Rename(stage, stage+".owned"); err != nil {
+			return err
+		}
+		if err := os.Mkdir(stage, 0o700); err != nil {
+			return err
+		}
+		return os.WriteFile(filepath.Join(stage, "replacement"), []byte("keep"), 0o600)
+	}))
+	if err := adapter.Extract(context.Background(), archivePath, destination); !errors.Is(err, ErrUnsafeArchive) {
+		t.Fatalf("Extract() error = %v, want ErrUnsafeArchive", err)
+	}
+	if body, err := os.ReadFile(filepath.Join(destination+".partial", "replacement")); err != nil || string(body) != "keep" {
+		t.Fatalf("replacement stage = %q, %v; want preserved", body, err)
+	}
+	if _, err := os.Lstat(destination); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("destination after stage substitution = %v, want absent", err)
+	}
+}
+
+func TestExtractErrorCleanupPreservesSubstitutedStage(t *testing.T) {
+	sandbox := t.TempDir()
+	archivePath := filepath.Join(sandbox, "root.tar.zst")
+	writeArchive(t, archivePath, []tar.Header{{Name: "file", Typeflag: tar.TypeReg, Mode: 0o600}})
+	destination := filepath.Join(sandbox, "destination")
+	cut := errors.New("provenance failure after substitution")
+	err := NewTarZstd().ExtractWithProvenance(context.Background(), archivePath, destination, func(root ExtractionRoot) ([]byte, error) {
+		if err := os.Rename(root.Path, root.Path+".owned"); err != nil {
+			return nil, err
+		}
+		if err := os.Mkdir(root.Path, 0o700); err != nil {
+			return nil, err
+		}
+		if err := os.WriteFile(filepath.Join(root.Path, "replacement"), []byte("keep"), 0o600); err != nil {
+			return nil, err
+		}
+		return nil, cut
+	})
+	if !errors.Is(err, cut) {
+		t.Fatalf("ExtractWithProvenance() error = %v, want cut", err)
+	}
+	if body, err := os.ReadFile(filepath.Join(destination+".partial", "replacement")); err != nil || string(body) != "keep" {
+		t.Fatalf("replacement stage = %q, %v; want preserved", body, err)
+	}
+}
+
+func TestCleanupRejectsSubstitutedChildBeforeRecursion(t *testing.T) {
+	root := t.TempDir()
+	child := filepath.Join(root, "child")
+	if err := os.Mkdir(child, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	rootFD, err := unix.Open(root, unix.O_RDONLY|unix.O_DIRECTORY|unix.O_CLOEXEC|unix.O_NOFOLLOW, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer unix.Close(rootFD)
+	var named unix.Stat_t
+	if err := unix.Fstatat(rootFD, "child", &named, unix.AT_SYMLINK_NOFOLLOW); err != nil {
+		t.Fatal(err)
+	}
+	fd, err := openArchiveCleanupChildAtWithHook(rootFD, "child", named, func() error {
+		if err := os.Rename(child, child+".owned"); err != nil {
+			return err
+		}
+		if err := os.Mkdir(child, 0o700); err != nil {
+			return err
+		}
+		return os.WriteFile(filepath.Join(child, "replacement"), []byte("keep"), 0o600)
+	})
+	if fd >= 0 {
+		unix.Close(fd)
+	}
+	if !errors.Is(err, ErrUnsafeArchive) {
+		t.Fatalf("openArchiveCleanupChildAtWithHook() error = %v, want ErrUnsafeArchive", err)
+	}
+	if body, err := os.ReadFile(filepath.Join(child, "replacement")); err != nil || string(body) != "keep" {
+		t.Fatalf("replacement child = %q, %v; want preserved", body, err)
+	}
+}
+
+func TestCleanupDoesNotCrossBindMount(t *testing.T) {
+	root := t.TempDir()
+	source := t.TempDir()
+	mounted := filepath.Join(root, "mounted")
+	if err := os.Mkdir(mounted, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(source, "canary"), []byte("keep"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := unix.Mount(source, mounted, "", unix.MS_BIND, ""); err != nil {
+		if errors.Is(err, unix.EPERM) || errors.Is(err, unix.ENOSYS) || errors.Is(err, unix.EOPNOTSUPP) {
+			t.Skipf("bind mounts unavailable: %v", err)
+		}
+		t.Fatal(err)
+	}
+	defer unix.Unmount(mounted, unix.MNT_DETACH)
+	rootFD, err := unix.Open(root, unix.O_RDONLY|unix.O_DIRECTORY|unix.O_CLOEXEC|unix.O_NOFOLLOW, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	err = removeArchiveDirectoryContents(rootFD)
+	unix.Close(rootFD)
+	if !errors.Is(err, unix.EXDEV) {
+		t.Fatalf("removeArchiveDirectoryContents() error = %v, want EXDEV", err)
+	}
+	if body, err := os.ReadFile(filepath.Join(mounted, "canary")); err != nil || string(body) != "keep" {
+		t.Fatalf("mounted canary = %q, %v; want preserved", body, err)
+	}
+}
+
+func TestExtractVerifiesPublishedDestinationIdentity(t *testing.T) {
+	sandbox := t.TempDir()
+	archivePath := filepath.Join(sandbox, "root.tar.zst")
+	writeArchive(t, archivePath, []tar.Header{{Name: "file", Typeflag: tar.TypeReg, Mode: 0o600}})
+	destination := filepath.Join(sandbox, "destination")
+	adapter := NewTarZstd(WithAfterPublish(func() error {
+		if err := os.Rename(destination, destination+".owned"); err != nil {
+			return err
+		}
+		return os.Mkdir(destination, 0o700)
+	}))
+	if err := adapter.Extract(context.Background(), archivePath, destination); !errors.Is(err, ErrUnsafeArchive) {
+		t.Fatalf("Extract() error = %v, want ErrUnsafeArchive", err)
 	}
 }
 

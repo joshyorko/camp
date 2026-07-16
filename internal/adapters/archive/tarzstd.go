@@ -3,6 +3,7 @@ package archive
 import (
 	"archive/tar"
 	"context"
+	"crypto/rand"
 	"crypto/sha256"
 	"encoding/hex"
 	"errors"
@@ -17,6 +18,7 @@ import (
 	"time"
 
 	"github.com/klauspost/compress/zstd"
+	"golang.org/x/sys/unix"
 )
 
 var (
@@ -31,13 +33,34 @@ type ArchiveInfo struct {
 }
 
 type TarZstd struct {
-	afterInventory func() error
+	afterInventory  func() error
+	afterStageMkdir func(string) error
+	beforePublish   func(string) error
+	afterPublish    func() error
+}
+
+type ExtractionRoot struct {
+	Path   string
+	Device uint64
+	Inode  uint64
 }
 
 type Option func(*TarZstd)
 
 func WithAfterInventory(hook func() error) Option {
 	return func(adapter *TarZstd) { adapter.afterInventory = hook }
+}
+
+func WithAfterStageMkdir(hook func(string) error) Option {
+	return func(adapter *TarZstd) { adapter.afterStageMkdir = hook }
+}
+
+func WithBeforePublish(hook func(string) error) Option {
+	return func(adapter *TarZstd) { adapter.beforePublish = hook }
+}
+
+func WithAfterPublish(hook func() error) Option {
+	return func(adapter *TarZstd) { adapter.afterPublish = hook }
 }
 
 func NewTarZstd(options ...Option) *TarZstd {
@@ -207,34 +230,109 @@ func (a *TarZstd) Create(ctx context.Context, root, destination string) (Archive
 	return ArchiveInfo{Path: destination, SHA256: hex.EncodeToString(digest[:]), Size: int64(len(body))}, nil
 }
 
-func (a *TarZstd) Extract(ctx context.Context, source, destination string) (err error) {
+func (a *TarZstd) Extract(ctx context.Context, source, destination string) error {
+	return a.extract(ctx, source, destination, nil)
+}
+
+func (a *TarZstd) ExtractWithProvenance(ctx context.Context, source, destination string, provenance func(ExtractionRoot) ([]byte, error)) error {
+	if provenance == nil {
+		return errors.New("extraction provenance callback is required")
+	}
+	return a.extract(ctx, source, destination, provenance)
+}
+
+func (a *TarZstd) extract(ctx context.Context, source, destination string, provenance func(ExtractionRoot) ([]byte, error)) (err error) {
 	if !filepath.IsAbs(source) || !filepath.IsAbs(destination) {
 		return errors.New("archive source and destination must be absolute")
 	}
-	if _, err := os.Lstat(destination); err == nil {
-		return os.ErrExist
-	} else if !errors.Is(err, os.ErrNotExist) {
+	parentPath := filepath.Dir(destination)
+	parentFD, err := unix.Open(parentPath, unix.O_RDONLY|unix.O_DIRECTORY|unix.O_CLOEXEC|unix.O_NOFOLLOW, 0)
+	if err != nil {
 		return err
 	}
-	stage := destination + ".partial"
-	if _, err := os.Lstat(stage); err == nil {
+	defer unix.Close(parentFD)
+	var parentStat unix.Stat_t
+	if err := unix.Fstat(parentFD, &parentStat); err != nil {
+		return err
+	}
+	if err := verifyArchiveDirectoryPath(parentPath, parentStat); err != nil {
+		return err
+	}
+	destinationName := filepath.Base(destination)
+	stageName := destinationName + ".partial"
+	if exists, err := archiveEntryExistsAt(parentFD, destinationName); err != nil || exists {
+		if err != nil {
+			return err
+		}
+		return os.ErrExist
+	}
+	if exists, err := archiveEntryExistsAt(parentFD, stageName); err != nil || exists {
+		if err != nil {
+			return err
+		}
 		return fmt.Errorf("unexplained extraction stage exists: %w", ErrUnsafeArchive)
 	}
-	if err := os.Mkdir(stage, 0o700); err != nil {
+	if err := unix.Mkdirat(parentFD, stageName, 0o700); err != nil {
 		return err
 	}
-	marker := filepath.Join(stage, ".camp-extract-owner")
-	if err := os.WriteFile(marker, []byte("camp-owned-partial\n"), 0o600); err != nil {
-		_ = os.RemoveAll(stage)
-		return err
+	var stageStat unix.Stat_t
+	if err := unix.Fstatat(parentFD, stageName, &stageStat, unix.AT_SYMLINK_NOFOLLOW); err != nil {
+		return fmt.Errorf("inspect created extraction stage: %w: %w", err, ErrUnsafeArchive)
 	}
+	if stageStat.Mode&unix.S_IFMT != unix.S_IFDIR {
+		return fmt.Errorf("created extraction stage is not a directory: %w", ErrUnsafeArchive)
+	}
+	stage := destination + ".partial"
+	published := false
 	defer func() {
-		if err != nil {
-			if body, readErr := os.ReadFile(marker); readErr == nil && string(body) == "camp-owned-partial\n" {
-				_ = os.RemoveAll(stage)
-			}
+		if err != nil && !published {
+			err = errors.Join(err, cleanupArchiveDirectoryAt(parentFD, stageName, stageStat))
 		}
 	}()
+	stageFD, err := openArchiveCleanupChildAt(parentFD, stageName, stageStat)
+	if err != nil {
+		return err
+	}
+	defer unix.Close(stageFD)
+	if err := unix.Fsync(parentFD); err != nil {
+		return err
+	}
+	stageAccess := fmt.Sprintf("/proc/self/fd/%d", stageFD)
+	if a.afterStageMkdir != nil {
+		if err := a.afterStageMkdir(stage); err != nil {
+			return err
+		}
+	}
+	markerBody := []byte("camp-owned-partial\n")
+	if provenance != nil {
+		markerBody, err = provenance(ExtractionRoot{Path: stage, Device: uint64(stageStat.Dev), Inode: stageStat.Ino})
+		if err != nil {
+			return err
+		}
+		if len(markerBody) == 0 {
+			return errors.New("extraction provenance is empty")
+		}
+	}
+	markerFD, err := unix.Openat(stageFD, ".camp-extract-owner", unix.O_WRONLY|unix.O_CREAT|unix.O_EXCL|unix.O_CLOEXEC|unix.O_NOFOLLOW, 0o600)
+	if err != nil {
+		return err
+	}
+	markerFile := os.NewFile(uintptr(markerFD), ".camp-extract-owner")
+	written, writeErr := markerFile.Write(markerBody)
+	if writeErr == nil && written != len(markerBody) {
+		writeErr = io.ErrShortWrite
+	}
+	err = writeErr
+	if err == nil {
+		err = markerFile.Sync()
+	}
+	closeMarkerErr := markerFile.Close()
+	if err != nil || closeMarkerErr != nil {
+		return errors.Join(err, closeMarkerErr)
+	}
+	if err := unix.Fsync(stageFD); err != nil {
+		return err
+	}
 	input, err := os.Open(source)
 	if err != nil {
 		return err
@@ -267,11 +365,11 @@ func (a *TarZstd) Extract(ctx context.Context, source, destination string) (err 
 		if _, duplicate := seen[name]; duplicate {
 			return fmt.Errorf("duplicate archive path %q: %w", name, ErrUnsafeArchive)
 		}
-		target := filepath.Join(stage, filepath.FromSlash(name))
-		if !within(stage, target) {
+		target := filepath.Join(stageAccess, filepath.FromSlash(name))
+		if !within(stageAccess, target) {
 			return ErrUnsafeArchive
 		}
-		if err := ensureSafeParents(stage, filepath.Dir(target)); err != nil {
+		if err := ensureSafeParents(stageAccess, filepath.Dir(target)); err != nil {
 			return err
 		}
 		switch header.Typeflag {
@@ -298,7 +396,7 @@ func (a *TarZstd) Extract(ctx context.Context, source, destination string) (err 
 			seen[name] = tar.TypeReg
 			regular[name] = struct{}{}
 		case tar.TypeSymlink:
-			if err := validateLink(stage, name, header.Linkname); err != nil {
+			if err := validateLink(stageAccess, name, header.Linkname); err != nil {
 				return err
 			}
 			if err := os.Symlink(header.Linkname, target); err != nil {
@@ -313,7 +411,7 @@ func (a *TarZstd) Extract(ctx context.Context, source, destination string) (err 
 			if _, ok := regular[linkname]; !ok {
 				return fmt.Errorf("hardlink target %q is not an earlier regular file: %w", linkname, ErrUnsafeArchive)
 			}
-			linkTarget := filepath.Join(stage, filepath.FromSlash(linkname))
+			linkTarget := filepath.Join(stageAccess, filepath.FromSlash(linkname))
 			info, err := os.Lstat(linkTarget)
 			if err != nil || !info.Mode().IsRegular() {
 				return ErrUnsafeArchive
@@ -331,21 +429,202 @@ func (a *TarZstd) Extract(ctx context.Context, source, destination string) (err 
 			return err
 		}
 	}
-	if err := os.Remove(marker); err != nil {
+	if provenance == nil {
+		if err := unix.Unlinkat(stageFD, ".camp-extract-owner", 0); err != nil {
+			return err
+		}
+	}
+	if err := unix.Fsync(stageFD); err != nil {
 		return err
 	}
-	if err := syncDirectory(stage); err != nil {
+	if a.beforePublish != nil {
+		if err := a.beforePublish(stage); err != nil {
+			return err
+		}
+	}
+	if err := verifyArchiveDirectoryPath(parentPath, parentStat); err != nil {
 		return err
 	}
-	if err := os.Rename(stage, destination); err != nil {
+	var current unix.Stat_t
+	if err := unix.Fstatat(parentFD, stageName, &current, unix.AT_SYMLINK_NOFOLLOW); err != nil || current.Mode&unix.S_IFMT != unix.S_IFDIR || current.Dev != stageStat.Dev || current.Ino != stageStat.Ino {
+		return fmt.Errorf("extraction stage identity changed before publish: %w", ErrUnsafeArchive)
+	}
+	if err := unix.Renameat2(parentFD, stageName, parentFD, destinationName, unix.RENAME_NOREPLACE); err != nil {
+		if errors.Is(err, syscall.EEXIST) {
+			return os.ErrExist
+		}
 		return err
 	}
-	return syncDirectory(filepath.Dir(destination))
+	published = true
+	if a.afterPublish != nil {
+		if err := a.afterPublish(); err != nil {
+			return err
+		}
+	}
+	var destinationStat unix.Stat_t
+	if err := unix.Fstatat(parentFD, destinationName, &destinationStat, unix.AT_SYMLINK_NOFOLLOW); err != nil || destinationStat.Mode&unix.S_IFMT != unix.S_IFDIR || destinationStat.Dev != stageStat.Dev || destinationStat.Ino != stageStat.Ino {
+		return fmt.Errorf("published extraction destination identity changed: %w", ErrUnsafeArchive)
+	}
+	if err := unix.Fsync(parentFD); err != nil {
+		return err
+	}
+	if err := verifyArchiveDirectoryPath(parentPath, parentStat); err != nil {
+		return err
+	}
+	err = nil
+	return nil
 }
 
 type directoryMetadata struct {
 	path   string
 	header tar.Header
+}
+
+func archiveEntryExistsAt(parentFD int, name string) (bool, error) {
+	var stat unix.Stat_t
+	err := unix.Fstatat(parentFD, name, &stat, unix.AT_SYMLINK_NOFOLLOW)
+	if errors.Is(err, syscall.ENOENT) {
+		return false, nil
+	}
+	return err == nil, err
+}
+
+func verifyArchiveDirectoryPath(path string, expected unix.Stat_t) error {
+	var current unix.Stat_t
+	if err := unix.Lstat(path, &current); err != nil {
+		return err
+	}
+	if current.Mode&unix.S_IFMT != unix.S_IFDIR || current.Dev != expected.Dev || current.Ino != expected.Ino {
+		return fmt.Errorf("archive destination parent identity changed: %w", ErrUnsafeArchive)
+	}
+	return nil
+}
+
+func cleanupArchiveDirectoryAt(parentFD int, name string, expected unix.Stat_t) error {
+	var current unix.Stat_t
+	if err := unix.Fstatat(parentFD, name, &current, unix.AT_SYMLINK_NOFOLLOW); err != nil {
+		if errors.Is(err, syscall.ENOENT) {
+			return nil
+		}
+		return err
+	}
+	if current.Mode&unix.S_IFMT != unix.S_IFDIR || current.Dev != expected.Dev || current.Ino != expected.Ino {
+		return fmt.Errorf("extraction stage changed before cleanup: %w", ErrUnsafeArchive)
+	}
+	random := make([]byte, 12)
+	if _, err := rand.Read(random); err != nil {
+		return err
+	}
+	quarantine := ".camp-extract-remove-" + hex.EncodeToString(random)
+	if err := unix.Renameat2(parentFD, name, parentFD, quarantine, unix.RENAME_NOREPLACE); err != nil {
+		return err
+	}
+	if err := unix.Fsync(parentFD); err != nil {
+		restoreErr := unix.Renameat2(parentFD, quarantine, parentFD, name, unix.RENAME_NOREPLACE)
+		return errors.Join(err, restoreErr, unix.Fsync(parentFD))
+	}
+	quarantineFD, err := openArchiveCleanupChildAt(parentFD, quarantine, expected)
+	if err != nil {
+		return errors.Join(err, unix.Renameat2(parentFD, quarantine, parentFD, name, unix.RENAME_NOREPLACE), unix.Fsync(parentFD))
+	}
+	var quarantined unix.Stat_t
+	statErr := unix.Fstat(quarantineFD, &quarantined)
+	if statErr != nil || quarantined.Dev != expected.Dev || quarantined.Ino != expected.Ino {
+		unix.Close(quarantineFD)
+		restoreErr := unix.Renameat2(parentFD, quarantine, parentFD, name, unix.RENAME_NOREPLACE)
+		return errors.Join(fmt.Errorf("extraction cleanup captured a replacement: %w", ErrUnsafeArchive), statErr, restoreErr, unix.Fsync(parentFD))
+	}
+	removeErr := removeArchiveDirectoryContents(quarantineFD)
+	closeErr := unix.Close(quarantineFD)
+	if removeErr != nil || closeErr != nil {
+		restoreErr := unix.Renameat2(parentFD, quarantine, parentFD, name, unix.RENAME_NOREPLACE)
+		return errors.Join(removeErr, closeErr, restoreErr, unix.Fsync(parentFD))
+	}
+	if err := unix.Unlinkat(parentFD, quarantine, unix.AT_REMOVEDIR); err != nil {
+		return errors.Join(err, unix.Renameat2(parentFD, quarantine, parentFD, name, unix.RENAME_NOREPLACE), unix.Fsync(parentFD))
+	}
+	return unix.Fsync(parentFD)
+}
+
+func removeArchiveDirectoryContents(directoryFD int) error {
+	if err := unix.Fchmod(directoryFD, 0o700); err != nil {
+		return err
+	}
+	dup, err := unix.Dup(directoryFD)
+	if err != nil {
+		return err
+	}
+	directory := os.NewFile(uintptr(dup), "archive-cleanup")
+	entries, readErr := directory.ReadDir(-1)
+	closeErr := directory.Close()
+	if readErr != nil || closeErr != nil {
+		return errors.Join(readErr, closeErr)
+	}
+	for _, entry := range entries {
+		var stat unix.Stat_t
+		if err := unix.Fstatat(directoryFD, entry.Name(), &stat, unix.AT_SYMLINK_NOFOLLOW); err != nil {
+			return err
+		}
+		if stat.Mode&unix.S_IFMT == unix.S_IFDIR {
+			childFD, err := openArchiveCleanupChildAt(directoryFD, entry.Name(), stat)
+			if err != nil {
+				return err
+			}
+			removeErr := removeArchiveDirectoryContents(childFD)
+			closeErr := unix.Close(childFD)
+			if removeErr != nil || closeErr != nil {
+				return errors.Join(removeErr, closeErr)
+			}
+			var after unix.Stat_t
+			if err := unix.Fstatat(directoryFD, entry.Name(), &after, unix.AT_SYMLINK_NOFOLLOW); err != nil || after.Mode&unix.S_IFMT != unix.S_IFDIR || after.Dev != stat.Dev || after.Ino != stat.Ino {
+				return fmt.Errorf("archive cleanup child changed after recursion: %w", ErrUnsafeArchive)
+			}
+			if err := unix.Unlinkat(directoryFD, entry.Name(), unix.AT_REMOVEDIR); err != nil {
+				return err
+			}
+		} else if err := unix.Unlinkat(directoryFD, entry.Name(), 0); err != nil {
+			return err
+		}
+	}
+	return unix.Fsync(directoryFD)
+}
+
+func openArchiveCleanupChildAt(parentFD int, name string, named unix.Stat_t) (int, error) {
+	return openArchiveCleanupChildAtWithHook(parentFD, name, named, nil)
+}
+
+func openArchiveCleanupChildAtWithHook(parentFD int, name string, named unix.Stat_t, beforeOpen func() error) (int, error) {
+	if named.Mode&unix.S_IFMT != unix.S_IFDIR {
+		return -1, fmt.Errorf("archive cleanup child %q is not a directory: %w", name, ErrUnsafeArchive)
+	}
+	if beforeOpen != nil {
+		if err := beforeOpen(); err != nil {
+			return -1, err
+		}
+	}
+	how := &unix.OpenHow{
+		Flags:   unix.O_RDONLY | unix.O_DIRECTORY | unix.O_CLOEXEC | unix.O_NOFOLLOW,
+		Resolve: unix.RESOLVE_BENEATH | unix.RESOLVE_NO_SYMLINKS | unix.RESOLVE_NO_XDEV,
+	}
+	fd, err := unix.Openat2(parentFD, name, how)
+	if err != nil {
+		return -1, err
+	}
+	var opened unix.Stat_t
+	if err := unix.Fstat(fd, &opened); err != nil {
+		unix.Close(fd)
+		return -1, err
+	}
+	var parent unix.Stat_t
+	if err := unix.Fstat(parentFD, &parent); err != nil {
+		unix.Close(fd)
+		return -1, err
+	}
+	if opened.Mode&unix.S_IFMT != unix.S_IFDIR || opened.Dev != named.Dev || opened.Ino != named.Ino || opened.Dev != parent.Dev {
+		unix.Close(fd)
+		return -1, fmt.Errorf("archive cleanup child %q identity or mount changed: %w", name, ErrUnsafeArchive)
+	}
+	return fd, nil
 }
 
 func inventory(ctx context.Context, root string) ([]sourceEntry, error) {

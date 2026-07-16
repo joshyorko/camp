@@ -2,6 +2,7 @@ package hydration
 
 import (
 	"context"
+	"crypto/rand"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
@@ -13,10 +14,12 @@ import (
 	"strings"
 	"syscall"
 
+	archiveadapter "github.com/joshyorko/camp/internal/adapters/archive"
 	"github.com/joshyorko/camp/internal/capsule"
 	"github.com/joshyorko/camp/internal/coordination"
 	"github.com/joshyorko/camp/internal/domain"
 	"github.com/joshyorko/camp/internal/ports"
+	"golang.org/x/sys/unix"
 )
 
 var (
@@ -27,12 +30,14 @@ var (
 type Phase string
 
 const (
-	PhaseStageCreated      Phase = "MaterializationStageCreated"
-	PhaseGenerationFetched Phase = "GenerationFetched"
-	PhaseGenerationLoaded  Phase = "GenerationLoaded"
-	PhaseExtractComplete   Phase = "MaterializationExtractComplete"
-	PhaseRenameComplete    Phase = "MaterializationRenameComplete"
-	PhaseOwnershipFact     Phase = "MaterializationOwnershipFact"
+	PhaseStageCreated            Phase = "MaterializationStageCreated"
+	PhaseGenerationFetched       Phase = "GenerationFetched"
+	PhaseGenerationLoaded        Phase = "GenerationLoaded"
+	PhaseExtractComplete         Phase = "MaterializationExtractComplete"
+	PhaseHydrationRootPublished  Phase = "HydrationRootPublished"
+	PhaseHydrationMarkerPrepared Phase = "HydrationMarkerPrepared"
+	PhaseRenameComplete          Phase = "MaterializationRenameComplete"
+	PhaseOwnershipFact           Phase = "MaterializationOwnershipFact"
 )
 
 type Request struct {
@@ -65,6 +70,10 @@ type Hauler interface {
 
 type ArchiveExtractor interface {
 	Extract(context.Context, string, string) error
+}
+
+type ProvenanceArchiveExtractor interface {
+	ExtractWithProvenance(context.Context, string, string, func(archiveadapter.ExtractionRoot) ([]byte, error)) error
 }
 
 type Hooks struct {
@@ -241,18 +250,29 @@ func (c *Controller) Hydrate(ctx context.Context, request Request) (Result, erro
 				if info.Mode()&os.ModeSymlink != 0 || !info.IsDir() {
 					return fmt.Errorf("materialization extraction root is unsafe: %w", ErrUnsafeMaterialization)
 				}
-				if err := c.validateHydrationMarker(rootStage, request); err != nil {
+				if err := c.completeHydrationMarker(rootStage, request); err != nil {
 					return err
 				}
 			} else if errors.Is(statErr, os.ErrNotExist) {
 				partial := rootStage + ".partial"
-				if err := removeOwnedArchivePartial(partial); err != nil {
+				if err := removeOwnedArchivePartial(partial, request); err != nil {
 					return err
 				}
-				if err := c.archive.Extract(ctx, innerArchive, rootStage); err != nil {
+				extractor, ok := c.archive.(ProvenanceArchiveExtractor)
+				if !ok {
+					return fmt.Errorf("archive extractor cannot persist hydration provenance: %w", ErrUnsafeMaterialization)
+				}
+				if err := extractor.ExtractWithProvenance(ctx, innerArchive, rootStage, func(root archiveadapter.ExtractionRoot) ([]byte, error) {
+					return extractionProvenanceBytesForIdentity(root.Device, root.Inode, request), nil
+				}); err != nil {
 					return fmt.Errorf("securely extract generation: %w", err)
 				}
-				if err := writeHydrationMarker(rootStage, request); err != nil {
+				if c.hooks.Cut != nil {
+					if err := c.hooks.Cut(PhaseHydrationRootPublished); err != nil {
+						return err
+					}
+				}
+				if err := c.completeHydrationMarker(rootStage, request); err != nil {
 					return err
 				}
 			} else {
@@ -366,6 +386,19 @@ type hydrationMarker struct {
 	SessionID     string `json:"sessionId"`
 	Token         string `json:"token"`
 	CanonicalPath string `json:"canonicalPath"`
+	Device        uint64 `json:"device"`
+	Inode         uint64 `json:"inode"`
+}
+
+type extractionProvenance struct {
+	Version       int    `json:"version"`
+	SessionID     string `json:"sessionId"`
+	Capsule       string `json:"capsule"`
+	Token         string `json:"token"`
+	StageRoot     string `json:"stageRoot"`
+	FinalRoot     string `json:"finalRoot"`
+	Generation    uint64 `json:"generation"`
+	ArchiveSHA256 string `json:"archiveSha256"`
 	Device        uint64 `json:"device"`
 	Inode         uint64 `json:"inode"`
 }
@@ -558,47 +591,387 @@ func (c *Controller) commit(ctx context.Context, request Request) error {
 	return syncDirectory(filepath.Dir(request.FinalRoot))
 }
 
+const (
+	hydrationMarkerName     = "hydration.json"
+	hydrationPartialName    = "hydration.json.partial"
+	extractionOwnerName     = ".camp-extract-owner"
+	maxHydrationMarkerBytes = 4096
+)
+
 func (c *Controller) validateHydrationMarker(root string, request Request) error {
-	markerPath := filepath.Join(root, ".camp", "runtime", "hydration.json")
-	info, err := os.Lstat(markerPath)
-	if err != nil {
-		return fmt.Errorf("inspect hydration marker: %w: %w", err, ErrUnsafeMaterialization)
-	}
-	if info.Mode()&os.ModeSymlink != 0 || !info.Mode().IsRegular() {
-		return fmt.Errorf("hydration marker is not a regular file: %w", ErrUnsafeMaterialization)
-	}
-	body, err := os.ReadFile(markerPath)
-	if err != nil {
-		return fmt.Errorf("read hydration marker: %w: %w", err, ErrUnsafeMaterialization)
-	}
-	var marker hydrationMarker
-	if json.Unmarshal(body, &marker) != nil || marker.Version != 1 || marker.SessionID != request.SessionID || marker.Token != request.Token || marker.CanonicalPath != request.FinalRoot {
-		return fmt.Errorf("hydration marker does not match request: %w", ErrUnsafeMaterialization)
-	}
-	device, inode, err := directoryIdentity(root)
+	rootFD, rootStat, err := openPinnedDirectory(root)
 	if err != nil {
 		return err
 	}
-	if marker.Device != device || marker.Inode != inode {
-		return fmt.Errorf("hydration marker identity does not match root: %w", ErrUnsafeMaterialization)
+	defer unix.Close(rootFD)
+	runtimeFD, runtimeStat, err := openMarkerRuntime(rootFD, false)
+	if err != nil {
+		return fmt.Errorf("open hydration marker directory: %w: %w", err, ErrUnsafeMaterialization)
+	}
+	defer unix.Close(runtimeFD)
+	if _, err := validateExactMarkerAt(runtimeFD, hydrationMarkerName, hydrationMarkerBytes(rootStat, request)); err != nil {
+		return fmt.Errorf("validate hydration marker: %w: %w", err, ErrUnsafeMaterialization)
+	}
+	if err := verifyDirectoryAt(rootFD, runtimeStat); err != nil {
+		return err
+	}
+	return verifyPinnedDirectory(root, rootStat)
+}
+
+func hydrationMarkerBytes(root unix.Stat_t, request Request) []byte {
+	body, _ := json.Marshal(hydrationMarker{Version: 1, SessionID: request.SessionID, Token: request.Token, CanonicalPath: request.FinalRoot, Device: uint64(root.Dev), Inode: root.Ino})
+	return body
+}
+
+func extractionProvenanceBytes(root unix.Stat_t, request Request) []byte {
+	return extractionProvenanceBytesForIdentity(uint64(root.Dev), root.Ino, request)
+}
+
+func extractionProvenanceBytesForIdentity(device, inode uint64, request Request) []byte {
+	body, _ := json.Marshal(extractionProvenance{
+		Version: 1, SessionID: request.SessionID, Capsule: request.Capsule, Token: request.Token,
+		StageRoot: request.StageRoot, FinalRoot: request.FinalRoot, Generation: request.Generation.Generation,
+		ArchiveSHA256: request.Generation.ArchiveSHA256, Device: device, Inode: inode,
+	})
+	return body
+}
+
+func (c *Controller) completeHydrationMarker(root string, request Request) error {
+	rootFD, rootStat, err := openPinnedDirectory(root)
+	if err != nil {
+		return err
+	}
+	defer unix.Close(rootFD)
+
+	runtimeFD, runtimeStat, runtimeErr := openMarkerRuntime(rootFD, false)
+	if runtimeErr != nil && !errors.Is(runtimeErr, syscall.ENOENT) {
+		return runtimeErr
+	}
+	defer func() {
+		if runtimeFD >= 0 {
+			unix.Close(runtimeFD)
+		}
+	}()
+	finalExists, err := entryExistsAt(runtimeFD, runtimeErr, hydrationMarkerName)
+	if err != nil {
+		return err
+	}
+	partialExists, err := entryExistsAt(runtimeFD, runtimeErr, hydrationPartialName)
+	if err != nil {
+		return err
+	}
+	if finalExists && partialExists {
+		return fmt.Errorf("hydration marker and partial both exist: %w", ErrUnsafeMaterialization)
+	}
+	body := hydrationMarkerBytes(rootStat, request)
+	switch {
+	case finalExists:
+		_, err = validateExactMarkerAt(runtimeFD, hydrationMarkerName, body)
+		if err == nil {
+			err = unix.Fsync(runtimeFD)
+		}
+		if err == nil {
+			err = verifyDirectoryAt(rootFD, runtimeStat)
+		}
+	case partialExists:
+		err = c.installHydrationMarkerAt(rootFD, runtimeFD, runtimeStat, body)
+	default:
+		if runtimeFD >= 0 {
+			unix.Close(runtimeFD)
+			runtimeFD = -1
+		}
+		if _, provenanceErr := validateExtractionProvenanceAt(rootFD, rootStat, request); provenanceErr != nil {
+			err = fmt.Errorf("validate extraction provenance: %w: %w", provenanceErr, ErrUnsafeMaterialization)
+		} else {
+			err = c.writeHydrationMarkerAt(rootFD, rootStat, request)
+		}
+	}
+	if err != nil {
+		return err
+	}
+	if provenanceStat, provenanceErr := validateExtractionProvenanceAt(rootFD, rootStat, request); provenanceErr == nil {
+		if err := removeExactEntryAt(rootFD, extractionOwnerName, provenanceStat); err != nil {
+			return err
+		}
+	} else if !errors.Is(provenanceErr, syscall.ENOENT) {
+		return provenanceErr
+	}
+	return verifyPinnedDirectory(root, rootStat)
+}
+
+func (c *Controller) writeHydrationMarkerAt(rootFD int, rootStat unix.Stat_t, request Request) error {
+	runtimeFD, runtimeStat, err := openMarkerRuntime(rootFD, true)
+	if err != nil {
+		return err
+	}
+	defer unix.Close(runtimeFD)
+	if exists, err := entryExistsAt(runtimeFD, nil, hydrationMarkerName); err != nil || exists {
+		if err != nil {
+			return err
+		}
+		return fmt.Errorf("hydration marker unexpectedly exists: %w", ErrUnsafeMaterialization)
+	}
+	if exists, err := entryExistsAt(runtimeFD, nil, hydrationPartialName); err != nil || exists {
+		if err != nil {
+			return err
+		}
+		return fmt.Errorf("hydration marker partial unexpectedly exists: %w", ErrUnsafeMaterialization)
+	}
+	fd, err := unix.Openat(runtimeFD, hydrationPartialName, unix.O_WRONLY|unix.O_CREAT|unix.O_EXCL|unix.O_CLOEXEC|unix.O_NOFOLLOW, 0o600)
+	if err != nil {
+		return err
+	}
+	file := os.NewFile(uintptr(fd), hydrationPartialName)
+	var created unix.Stat_t
+	statErr := unix.Fstat(fd, &created)
+	body := hydrationMarkerBytes(rootStat, request)
+	writeErr := statErr
+	if writeErr == nil {
+		writeErr = writeAll(file, body)
+	}
+	if writeErr == nil {
+		writeErr = file.Sync()
+	}
+	closeErr := file.Close()
+	if writeErr != nil || closeErr != nil {
+		var cleanupErr error
+		if statErr == nil {
+			cleanupErr = removeExactEntryAt(runtimeFD, hydrationPartialName, created)
+		}
+		return errors.Join(writeErr, closeErr, cleanupErr)
+	}
+	if err := unix.Fsync(runtimeFD); err != nil {
+		return err
+	}
+	if c.hooks.Cut != nil {
+		if err := c.hooks.Cut(PhaseHydrationMarkerPrepared); err != nil {
+			return err
+		}
+	}
+	if err := verifyDirectoryAt(rootFD, runtimeStat); err != nil {
+		return err
+	}
+	return c.installHydrationMarkerAt(rootFD, runtimeFD, runtimeStat, body)
+}
+
+func (c *Controller) installHydrationMarkerAt(rootFD, runtimeFD int, runtimeStat unix.Stat_t, body []byte) error {
+	partialStat, err := validateExactMarkerAt(runtimeFD, hydrationPartialName, body)
+	if err != nil {
+		return err
+	}
+	if exists, err := entryExistsAt(runtimeFD, nil, hydrationMarkerName); err != nil || exists {
+		if err != nil {
+			return err
+		}
+		return fmt.Errorf("hydration marker destination exists: %w", ErrUnsafeMaterialization)
+	}
+	if err := verifyDirectoryAt(rootFD, runtimeStat); err != nil {
+		return err
+	}
+	if err := unix.Renameat2(runtimeFD, hydrationPartialName, runtimeFD, hydrationMarkerName, unix.RENAME_NOREPLACE); err != nil {
+		return fmt.Errorf("install hydration marker: %w", err)
+	}
+	if err := unix.Fsync(runtimeFD); err != nil {
+		return err
+	}
+	finalStat, err := validateExactMarkerAt(runtimeFD, hydrationMarkerName, body)
+	if err != nil {
+		return err
+	}
+	if !sameStatIdentity(partialStat, finalStat) {
+		return fmt.Errorf("hydration marker identity changed during install: %w", ErrUnsafeMaterialization)
+	}
+	return verifyDirectoryAt(rootFD, runtimeStat)
+}
+
+func validateExtractionProvenanceAt(rootFD int, rootStat unix.Stat_t, request Request) (unix.Stat_t, error) {
+	return validateExactMarkerAt(rootFD, extractionOwnerName, extractionProvenanceBytes(rootStat, request))
+}
+
+func validateExactMarkerAt(parentFD int, name string, expected []byte) (unix.Stat_t, error) {
+	return validateExactMarkerAtWithHook(parentFD, name, expected, nil)
+}
+
+func validateExactMarkerAtWithHook(parentFD int, name string, expected []byte, afterRead func() error) (unix.Stat_t, error) {
+	fd, err := unix.Openat(parentFD, name, unix.O_RDONLY|unix.O_CLOEXEC|unix.O_NOFOLLOW|unix.O_NONBLOCK, 0)
+	if err != nil {
+		return unix.Stat_t{}, err
+	}
+	file := os.NewFile(uintptr(fd), name)
+	defer file.Close()
+	var stat unix.Stat_t
+	if err := unix.Fstat(fd, &stat); err != nil {
+		return unix.Stat_t{}, err
+	}
+	if stat.Mode&unix.S_IFMT != unix.S_IFREG || stat.Mode&0o7777 != 0o600 || stat.Nlink != 1 || stat.Size < 0 || stat.Size > maxHydrationMarkerBytes {
+		return unix.Stat_t{}, fmt.Errorf("marker %q has unsafe metadata: %w", name, ErrUnsafeMaterialization)
+	}
+	body, err := io.ReadAll(io.LimitReader(file, maxHydrationMarkerBytes+1))
+	if err != nil {
+		return unix.Stat_t{}, err
+	}
+	if len(body) > maxHydrationMarkerBytes || string(body) != string(expected) {
+		return unix.Stat_t{}, fmt.Errorf("marker %q does not match request: %w", name, ErrUnsafeMaterialization)
+	}
+	if err := unix.Fsync(fd); err != nil {
+		return unix.Stat_t{}, err
+	}
+	if afterRead != nil {
+		if err := afterRead(); err != nil {
+			return unix.Stat_t{}, err
+		}
+	}
+	var after unix.Stat_t
+	if err := unix.Fstat(fd, &after); err != nil {
+		return unix.Stat_t{}, err
+	}
+	var current unix.Stat_t
+	if err := unix.Fstatat(parentFD, name, &current, unix.AT_SYMLINK_NOFOLLOW); err != nil {
+		return unix.Stat_t{}, err
+	}
+	if current.Mode&unix.S_IFMT != unix.S_IFREG || current.Mode&0o7777 != 0o600 || current.Nlink != 1 || !sameMarkerStat(stat, after) || !sameMarkerStat(after, current) {
+		return unix.Stat_t{}, fmt.Errorf("marker %q name identity changed after read: %w", name, ErrUnsafeMaterialization)
+	}
+	return stat, nil
+}
+
+func openPinnedDirectory(path string) (int, unix.Stat_t, error) {
+	fd, err := unix.Open(path, unix.O_RDONLY|unix.O_DIRECTORY|unix.O_CLOEXEC|unix.O_NOFOLLOW, 0)
+	if err != nil {
+		return -1, unix.Stat_t{}, err
+	}
+	var stat unix.Stat_t
+	if err := unix.Fstat(fd, &stat); err != nil {
+		unix.Close(fd)
+		return -1, unix.Stat_t{}, err
+	}
+	if err := verifyPinnedDirectory(path, stat); err != nil {
+		unix.Close(fd)
+		return -1, unix.Stat_t{}, err
+	}
+	return fd, stat, nil
+}
+
+func verifyPinnedDirectory(path string, expected unix.Stat_t) error {
+	var current unix.Stat_t
+	if err := unix.Lstat(path, &current); err != nil {
+		return err
+	}
+	if current.Mode&unix.S_IFMT != unix.S_IFDIR || !sameStatIdentity(expected, current) {
+		return fmt.Errorf("directory path identity changed: %w", ErrUnsafeMaterialization)
 	}
 	return nil
 }
 
-func writeHydrationMarker(root string, request Request) error {
-	device, inode, err := directoryIdentity(root)
+func openMarkerRuntime(rootFD int, create bool) (int, unix.Stat_t, error) {
+	campFD, _, err := openDirectoryAtOwned(rootFD, ".camp", create)
+	if err != nil {
+		return -1, unix.Stat_t{}, err
+	}
+	defer unix.Close(campFD)
+	return openDirectoryAtOwned(campFD, "runtime", create)
+}
+
+func openDirectoryAtOwned(parentFD int, name string, create bool) (int, unix.Stat_t, error) {
+	fd, err := unix.Openat(parentFD, name, unix.O_RDONLY|unix.O_DIRECTORY|unix.O_CLOEXEC|unix.O_NOFOLLOW, 0)
+	if errors.Is(err, syscall.ENOENT) && create {
+		if err := unix.Mkdirat(parentFD, name, 0o700); err != nil && !errors.Is(err, syscall.EEXIST) {
+			return -1, unix.Stat_t{}, err
+		}
+		if err := unix.Fsync(parentFD); err != nil {
+			return -1, unix.Stat_t{}, err
+		}
+		fd, err = unix.Openat(parentFD, name, unix.O_RDONLY|unix.O_DIRECTORY|unix.O_CLOEXEC|unix.O_NOFOLLOW, 0)
+	}
+	if err != nil {
+		return -1, unix.Stat_t{}, err
+	}
+	var stat unix.Stat_t
+	if err := unix.Fstat(fd, &stat); err != nil {
+		unix.Close(fd)
+		return -1, unix.Stat_t{}, err
+	}
+	return fd, stat, nil
+}
+
+func verifyDirectoryAt(rootFD int, expected unix.Stat_t) error {
+	fd, current, err := openMarkerRuntime(rootFD, false)
 	if err != nil {
 		return err
 	}
-	directory := filepath.Join(root, ".camp", "runtime")
-	if err := secureMkdirAll(directory); err != nil {
+	unix.Close(fd)
+	if !sameStatIdentity(expected, current) {
+		return fmt.Errorf("hydration marker parent identity changed: %w", ErrUnsafeMaterialization)
+	}
+	return nil
+}
+
+func entryExistsAt(parentFD int, parentErr error, name string) (bool, error) {
+	if parentErr != nil {
+		if errors.Is(parentErr, syscall.ENOENT) {
+			return false, nil
+		}
+		return false, parentErr
+	}
+	var stat unix.Stat_t
+	err := unix.Fstatat(parentFD, name, &stat, unix.AT_SYMLINK_NOFOLLOW)
+	if errors.Is(err, syscall.ENOENT) {
+		return false, nil
+	}
+	return err == nil, err
+}
+
+func removeExactEntryAt(parentFD int, name string, expected unix.Stat_t) error {
+	random := make([]byte, 12)
+	if _, err := rand.Read(random); err != nil {
 		return err
 	}
-	body, err := json.Marshal(hydrationMarker{Version: 1, SessionID: request.SessionID, Token: request.Token, CanonicalPath: request.FinalRoot, Device: device, Inode: inode})
-	if err != nil {
+	quarantine := ".camp-remove-" + hex.EncodeToString(random)
+	if err := unix.Renameat2(parentFD, name, parentFD, quarantine, unix.RENAME_NOREPLACE); err != nil {
 		return err
 	}
-	return writeStableFile(filepath.Join(directory, "hydration.json"), body, 0o600)
+	current, err := validateEntryIdentityAt(parentFD, quarantine)
+	if err != nil || !sameStatIdentity(expected, current) {
+		restoreErr := unix.Renameat2(parentFD, quarantine, parentFD, name, unix.RENAME_NOREPLACE)
+		syncErr := unix.Fsync(parentFD)
+		return errors.Join(fmt.Errorf("entry %q changed before cleanup: %w", name, ErrUnsafeMaterialization), err, restoreErr, syncErr)
+	}
+	if err := unix.Unlinkat(parentFD, quarantine, 0); err != nil {
+		restoreErr := unix.Renameat2(parentFD, quarantine, parentFD, name, unix.RENAME_NOREPLACE)
+		syncErr := unix.Fsync(parentFD)
+		return errors.Join(err, restoreErr, syncErr)
+	}
+	return unix.Fsync(parentFD)
+}
+
+func validateEntryIdentityAt(parentFD int, name string) (unix.Stat_t, error) {
+	var stat unix.Stat_t
+	if err := unix.Fstatat(parentFD, name, &stat, unix.AT_SYMLINK_NOFOLLOW); err != nil {
+		return unix.Stat_t{}, err
+	}
+	return stat, nil
+}
+
+func sameStatIdentity(left, right unix.Stat_t) bool {
+	return left.Dev == right.Dev && left.Ino == right.Ino
+}
+
+func sameMarkerStat(left, right unix.Stat_t) bool {
+	return sameStatIdentity(left, right) && left.Mode == right.Mode && left.Nlink == right.Nlink && left.Size == right.Size && left.Mtim == right.Mtim && left.Ctim == right.Ctim
+}
+
+func writeAll(file *os.File, body []byte) error {
+	for len(body) > 0 {
+		written, err := file.Write(body)
+		if err != nil {
+			return err
+		}
+		if written == 0 {
+			return io.ErrShortWrite
+		}
+		body = body[written:]
+	}
+	return nil
 }
 
 func (c *Controller) writeState(stage string, state stageState) error {
@@ -653,22 +1026,156 @@ func removeOwnedStage(stage string, request Request) error {
 	return os.RemoveAll(stage)
 }
 
-func removeOwnedArchivePartial(path string) error {
-	info, err := os.Lstat(path)
-	if errors.Is(err, os.ErrNotExist) {
+func removeOwnedArchivePartial(path string, request Request) error {
+	rootFD, rootStat, err := openPinnedDirectory(path)
+	if errors.Is(err, syscall.ENOENT) {
 		return nil
 	}
 	if err != nil {
 		return err
 	}
-	if info.Mode()&os.ModeSymlink != 0 || !info.IsDir() {
-		return fmt.Errorf("unexplained archive partial is unsafe: %w", ErrUnsafeMaterialization)
+	if _, err := validateExtractionProvenanceAt(rootFD, rootStat, request); err != nil {
+		unix.Close(rootFD)
+		return fmt.Errorf("validate interrupted extraction provenance: %w: %w", err, ErrUnsafeMaterialization)
 	}
-	marker, err := os.ReadFile(filepath.Join(path, ".camp-extract-owner"))
-	if err != nil || string(marker) != "camp-owned-partial\n" {
-		return fmt.Errorf("unexplained archive partial exists: %w", ErrUnsafeMaterialization)
+	if err := verifyPinnedDirectory(path, rootStat); err != nil {
+		unix.Close(rootFD)
+		return err
 	}
-	return os.RemoveAll(path)
+	if err := unix.Close(rootFD); err != nil {
+		return err
+	}
+	return removeExactDirectoryPath(path, rootStat)
+}
+
+func removeExactDirectoryPath(path string, expected unix.Stat_t) error {
+	parentFD, _, err := openPinnedDirectory(filepath.Dir(path))
+	if err != nil {
+		return err
+	}
+	defer unix.Close(parentFD)
+	name := filepath.Base(path)
+	current, err := validateEntryIdentityAt(parentFD, name)
+	if err != nil {
+		return err
+	}
+	if current.Mode&unix.S_IFMT != unix.S_IFDIR || !sameStatIdentity(expected, current) {
+		return fmt.Errorf("interrupted extraction changed before cleanup: %w", ErrUnsafeMaterialization)
+	}
+	random := make([]byte, 12)
+	if _, err := rand.Read(random); err != nil {
+		return err
+	}
+	quarantine := ".camp-extract-remove-" + hex.EncodeToString(random)
+	if err := unix.Renameat2(parentFD, name, parentFD, quarantine, unix.RENAME_NOREPLACE); err != nil {
+		return err
+	}
+	if err := unix.Fsync(parentFD); err != nil {
+		restoreErr := unix.Renameat2(parentFD, quarantine, parentFD, name, unix.RENAME_NOREPLACE)
+		return errors.Join(err, restoreErr, unix.Fsync(parentFD))
+	}
+	quarantineFD, err := openHydrationCleanupChildAt(parentFD, quarantine, expected)
+	if err != nil {
+		return errors.Join(err, unix.Renameat2(parentFD, quarantine, parentFD, name, unix.RENAME_NOREPLACE), unix.Fsync(parentFD))
+	}
+	var quarantined unix.Stat_t
+	statErr := unix.Fstat(quarantineFD, &quarantined)
+	if statErr != nil || !sameStatIdentity(expected, quarantined) {
+		unix.Close(quarantineFD)
+		restoreErr := unix.Renameat2(parentFD, quarantine, parentFD, name, unix.RENAME_NOREPLACE)
+		return errors.Join(fmt.Errorf("interrupted extraction cleanup captured replacement: %w", ErrUnsafeMaterialization), statErr, restoreErr, unix.Fsync(parentFD))
+	}
+	removeErr := removeDirectoryContentsAt(quarantineFD)
+	closeErr := unix.Close(quarantineFD)
+	if removeErr != nil || closeErr != nil {
+		restoreErr := unix.Renameat2(parentFD, quarantine, parentFD, name, unix.RENAME_NOREPLACE)
+		return errors.Join(removeErr, closeErr, restoreErr, unix.Fsync(parentFD))
+	}
+	if err := unix.Unlinkat(parentFD, quarantine, unix.AT_REMOVEDIR); err != nil {
+		return errors.Join(err, unix.Renameat2(parentFD, quarantine, parentFD, name, unix.RENAME_NOREPLACE), unix.Fsync(parentFD))
+	}
+	return unix.Fsync(parentFD)
+}
+
+func removeDirectoryContentsAt(directoryFD int) error {
+	if err := unix.Fchmod(directoryFD, 0o700); err != nil {
+		return err
+	}
+	dup, err := unix.Dup(directoryFD)
+	if err != nil {
+		return err
+	}
+	directory := os.NewFile(uintptr(dup), "hydration-extraction-cleanup")
+	entries, readErr := directory.ReadDir(-1)
+	closeErr := directory.Close()
+	if readErr != nil || closeErr != nil {
+		return errors.Join(readErr, closeErr)
+	}
+	for _, entry := range entries {
+		var stat unix.Stat_t
+		if err := unix.Fstatat(directoryFD, entry.Name(), &stat, unix.AT_SYMLINK_NOFOLLOW); err != nil {
+			return err
+		}
+		if stat.Mode&unix.S_IFMT == unix.S_IFDIR {
+			childFD, err := openHydrationCleanupChildAt(directoryFD, entry.Name(), stat)
+			if err != nil {
+				return err
+			}
+			removeErr := removeDirectoryContentsAt(childFD)
+			closeErr := unix.Close(childFD)
+			if removeErr != nil || closeErr != nil {
+				return errors.Join(removeErr, closeErr)
+			}
+			var after unix.Stat_t
+			if err := unix.Fstatat(directoryFD, entry.Name(), &after, unix.AT_SYMLINK_NOFOLLOW); err != nil || after.Mode&unix.S_IFMT != unix.S_IFDIR || !sameStatIdentity(stat, after) {
+				return fmt.Errorf("hydration cleanup child changed after recursion: %w", ErrUnsafeMaterialization)
+			}
+			if err := unix.Unlinkat(directoryFD, entry.Name(), unix.AT_REMOVEDIR); err != nil {
+				return err
+			}
+		} else if err := unix.Unlinkat(directoryFD, entry.Name(), 0); err != nil {
+			return err
+		}
+	}
+	return unix.Fsync(directoryFD)
+}
+
+func openHydrationCleanupChildAt(parentFD int, name string, named unix.Stat_t) (int, error) {
+	return openHydrationCleanupChildAtWithHook(parentFD, name, named, nil)
+}
+
+func openHydrationCleanupChildAtWithHook(parentFD int, name string, named unix.Stat_t, beforeOpen func() error) (int, error) {
+	if named.Mode&unix.S_IFMT != unix.S_IFDIR {
+		return -1, fmt.Errorf("hydration cleanup child %q is not a directory: %w", name, ErrUnsafeMaterialization)
+	}
+	if beforeOpen != nil {
+		if err := beforeOpen(); err != nil {
+			return -1, err
+		}
+	}
+	how := &unix.OpenHow{
+		Flags:   unix.O_RDONLY | unix.O_DIRECTORY | unix.O_CLOEXEC | unix.O_NOFOLLOW,
+		Resolve: unix.RESOLVE_BENEATH | unix.RESOLVE_NO_SYMLINKS | unix.RESOLVE_NO_XDEV,
+	}
+	fd, err := unix.Openat2(parentFD, name, how)
+	if err != nil {
+		return -1, err
+	}
+	var opened unix.Stat_t
+	if err := unix.Fstat(fd, &opened); err != nil {
+		unix.Close(fd)
+		return -1, err
+	}
+	var parent unix.Stat_t
+	if err := unix.Fstat(parentFD, &parent); err != nil {
+		unix.Close(fd)
+		return -1, err
+	}
+	if opened.Mode&unix.S_IFMT != unix.S_IFDIR || !sameStatIdentity(named, opened) || opened.Dev != parent.Dev {
+		unix.Close(fd)
+		return -1, fmt.Errorf("hydration cleanup child %q identity or mount changed: %w", name, ErrUnsafeMaterialization)
+	}
+	return fd, nil
 }
 
 func secureExistingDirectory(path string) error {
