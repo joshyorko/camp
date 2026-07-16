@@ -161,6 +161,139 @@ func TestOpenReconcileWorkspaceUpRejectsClosedSessionBeforeObservation(t *testin
 	}
 }
 
+func TestOpenReconcileRejectsRecoveringWithoutOpenObjectiveBeforeObservation(t *testing.T) {
+	t.Parallel()
+	for _, objective := range []domain.RecoveryObjective{"", "checkpoint"} {
+		objective := objective
+		t.Run(string(objective), func(t *testing.T) {
+			t.Parallel()
+			environment := newOpenTestEnvironment(t)
+			devpod := &unknownOutcomeWorkspaceDevPod{}
+			environment.open.deps.DevPod = devpod
+			root := filepath.Join(t.TempDir(), "SecondBrain")
+			if err := os.MkdirAll(root, 0o700); err != nil {
+				t.Fatal(err)
+			}
+			name := "missing"
+			if objective != "" {
+				name = "unknown"
+			}
+			sessionID := "recovering-objective-" + name
+			_, err := environment.open.Run(context.Background(), OpenRequest{
+				SessionID: sessionID, Capsule: "brain", Branch: "main", Mode: domain.SessionReadWrite,
+				ExplicitRoot: root, EntryMode: domain.EntryTerminal, Context: "default", Provider: "docker",
+				Runtime: environment.runtime, Backend: environment.backend,
+			})
+			if !errors.Is(err, ports.ErrAmbiguous) {
+				t.Fatalf("Open() error = %v, want ErrAmbiguous", err)
+			}
+			snapshot, _, err := environment.open.deps.Journal.Load(context.Background(), sessionID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			snapshot.State = domain.SessionRecovering
+			snapshot.Recovery.Objective = objective
+			stateIntent := ports.IntentRecord{ID: sessionID + "-recovering-state", SessionID: sessionID, Transition: "RecoveringStateRecorded", Attempt: 1, Timestamp: snapshot.UpdatedAt}
+			if err := environment.open.deps.Journal.RecordIntent(context.Background(), stateIntent); err != nil {
+				t.Fatal(err)
+			}
+			if err := environment.open.deps.Journal.RecordFact(context.Background(), ports.FactRecord{
+				IntentID: stateIntent.ID, SessionID: sessionID, Transition: stateIntent.Transition, Timestamp: snapshot.UpdatedAt,
+			}, snapshot); err != nil {
+				t.Fatal(err)
+			}
+
+			if _, err := environment.open.Reconcile(context.Background(), sessionID); err == nil || !strings.Contains(err.Error(), "recovery objective") {
+				t.Fatalf("Reconcile() error = %v, want recovery objective rejection", err)
+			}
+			if devpod.listCalls != 0 || devpod.statusCalls != 0 || len(devpod.ups) != 1 {
+				t.Fatalf("DevPod effects after invalid objective = up:%d list:%d status:%d", len(devpod.ups), devpod.listCalls, devpod.statusCalls)
+			}
+		})
+	}
+}
+
+func TestOpenReconcileValidatesObjectiveOnExactObserverSnapshot(t *testing.T) {
+	t.Parallel()
+	environment := newOpenTestEnvironment(t)
+	devpod := &unknownOutcomeWorkspaceDevPod{}
+	environment.open.deps.DevPod = devpod
+	root := filepath.Join(t.TempDir(), "SecondBrain")
+	if err := os.MkdirAll(root, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	const sessionID = "observer-objective-swap"
+	_, err := environment.open.Run(context.Background(), OpenRequest{
+		SessionID: sessionID, Capsule: "brain", Branch: "main", Mode: domain.SessionReadWrite,
+		ExplicitRoot: root, EntryMode: domain.EntryTerminal, Context: "default", Provider: "docker",
+		Runtime: environment.runtime, Backend: environment.backend,
+	})
+	if !errors.Is(err, ports.ErrAmbiguous) {
+		t.Fatalf("Open() error = %v, want ErrAmbiguous", err)
+	}
+	environment.open.deps.Journal = &objectiveSwapJournal{Journal: environment.open.deps.Journal}
+
+	if _, err := environment.open.Reconcile(context.Background(), sessionID); !errors.Is(err, ErrOpenRecoveryObjective) {
+		t.Fatalf("Reconcile() error = %v, want ErrOpenRecoveryObjective", err)
+	}
+	if devpod.listCalls != 0 || devpod.statusCalls != 0 || len(devpod.ups) != 1 {
+		t.Fatalf("DevPod effects after observer objective swap = up:%d list:%d status:%d", len(devpod.ups), devpod.listCalls, devpod.statusCalls)
+	}
+}
+
+func TestOpenRunRejectsInvalidRecoveryObjectiveBeforeReentryEffects(t *testing.T) {
+	t.Parallel()
+	environment := newOpenTestEnvironment(t)
+	root := filepath.Join(t.TempDir(), "SecondBrain")
+	if err := os.MkdirAll(root, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	request := OpenRequest{
+		SessionID: "invalid-objective-reentry", Capsule: "brain", Branch: "main", Mode: domain.SessionReadWrite,
+		ExplicitRoot: root, EntryMode: domain.EntryTerminal, Context: "default", Provider: "docker",
+		Runtime: environment.runtime, Backend: environment.backend,
+	}
+	if _, err := environment.open.Run(context.Background(), request); err != nil {
+		t.Fatal(err)
+	}
+	snapshot, _, err := environment.open.deps.Journal.Load(context.Background(), request.SessionID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	snapshot.Recovery.Objective = "checkpoint"
+	intent := ports.IntentRecord{ID: request.SessionID + "-invalid-objective", SessionID: request.SessionID, Transition: "InvalidObjectiveInjected", Attempt: 1, Timestamp: snapshot.UpdatedAt}
+	if err := environment.open.deps.Journal.RecordIntent(context.Background(), intent); err != nil {
+		t.Fatal(err)
+	}
+	if err := environment.open.deps.Journal.RecordFact(context.Background(), ports.FactRecord{
+		IntentID: intent.ID, SessionID: request.SessionID, Transition: intent.Transition, Timestamp: snapshot.UpdatedAt,
+	}, snapshot); err != nil {
+		t.Fatal(err)
+	}
+	eventCount, sshCount := len(*environment.events), len(environment.devpod.ssh)
+
+	if _, err := environment.open.Run(context.Background(), request); !errors.Is(err, ErrOpenRecoveryObjective) {
+		t.Fatalf("Open() error = %v, want ErrOpenRecoveryObjective", err)
+	}
+	if len(*environment.events) != eventCount || len(environment.devpod.ssh) != sshCount {
+		t.Fatalf("re-entry effects after invalid objective: events=%v ssh=%d", *environment.events, len(environment.devpod.ssh))
+	}
+}
+
+type objectiveSwapJournal struct {
+	ports.Journal
+	loads int
+}
+
+func (j *objectiveSwapJournal) Load(ctx context.Context, sessionID string) (domain.JournalSnapshot, []ports.PendingIntent, error) {
+	snapshot, pending, err := j.Journal.Load(ctx, sessionID)
+	j.loads++
+	if err == nil && j.loads == 2 {
+		snapshot.Recovery.Objective = "checkpoint"
+	}
+	return snapshot, pending, err
+}
+
 func TestOpenBlockingEntryDoesNotLeavePendingCheckpointBlocker(t *testing.T) {
 	t.Parallel()
 	environment := newOpenTestEnvironment(t)

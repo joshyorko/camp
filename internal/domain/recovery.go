@@ -92,10 +92,22 @@ type CleanupPolicy struct {
 	RemoveSessionArtifacts     bool                   `json:"removeSessionArtifacts" yaml:"removeSessionArtifacts"`
 }
 
+type RecoveryObjective string
+
+const RecoveryObjectiveOpen RecoveryObjective = "open"
+
+type HydrationPlan struct {
+	Token     string `json:"token" yaml:"token"`
+	StageRoot string `json:"stageRoot" yaml:"stageRoot"`
+	FinalRoot string `json:"finalRoot" yaml:"finalRoot"`
+}
+
 type RecoveryRecord struct {
+	Objective       RecoveryObjective      `json:"objective" yaml:"objective"`
 	Configuration   ConfigurationRecord    `json:"configuration" yaml:"configuration"`
 	Session         SessionArtifactPaths   `json:"session" yaml:"session"`
 	Source          SourceDecision         `json:"source" yaml:"source"`
+	Hydration       *HydrationPlan         `json:"hydration,omitempty" yaml:"hydration,omitempty"`
 	DesiredServices []DesiredServiceRecord `json:"desiredServices,omitempty" yaml:"desiredServices,omitempty"`
 	Entry           EntryRequestRecord     `json:"entry" yaml:"entry"`
 	Forwarding      []ForwardingRecord     `json:"forwarding,omitempty" yaml:"forwarding,omitempty"`

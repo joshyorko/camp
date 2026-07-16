@@ -27,11 +27,12 @@ import (
 )
 
 var (
-	ErrOpenDependencies    = errors.New("open dependencies are incomplete")
-	ErrRecoveryRequired    = errors.New("session requires recovery before entry")
-	ErrOpenReadOnlyLease   = errors.New("read-only session cannot reconcile a writer lease")
-	ErrOpenSessionMismatch = errors.New("open request does not match the selected session")
-	ErrOpenIDEUnsupported  = errors.New("IDE entry is not implemented")
+	ErrOpenDependencies      = errors.New("open dependencies are incomplete")
+	ErrRecoveryRequired      = errors.New("session requires recovery before entry")
+	ErrOpenRecoveryObjective = errors.New("open recovery objective is missing or unsupported")
+	ErrOpenReadOnlyLease     = errors.New("read-only session cannot reconcile a writer lease")
+	ErrOpenSessionMismatch   = errors.New("open request does not match the selected session")
+	ErrOpenIDEUnsupported    = errors.New("IDE entry is not implemented")
 )
 
 type OpenPointerReader interface {
@@ -159,6 +160,12 @@ type openSessionOpenedInput struct {
 	ID string `json:"id"`
 }
 
+type openMaterializationPlanInput struct {
+	Token string `json:"token"`
+	Stage string `json:"stage"`
+	Final string `json:"final"`
+}
+
 type openTerminalEntryInput struct {
 	ID      string `json:"id"`
 	Workdir string `json:"workdir"`
@@ -221,13 +228,36 @@ func (o *Open) Reconcile(ctx context.Context, sessionID string) (domain.JournalS
 	if o == nil || o.deps.Journal == nil || o.deps.Clock == nil || sessionID == "" {
 		return domain.JournalSnapshot{}, errors.New("open reconciliation dependencies or session are incomplete")
 	}
-	return journalstore.Reconcile(ctx, o.deps.Journal, sessionID, map[string]journalstore.Observer{
-		"RemoteLeaseAcquisition":  o.observeRemoteLeaseAcquisition,
-		"WorkspaceUp":             o.observeWorkspaceUp,
-		"WorkspaceRootResolved":   o.observeWorkspaceRootResolved,
-		"SessionOpened":           o.observeSessionOpened,
-		"TerminalEntryDispatched": o.observeTerminalEntryDispatched,
+	snapshot, _, err := o.deps.Journal.Load(ctx, sessionID)
+	if err != nil {
+		return domain.JournalSnapshot{}, err
+	}
+	if err := validateOpenRecoveryObjective(snapshot); err != nil {
+		return snapshot, err
+	}
+	reconciled, err := journalstore.Reconcile(ctx, o.deps.Journal, sessionID, map[string]journalstore.Observer{
+		"RemoteLeaseAcquisition":  withOpenRecoveryObjective(o.observeRemoteLeaseAcquisition),
+		"WorkspaceUp":             withOpenRecoveryObjective(o.observeWorkspaceUp),
+		"WorkspaceRootResolved":   withOpenRecoveryObjective(o.observeWorkspaceRootResolved),
+		"SessionOpened":           withOpenRecoveryObjective(o.observeSessionOpened),
+		"TerminalEntryDispatched": withOpenRecoveryObjective(o.observeTerminalEntryDispatched),
 	})
+	if err != nil {
+		return reconciled, err
+	}
+	if err := validateOpenRecoveryObjective(reconciled); err != nil {
+		return reconciled, err
+	}
+	return reconciled, nil
+}
+
+func withOpenRecoveryObjective(observer journalstore.Observer) journalstore.Observer {
+	return func(ctx context.Context, snapshot domain.JournalSnapshot, intent ports.IntentRecord) (ports.FactRecord, domain.JournalSnapshot, error) {
+		if err := validateOpenRecoveryObjective(snapshot); err != nil {
+			return ports.FactRecord{}, snapshot, err
+		}
+		return observer(ctx, snapshot, intent)
+	}
 }
 
 func (o *Open) observeWorkspaceUp(ctx context.Context, snapshot domain.JournalSnapshot, intent ports.IntentRecord) (ports.FactRecord, domain.JournalSnapshot, error) {
@@ -590,6 +620,7 @@ func (o *Open) create(ctx context.Context, request OpenRequest) (OpenResult, err
 		Workspace: domain.WorkspaceRecord{Context: request.Context, Provider: request.Provider, LocalProvider: request.LocalProvider},
 		Cleanup:   domain.Cleanup{State: domain.CleanupPending},
 		Recovery: domain.RecoveryRecord{
+			Objective:     domain.RecoveryObjectiveOpen,
 			Configuration: config.DurableConfiguration(runtime, backend, paths),
 			Session:       domain.SessionArtifactPaths{Root: sessionRoot, RuntimeRoot: filepath.Join(sessionRoot, "runtime"), HaulPath: filepath.Join(sessionRoot, "generation.tar.zst"), RegistryOverlay: filepath.Join(sessionRoot, "registry")},
 			Entry:         domain.EntryRequestRecord{Mode: request.EntryMode, Target: entryTarget},
@@ -670,14 +701,15 @@ func (o *Open) create(ctx context.Context, request OpenRequest) (OpenResult, err
 		finalRoot := filepath.Join(o.deps.Ownership.MaterializationRoot(), request.Capsule, request.Branch, sessionID)
 		stageRoot := filepath.Join(sessionRoot, "materialization-stage")
 		hydrationRequest := hydration.Request{SessionID: sessionID, Capsule: request.Capsule, Generation: opened, Metadata: metadata, SessionRoot: sessionRoot, StageRoot: stageRoot, FinalRoot: finalRoot, HaulPath: snapshot.Recovery.Session.HaulPath, Token: token}
+		hydrationPlan := domain.HydrationPlan{Token: token, StageRoot: stageRoot, FinalRoot: finalRoot}
 		sourceLineage := fetchLineage
 		snapshot.Recovery.Source = domain.SourceDecision{Kind: domain.SourceDecisionRemote, Lineage: &sourceLineage, Generation: cloneGeneration(&opened)}
 		snapshot.Recovery.Cleanup.RemoveOwnedMaterialization = true
-		if err := journal.phase(ctx, "MaterializationPlanned", safeJSON(struct {
-			Token string `json:"token"`
-			Stage string `json:"stage"`
-			Final string `json:"final"`
-		}{Token: token, Stage: stageRoot, Final: finalRoot}), nil, func() error { return nil }); err != nil {
+		planInput := openMaterializationPlanInput{Token: token, Stage: stageRoot, Final: finalRoot}
+		if err := journal.phase(ctx, "MaterializationPlanned", planInput, nil, func() error {
+			snapshot.Recovery.Hydration = &hydrationPlan
+			return nil
+		}); err != nil {
 			return OpenResult{}, err
 		}
 		hydrator := o.deps.Hydrator
@@ -743,6 +775,9 @@ func (o *Open) reenter(ctx context.Context, snapshot domain.JournalSnapshot, req
 		(request.Provider != "" && request.Provider != snapshot.Workspace.Provider) {
 		return OpenResult{}, fmt.Errorf("session %q identity does not match the open request: %w", snapshot.SessionID, ErrOpenSessionMismatch)
 	}
+	if err := validateOpenRecoveryObjective(snapshot); err != nil {
+		return OpenResult{}, err
+	}
 	if snapshot.State == domain.SessionOpening || snapshot.State == domain.SessionRecovering {
 		return o.resumeOpening(ctx, snapshot, request)
 	}
@@ -778,6 +813,13 @@ func (o *Open) reenter(ctx context.Context, snapshot domain.JournalSnapshot, req
 		return OpenResult{}, err
 	}
 	return OpenResult{Snapshot: snapshot, Target: targetResult, MappedTarget: mapped, DevPodResult: entryResult, WorkspaceID: snapshot.Workspace.ID, RecoveryCommand: "camp recover " + snapshot.SessionID}, nil
+}
+
+func validateOpenRecoveryObjective(snapshot domain.JournalSnapshot) error {
+	if snapshot.Recovery.Objective != domain.RecoveryObjectiveOpen {
+		return fmt.Errorf("session %q recovery objective %q is invalid: %w", snapshot.SessionID, snapshot.Recovery.Objective, ErrOpenRecoveryObjective)
+	}
+	return nil
 }
 
 func (o *Open) resumeOpening(ctx context.Context, snapshot domain.JournalSnapshot, request OpenRequest) (OpenResult, error) {

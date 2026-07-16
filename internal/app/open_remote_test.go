@@ -609,6 +609,7 @@ func TestOpenReconcileReadOnlySnapshotNeverObservesOrAcquiresLease(t *testing.T)
 	snapshot := domain.JournalSnapshot{
 		SchemaVersion: domain.SchemaVersion, SessionID: sessionID, Capsule: "brain", Lineage: domain.Lineage{Branch: "feature"},
 		Mode: domain.SessionReadOnly, State: domain.SessionOpening, CreatedAt: now, UpdatedAt: now,
+		Recovery: domain.RecoveryRecord{Objective: domain.RecoveryObjectiveOpen},
 	}
 	if err := environment.open.deps.Journal.Create(context.Background(), snapshot); err != nil {
 		t.Fatal(err)
@@ -648,6 +649,7 @@ func TestOpenReconcileRejectsInconsistentBranchSourceIntent(t *testing.T) {
 	snapshot := domain.JournalSnapshot{
 		SchemaVersion: domain.SchemaVersion, SessionID: sessionID, Capsule: "brain", Lineage: domain.Lineage{Branch: "feature"},
 		Mode: domain.SessionReadWrite, State: domain.SessionOpening, CreatedAt: now, UpdatedAt: now,
+		Recovery: domain.RecoveryRecord{Objective: domain.RecoveryObjectiveOpen},
 	}
 	if err := environment.open.deps.Journal.Create(context.Background(), snapshot); err != nil {
 		t.Fatal(err)
@@ -721,6 +723,68 @@ func TestOpenRemoteJournalAndArtifactsDoNotPersistConfiguredCredentials(t *testi
 		if strings.Contains(string(body), "configured-secret") {
 			t.Fatalf("credential persisted in %s", path)
 		}
+	}
+}
+
+func TestOpenRemotePersistsDurableObjectiveAndHydrationPlanBeforeFirstHydrationEffect(t *testing.T) {
+	t.Parallel()
+	environment := newRemoteOpenTestEnvironment(t)
+	inspector := &recoveryInspectingOpenHydrator{
+		journal:  environment.open.deps.Journal,
+		delegate: environment.hydrator,
+	}
+	environment.open.deps.Hydrator = inspector
+	const sessionID = "durable-hydration-plan"
+	_, err := environment.open.Run(context.Background(), OpenRequest{
+		SessionID: sessionID, Capsule: "brain", Branch: "feature", SourceLineage: domain.Lineage{Branch: "main"},
+		Mode: domain.SessionReadOnly, RemoteAvailable: true, Target: "MemoryD", EntryMode: domain.EntryTerminal,
+		Context: "default", Provider: "docker", Runtime: environment.runtime, Backend: environment.backend,
+	})
+	if err != nil {
+		t.Fatalf("Open() error = %v", err)
+	}
+	if inspector.snapshot.Recovery.Objective != domain.RecoveryObjectiveOpen {
+		t.Fatalf("durable recovery objective = %#v, want open", inspector.snapshot.Recovery.Objective)
+	}
+	plan := inspector.snapshot.Recovery.Hydration
+	if plan == nil {
+		t.Fatal("durable hydration plan is nil")
+	}
+	wantStage := filepath.Join(environment.paths.SessionRoot, sessionID, "materialization-stage")
+	wantFinal := filepath.Join(environment.ownership.MaterializationRoot(), "brain", "feature", sessionID)
+	if plan.Token == "" || plan.Token != environment.hydrator.request.Token || plan.StageRoot != wantStage || plan.FinalRoot != wantFinal {
+		t.Fatalf("durable hydration plan = %#v, request = %#v", plan, environment.hydrator.request)
+	}
+	journalBody, err := os.ReadFile(filepath.Join(environment.paths.SessionRoot, sessionID, "journal.jsonl"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	foundPlanIntent := false
+	for _, line := range bytes.Split(journalBody, []byte{'\n'}) {
+		if len(line) == 0 {
+			continue
+		}
+		var entry struct {
+			Kind   string              `json:"kind"`
+			Intent *ports.IntentRecord `json:"intent"`
+		}
+		if err := json.Unmarshal(line, &entry); err != nil {
+			t.Fatal(err)
+		}
+		if entry.Kind != "intent" || entry.Intent == nil || entry.Intent.Transition != "MaterializationPlanned" {
+			continue
+		}
+		foundPlanIntent = true
+		var input map[string]any
+		if err := json.Unmarshal(entry.Intent.Input, &input); err != nil {
+			t.Fatal(err)
+		}
+		if input["token"] == "" || input["stage"] != wantStage || input["final"] != wantFinal || input["stageRoot"] != nil || input["finalRoot"] != nil {
+			t.Fatalf("materialization plan intent = %#v, want compatible token/stage/final envelope", input)
+		}
+	}
+	if !foundPlanIntent {
+		t.Fatal("journal is missing MaterializationPlanned intent")
 	}
 }
 
@@ -1038,6 +1102,21 @@ type recordingOpenHydrator struct {
 	events    *[]string
 	request   hydration.Request
 	calls     int
+}
+
+type recoveryInspectingOpenHydrator struct {
+	journal  ports.Journal
+	delegate OpenHydrator
+	snapshot domain.JournalSnapshot
+}
+
+func (r *recoveryInspectingOpenHydrator) Hydrate(ctx context.Context, request hydration.Request) (hydration.Result, error) {
+	snapshot, _, err := r.journal.Load(ctx, request.SessionID)
+	if err != nil {
+		return hydration.Result{}, err
+	}
+	r.snapshot = snapshot
+	return r.delegate.Hydrate(ctx, request)
 }
 
 type invalidOpenHydrator struct {

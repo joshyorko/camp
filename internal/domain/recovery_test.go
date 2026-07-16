@@ -8,16 +8,22 @@ import (
 
 func TestJournalSnapshotRoundTripsCompleteFreshProcessRecoveryContract(t *testing.T) {
 	t.Parallel()
+	sourceLineage := Lineage{Branch: "main"}
+	sourceGeneration := GenerationRef{Generation: 42, ArchiveSHA256: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}
 	snapshot := JournalSnapshot{
 		SchemaVersion: SchemaVersion, SessionID: "session-a", Capsule: "brain", Lineage: Lineage{Branch: "main"}, State: SessionOpening,
 		Recovery: RecoveryRecord{
+			Objective: RecoveryObjectiveOpen,
 			Configuration: ConfigurationRecord{
 				Capsule: "brain", BackendKind: "file", BackendURL: "file:///mnt/camp", BackendFingerprint: "fingerprint",
 				Source: "/home/josh/SecondBrain", RegistryPort: 45001, FileserverPort: 45002,
 				Paths: SessionPaths{DataRoot: "/data/camp", WorkRoot: "/data/camp/work", StoreRoot: "/data/camp/stores", SessionRoot: "/data/camp/sessions", CacheRoot: "/cache/camp"},
 			},
 			Session: SessionArtifactPaths{Root: "/data/camp/sessions/session-a", RuntimeRoot: "/data/camp/sessions/session-a/runtime", HaulPath: "/data/camp/stores/session-a/generation.tar.zst", RegistryOverlay: "/data/camp/sessions/session-a/registry"},
-			Source:  SourceDecision{Kind: "adopted", Root: "/home/josh/SecondBrain", Initialized: true},
+			Source:  SourceDecision{Kind: SourceDecisionRemote, Initialized: true, Lineage: &sourceLineage, Generation: &sourceGeneration},
+			Hydration: &HydrationPlan{
+				Token: "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef", StageRoot: "/data/camp/sessions/session-a/materialization-stage", FinalRoot: "/data/camp/work/brain/main/session-a",
+			},
 			DesiredServices: []DesiredServiceRecord{{
 				Name: "registry", LaunchToken: "launch-id", Mapping: EndpointMapping{HostAddress: "127.0.0.1", HostPort: 45001, GuestPort: 5000},
 				PIDPath: "/data/camp/sessions/session-a/registry.pid", LogPath: "/data/camp/sessions/session-a/registry.log",
