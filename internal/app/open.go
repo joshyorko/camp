@@ -31,6 +31,7 @@ var (
 	ErrRecoveryRequired    = errors.New("session requires recovery before entry")
 	ErrOpenReadOnlyLease   = errors.New("read-only session cannot reconcile a writer lease")
 	ErrOpenSessionMismatch = errors.New("open request does not match the selected session")
+	ErrOpenIDEUnsupported  = errors.New("IDE entry is not implemented")
 )
 
 type OpenPointerReader interface {
@@ -86,24 +87,23 @@ type OpenDependencies struct {
 }
 
 type OpenRequest struct {
-	SessionID        string
-	Capsule          string
-	Branch           string
-	Mode             domain.SessionMode
-	ExplicitRoot     string
-	ConfiguredRoot   string
-	RemoteAvailable  bool
-	SourceLineage    domain.Lineage
-	Target           string
-	EntryMode        domain.EntryMode
-	Context          string
-	Provider         string
-	LocalProvider    bool
-	DevcontainerPath string
-	Machine          string
-	LeaseTTL         time.Duration
-	Runtime          config.Runtime
-	Backend          config.FileBackend
+	SessionID       string
+	Capsule         string
+	Branch          string
+	Mode            domain.SessionMode
+	ExplicitRoot    string
+	ConfiguredRoot  string
+	RemoteAvailable bool
+	SourceLineage   domain.Lineage
+	Target          string
+	EntryMode       domain.EntryMode
+	Context         string
+	Provider        string
+	LocalProvider   bool
+	Machine         string
+	LeaseTTL        time.Duration
+	Runtime         config.Runtime
+	Backend         config.FileBackend
 }
 
 type OpenResult struct {
@@ -311,7 +311,10 @@ func (o *Open) validate(request OpenRequest) error {
 	if request.Mode != domain.SessionReadWrite && request.Mode != domain.SessionReadOnly {
 		return fmt.Errorf("unsupported open session mode %q", request.Mode)
 	}
-	if request.EntryMode != domain.EntryTerminal && request.EntryMode != domain.EntryIDE {
+	if request.EntryMode == domain.EntryIDE {
+		return ErrOpenIDEUnsupported
+	}
+	if request.EntryMode != domain.EntryTerminal {
 		return fmt.Errorf("unsupported open entry mode %q", request.EntryMode)
 	}
 	return nil
@@ -490,13 +493,12 @@ func (o *Open) create(ctx context.Context, request OpenRequest) (OpenResult, err
 		return OpenResult{}, err
 	}
 	snapshot.Tools = initialization.Lock.Tools
-	snapshot.Recovery.Configuration.DevcontainerPath = request.DevcontainerPath
 	if err := journal.phase(ctx, "CapsuleInitialized", safeJSON(struct {
 		Root string `json:"root"`
 	}{Root: root}), initialization, func() error { snapshot.Recovery.Source.Initialized = true; return nil }); err != nil {
 		return OpenResult{}, err
 	}
-	devcontainer, err := capsule.ResolveDevcontainer(root, request.DevcontainerPath, initialization.Lock)
+	devcontainer, err := capsule.ResolveDevcontainer(root, request.Runtime.DevcontainerPath, initialization.Lock)
 	if err != nil {
 		return OpenResult{}, err
 	}

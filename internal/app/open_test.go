@@ -69,6 +69,35 @@ func TestOpenAdoptsRootPreservesOwnershipAndResolvesTargetAfterCommit(t *testing
 	}
 }
 
+func TestOpenUsesRuntimeDevcontainerPathAsSingleSourceOfTruth(t *testing.T) {
+	t.Parallel()
+	environment := newOpenTestEnvironment(t)
+	root := filepath.Join(t.TempDir(), "SecondBrain")
+	custom := filepath.Join(root, "custom", "devcontainer.json")
+	if err := os.MkdirAll(filepath.Dir(custom), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(custom, []byte("{\"image\":\"example.invalid/camp@sha256:"+strings.Repeat("b", 64)+"\"}\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	runtime := environment.runtime
+	runtime.DevcontainerPath = filepath.Join("custom", "devcontainer.json")
+	result, err := environment.open.Run(context.Background(), OpenRequest{
+		SessionID: "runtime-devcontainer", Capsule: "brain", Branch: "main", Mode: domain.SessionReadWrite,
+		ExplicitRoot: root, Target: "", EntryMode: domain.EntryTerminal, Context: "default", Provider: "docker",
+		Runtime: runtime, Backend: environment.backend,
+	})
+	if err != nil {
+		t.Fatalf("Open() error = %v", err)
+	}
+	if len(environment.devpod.ups) != 1 || environment.devpod.ups[0].DevcontainerPath != custom {
+		t.Fatalf("DevPod devcontainer path = %#v, want %q", environment.devpod.ups, custom)
+	}
+	if result.Snapshot.Recovery.Configuration.DevcontainerPath != custom {
+		t.Fatalf("recovery devcontainer path = %q, want %q", result.Snapshot.Recovery.Configuration.DevcontainerPath, custom)
+	}
+}
+
 func TestOpenReentrySelectsExistingSessionWithoutSecondWorkspaceCreation(t *testing.T) {
 	t.Parallel()
 	environment := newOpenTestEnvironment(t)
@@ -190,6 +219,29 @@ func TestOpenRejectsUnsafeXDGLayoutAndNonCanonicalBackend(t *testing.T) {
 	request.Backend = config.FileBackend{Root: environment.backend.Root}
 	if _, err := environment.open.Run(context.Background(), request); err == nil {
 		t.Fatal("backend without canonical file URL was accepted")
+	}
+}
+
+func TestOpenRejectsIDEEntryBeforeJournalCreateOrEffects(t *testing.T) {
+	t.Parallel()
+	environment := newOpenTestEnvironment(t)
+	root := filepath.Join(t.TempDir(), "SecondBrain")
+	if err := os.MkdirAll(root, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	_, err := environment.open.Run(context.Background(), OpenRequest{
+		SessionID: "unsupported-ide", Capsule: "brain", Branch: "main", Mode: domain.SessionReadWrite,
+		ExplicitRoot: root, Target: "MemoryD", EntryMode: domain.EntryIDE, Context: "default", Provider: "docker",
+		Runtime: environment.runtime, Backend: environment.backend,
+	})
+	if !errors.Is(err, ErrOpenIDEUnsupported) {
+		t.Fatalf("Open() error = %v, want ErrOpenIDEUnsupported", err)
+	}
+	if _, _, loadErr := environment.open.deps.Journal.Load(context.Background(), "unsupported-ide"); loadErr == nil {
+		t.Fatal("unsupported IDE request created a journal")
+	}
+	if len(*environment.events) != 0 || len(environment.devpod.ups) != 0 || len(environment.devpod.ssh) != 0 {
+		t.Fatalf("unsupported IDE request effects: events=%v ups=%d ssh=%d", *environment.events, len(environment.devpod.ups), len(environment.devpod.ssh))
 	}
 }
 
