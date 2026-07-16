@@ -90,3 +90,103 @@ func TestOwnershipFailsClosedOnMarkerOrIdentityMismatch(t *testing.T) {
 		t.Fatalf("RemoveOwned(inode mismatch) = %v, %v", removed, err)
 	}
 }
+
+func TestOwnershipRejectsSymlinkedMarkerParents(t *testing.T) {
+	t.Parallel()
+	dataHome := filepath.Join(t.TempDir(), "data")
+	ownership, err := NewOwnership(dataHome)
+	if err != nil {
+		t.Fatal(err)
+	}
+	created := filepath.Join(dataHome, "camp", "materializations", "session-a")
+	if err := os.MkdirAll(created, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	outside := t.TempDir()
+	if err := os.Symlink(outside, filepath.Join(created, ".camp")); err != nil {
+		t.Fatal(err)
+	}
+	token := "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+	if _, err := ownership.MarkCreatedWithToken(created, token); !errors.Is(err, ErrOwnershipMismatch) {
+		t.Fatalf("MarkCreatedWithToken() error = %v, want ErrOwnershipMismatch", err)
+	}
+	if _, err := os.Stat(filepath.Join(outside, "runtime", "ownership.json")); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("symlink target was modified: %v", err)
+	}
+}
+
+func TestOwnershipRemovalRejectsSymlinkedMarkerParents(t *testing.T) {
+	t.Parallel()
+	dataHome := filepath.Join(t.TempDir(), "data")
+	ownership, err := NewOwnership(dataHome)
+	if err != nil {
+		t.Fatal(err)
+	}
+	created := filepath.Join(dataHome, "camp", "materializations", "session-a")
+	if err := os.MkdirAll(created, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	token := "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+	record, err := ownership.MarkCreatedWithToken(created, token)
+	if err != nil {
+		t.Fatal(err)
+	}
+	marker, err := os.ReadFile(filepath.Join(created, ".camp", "runtime", "ownership.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	outside := t.TempDir()
+	if err := os.RemoveAll(filepath.Join(created, ".camp")); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(outside, filepath.Join(created, ".camp")); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Join(outside, "runtime"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(outside, "runtime", "ownership.json"), marker, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if removed, err := ownership.RemoveOwned(context.Background(), record); removed || !errors.Is(err, ErrOwnershipMismatch) {
+		t.Fatalf("RemoveOwned() = %v, %v, want ownership mismatch", removed, err)
+	}
+	if _, err := os.Stat(created); err != nil {
+		t.Fatalf("mismatched root was removed: %v", err)
+	}
+}
+
+func TestOwnershipRemovalRejectsSymlinkedMarkerFile(t *testing.T) {
+	t.Parallel()
+	dataHome := filepath.Join(t.TempDir(), "data")
+	ownership, err := NewOwnership(dataHome)
+	if err != nil {
+		t.Fatal(err)
+	}
+	created := filepath.Join(dataHome, "camp", "materializations", "session-a")
+	if err := os.MkdirAll(created, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	record, err := ownership.MarkCreated(created)
+	if err != nil {
+		t.Fatal(err)
+	}
+	markerPath := filepath.Join(created, ".camp", "runtime", "ownership.json")
+	marker, err := os.ReadFile(markerPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	outside := filepath.Join(t.TempDir(), "ownership.json")
+	if err := os.WriteFile(outside, marker, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Remove(markerPath); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(outside, markerPath); err != nil {
+		t.Fatal(err)
+	}
+	if removed, err := ownership.RemoveOwned(context.Background(), record); removed || !errors.Is(err, ErrOwnershipMismatch) {
+		t.Fatalf("RemoveOwned() = %v, %v, want ownership mismatch", removed, err)
+	}
+}

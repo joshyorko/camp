@@ -21,6 +21,13 @@ type Ownership struct {
 	materializationRoot string
 }
 
+func (o *Ownership) MaterializationRoot() string {
+	if o == nil {
+		return ""
+	}
+	return o.materializationRoot
+}
+
 type ownershipMarker struct {
 	Token         string `json:"token"`
 	CanonicalPath string `json:"canonicalPath"`
@@ -63,6 +70,29 @@ func (o *Ownership) Adopt(path string) (domain.Materialization, error) {
 }
 
 func (o *Ownership) MarkCreated(path string) (domain.Materialization, error) {
+	token, err := NewOwnershipToken()
+	if err != nil {
+		return domain.Materialization{}, err
+	}
+	return o.MarkCreatedWithToken(path, token)
+}
+
+func NewOwnershipToken() (string, error) {
+	tokenBytes := make([]byte, 32)
+	if _, err := rand.Read(tokenBytes); err != nil {
+		return "", fmt.Errorf("generate ownership token: %w", err)
+	}
+	return hex.EncodeToString(tokenBytes), nil
+}
+
+func (o *Ownership) MarkCreatedWithToken(path, token string) (domain.Materialization, error) {
+	if o == nil || o.materializationRoot == "" {
+		return domain.Materialization{}, errors.New("ownership root is unavailable")
+	}
+	decoded, err := hex.DecodeString(token)
+	if err != nil || len(decoded) != 32 {
+		return domain.Materialization{}, fmt.Errorf("ownership token is invalid: %w", ErrOwnershipMismatch)
+	}
 	canonical, original, device, inode, err := inspectRoot(path)
 	if err != nil {
 		return domain.Materialization{}, err
@@ -70,21 +100,42 @@ func (o *Ownership) MarkCreated(path string) (domain.Materialization, error) {
 	if !contained(o.materializationRoot, canonical) {
 		return domain.Materialization{}, fmt.Errorf("created root %q is outside %q: %w", canonical, o.materializationRoot, ErrOwnershipMismatch)
 	}
-	tokenBytes := make([]byte, 32)
-	if _, err := rand.Read(tokenBytes); err != nil {
-		return domain.Materialization{}, fmt.Errorf("generate ownership token: %w", err)
+	materialization := domain.Materialization{
+		SchemaVersion:    domain.SchemaVersion,
+		CanonicalPath:    canonical,
+		OriginalPath:     original,
+		OwnershipMarker:  token,
+		Mode:             domain.MaterializationCreated,
+		Device:           device,
+		Inode:            inode,
+		CleanupPermitted: true,
 	}
-	token := hex.EncodeToString(tokenBytes)
 	marker := ownershipMarker{Token: token, CanonicalPath: canonical, Device: device, Inode: inode}
 	body, err := json.Marshal(marker)
 	if err != nil {
 		return domain.Materialization{}, err
 	}
 	runtimeDirectory := filepath.Join(canonical, ".camp", "runtime")
-	if err := os.MkdirAll(runtimeDirectory, 0o700); err != nil {
+	if err := ensureMarkerDirectory(canonical); err != nil {
 		return domain.Materialization{}, fmt.Errorf("create ownership marker directory: %w", err)
 	}
 	markerPath := filepath.Join(runtimeDirectory, "ownership.json")
+	if existing, readErr := os.Lstat(markerPath); readErr == nil {
+		if existing.Mode()&os.ModeSymlink != 0 || !existing.Mode().IsRegular() {
+			return domain.Materialization{}, fmt.Errorf("ownership marker is not a regular file: %w", ErrOwnershipMismatch)
+		}
+		existingBody, readErr := os.ReadFile(markerPath)
+		if readErr != nil || len(existingBody) > 4096 {
+			return domain.Materialization{}, fmt.Errorf("read ownership marker: %w", ErrOwnershipMismatch)
+		}
+		var existingMarker ownershipMarker
+		if json.Unmarshal(existingBody, &existingMarker) != nil || existingMarker != marker {
+			return domain.Materialization{}, ErrOwnershipMismatch
+		}
+		return materialization, nil
+	} else if !errors.Is(readErr, os.ErrNotExist) {
+		return domain.Materialization{}, readErr
+	}
 	file, err := os.OpenFile(markerPath, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o600)
 	if err != nil {
 		return domain.Materialization{}, fmt.Errorf("create ownership marker: %w", err)
@@ -102,16 +153,43 @@ func (o *Ownership) MarkCreated(path string) (domain.Materialization, error) {
 	if err := syncDir(runtimeDirectory); err != nil {
 		return domain.Materialization{}, fmt.Errorf("sync ownership marker: %w", err)
 	}
-	return domain.Materialization{
-		SchemaVersion:    domain.SchemaVersion,
-		CanonicalPath:    canonical,
-		OriginalPath:     original,
-		OwnershipMarker:  token,
-		Mode:             domain.MaterializationCreated,
-		Device:           device,
-		Inode:            inode,
-		CleanupPermitted: true,
-	}, nil
+	return materialization, nil
+}
+
+func ensureMarkerDirectory(root string) error {
+	current := root
+	for _, component := range []string{".camp", "runtime"} {
+		current = filepath.Join(current, component)
+		info, err := os.Lstat(current)
+		if errors.Is(err, os.ErrNotExist) {
+			if err := os.Mkdir(current, 0o700); err != nil {
+				return err
+			}
+			continue
+		}
+		if err != nil {
+			return err
+		}
+		if info.Mode()&os.ModeSymlink != 0 || !info.IsDir() {
+			return fmt.Errorf("ownership marker parent %q is not a real directory: %w", current, ErrOwnershipMismatch)
+		}
+	}
+	return nil
+}
+
+func validateMarkerDirectory(root string) error {
+	current := root
+	for _, component := range []string{".camp", "runtime"} {
+		current = filepath.Join(current, component)
+		info, err := os.Lstat(current)
+		if err != nil {
+			return err
+		}
+		if info.Mode()&os.ModeSymlink != 0 || !info.IsDir() {
+			return fmt.Errorf("ownership marker parent %q is not a real directory", current)
+		}
+	}
+	return nil
 }
 
 func (o *Ownership) RemoveOwned(ctx context.Context, materialization domain.Materialization) (bool, error) {
@@ -131,7 +209,17 @@ func (o *Ownership) RemoveOwned(ctx context.Context, materialization domain.Mate
 	if canonical != materialization.CanonicalPath || !contained(o.materializationRoot, canonical) || device != materialization.Device || inode != materialization.Inode {
 		return false, ErrOwnershipMismatch
 	}
+	if err := validateMarkerDirectory(canonical); err != nil {
+		return false, fmt.Errorf("validate ownership marker directory: %w", errors.Join(err, ErrOwnershipMismatch))
+	}
 	markerPath := filepath.Join(canonical, ".camp", "runtime", "ownership.json")
+	markerInfo, err := os.Lstat(markerPath)
+	if err != nil {
+		return false, fmt.Errorf("inspect ownership marker: %w", errors.Join(err, ErrOwnershipMismatch))
+	}
+	if markerInfo.Mode()&os.ModeSymlink != 0 || !markerInfo.Mode().IsRegular() {
+		return false, fmt.Errorf("ownership marker is not a regular file: %w", ErrOwnershipMismatch)
+	}
 	file, err := os.Open(markerPath)
 	if err != nil {
 		return false, fmt.Errorf("open ownership marker: %w", ErrOwnershipMismatch)
