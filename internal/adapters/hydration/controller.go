@@ -202,24 +202,37 @@ func (c *Controller) Hydrate(ctx context.Context, request Request) (Result, erro
 			return Result{}, err
 		}
 		storeRoot := filepath.Join(request.StageRoot, "hauler-store")
-		if err := c.run(ctx, PhaseGenerationLoaded, request, &state, func() error {
-			if state.GenerationLoaded {
-				return nil
+		loadOutcomeUnknown := false
+		if !state.GenerationLoaded {
+			if _, statErr := os.Lstat(storeRoot); statErr == nil {
+				if err := mkdirOwned(storeRoot); err != nil {
+					return Result{}, err
+				}
+				loadOutcomeUnknown = true
+			} else if !errors.Is(statErr, os.ErrNotExist) {
+				return Result{}, statErr
 			}
-			if err := mkdirOwned(storeRoot); err != nil {
-				return err
+		}
+		if !loadOutcomeUnknown {
+			if err := c.run(ctx, PhaseGenerationLoaded, request, &state, func() error {
+				if state.GenerationLoaded {
+					return nil
+				}
+				if err := mkdirOwned(storeRoot); err != nil {
+					return err
+				}
+				result, err := c.hauler.Load(ctx, storeRoot, []string{request.HaulPath})
+				if err != nil {
+					return fmt.Errorf("load generation with Hauler: %w", err)
+				}
+				if result.ExitCode != 0 {
+					return fmt.Errorf("load generation with Hauler exited %d", result.ExitCode)
+				}
+				state.GenerationLoaded = true
+				return c.writeState(request.StageRoot, state)
+			}); err != nil {
+				return Result{}, err
 			}
-			result, err := c.hauler.Load(ctx, storeRoot, []string{request.HaulPath})
-			if err != nil {
-				return fmt.Errorf("load generation with Hauler: %w", err)
-			}
-			if result.ExitCode != 0 {
-				return fmt.Errorf("load generation with Hauler exited %d", result.ExitCode)
-			}
-			state.GenerationLoaded = true
-			return c.writeState(request.StageRoot, state)
-		}); err != nil {
-			return Result{}, err
 		}
 		outerRoot := filepath.Join(request.StageRoot, "hauler-extract")
 		innerArchive := filepath.Join(outerRoot, request.Capsule+".tar.zst")
@@ -278,10 +291,16 @@ func (c *Controller) Hydrate(ctx context.Context, request Request) (Result, erro
 			} else {
 				return statErr
 			}
+			state.GenerationLoaded = true
 			state.ExtractComplete = true
 			return c.writeState(request.StageRoot, state)
 		}); err != nil {
 			return Result{}, err
+		}
+		if loadOutcomeUnknown {
+			if err := c.after(ctx, PhaseGenerationLoaded, request, Result{StageRoot: request.StageRoot, FinalRoot: request.FinalRoot, Token: request.Token}); err != nil {
+				return Result{}, err
+			}
 		}
 		if err := c.run(ctx, PhaseRenameComplete, request, &state, func() error {
 			if state.Renamed {
