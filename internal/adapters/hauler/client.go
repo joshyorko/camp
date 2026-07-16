@@ -2,7 +2,6 @@ package hauler
 
 import (
 	"context"
-	"strconv"
 
 	"github.com/joshyorko/camp/internal/ports"
 )
@@ -18,12 +17,16 @@ type RegistryOptions struct {
 	Directory string
 	Port      int
 	ReadOnly  bool
+	LogPath   string
+	PIDPath   string
 }
 
 type FileserverOptions struct {
 	Directory      string
 	Port           int
 	TimeoutSeconds int
+	LogPath        string
+	PIDPath        string
 }
 
 type Client struct {
@@ -86,21 +89,13 @@ func (c *Client) Info(ctx context.Context, store string) (ports.Result, error) {
 }
 
 func (c *Client) Registry(store string, options RegistryOptions) ports.Command {
-	argv := append(storeArgv(store, "serve", "registry"),
-		"--directory", options.Directory,
-		"--port", strconv.Itoa(options.Port),
-		"--readonly="+strconv.FormatBool(options.ReadOnly),
-	)
-	return ports.Command{Executable: c.executable, Argv: argv}
+	definition := serviceDefinitionForClient(c.executable, store, options.Directory, options.Port, options.LogPath, options.PIDPath, RegistryServiceName, options.ReadOnly, 0)
+	return definition.command()
 }
 
 func (c *Client) Fileserver(store string, options FileserverOptions) ports.Command {
-	argv := append(storeArgv(store, "serve", "fileserver"),
-		"--directory", options.Directory,
-		"--port", strconv.Itoa(options.Port),
-		"--timeout", strconv.Itoa(options.TimeoutSeconds),
-	)
-	return ports.Command{Executable: c.executable, Argv: argv}
+	definition := serviceDefinitionForClient(c.executable, store, options.Directory, options.Port, options.LogPath, options.PIDPath, FileserverServiceName, false, options.TimeoutSeconds)
+	return definition.command()
 }
 
 func storeArgv(store string, command ...string) []string {
