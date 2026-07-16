@@ -192,6 +192,69 @@ func validateMarkerDirectory(root string) error {
 	return nil
 }
 
+func (o *Ownership) Revalidate(materialization domain.Materialization) error {
+	if o == nil || o.materializationRoot == "" || materialization.SchemaVersion != domain.SchemaVersion {
+		return ErrOwnershipMismatch
+	}
+	if materialization.Mode == domain.MaterializationCreated {
+		_, err := o.revalidateCreated(materialization)
+		return err
+	}
+	if materialization.Mode != domain.MaterializationAdopted || materialization.CleanupPermitted || materialization.OwnershipMarker != "" {
+		return ErrOwnershipMismatch
+	}
+	canonical, original, device, inode, err := inspectRoot(materialization.OriginalPath)
+	if err != nil {
+		return fmt.Errorf("revalidate adopted materialization: %w", errors.Join(err, ErrOwnershipMismatch))
+	}
+	if canonical != materialization.CanonicalPath || original != materialization.OriginalPath || device != materialization.Device || inode != materialization.Inode {
+		return ErrOwnershipMismatch
+	}
+	return nil
+}
+
+func (o *Ownership) revalidateCreated(materialization domain.Materialization) (string, error) {
+	if materialization.Mode != domain.MaterializationCreated || !materialization.CleanupPermitted || materialization.OwnershipMarker == "" {
+		return "", ErrOwnershipMismatch
+	}
+	decoded, err := hex.DecodeString(materialization.OwnershipMarker)
+	if err != nil || len(decoded) != 32 || hex.EncodeToString(decoded) != materialization.OwnershipMarker {
+		return "", ErrOwnershipMismatch
+	}
+	canonical, original, device, inode, err := inspectRoot(materialization.CanonicalPath)
+	if err != nil {
+		return "", fmt.Errorf("revalidate materialization: %w", errors.Join(err, ErrOwnershipMismatch))
+	}
+	if canonical != materialization.CanonicalPath || original != materialization.OriginalPath || !contained(o.materializationRoot, canonical) || device != materialization.Device || inode != materialization.Inode {
+		return "", ErrOwnershipMismatch
+	}
+	if err := validateMarkerDirectory(canonical); err != nil {
+		return "", fmt.Errorf("validate ownership marker directory: %w", errors.Join(err, ErrOwnershipMismatch))
+	}
+	markerPath := filepath.Join(canonical, ".camp", "runtime", "ownership.json")
+	markerInfo, err := os.Lstat(markerPath)
+	if err != nil {
+		return "", fmt.Errorf("inspect ownership marker: %w", errors.Join(err, ErrOwnershipMismatch))
+	}
+	if markerInfo.Mode()&os.ModeSymlink != 0 || !markerInfo.Mode().IsRegular() {
+		return "", fmt.Errorf("ownership marker is not a regular file: %w", ErrOwnershipMismatch)
+	}
+	file, err := os.Open(markerPath)
+	if err != nil {
+		return "", fmt.Errorf("open ownership marker: %w", ErrOwnershipMismatch)
+	}
+	body, readErr := io.ReadAll(io.LimitReader(file, 4097))
+	closeErr := file.Close()
+	if readErr != nil || closeErr != nil || len(body) > 4096 {
+		return "", ErrOwnershipMismatch
+	}
+	var marker ownershipMarker
+	if err := json.Unmarshal(body, &marker); err != nil || marker.Token != materialization.OwnershipMarker || marker.CanonicalPath != canonical || marker.Device != device || marker.Inode != inode {
+		return "", ErrOwnershipMismatch
+	}
+	return canonical, nil
+}
+
 func (o *Ownership) RemoveOwned(ctx context.Context, materialization domain.Materialization) (bool, error) {
 	if err := ctx.Err(); err != nil {
 		return false, err
@@ -199,39 +262,9 @@ func (o *Ownership) RemoveOwned(ctx context.Context, materialization domain.Mate
 	if materialization.Mode == domain.MaterializationAdopted {
 		return false, nil
 	}
-	if materialization.Mode != domain.MaterializationCreated || !materialization.CleanupPermitted || materialization.OwnershipMarker == "" {
-		return false, ErrOwnershipMismatch
-	}
-	canonical, _, device, inode, err := inspectRoot(materialization.CanonicalPath)
+	canonical, err := o.revalidateCreated(materialization)
 	if err != nil {
-		return false, fmt.Errorf("revalidate materialization: %w: %w", err, ErrOwnershipMismatch)
-	}
-	if canonical != materialization.CanonicalPath || !contained(o.materializationRoot, canonical) || device != materialization.Device || inode != materialization.Inode {
-		return false, ErrOwnershipMismatch
-	}
-	if err := validateMarkerDirectory(canonical); err != nil {
-		return false, fmt.Errorf("validate ownership marker directory: %w", errors.Join(err, ErrOwnershipMismatch))
-	}
-	markerPath := filepath.Join(canonical, ".camp", "runtime", "ownership.json")
-	markerInfo, err := os.Lstat(markerPath)
-	if err != nil {
-		return false, fmt.Errorf("inspect ownership marker: %w", errors.Join(err, ErrOwnershipMismatch))
-	}
-	if markerInfo.Mode()&os.ModeSymlink != 0 || !markerInfo.Mode().IsRegular() {
-		return false, fmt.Errorf("ownership marker is not a regular file: %w", ErrOwnershipMismatch)
-	}
-	file, err := os.Open(markerPath)
-	if err != nil {
-		return false, fmt.Errorf("open ownership marker: %w", ErrOwnershipMismatch)
-	}
-	body, readErr := io.ReadAll(io.LimitReader(file, 4097))
-	closeErr := file.Close()
-	if readErr != nil || closeErr != nil || len(body) > 4096 {
-		return false, ErrOwnershipMismatch
-	}
-	var marker ownershipMarker
-	if err := json.Unmarshal(body, &marker); err != nil || marker.Token != materialization.OwnershipMarker || marker.CanonicalPath != canonical || marker.Device != device || marker.Inode != inode {
-		return false, ErrOwnershipMismatch
+		return false, err
 	}
 	parent := filepath.Dir(canonical)
 	if err := os.RemoveAll(canonical); err != nil {

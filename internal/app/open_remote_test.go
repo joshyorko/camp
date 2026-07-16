@@ -68,6 +68,312 @@ func TestOpenRemoteBranchUsesSourceGenerationAndReentryDoesNotRehydrate(t *testi
 	}
 }
 
+func TestOpenRemoteReentryRejectsInvalidOwnershipBeforeTargetOrSSH(t *testing.T) {
+	t.Parallel()
+	environment := newRemoteOpenTestEnvironment(t)
+	first, err := environment.open.Run(context.Background(), OpenRequest{
+		SessionID: "invalid-reentry-ownership-session", Capsule: "brain", Branch: "feature", SourceLineage: domain.Lineage{Branch: "main"},
+		Mode: domain.SessionReadWrite, RemoteAvailable: true, Target: "MemoryD", EntryMode: domain.EntryTerminal,
+		Context: "default", Provider: "docker", Machine: "machine-a", Runtime: environment.runtime, Backend: environment.backend,
+	})
+	if err != nil {
+		t.Fatalf("first Open() error = %v", err)
+	}
+	markerPath := filepath.Join(first.Snapshot.Materialization.CanonicalPath, ".camp", "runtime", "ownership.json")
+	if err := os.WriteFile(markerPath, []byte(`{"token":"attacker"}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	upCount, sshCount := len(environment.devpod.ups), len(environment.devpod.ssh)
+	eventCount := len(*environment.devpod.events)
+	_, err = environment.open.Run(context.Background(), OpenRequest{
+		Capsule: "brain", Branch: "feature", Target: "MemoryD", EntryMode: domain.EntryTerminal,
+		Context: "default", Provider: "docker", Runtime: environment.runtime, Backend: environment.backend,
+	})
+	if !errors.Is(err, capsule.ErrOwnershipMismatch) {
+		t.Fatalf("re-entry Open() error = %v, want ErrOwnershipMismatch", err)
+	}
+	if len(environment.devpod.ups) != upCount || len(environment.devpod.ssh) != sshCount || len(*environment.devpod.events) != eventCount {
+		t.Fatalf("re-entry effects after ownership mismatch: ups=%d ssh=%d events=%v", len(environment.devpod.ups), len(environment.devpod.ssh), *environment.devpod.events)
+	}
+}
+
+func TestOpenReentryRejectsCreatedMaterializationOutsideSessionPathBeforeSideEffects(t *testing.T) {
+	t.Parallel()
+	environment := newRemoteOpenTestEnvironment(t)
+	first, err := environment.open.Run(context.Background(), OpenRequest{
+		SessionID: "created-path-reentry-session", Capsule: "brain", Branch: "feature", SourceLineage: domain.Lineage{Branch: "main"},
+		Mode: domain.SessionReadWrite, RemoteAvailable: true, Target: "MemoryD", EntryMode: domain.EntryTerminal,
+		Context: "default", Provider: "docker", Machine: "machine-a", Runtime: environment.runtime, Backend: environment.backend,
+	})
+	if err != nil {
+		t.Fatalf("first Open() error = %v", err)
+	}
+	otherRoot := filepath.Join(environment.ownership.MaterializationRoot(), "brain", "feature", "other-session")
+	if err := os.MkdirAll(otherRoot, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	other, err := environment.ownership.MarkCreated(otherRoot)
+	if err != nil {
+		t.Fatal(err)
+	}
+	snapshot := first.Snapshot
+	snapshot.Materialization = other
+	eventCount, sshCount := len(*environment.devpod.events), len(environment.devpod.ssh)
+	_, err = environment.open.reenter(context.Background(), snapshot, OpenRequest{
+		SessionID: snapshot.SessionID, Capsule: snapshot.Capsule, Branch: snapshot.Lineage.Branch, Target: "MemoryD", EntryMode: domain.EntryTerminal,
+	})
+	if !errors.Is(err, capsule.ErrOwnershipMismatch) {
+		t.Fatalf("reenter() error = %v, want ErrOwnershipMismatch", err)
+	}
+	if len(*environment.devpod.events) != eventCount || len(environment.devpod.ssh) != sshCount {
+		t.Fatalf("re-entry effects after path mismatch: events=%v ssh=%d", *environment.devpod.events, len(environment.devpod.ssh))
+	}
+}
+
+func TestOpenReentryRejectsWorkspaceStagingRootMismatchBeforeSideEffects(t *testing.T) {
+	t.Parallel()
+	environment := newRemoteOpenTestEnvironment(t)
+	first, err := environment.open.Run(context.Background(), OpenRequest{
+		SessionID: "staging-root-reentry-session", Capsule: "brain", Branch: "feature", SourceLineage: domain.Lineage{Branch: "main"},
+		Mode: domain.SessionReadWrite, RemoteAvailable: true, Target: "MemoryD", EntryMode: domain.EntryTerminal,
+		Context: "default", Provider: "docker", Machine: "machine-a", Runtime: environment.runtime, Backend: environment.backend,
+	})
+	if err != nil {
+		t.Fatalf("first Open() error = %v", err)
+	}
+	snapshot := first.Snapshot
+	snapshot.Workspace.StagingRoot = t.TempDir()
+	eventCount, sshCount := len(*environment.devpod.events), len(environment.devpod.ssh)
+	if _, err := environment.open.reenter(context.Background(), snapshot, OpenRequest{
+		SessionID: snapshot.SessionID, Capsule: snapshot.Capsule, Branch: snapshot.Lineage.Branch, Target: "MemoryD", EntryMode: domain.EntryTerminal,
+	}); err == nil {
+		t.Fatal("reenter() accepted a staging root different from the materialization")
+	}
+	if len(*environment.devpod.events) != eventCount || len(environment.devpod.ssh) != sshCount {
+		t.Fatalf("re-entry effects after staging mismatch: events=%v ssh=%d", *environment.devpod.events, len(environment.devpod.ssh))
+	}
+}
+
+func TestOpenReentryRejectsWorkspaceLocalFolderMismatchBeforeSideEffects(t *testing.T) {
+	t.Parallel()
+	environment := newRemoteOpenTestEnvironment(t)
+	first, err := environment.open.Run(context.Background(), OpenRequest{
+		SessionID: "local-folder-reentry-session", Capsule: "brain", Branch: "feature", SourceLineage: domain.Lineage{Branch: "main"},
+		Mode: domain.SessionReadWrite, RemoteAvailable: true, Target: "MemoryD", EntryMode: domain.EntryTerminal,
+		Context: "default", Provider: "docker", Machine: "machine-a", Runtime: environment.runtime, Backend: environment.backend,
+	})
+	if err != nil {
+		t.Fatalf("first Open() error = %v", err)
+	}
+	snapshot := first.Snapshot
+	snapshot.Workspace.LocalFolder = t.TempDir()
+	eventCount, sshCount := len(*environment.devpod.events), len(environment.devpod.ssh)
+	if _, err := environment.open.reenter(context.Background(), snapshot, OpenRequest{
+		SessionID: snapshot.SessionID, Capsule: snapshot.Capsule, Branch: snapshot.Lineage.Branch, Target: "MemoryD", EntryMode: domain.EntryTerminal,
+	}); err == nil {
+		t.Fatal("reenter() accepted a local folder different from the materialization")
+	}
+	if len(*environment.devpod.events) != eventCount || len(environment.devpod.ssh) != sshCount {
+		t.Fatalf("re-entry effects after local-folder mismatch: events=%v ssh=%d", *environment.devpod.events, len(environment.devpod.ssh))
+	}
+}
+
+func TestOpenReentryRequiresPersistedEffectiveRootBeforeSideEffects(t *testing.T) {
+	t.Parallel()
+	environment := newRemoteOpenTestEnvironment(t)
+	first, err := environment.open.Run(context.Background(), OpenRequest{
+		SessionID: "effective-root-reentry-session", Capsule: "brain", Branch: "feature", SourceLineage: domain.Lineage{Branch: "main"},
+		Mode: domain.SessionReadWrite, RemoteAvailable: true, Target: "MemoryD", EntryMode: domain.EntryTerminal,
+		Context: "default", Provider: "docker", Machine: "machine-a", Runtime: environment.runtime, Backend: environment.backend,
+	})
+	if err != nil {
+		t.Fatalf("first Open() error = %v", err)
+	}
+	snapshot := first.Snapshot
+	snapshot.Workspace.EffectiveRoot = ""
+	eventCount, sshCount := len(*environment.devpod.events), len(environment.devpod.ssh)
+	if _, err := environment.open.reenter(context.Background(), snapshot, OpenRequest{
+		SessionID: snapshot.SessionID, Capsule: snapshot.Capsule, Branch: snapshot.Lineage.Branch, Target: "MemoryD", EntryMode: domain.EntryTerminal,
+	}); err == nil {
+		t.Fatal("reenter() accepted a missing effective workspace root")
+	}
+	if len(*environment.devpod.events) != eventCount || len(environment.devpod.ssh) != sshCount {
+		t.Fatalf("re-entry effects after missing effective root: events=%v ssh=%d", *environment.devpod.events, len(environment.devpod.ssh))
+	}
+}
+
+func TestOpenReentryRejectsNonDeterministicWorkspaceIDBeforeSideEffects(t *testing.T) {
+	t.Parallel()
+	environment := newRemoteOpenTestEnvironment(t)
+	first, err := environment.open.Run(context.Background(), OpenRequest{
+		SessionID: "workspace-id-reentry-session", Capsule: "brain", Branch: "feature", SourceLineage: domain.Lineage{Branch: "main"},
+		Mode: domain.SessionReadWrite, RemoteAvailable: true, Target: "MemoryD", EntryMode: domain.EntryTerminal,
+		Context: "default", Provider: "docker", Machine: "machine-a", Runtime: environment.runtime, Backend: environment.backend,
+	})
+	if err != nil {
+		t.Fatalf("first Open() error = %v", err)
+	}
+	snapshot := first.Snapshot
+	snapshot.Workspace.ID = "attacker-workspace"
+	eventCount, sshCount := len(*environment.devpod.events), len(environment.devpod.ssh)
+	if _, err := environment.open.reenter(context.Background(), snapshot, OpenRequest{
+		SessionID: snapshot.SessionID, Capsule: snapshot.Capsule, Branch: snapshot.Lineage.Branch, Target: "MemoryD", EntryMode: domain.EntryTerminal,
+	}); err == nil {
+		t.Fatal("reenter() accepted a non-deterministic workspace ID")
+	}
+	if len(*environment.devpod.events) != eventCount || len(environment.devpod.ssh) != sshCount {
+		t.Fatalf("re-entry effects after workspace ID mismatch: events=%v ssh=%d", *environment.devpod.events, len(environment.devpod.ssh))
+	}
+}
+
+func TestOpenReentryRejectsExplicitSessionCapsuleOrBranchMismatch(t *testing.T) {
+	t.Parallel()
+	for _, test := range []struct {
+		name    string
+		capsule string
+		branch  string
+	}{
+		{name: "capsule", capsule: "other", branch: "feature"},
+		{name: "branch", capsule: "brain", branch: "other"},
+	} {
+		test := test
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+			environment := newRemoteOpenTestEnvironment(t)
+			const sessionID = "identity-reentry-session"
+			_, err := environment.open.Run(context.Background(), OpenRequest{
+				SessionID: sessionID, Capsule: "brain", Branch: "feature", SourceLineage: domain.Lineage{Branch: "main"},
+				Mode: domain.SessionReadWrite, RemoteAvailable: true, Target: "MemoryD", EntryMode: domain.EntryTerminal,
+				Context: "default", Provider: "docker", Machine: "machine-a", Runtime: environment.runtime, Backend: environment.backend,
+			})
+			if err != nil {
+				t.Fatalf("first Open() error = %v", err)
+			}
+			eventCount, sshCount := len(*environment.devpod.events), len(environment.devpod.ssh)
+			_, err = environment.open.Run(context.Background(), OpenRequest{
+				SessionID: sessionID, Capsule: test.capsule, Branch: test.branch, Target: "MemoryD", EntryMode: domain.EntryTerminal,
+				Context: "default", Provider: "docker", Runtime: environment.runtime, Backend: environment.backend,
+			})
+			if !errors.Is(err, ErrOpenSessionMismatch) {
+				t.Fatalf("re-entry Open() error = %v, want ErrOpenSessionMismatch", err)
+			}
+			if len(*environment.devpod.events) != eventCount || len(environment.devpod.ssh) != sshCount {
+				t.Fatalf("re-entry effects after identity mismatch: events=%v ssh=%d", *environment.devpod.events, len(environment.devpod.ssh))
+			}
+		})
+	}
+}
+
+func TestOpenReentryRejectsWorkspaceContextOrProviderMismatchBeforeSideEffects(t *testing.T) {
+	t.Parallel()
+	for _, test := range []struct {
+		name   string
+		mutate func(*domain.JournalSnapshot)
+	}{
+		{name: "context", mutate: func(snapshot *domain.JournalSnapshot) { snapshot.Workspace.Context = "attacker" }},
+		{name: "provider", mutate: func(snapshot *domain.JournalSnapshot) { snapshot.Workspace.Provider = "attacker" }},
+	} {
+		test := test
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+			environment := newRemoteOpenTestEnvironment(t)
+			first, err := environment.open.Run(context.Background(), OpenRequest{
+				SessionID: "routing-reentry-" + test.name, Capsule: "brain", Branch: "feature", SourceLineage: domain.Lineage{Branch: "main"},
+				Mode: domain.SessionReadWrite, RemoteAvailable: true, Target: "MemoryD", EntryMode: domain.EntryTerminal,
+				Context: "default", Provider: "docker", Machine: "machine-a", Runtime: environment.runtime, Backend: environment.backend,
+			})
+			if err != nil {
+				t.Fatalf("first Open() error = %v", err)
+			}
+			snapshot := first.Snapshot
+			test.mutate(&snapshot)
+			eventCount, sshCount := len(*environment.devpod.events), len(environment.devpod.ssh)
+			_, err = environment.open.reenter(context.Background(), snapshot, OpenRequest{
+				SessionID: snapshot.SessionID, Capsule: snapshot.Capsule, Branch: snapshot.Lineage.Branch,
+				Context: "default", Provider: "docker", Target: "MemoryD", EntryMode: domain.EntryTerminal,
+			})
+			if !errors.Is(err, ErrOpenSessionMismatch) {
+				t.Fatalf("reenter() error = %v, want ErrOpenSessionMismatch", err)
+			}
+			if len(*environment.devpod.events) != eventCount || len(environment.devpod.ssh) != sshCount {
+				t.Fatalf("re-entry effects after routing mismatch: events=%v ssh=%d", *environment.devpod.events, len(environment.devpod.ssh))
+			}
+		})
+	}
+}
+
+func TestOpenReentryRejectsExplicitModeMismatchBeforeSideEffects(t *testing.T) {
+	t.Parallel()
+	environment := newRemoteOpenTestEnvironment(t)
+	first, err := environment.open.Run(context.Background(), OpenRequest{
+		SessionID: "mode-reentry-session", Capsule: "brain", Branch: "feature", SourceLineage: domain.Lineage{Branch: "main"},
+		Mode: domain.SessionReadWrite, RemoteAvailable: true, Target: "MemoryD", EntryMode: domain.EntryTerminal,
+		Context: "default", Provider: "docker", Machine: "machine-a", Runtime: environment.runtime, Backend: environment.backend,
+	})
+	if err != nil {
+		t.Fatalf("first Open() error = %v", err)
+	}
+	eventCount, sshCount := len(*environment.devpod.events), len(environment.devpod.ssh)
+	_, err = environment.open.reenter(context.Background(), first.Snapshot, OpenRequest{
+		SessionID: first.Snapshot.SessionID, Capsule: first.Snapshot.Capsule, Branch: first.Snapshot.Lineage.Branch, Mode: domain.SessionReadOnly,
+		Context: first.Snapshot.Workspace.Context, Provider: first.Snapshot.Workspace.Provider, Target: "MemoryD", EntryMode: domain.EntryTerminal,
+	})
+	if !errors.Is(err, ErrOpenSessionMismatch) {
+		t.Fatalf("reenter() error = %v, want ErrOpenSessionMismatch", err)
+	}
+	if len(*environment.devpod.events) != eventCount || len(environment.devpod.ssh) != sshCount {
+		t.Fatalf("re-entry effects after mode mismatch: events=%v ssh=%d", *environment.devpod.events, len(environment.devpod.ssh))
+	}
+}
+
+func TestOpenReentryRejectsIncoherentRemoteSourceOrModeBeforeSideEffects(t *testing.T) {
+	t.Parallel()
+	for _, test := range []struct {
+		name   string
+		mutate func(*domain.JournalSnapshot)
+	}{
+		{name: "source-kind", mutate: func(snapshot *domain.JournalSnapshot) { snapshot.Recovery.Source.Kind = domain.SourceDecisionAdopted }},
+		{name: "source-lineage", mutate: func(snapshot *domain.JournalSnapshot) { snapshot.Recovery.Source.Lineage = nil }},
+		{name: "source-generation", mutate: func(snapshot *domain.JournalSnapshot) { snapshot.Recovery.Source.Generation = nil }},
+		{name: "opened-generation", mutate: func(snapshot *domain.JournalSnapshot) { snapshot.OpenedGeneration = nil }},
+		{name: "current-base", mutate: func(snapshot *domain.JournalSnapshot) { snapshot.CurrentBase = nil }},
+		{name: "generation-mismatch", mutate: func(snapshot *domain.JournalSnapshot) {
+			other := domain.GenerationRef{Generation: snapshot.Recovery.Source.Generation.Generation + 1, ArchiveSHA256: snapshot.Recovery.Source.Generation.ArchiveSHA256}
+			snapshot.Recovery.Source.Generation = &other
+		}},
+		{name: "cleanup-policy", mutate: func(snapshot *domain.JournalSnapshot) { snapshot.Recovery.Cleanup.RemoveOwnedMaterialization = false }},
+		{name: "read-only-with-lease", mutate: func(snapshot *domain.JournalSnapshot) { snapshot.Mode = domain.SessionReadOnly }},
+		{name: "writer-without-lease", mutate: func(snapshot *domain.JournalSnapshot) { snapshot.Lease = domain.LeaseRecord{} }},
+	} {
+		test := test
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+			environment := newRemoteOpenTestEnvironment(t)
+			first, err := environment.open.Run(context.Background(), OpenRequest{
+				SessionID: "source-mode-reentry-" + test.name, Capsule: "brain", Branch: "feature", SourceLineage: domain.Lineage{Branch: "main"},
+				Mode: domain.SessionReadWrite, RemoteAvailable: true, Target: "MemoryD", EntryMode: domain.EntryTerminal,
+				Context: "default", Provider: "docker", Machine: "machine-a", Runtime: environment.runtime, Backend: environment.backend,
+			})
+			if err != nil {
+				t.Fatalf("first Open() error = %v", err)
+			}
+			snapshot := first.Snapshot
+			test.mutate(&snapshot)
+			eventCount, sshCount := len(*environment.devpod.events), len(environment.devpod.ssh)
+			_, err = environment.open.reenter(context.Background(), snapshot, OpenRequest{
+				SessionID: snapshot.SessionID, Capsule: snapshot.Capsule, Branch: snapshot.Lineage.Branch,
+				Context: snapshot.Workspace.Context, Provider: snapshot.Workspace.Provider, Target: "MemoryD", EntryMode: domain.EntryTerminal,
+			})
+			if !errors.Is(err, ErrOpenSessionMismatch) {
+				t.Fatalf("reenter() error = %v, want ErrOpenSessionMismatch", err)
+			}
+			if len(*environment.devpod.events) != eventCount || len(environment.devpod.ssh) != sshCount {
+				t.Fatalf("re-entry effects after source/mode mismatch: events=%v ssh=%d", *environment.devpod.events, len(environment.devpod.ssh))
+			}
+		})
+	}
+}
+
 func TestOpenJournalsRemoteLeaseAcquisitionIntentAndFact(t *testing.T) {
 	t.Parallel()
 	environment := newRemoteOpenTestEnvironment(t)

@@ -27,9 +27,10 @@ import (
 )
 
 var (
-	ErrOpenDependencies  = errors.New("open dependencies are incomplete")
-	ErrRecoveryRequired  = errors.New("session requires recovery before entry")
-	ErrOpenReadOnlyLease = errors.New("read-only session cannot reconcile a writer lease")
+	ErrOpenDependencies    = errors.New("open dependencies are incomplete")
+	ErrRecoveryRequired    = errors.New("session requires recovery before entry")
+	ErrOpenReadOnlyLease   = errors.New("read-only session cannot reconcile a writer lease")
+	ErrOpenSessionMismatch = errors.New("open request does not match the selected session")
 )
 
 type OpenPointerReader interface {
@@ -152,6 +153,13 @@ func (o *Open) Run(ctx context.Context, request OpenRequest) (OpenResult, error)
 	request = normalizeOpenRequest(request)
 	if err := o.validate(request); err != nil {
 		return OpenResult{}, err
+	}
+	if request.ExplicitRoot != "" {
+		source, err := capsule.ResolveSource(capsule.SourceRequest{Capsule: request.Capsule, ExplicitPath: request.ExplicitRoot})
+		if err != nil {
+			return OpenResult{}, err
+		}
+		request.ExplicitRoot = source.Root
 	}
 	if request.SessionID == "" {
 		selected, err := SelectActiveSession(ctx, o.deps.Journal, SessionSelector{Capsule: request.Capsule, Branch: request.Branch, CanonicalRoot: request.ExplicitRoot})
@@ -561,8 +569,37 @@ func (o *Open) create(ctx context.Context, request OpenRequest) (OpenResult, err
 }
 
 func (o *Open) reenter(ctx context.Context, snapshot domain.JournalSnapshot, request OpenRequest) (OpenResult, error) {
+	if (request.SessionID != "" && request.SessionID != snapshot.SessionID) || request.Capsule != snapshot.Capsule || (domain.Lineage{Branch: request.Branch}) != snapshot.Lineage ||
+		(request.Mode != "" && request.Mode != snapshot.Mode) || (request.Context != "" && request.Context != snapshot.Workspace.Context) ||
+		(request.Provider != "" && request.Provider != snapshot.Workspace.Provider) {
+		return OpenResult{}, fmt.Errorf("session %q identity does not match the open request: %w", snapshot.SessionID, ErrOpenSessionMismatch)
+	}
 	if snapshot.State != domain.SessionOpen {
 		return OpenResult{}, fmt.Errorf("session %q is %s: %w", snapshot.SessionID, snapshot.State, ErrRecoveryRequired)
+	}
+	if err := validateOpenReentrySource(snapshot); err != nil {
+		return OpenResult{}, fmt.Errorf("session %q recovery source is inconsistent: %w", snapshot.SessionID, err)
+	}
+	if err := o.deps.Ownership.Revalidate(snapshot.Materialization); err != nil {
+		return OpenResult{}, fmt.Errorf("revalidate session materialization: %w", err)
+	}
+	if snapshot.Materialization.Mode == domain.MaterializationCreated {
+		expectedRoot := filepath.Join(o.deps.Ownership.MaterializationRoot(), snapshot.Capsule, snapshot.Lineage.Branch, snapshot.SessionID)
+		if snapshot.Materialization.CanonicalPath != filepath.Clean(expectedRoot) {
+			return OpenResult{}, fmt.Errorf("created session materialization path changed: %w", capsule.ErrOwnershipMismatch)
+		}
+	}
+	if snapshot.Workspace.StagingRoot != snapshot.Materialization.CanonicalPath {
+		return OpenResult{}, errors.New("session workspace staging root does not match its materialization")
+	}
+	if snapshot.Workspace.LocalFolder != snapshot.Materialization.CanonicalPath {
+		return OpenResult{}, errors.New("session workspace local folder does not match its materialization")
+	}
+	if !filepath.IsAbs(snapshot.Workspace.EffectiveRoot) {
+		return OpenResult{}, errors.New("session effective workspace root is missing or not absolute")
+	}
+	if snapshot.Workspace.ID != workspace.DeterministicID(snapshot.Capsule, snapshot.Lineage.Branch, snapshot.Materialization.CanonicalPath) {
+		return OpenResult{}, errors.New("session workspace ID does not match its materialization")
 	}
 	root := snapshot.Materialization.CanonicalPath
 	if root == "" {
@@ -577,9 +614,6 @@ func (o *Open) reenter(ctx context.Context, snapshot domain.JournalSnapshot, req
 		return OpenResult{}, err
 	}
 	effectiveRoot := snapshot.Workspace.EffectiveRoot
-	if effectiveRoot == "" {
-		effectiveRoot = snapshot.Workspace.StagingRoot
-	}
 	mapped, err := workspace.MapTarget(snapshot.Workspace.StagingRoot, effectiveRoot, targetResult.Relative)
 	if err != nil {
 		return OpenResult{}, err
@@ -593,6 +627,31 @@ func (o *Open) reenter(ctx context.Context, snapshot domain.JournalSnapshot, req
 		return OpenResult{}, err
 	}
 	return OpenResult{Snapshot: snapshot, Target: targetResult, MappedTarget: mapped, DevPodResult: entryResult, WorkspaceID: snapshot.Workspace.ID, RecoveryCommand: "camp recover " + snapshot.SessionID}, nil
+}
+
+func validateOpenReentrySource(snapshot domain.JournalSnapshot) error {
+	if snapshot.Materialization.Mode == domain.MaterializationAdopted {
+		source := snapshot.Recovery.Source
+		if source.Kind != domain.SourceDecisionAdopted || source.Root != snapshot.Materialization.CanonicalPath || snapshot.Recovery.Cleanup.RemoveOwnedMaterialization {
+			return ErrOpenSessionMismatch
+		}
+		return nil
+	}
+	if snapshot.Materialization.Mode != domain.MaterializationCreated {
+		return ErrOpenSessionMismatch
+	}
+	source := snapshot.Recovery.Source
+	if source.Kind != domain.SourceDecisionRemote || source.Lineage == nil || source.Generation == nil ||
+		snapshot.OpenedGeneration == nil || snapshot.CurrentBase == nil || *source.Generation != *snapshot.OpenedGeneration ||
+		!snapshot.Recovery.Cleanup.RemoveOwnedMaterialization {
+		return ErrOpenSessionMismatch
+	}
+	hasLease := snapshot.Lease.Lease != nil
+	if (snapshot.Mode == domain.SessionReadWrite && !hasLease) || (snapshot.Mode == domain.SessionReadOnly && hasLease) ||
+		(snapshot.Mode != domain.SessionReadWrite && snapshot.Mode != domain.SessionReadOnly) {
+		return ErrOpenSessionMismatch
+	}
+	return nil
 }
 
 func (o *Open) observeRemote(ctx context.Context, request OpenRequest, lineage domain.Lineage, log *openJournal) (*coordination.PointerRecord, *coordination.PointerRecord, error) {

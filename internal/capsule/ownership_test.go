@@ -53,6 +53,55 @@ func TestOwnershipNeverDeletesAdoptedRootAndDeletesOnlyMatchingCreatedRoot(t *te
 	}
 }
 
+func TestOwnershipRevalidateAdoptedRejectsReplacedRootIdentity(t *testing.T) {
+	t.Parallel()
+	dataHome := filepath.Join(t.TempDir(), "data")
+	ownership, err := NewOwnership(dataHome)
+	if err != nil {
+		t.Fatal(err)
+	}
+	root := filepath.Join(t.TempDir(), "adopted")
+	if err := os.MkdirAll(root, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	record, err := ownership.Adopt(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Remove(root); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Mkdir(root, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := ownership.Revalidate(record); !errors.Is(err, ErrOwnershipMismatch) {
+		t.Fatalf("Revalidate(replaced adopted root) error = %v, want ErrOwnershipMismatch", err)
+	}
+	if info, err := os.Stat(root); err != nil || !info.IsDir() {
+		t.Fatalf("Revalidate mutated replacement root: info=%v error=%v", info, err)
+	}
+}
+
+func TestOwnershipRevalidateCreatedAcceptsExactOwnedMarker(t *testing.T) {
+	t.Parallel()
+	dataHome := filepath.Join(t.TempDir(), "data")
+	ownership, err := NewOwnership(dataHome)
+	if err != nil {
+		t.Fatal(err)
+	}
+	root := filepath.Join(ownership.MaterializationRoot(), "brain", "main", "session-a")
+	if err := os.MkdirAll(root, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	record, err := ownership.MarkCreated(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := ownership.Revalidate(record); err != nil {
+		t.Fatalf("Revalidate(created) error = %v", err)
+	}
+}
+
 func TestOwnershipFailsClosedOnMarkerOrIdentityMismatch(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()

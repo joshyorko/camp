@@ -97,6 +97,77 @@ func TestOpenReentrySelectsExistingSessionWithoutSecondWorkspaceCreation(t *test
 	}
 }
 
+func TestOpenReentryCanonicalizesExplicitRootForSessionSelection(t *testing.T) {
+	t.Parallel()
+	environment := newOpenTestEnvironment(t)
+	root := filepath.Join(t.TempDir(), "SecondBrain")
+	if err := os.MkdirAll(filepath.Join(root, "MemoryD"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	first, err := environment.open.Run(context.Background(), OpenRequest{
+		SessionID: "canonical-root-reentry-session", Capsule: "brain", Branch: "main", Mode: domain.SessionReadWrite,
+		ExplicitRoot: root, Target: "MemoryD", EntryMode: domain.EntryTerminal, Context: "default", Provider: "docker",
+		Runtime: environment.runtime, Backend: environment.backend,
+	})
+	if err != nil {
+		t.Fatalf("first Open() error = %v", err)
+	}
+	upCount, eventCount := len(environment.devpod.ups), len(*environment.events)
+	second, err := environment.open.Run(context.Background(), OpenRequest{
+		Capsule: "brain", Branch: "main", ExplicitRoot: root + string(filepath.Separator) + ".", Target: "MemoryD",
+		EntryMode: domain.EntryTerminal, Context: "default", Provider: "docker", Runtime: environment.runtime, Backend: environment.backend,
+	})
+	if err != nil {
+		t.Fatalf("re-entry Open() error = %v", err)
+	}
+	if second.Snapshot.SessionID != first.Snapshot.SessionID || len(environment.devpod.ups) != upCount || len(*environment.events) != eventCount+2 {
+		t.Fatalf("canonical-root re-entry snapshot/calls = %#v, ups=%d events=%#v", second.Snapshot, len(environment.devpod.ups), *environment.events)
+	}
+}
+
+func TestOpenReentryRejectsIncoherentAdoptedSourceBeforeSideEffects(t *testing.T) {
+	t.Parallel()
+	for _, test := range []struct {
+		name   string
+		mutate func(*domain.JournalSnapshot)
+	}{
+		{name: "source-kind", mutate: func(snapshot *domain.JournalSnapshot) { snapshot.Recovery.Source.Kind = domain.SourceDecisionRemote }},
+		{name: "source-root", mutate: func(snapshot *domain.JournalSnapshot) { snapshot.Recovery.Source.Root = t.TempDir() }},
+		{name: "cleanup-policy", mutate: func(snapshot *domain.JournalSnapshot) { snapshot.Recovery.Cleanup.RemoveOwnedMaterialization = true }},
+	} {
+		test := test
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+			environment := newOpenTestEnvironment(t)
+			root := filepath.Join(t.TempDir(), "SecondBrain")
+			if err := os.MkdirAll(filepath.Join(root, "MemoryD"), 0o700); err != nil {
+				t.Fatal(err)
+			}
+			first, err := environment.open.Run(context.Background(), OpenRequest{
+				SessionID: "adopted-source-reentry-" + test.name, Capsule: "brain", Branch: "main", Mode: domain.SessionReadWrite,
+				ExplicitRoot: root, Target: "MemoryD", EntryMode: domain.EntryTerminal, Context: "default", Provider: "docker",
+				Runtime: environment.runtime, Backend: environment.backend,
+			})
+			if err != nil {
+				t.Fatalf("first Open() error = %v", err)
+			}
+			snapshot := first.Snapshot
+			test.mutate(&snapshot)
+			eventCount, sshCount := len(*environment.events), len(environment.devpod.ssh)
+			_, err = environment.open.reenter(context.Background(), snapshot, OpenRequest{
+				SessionID: snapshot.SessionID, Capsule: snapshot.Capsule, Branch: snapshot.Lineage.Branch,
+				Context: snapshot.Workspace.Context, Provider: snapshot.Workspace.Provider, Target: "MemoryD", EntryMode: domain.EntryTerminal,
+			})
+			if !errors.Is(err, ErrOpenSessionMismatch) {
+				t.Fatalf("reenter() error = %v, want ErrOpenSessionMismatch", err)
+			}
+			if len(*environment.events) != eventCount || len(environment.devpod.ssh) != sshCount {
+				t.Fatalf("re-entry effects after adopted source mismatch: events=%v ssh=%d", *environment.events, len(environment.devpod.ssh))
+			}
+		})
+	}
+}
+
 func TestOpenRejectsUnsafeXDGLayoutAndNonCanonicalBackend(t *testing.T) {
 	t.Parallel()
 	environment := newOpenTestEnvironment(t)
@@ -219,10 +290,10 @@ func (i *openInitializer) Initialize(_ context.Context, root, capsuleID string) 
 }
 
 type openDevPod struct {
-	events *[]string
-	ups    []devpodadapter.UpOptions
-	ssh    []devpodadapter.SSHOptions
-	folder string
+	events    *[]string
+	ups       []devpodadapter.UpOptions
+	ssh       []devpodadapter.SSHOptions
+	folder    string
 	folderErr error
 }
 
