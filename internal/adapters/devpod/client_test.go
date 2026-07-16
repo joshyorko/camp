@@ -20,6 +20,90 @@ func (r *recordingRunner) Run(_ context.Context, command ports.Command) (ports.R
 	return r.result, r.err
 }
 
+type startedRecordingRunner struct {
+	commands []ports.Command
+	runCalls int
+	result   ports.Result
+	err      error
+}
+
+func (r *startedRecordingRunner) Run(_ context.Context, _ ports.Command) (ports.Result, error) {
+	r.runCalls++
+	return ports.Result{}, errors.New("Run called instead of RunStarted")
+}
+
+func (r *startedRecordingRunner) RunStarted(_ context.Context, command ports.Command, started func() error) (ports.Result, error) {
+	r.commands = append(r.commands, command)
+	if err := started(); err != nil {
+		return ports.Result{}, err
+	}
+	return r.result, r.err
+}
+
+func TestSSHWithStartPreservesExactArgvThroughStartedRunner(t *testing.T) {
+	t.Parallel()
+	runner := &startedRecordingRunner{result: ports.Result{ExitCode: 23}}
+	client := NewClient("/opt/devpod", runner)
+	callbackCalls := 0
+	got, err := client.SSHWithStart(context.Background(), SSHOptions{
+		WorkspaceID:     "camp-second-brain",
+		Context:         "default",
+		Workdir:         "/workspaces/Memory D",
+		User:            "vscode",
+		ForwardPorts:    []string{"127.0.0.1:3000:3000"},
+		ReverseForwards: []string{"127.0.0.1:5000:127.0.0.1:5000"},
+		SetEnv:          []string{"CAMP_CAPSULE=second-brain"},
+		StartServices:   true,
+		ForwardedArgv:   []string{"--log-output", "plain"},
+	}, func() error {
+		callbackCalls++
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("SSHWithStart() error = %v", err)
+	}
+	if !reflect.DeepEqual(got, runner.result) {
+		t.Fatalf("result = %#v, want %#v", got, runner.result)
+	}
+	if callbackCalls != 1 {
+		t.Fatalf("started callback calls = %d, want 1", callbackCalls)
+	}
+	if runner.runCalls != 0 {
+		t.Fatalf("Run calls = %d, want 0", runner.runCalls)
+	}
+	want := ports.Command{Executable: "/opt/devpod", Argv: []string{
+		"ssh", "--context", "default", "--workdir", "/workspaces/Memory D", "--user", "vscode",
+		"--forward-ports", "127.0.0.1:3000:3000",
+		"--reverse-forward-ports", "127.0.0.1:5000:127.0.0.1:5000",
+		"--set-env", "CAMP_CAPSULE=second-brain", "--log-output", "plain",
+		"--start-services=true", "camp-second-brain",
+	}}
+	if len(runner.commands) != 1 || !reflect.DeepEqual(runner.commands[0], want) {
+		t.Fatalf("commands = %#v, want [%#v]", runner.commands, want)
+	}
+}
+
+func TestSSHWithStartRejectsRunnerWithoutStartObservationWithoutRunning(t *testing.T) {
+	t.Parallel()
+	runner := &recordingRunner{}
+	callbackCalls := 0
+	_, err := NewClient("/opt/devpod", runner).SSHWithStart(context.Background(), SSHOptions{
+		WorkspaceID: "camp-second-brain",
+	}, func() error {
+		callbackCalls++
+		return nil
+	})
+	if !errors.Is(err, ErrStartObservationRequired) {
+		t.Fatalf("SSHWithStart() error = %v, want ErrStartObservationRequired", err)
+	}
+	if len(runner.commands) != 0 {
+		t.Fatalf("runner commands = %#v, want none", runner.commands)
+	}
+	if callbackCalls != 0 {
+		t.Fatalf("started callback calls = %d, want 0", callbackCalls)
+	}
+}
+
 func TestExactDevPodArgv(t *testing.T) {
 	tests := []struct {
 		name string

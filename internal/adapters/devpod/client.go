@@ -14,6 +14,7 @@ import (
 var (
 	ErrLifecycleActionNotAllowed = errors.New("DevPod lifecycle action not allowed")
 	ErrUnknownWorkspaceState     = errors.New("unknown DevPod workspace state")
+	ErrStartObservationRequired  = errors.New("DevPod runner cannot observe subprocess start")
 )
 
 type WorkspaceState string
@@ -126,6 +127,18 @@ func (c *Client) SSH(ctx context.Context, options SSHOptions) (ports.Result, err
 		return ports.Result{}, err
 	}
 	return c.runner.Run(ctx, command)
+}
+
+func (c *Client) SSHWithStart(ctx context.Context, options SSHOptions, started func() error) (ports.Result, error) {
+	command, err := c.SSHCommand(options)
+	if err != nil {
+		return ports.Result{}, err
+	}
+	runner, ok := c.runner.(ports.StartedRunner)
+	if !ok {
+		return ports.Result{}, ErrStartObservationRequired
+	}
+	return runner.RunStarted(ctx, command, started)
 }
 
 func (c *Client) SSHCommand(options SSHOptions) (ports.Command, error) {

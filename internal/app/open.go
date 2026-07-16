@@ -63,8 +63,11 @@ type OpenInitializer interface {
 
 type OpenDevPod interface {
 	Up(context.Context, devpodadapter.UpOptions) (ports.Result, error)
+	ListInContext(context.Context, string) ([]devpodadapter.Workspace, error)
+	StatusInContext(context.Context, string, string) (devpodadapter.WorkspaceStatus, error)
 	ResolveWorkspaceFolderInContext(context.Context, string, string) (string, error)
 	SSH(context.Context, devpodadapter.SSHOptions) (ports.Result, error)
+	SSHWithStart(context.Context, devpodadapter.SSHOptions, func() error) (ports.Result, error)
 }
 
 type OpenTargetResolver interface {
@@ -141,6 +144,26 @@ type openLeaseReceipt struct {
 	ObservedRevision string                `json:"observedRevision"`
 }
 
+type openWorkspaceUpInput struct {
+	ID       string                        `json:"id"`
+	Context  string                        `json:"context"`
+	Provider string                        `json:"provider"`
+	Env      devpodadapter.CampEnvironment `json:"environment"`
+}
+
+type openWorkspaceRootInput struct {
+	ID string `json:"id"`
+}
+
+type openSessionOpenedInput struct {
+	ID string `json:"id"`
+}
+
+type openTerminalEntryInput struct {
+	ID      string `json:"id"`
+	Workdir string `json:"workdir"`
+}
+
 type Open struct {
 	deps OpenDependencies
 }
@@ -164,27 +187,210 @@ func (o *Open) Run(ctx context.Context, request OpenRequest) (OpenResult, error)
 	if request.SessionID == "" {
 		selected, err := SelectActiveSession(ctx, o.deps.Journal, SessionSelector{Capsule: request.Capsule, Branch: request.Branch, CanonicalRoot: request.ExplicitRoot})
 		if err == nil {
-			return o.reenter(ctx, selected, request)
+			loaded, pending, loadErr := o.deps.Journal.Load(ctx, selected.SessionID)
+			if loadErr != nil {
+				return OpenResult{}, loadErr
+			}
+			return o.reenterWithPending(ctx, loaded, pending, request)
 		}
 		if !errors.Is(err, ErrNoActiveSession) {
 			return OpenResult{}, err
 		}
-	} else if snapshot, _, err := o.deps.Journal.Load(ctx, request.SessionID); err == nil && activeSessionState(snapshot.State) {
-		return o.reenter(ctx, snapshot, request)
+	} else if snapshot, pending, err := o.deps.Journal.Load(ctx, request.SessionID); err == nil && activeSessionState(snapshot.State) {
+		return o.reenterWithPending(ctx, snapshot, pending, request)
 	}
 	return o.create(ctx, request)
 }
 
+func (o *Open) reenterWithPending(ctx context.Context, snapshot domain.JournalSnapshot, pending []ports.PendingIntent, request OpenRequest) (OpenResult, error) {
+	if snapshot.State == domain.SessionOpen && len(pending) != 0 {
+		terminalPending := containsPendingTransition(pending, "TerminalEntryDispatched")
+		reconciled, err := o.Reconcile(ctx, snapshot.SessionID)
+		if err != nil {
+			return OpenResult{}, err
+		}
+		if terminalPending {
+			return OpenResult{Snapshot: reconciled, WorkspaceID: reconciled.Workspace.ID, RecoveryCommand: "camp recover " + reconciled.SessionID}, errors.New("workspace is open; previous terminal entry outcome is unknown; run camp attach to enter it")
+		}
+		snapshot = reconciled
+	}
+	return o.reenter(ctx, snapshot, request)
+}
+
 func (o *Open) Reconcile(ctx context.Context, sessionID string) (domain.JournalSnapshot, error) {
-	if o == nil || o.deps.Journal == nil || o.deps.Pointers == nil || o.deps.Leases == nil || o.deps.Clock == nil || sessionID == "" {
+	if o == nil || o.deps.Journal == nil || o.deps.Clock == nil || sessionID == "" {
 		return domain.JournalSnapshot{}, errors.New("open reconciliation dependencies or session are incomplete")
 	}
 	return journalstore.Reconcile(ctx, o.deps.Journal, sessionID, map[string]journalstore.Observer{
-		"RemoteLeaseAcquisition": o.observeRemoteLeaseAcquisition,
+		"RemoteLeaseAcquisition":  o.observeRemoteLeaseAcquisition,
+		"WorkspaceUp":             o.observeWorkspaceUp,
+		"WorkspaceRootResolved":   o.observeWorkspaceRootResolved,
+		"SessionOpened":           o.observeSessionOpened,
+		"TerminalEntryDispatched": o.observeTerminalEntryDispatched,
 	})
 }
 
+func (o *Open) observeWorkspaceUp(ctx context.Context, snapshot domain.JournalSnapshot, intent ports.IntentRecord) (ports.FactRecord, domain.JournalSnapshot, error) {
+	if o.deps.DevPod == nil || o.deps.Ownership == nil {
+		return ports.FactRecord{}, snapshot, errors.New("workspace reconciliation dependencies are incomplete")
+	}
+	if snapshot.State != domain.SessionOpening && snapshot.State != domain.SessionRecovering {
+		return ports.FactRecord{}, snapshot, fmt.Errorf("session %q is not awaiting workspace creation", snapshot.SessionID)
+	}
+	var input openWorkspaceUpInput
+	if err := json.Unmarshal(intent.Input, &input); err != nil {
+		return ports.FactRecord{}, snapshot, fmt.Errorf("decode workspace up intent: %w", err)
+	}
+	root := snapshot.Materialization.CanonicalPath
+	expectedID := workspace.DeterministicID(snapshot.Capsule, snapshot.Lineage.Branch, root)
+	checkpoint := ""
+	if snapshot.OpenedGeneration != nil {
+		checkpoint = strconv.FormatUint(snapshot.OpenedGeneration.Generation, 10)
+	}
+	expectedEnvironment := devpodadapter.CampEnvironment{
+		Registry: endpoint(snapshot.Recovery.Configuration.RegistryPort), Fileserver: endpoint(snapshot.Recovery.Configuration.FileserverPort),
+		Capsule: snapshot.Capsule, Checkpoint: checkpoint,
+	}
+	if intent.SessionID != snapshot.SessionID || input.ID == "" || input.ID != expectedID || input.Context == "" || input.Context != snapshot.Workspace.Context ||
+		input.Provider == "" || input.Provider != snapshot.Workspace.Provider || input.Env != expectedEnvironment || root == "" {
+		return ports.FactRecord{}, snapshot, errors.New("workspace up intent does not match the pending session")
+	}
+	if err := o.deps.Ownership.Revalidate(snapshot.Materialization); err != nil {
+		return ports.FactRecord{}, snapshot, fmt.Errorf("revalidate workspace materialization: %w", err)
+	}
+	workspaces, err := o.deps.DevPod.ListInContext(ctx, input.Context)
+	if err != nil {
+		return ports.FactRecord{}, snapshot, err
+	}
+	matches := 0
+	for _, candidate := range workspaces {
+		if candidate.ID != input.ID {
+			continue
+		}
+		matches++
+		if candidate.Context != input.Context || candidate.Provider.Name != input.Provider || candidate.Source.LocalFolder != root {
+			return ports.FactRecord{}, snapshot, errors.New("observed DevPod workspace does not match the pending intent")
+		}
+	}
+	if matches != 1 {
+		return ports.FactRecord{}, snapshot, errors.New("pending DevPod workspace is absent or ambiguous")
+	}
+	status, err := o.deps.DevPod.StatusInContext(ctx, input.Context, input.ID)
+	if err != nil {
+		return ports.FactRecord{}, snapshot, err
+	}
+	if status.ID != input.ID || (status.Context != "" && status.Context != input.Context) || (status.Provider != "" && status.Provider != input.Provider) || status.State != devpodadapter.StateRunning {
+		return ports.FactRecord{}, snapshot, fmt.Errorf("observed DevPod workspace is not ready: %w", devpodadapter.ErrUnknownWorkspaceState)
+	}
+	next := snapshot
+	next.Workspace.ID = input.ID
+	next.Workspace.LocalFolder = root
+	next.Workspace.StagingRoot = root
+	next.Workspace.Target = snapshot.Recovery.Entry.Target
+	now := o.deps.Clock.Now().UTC()
+	if now.IsZero() {
+		return ports.FactRecord{}, snapshot, errors.New("open reconciliation clock returned zero time")
+	}
+	return ports.FactRecord{IntentID: intent.ID, SessionID: intent.SessionID, Transition: intent.Transition, Timestamp: now, Output: safeJSON(status)}, next, nil
+}
+
+func (o *Open) observeWorkspaceRootResolved(ctx context.Context, snapshot domain.JournalSnapshot, intent ports.IntentRecord) (ports.FactRecord, domain.JournalSnapshot, error) {
+	if o.deps.DevPod == nil || o.deps.Ownership == nil {
+		return ports.FactRecord{}, snapshot, errors.New("workspace root reconciliation dependencies are incomplete")
+	}
+	if snapshot.State != domain.SessionOpening && snapshot.State != domain.SessionRecovering {
+		return ports.FactRecord{}, snapshot, fmt.Errorf("session %q is not awaiting workspace root resolution", snapshot.SessionID)
+	}
+	var input openWorkspaceRootInput
+	if err := json.Unmarshal(intent.Input, &input); err != nil {
+		return ports.FactRecord{}, snapshot, fmt.Errorf("decode workspace root intent: %w", err)
+	}
+	if intent.SessionID != snapshot.SessionID || input.ID == "" || input.ID != snapshot.Workspace.ID {
+		return ports.FactRecord{}, snapshot, errors.New("workspace root intent does not match the pending session")
+	}
+	if err := o.validateOpenSession(snapshot, false); err != nil {
+		return ports.FactRecord{}, snapshot, err
+	}
+	effectiveRoot, err := o.deps.DevPod.ResolveWorkspaceFolderInContext(ctx, snapshot.Workspace.Context, snapshot.Workspace.ID)
+	if err != nil {
+		return ports.FactRecord{}, snapshot, err
+	}
+	if !filepath.IsAbs(effectiveRoot) || filepath.Clean(effectiveRoot) == string(filepath.Separator) {
+		return ports.FactRecord{}, snapshot, errors.New("observed DevPod workspace root is unsafe")
+	}
+	next := snapshot
+	next.Workspace.EffectiveRoot = filepath.Clean(effectiveRoot)
+	now := o.deps.Clock.Now().UTC()
+	if now.IsZero() {
+		return ports.FactRecord{}, snapshot, errors.New("open reconciliation clock returned zero time")
+	}
+	return ports.FactRecord{IntentID: intent.ID, SessionID: intent.SessionID, Transition: intent.Transition, Timestamp: now, Output: safeJSON(next.Workspace.EffectiveRoot)}, next, nil
+}
+
+func (o *Open) observeSessionOpened(_ context.Context, snapshot domain.JournalSnapshot, intent ports.IntentRecord) (ports.FactRecord, domain.JournalSnapshot, error) {
+	if o.deps.Ownership == nil {
+		return ports.FactRecord{}, snapshot, errors.New("session readiness reconciliation dependencies are incomplete")
+	}
+	if snapshot.State != domain.SessionOpening && snapshot.State != domain.SessionRecovering {
+		return ports.FactRecord{}, snapshot, fmt.Errorf("session %q is not awaiting readiness completion", snapshot.SessionID)
+	}
+	var input openSessionOpenedInput
+	if err := json.Unmarshal(intent.Input, &input); err != nil {
+		return ports.FactRecord{}, snapshot, fmt.Errorf("decode session readiness intent: %w", err)
+	}
+	if intent.SessionID != snapshot.SessionID || input.ID == "" || input.ID != snapshot.Workspace.ID || snapshot.Recovery.Entry.Mode != domain.EntryTerminal {
+		return ports.FactRecord{}, snapshot, errors.New("session readiness intent does not match the pending session")
+	}
+	if err := o.validateOpenSession(snapshot, true); err != nil {
+		return ports.FactRecord{}, snapshot, err
+	}
+	next := snapshot
+	next.State = domain.SessionOpen
+	now := o.deps.Clock.Now().UTC()
+	if now.IsZero() {
+		return ports.FactRecord{}, snapshot, errors.New("open reconciliation clock returned zero time")
+	}
+	return ports.FactRecord{IntentID: intent.ID, SessionID: intent.SessionID, Transition: intent.Transition, Timestamp: now}, next, nil
+}
+
+func (o *Open) observeTerminalEntryDispatched(_ context.Context, snapshot domain.JournalSnapshot, intent ports.IntentRecord) (ports.FactRecord, domain.JournalSnapshot, error) {
+	if o.deps.Ownership == nil {
+		return ports.FactRecord{}, snapshot, errors.New("terminal entry reconciliation dependencies are incomplete")
+	}
+	if snapshot.State != domain.SessionOpen {
+		return ports.FactRecord{}, snapshot, fmt.Errorf("session %q is not open for terminal entry reconciliation", snapshot.SessionID)
+	}
+	var input openTerminalEntryInput
+	if err := json.Unmarshal(intent.Input, &input); err != nil {
+		return ports.FactRecord{}, snapshot, fmt.Errorf("decode terminal entry intent: %w", err)
+	}
+	if intent.SessionID != snapshot.SessionID || input.ID == "" || input.ID != snapshot.Workspace.ID || snapshot.Recovery.Entry.Mode != domain.EntryTerminal {
+		return ports.FactRecord{}, snapshot, errors.New("terminal entry intent does not match the open session")
+	}
+	if err := o.validateOpenSession(snapshot, true); err != nil {
+		return ports.FactRecord{}, snapshot, err
+	}
+	workdir := filepath.Clean(input.Workdir)
+	relative, err := filepath.Rel(snapshot.Workspace.EffectiveRoot, workdir)
+	if err != nil || !filepath.IsAbs(input.Workdir) || workdir != input.Workdir || relative == ".." || strings.HasPrefix(relative, ".."+string(filepath.Separator)) {
+		return ports.FactRecord{}, snapshot, errors.New("terminal entry intent workdir escapes the open workspace")
+	}
+	now := o.deps.Clock.Now().UTC()
+	if now.IsZero() {
+		return ports.FactRecord{}, snapshot, errors.New("open reconciliation clock returned zero time")
+	}
+	return ports.FactRecord{
+		IntentID: intent.ID, SessionID: intent.SessionID, Transition: intent.Transition, Timestamp: now,
+		Output: safeJSON(struct {
+			Outcome string `json:"outcome"`
+		}{Outcome: "unknown-after-process-restart"}),
+	}, snapshot, nil
+}
+
 func (o *Open) observeRemoteLeaseAcquisition(ctx context.Context, snapshot domain.JournalSnapshot, intent ports.IntentRecord) (ports.FactRecord, domain.JournalSnapshot, error) {
+	if o.deps.Pointers == nil || o.deps.Leases == nil {
+		return ports.FactRecord{}, snapshot, errors.New("lease reconciliation dependencies are incomplete")
+	}
 	if snapshot.Mode != domain.SessionReadWrite {
 		return ports.FactRecord{}, snapshot, ErrOpenReadOnlyLease
 	}
@@ -524,50 +730,11 @@ func (o *Open) create(ctx context.Context, request OpenRequest) (OpenResult, err
 	upOptions := devpodadapter.UpOptions{WorkspacePath: root, WorkspaceID: workspaceID, Context: request.Context, Provider: request.Provider, DevcontainerPath: devcontainer.Path, CampEnvironment: &devpodadapter.CampEnvironment{Registry: endpoint(request.Runtime.RegistryPort), Fileserver: endpoint(request.Runtime.FileserverPort), Capsule: request.Capsule, Checkpoint: checkpoint}}
 	snapshot.Workspace = domain.WorkspaceRecord{ID: workspaceID, Context: request.Context, Provider: request.Provider, LocalProvider: request.LocalProvider, LocalFolder: root, Target: targetResult.Relative, StagingRoot: root}
 	var upResult ports.Result
-	if err := journal.phase(ctx, "WorkspaceUp", safeJSON(struct {
-		ID       string                        `json:"id"`
-		Context  string                        `json:"context"`
-		Provider string                        `json:"provider"`
-		Env      devpodadapter.CampEnvironment `json:"environment"`
-	}{ID: workspaceID, Context: request.Context, Provider: request.Provider, Env: *upOptions.CampEnvironment}), &upResult, func() error { var err error; upResult, err = o.deps.DevPod.Up(ctx, upOptions); return err }); err != nil {
-		return OpenResult{}, err
-	}
-	var effectiveRoot string
-	if err := journal.phase(ctx, "WorkspaceRootResolved", safeJSON(struct {
-		ID string `json:"id"`
-	}{ID: workspaceID}), &effectiveRoot, func() error {
-		var err error
-		effectiveRoot, err = o.deps.DevPod.ResolveWorkspaceFolderInContext(ctx, request.Context, workspaceID)
-		if err == nil {
-			snapshot.Workspace.EffectiveRoot = effectiveRoot
-		}
-		return err
-	}); err != nil {
-		return OpenResult{}, err
-	}
-	mapped, err := workspace.MapTarget(root, effectiveRoot, targetResult.Relative)
-	if err != nil {
+	if err := journal.phase(ctx, "WorkspaceUp", safeJSON(openWorkspaceUpInput{ID: workspaceID, Context: request.Context, Provider: request.Provider, Env: *upOptions.CampEnvironment}), &upResult, func() error { var err error; upResult, err = o.deps.DevPod.Up(ctx, upOptions); return err }); err != nil {
 		return OpenResult{}, err
 	}
 	snapshot.Recovery.Configuration.DevcontainerPath = devcontainer.Path
-	var entryResult ports.Result
-	if request.EntryMode == domain.EntryTerminal {
-		if err := journal.phase(ctx, "TerminalEntryDispatched", safeJSON(struct{ ID, Workdir string }{ID: workspaceID, Workdir: mapped}), &entryResult, func() error {
-			var err error
-			entryResult, err = o.deps.DevPod.SSH(ctx, devpodadapter.SSHOptions{WorkspaceID: workspaceID, Context: request.Context, Workdir: mapped, StartServices: true})
-			return err
-		}); err != nil {
-			return OpenResult{}, err
-		}
-	}
-	snapshot.State = domain.SessionOpen
-	snapshot.Recovery.Entry.Mode = request.EntryMode
-	if err := journal.phase(ctx, "SessionOpened", safeJSON(struct {
-		ID string `json:"id"`
-	}{ID: workspaceID}), nil, func() error { return nil }); err != nil {
-		return OpenResult{}, err
-	}
-	return OpenResult{Snapshot: snapshot, Target: targetResult, MappedTarget: mapped, DevPodResult: entryResult, WorkspaceID: workspaceID, RecoveryCommand: "camp recover " + sessionID}, nil
+	return o.completeWorkspaceOpen(ctx, snapshot, request, targetResult)
 }
 
 func (o *Open) reenter(ctx context.Context, snapshot domain.JournalSnapshot, request OpenRequest) (OpenResult, error) {
@@ -576,32 +743,14 @@ func (o *Open) reenter(ctx context.Context, snapshot domain.JournalSnapshot, req
 		(request.Provider != "" && request.Provider != snapshot.Workspace.Provider) {
 		return OpenResult{}, fmt.Errorf("session %q identity does not match the open request: %w", snapshot.SessionID, ErrOpenSessionMismatch)
 	}
+	if snapshot.State == domain.SessionOpening || snapshot.State == domain.SessionRecovering {
+		return o.resumeOpening(ctx, snapshot, request)
+	}
 	if snapshot.State != domain.SessionOpen {
 		return OpenResult{}, fmt.Errorf("session %q is %s: %w", snapshot.SessionID, snapshot.State, ErrRecoveryRequired)
 	}
-	if err := validateOpenReentrySource(snapshot); err != nil {
-		return OpenResult{}, fmt.Errorf("session %q recovery source is inconsistent: %w", snapshot.SessionID, err)
-	}
-	if err := o.deps.Ownership.Revalidate(snapshot.Materialization); err != nil {
-		return OpenResult{}, fmt.Errorf("revalidate session materialization: %w", err)
-	}
-	if snapshot.Materialization.Mode == domain.MaterializationCreated {
-		expectedRoot := filepath.Join(o.deps.Ownership.MaterializationRoot(), snapshot.Capsule, snapshot.Lineage.Branch, snapshot.SessionID)
-		if snapshot.Materialization.CanonicalPath != filepath.Clean(expectedRoot) {
-			return OpenResult{}, fmt.Errorf("created session materialization path changed: %w", capsule.ErrOwnershipMismatch)
-		}
-	}
-	if snapshot.Workspace.StagingRoot != snapshot.Materialization.CanonicalPath {
-		return OpenResult{}, errors.New("session workspace staging root does not match its materialization")
-	}
-	if snapshot.Workspace.LocalFolder != snapshot.Materialization.CanonicalPath {
-		return OpenResult{}, errors.New("session workspace local folder does not match its materialization")
-	}
-	if !filepath.IsAbs(snapshot.Workspace.EffectiveRoot) {
-		return OpenResult{}, errors.New("session effective workspace root is missing or not absolute")
-	}
-	if snapshot.Workspace.ID != workspace.DeterministicID(snapshot.Capsule, snapshot.Lineage.Branch, snapshot.Materialization.CanonicalPath) {
-		return OpenResult{}, errors.New("session workspace ID does not match its materialization")
+	if err := o.validateOpenSession(snapshot, true); err != nil {
+		return OpenResult{}, err
 	}
 	root := snapshot.Materialization.CanonicalPath
 	if root == "" {
@@ -629,6 +778,155 @@ func (o *Open) reenter(ctx context.Context, snapshot domain.JournalSnapshot, req
 		return OpenResult{}, err
 	}
 	return OpenResult{Snapshot: snapshot, Target: targetResult, MappedTarget: mapped, DevPodResult: entryResult, WorkspaceID: snapshot.Workspace.ID, RecoveryCommand: "camp recover " + snapshot.SessionID}, nil
+}
+
+func (o *Open) resumeOpening(ctx context.Context, snapshot domain.JournalSnapshot, request OpenRequest) (OpenResult, error) {
+	reconciled, err := o.Reconcile(ctx, snapshot.SessionID)
+	if err != nil {
+		return OpenResult{}, err
+	}
+	if reconciled.Workspace.ID == "" || reconciled.Workspace.LocalFolder == "" || reconciled.Workspace.StagingRoot == "" {
+		return OpenResult{}, fmt.Errorf("session %q has not reached durable workspace readiness: %w", snapshot.SessionID, ErrRecoveryRequired)
+	}
+	if err := o.validateOpenSession(reconciled, false); err != nil {
+		return OpenResult{}, err
+	}
+	root := reconciled.Materialization.CanonicalPath
+	targetName := request.Target
+	if targetName == "" {
+		targetName = reconciled.Recovery.Entry.Target
+	}
+	targetResult, err := o.deps.Target.Resolve(ctx, root, targetName)
+	if err != nil {
+		return OpenResult{}, err
+	}
+	return o.completeWorkspaceOpen(ctx, reconciled, request, targetResult)
+}
+
+func (o *Open) completeWorkspaceOpen(ctx context.Context, snapshot domain.JournalSnapshot, request OpenRequest, targetResult target.Result) (OpenResult, error) {
+	now := o.deps.Clock.Now().UTC()
+	if now.IsZero() {
+		return OpenResult{}, errors.New("open clock returned zero time")
+	}
+	journal := newOpenJournal(o.deps.Journal, &snapshot, now)
+	root := snapshot.Materialization.CanonicalPath
+	effectiveRoot := snapshot.Workspace.EffectiveRoot
+	if effectiveRoot == "" {
+		if err := journal.phase(ctx, "WorkspaceRootResolved", safeJSON(openWorkspaceRootInput{ID: snapshot.Workspace.ID}), &effectiveRoot, func() error {
+			var err error
+			effectiveRoot, err = o.deps.DevPod.ResolveWorkspaceFolderInContext(ctx, snapshot.Workspace.Context, snapshot.Workspace.ID)
+			if err == nil {
+				snapshot.Workspace.EffectiveRoot = effectiveRoot
+			}
+			return err
+		}); err != nil {
+			return OpenResult{}, err
+		}
+	}
+	mapped, err := workspace.MapTarget(root, effectiveRoot, targetResult.Relative)
+	if err != nil {
+		return OpenResult{}, err
+	}
+	snapshot.State = domain.SessionOpen
+	snapshot.Recovery.Entry.Mode = request.EntryMode
+	if err := journal.phase(ctx, "SessionOpened", safeJSON(openSessionOpenedInput{ID: snapshot.Workspace.ID}), nil, func() error { return nil }); err != nil {
+		return OpenResult{}, err
+	}
+	var entryResult ports.Result
+	if request.EntryMode == domain.EntryTerminal {
+		intent, err := journal.ensureIntent(ctx, "TerminalEntryDispatched", safeJSON(openTerminalEntryInput{ID: snapshot.Workspace.ID, Workdir: mapped}))
+		if err != nil {
+			return OpenResult{}, err
+		}
+		var entryErr error
+		entryStarted := false
+		entryResult, entryErr = o.deps.DevPod.SSHWithStart(ctx, devpodadapter.SSHOptions{WorkspaceID: snapshot.Workspace.ID, Context: snapshot.Workspace.Context, Workdir: mapped, StartServices: true}, func() error {
+			entryStarted = true
+			return journal.recordFact(ctx, intent, struct {
+				Started bool `json:"started"`
+			}{Started: true}, nil)
+		})
+		if entryErr != nil {
+			if err := o.settleFailedTerminalEntry(ctx, intent, now, entryStarted); err != nil {
+				return OpenResult{}, fmt.Errorf("workspace is open; run camp attach to enter it; terminal entry outcome could not be durably settled: %w", errors.Join(entryErr, err))
+			}
+			return OpenResult{}, fmt.Errorf("workspace is open; run camp attach to enter it: %w", entryErr)
+		}
+	}
+	return OpenResult{Snapshot: snapshot, Target: targetResult, MappedTarget: mapped, DevPodResult: entryResult, WorkspaceID: snapshot.Workspace.ID, RecoveryCommand: "camp recover " + snapshot.SessionID}, nil
+}
+
+func (o *Open) settleFailedTerminalEntry(ctx context.Context, intent ports.IntentRecord, now time.Time, started bool) error {
+	ctx = context.WithoutCancel(ctx)
+	snapshot, pending, err := o.deps.Journal.Load(ctx, intent.SessionID)
+	if err != nil {
+		return fmt.Errorf("reload terminal entry intent: %w", err)
+	}
+	if !containsPendingIntent(pending, intent.ID) {
+		return nil
+	}
+	fact := ports.FactRecord{
+		IntentID: intent.ID, SessionID: intent.SessionID, Transition: intent.Transition, Timestamp: now,
+		Output: safeJSON(struct {
+			Started bool `json:"started"`
+		}{Started: started}),
+	}
+	if err := o.deps.Journal.RecordFact(ctx, fact, snapshot); err != nil {
+		_, after, loadErr := o.deps.Journal.Load(ctx, intent.SessionID)
+		if loadErr != nil {
+			return errors.Join(err, fmt.Errorf("reload terminal entry intent after fact error: %w", loadErr))
+		}
+		if containsPendingIntent(after, intent.ID) {
+			return fmt.Errorf("record terminal entry failure fact: %w", err)
+		}
+	}
+	return nil
+}
+
+func containsPendingIntent(pending []ports.PendingIntent, intentID string) bool {
+	for _, item := range pending {
+		if item.Intent.ID == intentID {
+			return true
+		}
+	}
+	return false
+}
+
+func containsPendingTransition(pending []ports.PendingIntent, transition string) bool {
+	for _, item := range pending {
+		if item.Intent.Transition == transition {
+			return true
+		}
+	}
+	return false
+}
+
+func (o *Open) validateOpenSession(snapshot domain.JournalSnapshot, requireEffectiveRoot bool) error {
+	if err := validateOpenReentrySource(snapshot); err != nil {
+		return fmt.Errorf("session %q recovery source is inconsistent: %w", snapshot.SessionID, err)
+	}
+	if err := o.deps.Ownership.Revalidate(snapshot.Materialization); err != nil {
+		return fmt.Errorf("revalidate session materialization: %w", err)
+	}
+	if snapshot.Materialization.Mode == domain.MaterializationCreated {
+		expectedRoot := filepath.Join(o.deps.Ownership.MaterializationRoot(), snapshot.Capsule, snapshot.Lineage.Branch, snapshot.SessionID)
+		if snapshot.Materialization.CanonicalPath != filepath.Clean(expectedRoot) {
+			return fmt.Errorf("created session materialization path changed: %w", capsule.ErrOwnershipMismatch)
+		}
+	}
+	if snapshot.Workspace.StagingRoot != snapshot.Materialization.CanonicalPath {
+		return errors.New("session workspace staging root does not match its materialization")
+	}
+	if snapshot.Workspace.LocalFolder != snapshot.Materialization.CanonicalPath {
+		return errors.New("session workspace local folder does not match its materialization")
+	}
+	if requireEffectiveRoot && !filepath.IsAbs(snapshot.Workspace.EffectiveRoot) {
+		return errors.New("session effective workspace root is missing or not absolute")
+	}
+	if snapshot.Workspace.ID != workspace.DeterministicID(snapshot.Capsule, snapshot.Lineage.Branch, snapshot.Materialization.CanonicalPath) {
+		return errors.New("session workspace ID does not match its materialization")
+	}
+	return nil
 }
 
 func validateOpenReentrySource(snapshot domain.JournalSnapshot) error {

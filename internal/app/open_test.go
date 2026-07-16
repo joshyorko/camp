@@ -354,6 +354,24 @@ func (d *openDevPod) Up(_ context.Context, options devpodadapter.UpOptions) (por
 	d.ups = append(d.ups, options)
 	return ports.Result{}, nil
 }
+func (d *openDevPod) ListInContext(_ context.Context, devpodContext string) ([]devpodadapter.Workspace, error) {
+	workspaces := make([]devpodadapter.Workspace, 0, len(d.ups))
+	for _, up := range d.ups {
+		workspaces = append(workspaces, devpodadapter.Workspace{
+			ID: up.WorkspaceID, Provider: devpodadapter.WorkspaceProvider{Name: up.Provider},
+			Source: devpodadapter.WorkspaceSource{LocalFolder: up.WorkspacePath}, Context: devpodContext,
+		})
+	}
+	return workspaces, nil
+}
+func (d *openDevPod) StatusInContext(_ context.Context, devpodContext, workspaceID string) (devpodadapter.WorkspaceStatus, error) {
+	for _, up := range d.ups {
+		if up.WorkspaceID == workspaceID {
+			return devpodadapter.WorkspaceStatus{ID: workspaceID, Context: devpodContext, Provider: up.Provider, State: devpodadapter.StateRunning}, nil
+		}
+	}
+	return devpodadapter.WorkspaceStatus{ID: workspaceID, Context: devpodContext, State: devpodadapter.StateNotFound}, nil
+}
 func (d *openDevPod) ResolveWorkspaceFolderInContext(context.Context, string, string) (string, error) {
 	*d.events = append(*d.events, "folder")
 	if d.folderErr != nil {
@@ -365,6 +383,12 @@ func (d *openDevPod) SSH(_ context.Context, options devpodadapter.SSHOptions) (p
 	*d.events = append(*d.events, "ssh")
 	d.ssh = append(d.ssh, options)
 	return ports.Result{}, nil
+}
+func (d *openDevPod) SSHWithStart(ctx context.Context, options devpodadapter.SSHOptions, started func() error) (ports.Result, error) {
+	if err := started(); err != nil {
+		return ports.Result{}, err
+	}
+	return d.SSH(ctx, options)
 }
 
 type openTargetResolver struct {

@@ -31,6 +31,10 @@ type Runner interface {
 	Run(ctx context.Context, command Command) (Result, error)
 }
 
+type StartedRunner interface {
+	RunStarted(ctx context.Context, command Command, started func() error) (Result, error)
+}
+
 type CommandView struct {
 	Executable  string
 	Argv        []string

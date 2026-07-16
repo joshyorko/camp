@@ -17,6 +17,14 @@ type Runner struct{}
 func NewRunner() *Runner { return &Runner{} }
 
 func (r *Runner) Run(ctx context.Context, command ports.Command) (ports.Result, error) {
+	return r.run(ctx, command, nil)
+}
+
+func (r *Runner) RunStarted(ctx context.Context, command ports.Command, started func() error) (ports.Result, error) {
+	return r.run(ctx, command, started)
+}
+
+func (r *Runner) run(ctx context.Context, command ports.Command, started func() error) (ports.Result, error) {
 	cmd := exec.CommandContext(ctx, command.Executable, command.Argv...)
 	cmd.Dir = command.Directory
 	cmd.Stdin = command.Stdin
@@ -26,7 +34,18 @@ func (r *Runner) Run(ctx context.Context, command ports.Command) (ports.Result, 
 	cmd.Stdout = joinedWriter(&stdout, command.Stdout)
 	cmd.Stderr = joinedWriter(&stderr, command.Stderr)
 
-	err := cmd.Run()
+	err := cmd.Start()
+	if err == nil && started != nil {
+		if startedErr := started(); startedErr != nil {
+			_ = cmd.Process.Kill()
+			_ = cmd.Wait()
+			result := ports.Result{ExitCode: -1, Stdout: stdout.Bytes(), Stderr: stderr.Bytes()}
+			return result, startedErr
+		}
+	}
+	if err == nil {
+		err = cmd.Wait()
+	}
 	result := ports.Result{ExitCode: exitCode(err), Stdout: stdout.Bytes(), Stderr: stderr.Bytes()}
 	if ctxErr := ctx.Err(); ctxErr != nil {
 		return result, ctxErr
