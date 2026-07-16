@@ -4,9 +4,9 @@ Authoritative execution ledger for `patchraptor/camp-implementation`. Update thi
 
 ## Current state
 
-- Overall Tasks 3–7: **16%**.
-- Last pushed integration: `f8f15e929f7a845f33b20b4a09edaa515dfbaa20` (`docs: add project README and Camp hero`).
-- Active checkpoint base: `f8f15e929f7a845f33b20b4a09edaa515dfbaa20`, upstream `origin/patchraptor/camp-implementation`, ahead/behind `0/0` before the current uncommitted checkpoint.
+- Overall Tasks 3–7: **20%**.
+- Last pushed integration: `40518c7f14f9a553fab91d2e4c9bcffa882a2bf6` (`fix: make materialization markers crash safe`).
+- Active checkpoint base: `40518c7f14f9a553fab91d2e4c9bcffa882a2bf6`, upstream `origin/patchraptor/camp-implementation`, ahead/behind `0/0` with a clean worktree immediately after push.
 - Integrator/committer: Sol (`/root`).
 - Merge authority: merge the completed, verified PR into the verified default branch; do not deploy, publish a release, or mutate external services.
 
@@ -14,9 +14,12 @@ Authoritative execution ledger for `patchraptor/camp-implementation`. Update thi
 
 | State | Task / issue | Owner | Exclusive write scope | Checkpoint gate |
 |---|---|---|---|---|
-| CHECKPOINT READY | Task 3 crash-safe ownership marker and owned-root cleanup | `/root/task3_ownership_marker` | `internal/capsule/ownership.go`, `internal/capsule/ownership_test.go` | Focused/race/package tests, cross-mount rejection, deterministic quarantine and marker crash replay passed; Sol full gate passed |
-| CHECKPOINT READY | Task 3 crash-safe archive provenance and hydration marker | `/root/task3_hydration_marker` | `internal/adapters/archive/{tarzstd.go,tarzstd_test.go}`, `internal/adapters/hydration/{controller.go,controller_test.go}` | Focused/race/package tests, no-cross-mount cleanup, fsync ordering, exact destination identity passed; Sol full gate passed |
-| QUEUED | Task 3 application hydration-intent replay | Sol owns `internal/app/open.go`; next Luna receives a new test file only | `internal/app/open.go` serialized; dedicated new test file | RED: `TestOpenRemoteResumesPendingHydrationStageWithOriginalPlanWithoutDuplicateIntent` |
+| PUSHED `40518c7` | Task 3 crash-safe ownership marker and owned-root cleanup | `/root/task3_ownership_marker`; integrated by Sol | `internal/capsule/ownership.go`, `internal/capsule/ownership_test.go` | Focused/race/package and Sol full gates passed |
+| PUSHED `40518c7` | Task 3 crash-safe archive provenance and hydration marker | `/root/task3_hydration_marker`; integrated by Sol | `internal/adapters/archive/{tarzstd.go,tarzstd_test.go}`, `internal/adapters/hydration/{controller.go,controller_test.go}` | Focused/race/package and Sol full gates passed |
+| READY FOR CHECKPOINT | Task 3 application hydration-intent replay | `/root/task3_app_hydration_red`; integrated by Sol in `internal/app/open.go` | `internal/app/open.go`, new focused recovery test | Original plan replay and single intent/fact regression green |
+| READY FOR CHECKPOINT | Task 4 DevPod/IDE contract including `t3-code` | `/root/task4_devpod_ide`; integrated by Sol | `internal/adapters/devpod/{client.go,client_test.go,ide.go,ide_test.go}` | Typed/repeated flags, conflict rejection, VS Code URI, T3 typed entry contract green |
+| READY FOR CHECKPOINT | Task 5 SSH transfer primitives | `/root/task5_sshtransfer`; integrated and remote-shell hardened by Sol | New `internal/adapters/sshtransfer/*` | Rsync/tar fallback/exclusions, quoted nonstandard roots, and loopback forward contract green |
+| READY FOR DOCS COMMIT | Task 7 Camp documentation artwork | `/root/docs_artwork`; integrated by Sol | Ten archive-provided `docs/assets/*.png`, matching Markdown, this ledger | Safe ZIP manifest, PNG decode/CRC/dimensions, exact links, diff check green |
 
 ## Task 3 — complete local lifecycle and recovery (about 70%)
 
@@ -24,8 +27,8 @@ Authoritative execution ledger for `patchraptor/camp-implementation`. Update thi
 - [x] Durable terminal-entry intent/fact and callback crash-cut recovery.
 - [x] Durable recovery objective and hydration plan (`96ef443`).
 - [x] Workspace-readiness reconciliation (`e7e7294`).
-- [x] Integrate current marker/archive recovery checkpoint with final focused reviews and fresh repository gates; commit/push pending below.
-- [ ] Reconcile pending hydration transitions from the original durable token/stage/final plan without duplicate intent/effect/fact.
+- [x] Push crash-safe marker/archive recovery checkpoint (`40518c7`).
+- [x] Reconcile pending hydration transitions from the original durable token/stage/final plan without duplicate intent/effect/fact (current checkpoint).
 - [ ] Observe unknown Hauler load/extract outcomes without duplicate destructive work.
 - [ ] Complete service readiness, supervisor recovery, and durable opening/recovering objectives.
 - [ ] Prove the real local open → edit/image → sync → close → reopen vertical with crash cuts.
@@ -33,14 +36,14 @@ Authoritative execution ledger for `patchraptor/camp-implementation`. Update thi
 ## Task 4 — command, IDE, and presentation surface (about 5%)
 
 - [ ] Freeze one canonical session selector/target mapper; do not duplicate `internal/app/session.go` or `internal/workspace/local.go`.
-- [ ] Implement typed DevPod flags, SSH forwarding, raw-argument conflict rejection, and VS Code/Insiders/T3 IDE contracts.
+- [x] Implement typed DevPod flags, SSH forwarding, raw-argument conflict rejection, and VS Code/Insiders/T3 IDE adapter contracts (current checkpoint; app/CLI wiring remains).
 - [ ] Implement attach/list/status/history/recover/serve/images/provider/config use cases and stable human/JSON presenters.
 - [ ] Wire the complete Cobra tree, aliases, help goldens, and bash/zsh/fish completions.
 - [ ] Issue #1: add `t3-code` and `--sites` validation without changing terminal or VS Code-family behavior.
 
 ## Task 5 — remote transport and portable controller (0%)
 
-- [ ] Implement rsync mirror, structured tar fallback, exact exclusions, and DevPod-generated SSH target/forward primitives.
+- [x] Implement rsync mirror, structured tar fallback, exact exclusions, and DevPod-generated SSH target/forward primitives (current checkpoint; workspace integration remains).
 - [ ] Expand the serialized mirror request/application boundary; `internal/app/checkpoint.go` currently accepts only `MirrorLocalNoop`.
 - [ ] Prove remote open/sync/close/recover uses the same publisher, CAS, lease, and cleanup protocol as local.
 - [ ] Issue #1: run T3 inside the DevPod workspace, manage its process/readiness/logs, loopback-only forward, Desktop handoff, teardown, and controller relocation.
@@ -59,7 +62,7 @@ Authoritative execution ledger for `patchraptor/camp-implementation`. Update thi
 - [ ] Packaging, completions, Homebrew metadata, CI/release configuration, SBOM/checksum artifacts, and credential-gated real matrices.
 - [ ] Issue #1 pins: tap `de1f2cf4554437a2d52d426b0b80b78f32bc5b8e`, T3 `main.20260716072441.5e8b2c800ecd`, Codex `release.20260608151242.525e9535fcdf`, Sites client `5e8b2c800ecd98e23adbdbfc8970f4687ac8254b`.
 - [ ] Issue #1 private Sites pairing/session lifecycle and optional Harvester profile; no secrets in haul, backend, Sites config, cloud-init, or OpenTofu state.
-- [ ] Final docs must remain truthful and derive examples from the real command tree. Documentation artwork is parked outside the worktree until implementation checkpoints are current.
+- [ ] Final docs must remain truthful and derive examples from the real command tree. The validated ten-image documentation artwork set is linked in the current docs commit.
 
 ## Current blockers
 
@@ -70,7 +73,7 @@ Authoritative execution ledger for `patchraptor/camp-implementation`. Update thi
 ## Verification ledger
 
 - `f8f15e9`: `go build -o /tmp/camp-readme-checkpoint ./cmd/camp`; focused tests; `go test ./... -count=1`; `go vet ./...`; `git diff --check` — passed before push.
-- Current checkpoint tip: focused capsule/archive/hydration tests, `go test ./... -count=1`, `go vet ./...`, and `git diff --check` passed under Sol immediately before commit.
+- `40518c7`: focused capsule/archive/hydration tests, `go test ./... -count=1`, `go vet ./...`, and `git diff --check` passed under Sol immediately before commit; live branch SHA verified equal after push.
 
 ## Push and merge checklist
 
@@ -83,3 +86,20 @@ Authoritative execution ledger for `patchraptor/camp-implementation`. Update thi
 - [ ] Run the full credential-free matrix and record credential-gated evidence honestly.
 - [ ] Open or update the normal PR, mark it ready, and merge only after all authorized implementation and final gates complete.
 - [ ] Verify the live default-branch SHA contains every intended commit; reconcile worker branches/worktrees; leave the default checkout clean.
+
+## Documentation artwork ledger
+
+The supplied archive was validated as exactly ten safe repository-relative PNG entries. Every image is 1774×887, has valid PNG chunk CRCs, and decompresses successfully. No archive entry was rejected.
+
+| Archive entry | Destination asset | Linked document | Validation |
+|---|---|---|---|
+| `docs/assets/adr-0001-lifecycle-controller.png` | `docs/assets/adr-0001-lifecycle-controller.png` | `docs/adr/0001-hauler-devpod-boundary.md` | Valid PNG; 1774×887; linked once |
+| `docs/assets/adr-0002-generations-leases-recovery.png` | `docs/assets/adr-0002-generations-leases-recovery.png` | `docs/adr/0002-generations-leases-and-recovery.md` | Valid PNG; 1774×887; linked once |
+| `docs/assets/adr-0003-pinned-toolchain.png` | `docs/assets/adr-0003-pinned-toolchain.png` | `docs/adr/0003-pinned-toolchain.md` | Valid PNG; 1774×887; linked once |
+| `docs/assets/adr-0004-config-registry-contracts.png` | `docs/assets/adr-0004-config-registry-contracts.png` | `docs/adr/0004-capsule-devcontainer-and-registry-contracts.md` | Valid PNG; 1774×887; linked once |
+| `docs/assets/adr-0005-ownership-supervision.png` | `docs/assets/adr-0005-ownership-supervision.png` | `docs/adr/0005-materialization-ownership-and-supervision.md` | Valid PNG; 1774×887; linked once |
+| `docs/assets/adr-0006-loopback-confinement.png` | `docs/assets/adr-0006-loopback-confinement.png` | `docs/adr/0006-hauler-loopback-confinement.md` | Valid PNG; 1774×887; linked once |
+| `docs/assets/oracle-architecture-review.png` | `docs/assets/oracle-architecture-review.png` | `docs/reviews/2026-07-14-oracle-architecture-review.md` | Valid PNG; 1774×887; linked once |
+| `docs/assets/camp-implementation-plan.png` | `docs/assets/camp-implementation-plan.png` | `docs/superpowers/plans/2026-07-14-camp.md` | Valid PNG; 1774×887; linked once |
+| `docs/assets/task-3b-atomic-materialization.png` | `docs/assets/task-3b-atomic-materialization.png` | `docs/superpowers/tasks/2026-07-14-camp-task-3b.md` | Valid PNG; 1774×887; linked once |
+| `docs/assets/camp-codex-build-prompt.png` | `docs/assets/camp-codex-build-prompt.png` | `prompts/camp-codex-build-prompt.md` | Valid PNG; 1774×887; linked once |

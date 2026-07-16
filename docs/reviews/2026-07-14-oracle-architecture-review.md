@@ -2,6 +2,8 @@
 >
 > This is the verbatim architecture feedback captured before implementation.
 
+![An architect's relief map reveals camp boundaries, risks, recovery paths, and a corrected build order](../assets/oracle-architecture-review.png)
+
 # Architecture cross-check
 
 ## Verdict

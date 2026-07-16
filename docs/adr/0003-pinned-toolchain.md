@@ -1,5 +1,7 @@
 # ADR 0003: Lock the user-selected DevPod fork and Hauler
 
+![Pinned expedition tools sit in fitted positions on a calibrated outdoor workbench](../assets/adr-0003-pinned-toolchain.png)
+
 ## Status
 
 Accepted on 2026-07-14.

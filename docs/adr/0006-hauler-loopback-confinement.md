@@ -1,5 +1,7 @@
 # ADR 0006: Confine Hauler services with supervised pasta units
 
+![A supervised service tent and supply carts remain inside a closed loopback safety perimeter](../assets/adr-0006-loopback-confinement.png)
+
 ## Status
 
 Accepted on 2026-07-14.

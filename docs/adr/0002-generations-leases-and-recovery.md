@@ -1,5 +1,7 @@
 # ADR 0002: Publish immutable generations with optimistic concurrency
 
+![Immutable expedition cases form a durable history with a leased current generation and rollback path](../assets/adr-0002-generations-leases-recovery.png)
+
 ## Status
 
 Accepted on 2026-07-14.

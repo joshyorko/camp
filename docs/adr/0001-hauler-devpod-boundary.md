@@ -1,5 +1,7 @@
 # ADR 0001: Keep Camp as a lifecycle controller
 
+![A central command tent coordinates separate cargo transport and remote workspace stations](../assets/adr-0001-lifecycle-controller.png)
+
 ## Status
 
 Accepted on 2026-07-14.

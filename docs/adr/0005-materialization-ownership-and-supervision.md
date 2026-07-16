@@ -1,5 +1,7 @@
 # ADR 0005: Separate adoption, ownership, and persistent supervision
 
+![Three camp stages distinguish safe adoption, exclusive ownership, and persistent supervision](../assets/adr-0005-ownership-supervision.png)
+
 ## Status
 
 Accepted on 2026-07-14.
