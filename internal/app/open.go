@@ -638,9 +638,7 @@ func (o *Open) create(ctx context.Context, request OpenRequest) (OpenResult, err
 	if err != nil {
 		return OpenResult{}, err
 	}
-	var initialization capsule.Initialization
 	var root string
-	var openedGeneration *domain.GenerationRef
 	var observedPointer *coordination.PointerRecord
 	var fetchLineage = lineage
 	if source.Kind == capsule.SourceAdopted {
@@ -676,7 +674,6 @@ func (o *Open) create(ctx context.Context, request OpenRequest) (OpenResult, err
 			fetchLineage = sourcePointer.Pointer.Lineage
 		}
 		opened := observedPointer.Pointer.Generation
-		openedGeneration = &opened
 		snapshot.OpenedGeneration = cloneGeneration(&opened)
 		snapshot.CurrentBase = cloneGeneration(&opened)
 		if observedPointer.Pointer.Lineage == lineage {
@@ -726,7 +723,16 @@ func (o *Open) create(ctx context.Context, request OpenRequest) (OpenResult, err
 		root = hydrated.Materialization.CanonicalPath
 		snapshot.Materialization = hydrated.Materialization
 	}
-	initialization, err = o.deps.Initializer.Initialize(ctx, root, request.Capsule)
+	return o.continueOpeningFromMaterialization(ctx, snapshot, request, journal)
+}
+
+func (o *Open) continueOpeningFromMaterialization(ctx context.Context, snapshot domain.JournalSnapshot, request OpenRequest, journal *openJournal) (OpenResult, error) {
+	journal.snapshot = &snapshot
+	root := snapshot.Materialization.CanonicalPath
+	if root == "" {
+		return OpenResult{}, errors.New("opening session has no durable materialization")
+	}
+	initialization, err := o.deps.Initializer.Initialize(ctx, root, request.Capsule)
 	if err != nil {
 		return OpenResult{}, err
 	}
@@ -745,7 +751,7 @@ func (o *Open) create(ctx context.Context, request OpenRequest) (OpenResult, err
 	}{Path: devcontainer.Path}), devcontainer, func() error { snapshot.Recovery.Configuration.DevcontainerPath = devcontainer.Path; return nil }); err != nil {
 		return OpenResult{}, err
 	}
-	targetResult, err := o.deps.Target.Resolve(ctx, root, entryTarget)
+	targetResult, err := o.deps.Target.Resolve(ctx, root, request.Target)
 	if err != nil {
 		return OpenResult{}, err
 	}
@@ -756,8 +762,8 @@ func (o *Open) create(ctx context.Context, request OpenRequest) (OpenResult, err
 	}
 	workspaceID := workspace.DeterministicID(request.Capsule, request.Branch, root)
 	checkpoint := ""
-	if openedGeneration != nil {
-		checkpoint = strconv.FormatUint(openedGeneration.Generation, 10)
+	if snapshot.OpenedGeneration != nil {
+		checkpoint = strconv.FormatUint(snapshot.OpenedGeneration.Generation, 10)
 	}
 	upOptions := devpodadapter.UpOptions{WorkspacePath: root, WorkspaceID: workspaceID, Context: request.Context, Provider: request.Provider, DevcontainerPath: devcontainer.Path, CampEnvironment: &devpodadapter.CampEnvironment{Registry: endpoint(request.Runtime.RegistryPort), Fileserver: endpoint(request.Runtime.FileserverPort), Capsule: request.Capsule, Checkpoint: checkpoint}}
 	snapshot.Workspace = domain.WorkspaceRecord{ID: workspaceID, Context: request.Context, Provider: request.Provider, LocalProvider: request.LocalProvider, LocalFolder: root, Target: targetResult.Relative, StagingRoot: root}
@@ -823,12 +829,30 @@ func validateOpenRecoveryObjective(snapshot domain.JournalSnapshot) error {
 }
 
 func (o *Open) resumeOpening(ctx context.Context, snapshot domain.JournalSnapshot, request OpenRequest) (OpenResult, error) {
+	loaded, pending, err := o.deps.Journal.Load(ctx, snapshot.SessionID)
+	if err != nil {
+		return OpenResult{}, err
+	}
+	if hasPendingHydration(pending) {
+		loaded, err = o.resumeHydration(ctx, loaded, pending)
+		if err != nil {
+			return OpenResult{}, err
+		}
+	}
 	reconciled, err := o.Reconcile(ctx, snapshot.SessionID)
 	if err != nil {
 		return OpenResult{}, err
 	}
 	if reconciled.Workspace.ID == "" || reconciled.Workspace.LocalFolder == "" || reconciled.Workspace.StagingRoot == "" {
-		return OpenResult{}, fmt.Errorf("session %q has not reached durable workspace readiness: %w", snapshot.SessionID, ErrRecoveryRequired)
+		if reconciled.Materialization.CanonicalPath == "" {
+			return OpenResult{}, fmt.Errorf("session %q has not reached durable workspace readiness: %w", snapshot.SessionID, ErrRecoveryRequired)
+		}
+		request = openRequestFromRecovery(request, reconciled)
+		now := o.deps.Clock.Now().UTC()
+		if now.IsZero() {
+			return OpenResult{}, errors.New("open recovery clock returned zero time")
+		}
+		return o.continueOpeningFromMaterialization(ctx, reconciled, request, newOpenJournal(o.deps.Journal, &reconciled, now))
 	}
 	if err := o.validateOpenSession(reconciled, false); err != nil {
 		return OpenResult{}, err
@@ -843,6 +867,85 @@ func (o *Open) resumeOpening(ctx context.Context, snapshot domain.JournalSnapsho
 		return OpenResult{}, err
 	}
 	return o.completeWorkspaceOpen(ctx, reconciled, request, targetResult)
+}
+
+func hasPendingHydration(pending []ports.PendingIntent) bool {
+	for _, item := range pending {
+		if strings.HasPrefix(item.Intent.Transition, "Hydration") {
+			return true
+		}
+	}
+	return false
+}
+
+func (o *Open) resumeHydration(ctx context.Context, snapshot domain.JournalSnapshot, pending []ports.PendingIntent) (domain.JournalSnapshot, error) {
+	plan := snapshot.Recovery.Hydration
+	source := snapshot.Recovery.Source
+	if o.deps.Hydrator == nil || o.deps.Generations == nil || o.deps.Clock == nil || plan == nil || source.Kind != domain.SourceDecisionRemote || source.Lineage == nil || source.Generation == nil {
+		return snapshot, errors.New("pending hydration recovery dependencies or durable plan are incomplete")
+	}
+	if snapshot.OpenedGeneration == nil || *snapshot.OpenedGeneration != *source.Generation {
+		return snapshot, errors.New("pending hydration generation does not match the opened generation")
+	}
+	metadata, _, err := o.deps.Generations.ReadMetadata(ctx, snapshot.Capsule, *source.Lineage, *source.Generation)
+	if err != nil {
+		return snapshot, err
+	}
+	request := hydration.Request{
+		SessionID: snapshot.SessionID, Capsule: snapshot.Capsule, Generation: *source.Generation, Metadata: metadata,
+		SessionRoot: snapshot.Recovery.Session.Root, StageRoot: plan.StageRoot, FinalRoot: plan.FinalRoot,
+		HaulPath: snapshot.Recovery.Session.HaulPath, Token: plan.Token,
+	}
+	now := o.deps.Clock.Now().UTC()
+	if now.IsZero() {
+		return snapshot, errors.New("open recovery clock returned zero time")
+	}
+	journal := newOpenJournal(o.deps.Journal, &snapshot, now)
+	for _, item := range pending {
+		if !strings.HasPrefix(item.Intent.Transition, "Hydration") {
+			continue
+		}
+		if err := journal.adoptPending(item.Intent); err != nil {
+			return snapshot, err
+		}
+	}
+	withHooks, ok := o.deps.Hydrator.(OpenHydratorWithHooks)
+	if !ok {
+		return snapshot, errors.New("pending hydration recovery requires durable phase hooks")
+	}
+	result, err := withHooks.WithHooks(o.hydrationHooks(journal)).Hydrate(ctx, request)
+	if err != nil {
+		return snapshot, err
+	}
+	if err := validateRemoteMaterialization(result.Materialization, plan.FinalRoot, plan.Token); err != nil {
+		return snapshot, err
+	}
+	stageID := transitionID(snapshot.SessionID, "Hydration"+string(hydration.PhaseStageCreated))
+	if intent, ok := journal.pending[stageID]; ok {
+		phaseResult := hydration.Result{StageRoot: plan.StageRoot, FinalRoot: plan.FinalRoot, Token: plan.Token}
+		if err := journal.recordFact(ctx, intent, phaseResult, nil); err != nil {
+			return snapshot, err
+		}
+	}
+	snapshot.Materialization = result.Materialization
+	return snapshot, nil
+}
+
+func openRequestFromRecovery(request OpenRequest, snapshot domain.JournalSnapshot) OpenRequest {
+	request.SessionID = snapshot.SessionID
+	request.Capsule = snapshot.Capsule
+	request.Branch = snapshot.Lineage.Branch
+	request.Mode = snapshot.Mode
+	request.Context = snapshot.Workspace.Context
+	request.Provider = snapshot.Workspace.Provider
+	request.LocalProvider = snapshot.Workspace.LocalProvider
+	request.EntryMode = snapshot.Recovery.Entry.Mode
+	request.Target = snapshot.Recovery.Entry.Target
+	request.Runtime.Capsule = snapshot.Capsule
+	request.Runtime.RegistryPort = snapshot.Recovery.Configuration.RegistryPort
+	request.Runtime.FileserverPort = snapshot.Recovery.Configuration.FileserverPort
+	request.Runtime.DevcontainerPath = snapshot.Recovery.Configuration.DevcontainerPath
+	return request
 }
 
 func (o *Open) completeWorkspaceOpen(ctx context.Context, snapshot domain.JournalSnapshot, request OpenRequest, targetResult target.Result) (OpenResult, error) {
@@ -1095,6 +1198,17 @@ func (j *openJournal) phase(ctx context.Context, transition string, input, outpu
 func (j *openJournal) begin(ctx context.Context, transition string, input any) error {
 	_, err := j.ensureIntent(ctx, transition, input)
 	return err
+}
+
+func (j *openJournal) adoptPending(intent ports.IntentRecord) error {
+	if intent.SessionID != j.snapshot.SessionID || intent.ID != transitionID(j.snapshot.SessionID, intent.Transition) || intent.Transition == "" {
+		return errors.New("pending hydration intent does not match the opening session")
+	}
+	if _, exists := j.pending[intent.ID]; exists {
+		return errors.New("duplicate pending hydration intent")
+	}
+	j.pending[intent.ID] = intent
+	return nil
 }
 
 func (j *openJournal) complete(ctx context.Context, transition string, output any, apply func()) error {

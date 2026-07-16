@@ -15,6 +15,7 @@ var (
 	ErrLifecycleActionNotAllowed = errors.New("DevPod lifecycle action not allowed")
 	ErrUnknownWorkspaceState     = errors.New("unknown DevPod workspace state")
 	ErrStartObservationRequired  = errors.New("DevPod runner cannot observe subprocess start")
+	ErrDevPodArgumentConflict    = errors.New("typed DevPod option conflicts with raw argument")
 )
 
 type WorkspaceState string
@@ -50,14 +51,33 @@ type WorkspaceSource struct {
 }
 
 type UpOptions struct {
-	WorkspacePath    string
-	WorkspaceID      string
-	Context          string
-	Provider         string
-	DevcontainerPath string
-	CampEnvironment  *CampEnvironment
-	InitEnv          []string
-	ForwardedArgv    []string
+	WorkspacePath        string
+	WorkspaceID          string
+	Context              string
+	Provider             string
+	Machine              string
+	ProviderOptions      []string
+	DevcontainerImage    string
+	DevcontainerPath     string
+	DevcontainerID       string
+	FallbackImage        string
+	AdditionalFeatures   string
+	Mounts               []string
+	WorkspaceEnv         []string
+	WorkspaceEnvFiles    []string
+	CampEnvironment      *CampEnvironment
+	InitEnv              []string
+	Dotfiles             string
+	Recreate             bool
+	Reset                bool
+	PrebuildRepositories []string
+	IDE                  IDE
+	IDEOptions           []string
+	OpenIDE              *bool
+	ConfigureSSH         *bool
+	GPGAgentForwarding   *bool
+	SSHConfigPath        string
+	ForwardedArgv        []string
 }
 
 type CampEnvironment struct {
@@ -68,15 +88,24 @@ type CampEnvironment struct {
 }
 
 type SSHOptions struct {
-	WorkspaceID     string
-	Context         string
-	Workdir         string
-	User            string
-	ForwardPorts    []string
-	ReverseForwards []string
-	SetEnv          []string
-	StartServices   bool
-	ForwardedArgv   []string
+	WorkspaceID          string
+	Context              string
+	Workdir              string
+	User                 string
+	ForwardPorts         []string
+	ReverseForwards      []string
+	SendEnv              []string
+	SetEnv               []string
+	ForwardPortsTimeout  string
+	AgentForwarding      *bool
+	GPGAgentForwarding   *bool
+	Stdio                *bool
+	SSHKeepAliveInterval string
+	GitSSHSigningKey     string
+	TermMode             string
+	InstallTerminfo      *bool
+	StartServices        bool
+	ForwardedArgv        []string
 }
 
 type WorkspaceCommand = ports.WorkspaceCommand
@@ -91,7 +120,48 @@ func NewClient(executable string, runner ports.Runner) *Client {
 }
 
 func (c *Client) Up(ctx context.Context, options UpOptions) (ports.Result, error) {
-	argv := []string{"up", "--ide", "none", "--open-ide=false"}
+	entry := IDEEntry{IDE: options.IDE}
+	if entry.IDE == "" {
+		entry.IDE = IDETerminal
+	}
+	devPodIDE, openIDE, err := entry.DevPodSetup()
+	if err != nil {
+		return ports.Result{}, err
+	}
+	if options.OpenIDE != nil {
+		openIDE = *options.OpenIDE
+	}
+	if (entry.IDE == IDETerminal || entry.IDE == IDET3Code) && openIDE {
+		return ports.Result{}, fmt.Errorf("%w: %q cannot request DevPod IDE opening", ErrInvalidIDEEntry, entry.IDE)
+	}
+	conflicts := []string{"--ide", "--open-ide"}
+	conflicts = appendActiveFlag(conflicts, options.Context != "", "--context")
+	conflicts = appendActiveFlag(conflicts, options.WorkspaceID != "", "--id")
+	conflicts = appendActiveFlag(conflicts, options.Provider != "", "--provider")
+	conflicts = appendActiveFlag(conflicts, options.Machine != "", "--machine")
+	conflicts = appendActiveFlag(conflicts, len(options.ProviderOptions) > 0, "--provider-option")
+	conflicts = appendActiveFlag(conflicts, options.DevcontainerImage != "", "--devcontainer-image")
+	conflicts = appendActiveFlag(conflicts, options.DevcontainerPath != "", "--devcontainer-path")
+	conflicts = appendActiveFlag(conflicts, options.DevcontainerID != "", "--devcontainer-id")
+	conflicts = appendActiveFlag(conflicts, options.FallbackImage != "", "--fallback-image")
+	conflicts = appendActiveFlag(conflicts, options.AdditionalFeatures != "", "--additional-features")
+	conflicts = appendActiveFlag(conflicts, len(options.Mounts) > 0, "--mount")
+	conflicts = appendActiveFlag(conflicts, len(options.WorkspaceEnv) > 0 || options.CampEnvironment != nil, "--workspace-env")
+	conflicts = appendActiveFlag(conflicts, len(options.WorkspaceEnvFiles) > 0, "--workspace-env-file")
+	conflicts = appendActiveFlag(conflicts, len(options.InitEnv) > 0, "--init-env")
+	conflicts = appendActiveFlag(conflicts, options.Dotfiles != "", "--dotfiles")
+	conflicts = appendActiveFlag(conflicts, options.Recreate, "--recreate")
+	conflicts = appendActiveFlag(conflicts, options.Reset, "--reset")
+	conflicts = appendActiveFlag(conflicts, len(options.PrebuildRepositories) > 0, "--prebuild-repository")
+	conflicts = appendActiveFlag(conflicts, len(options.IDEOptions) > 0, "--ide-option")
+	conflicts = appendActiveFlag(conflicts, options.ConfigureSSH != nil, "--configure-ssh")
+	conflicts = appendActiveFlag(conflicts, options.GPGAgentForwarding != nil, "--gpg-agent-forwarding")
+	conflicts = appendActiveFlag(conflicts, options.SSHConfigPath != "", "--ssh-config")
+	if err := rejectRawConflicts(options.ForwardedArgv, conflicts...); err != nil {
+		return ports.Result{}, err
+	}
+
+	argv := []string{"up", "--ide", string(devPodIDE), "--open-ide=" + strconv.FormatBool(openIDE)}
 	if options.Context != "" {
 		argv = append(argv, "--context", options.Context)
 	}
@@ -101,9 +171,28 @@ func (c *Client) Up(ctx context.Context, options UpOptions) (ports.Result, error
 	if options.Provider != "" {
 		argv = append(argv, "--provider", options.Provider)
 	}
+	if options.Machine != "" {
+		argv = append(argv, "--machine", options.Machine)
+	}
+	argv = appendRepeated(argv, "--provider-option", options.ProviderOptions)
+	if options.DevcontainerImage != "" {
+		argv = append(argv, "--devcontainer-image", options.DevcontainerImage)
+	}
 	if options.DevcontainerPath != "" {
 		argv = append(argv, "--devcontainer-path", options.DevcontainerPath)
 	}
+	if options.DevcontainerID != "" {
+		argv = append(argv, "--devcontainer-id", options.DevcontainerID)
+	}
+	if options.FallbackImage != "" {
+		argv = append(argv, "--fallback-image", options.FallbackImage)
+	}
+	if options.AdditionalFeatures != "" {
+		argv = append(argv, "--additional-features", options.AdditionalFeatures)
+	}
+	argv = appendRepeated(argv, "--mount", options.Mounts)
+	argv = appendRepeated(argv, "--workspace-env", options.WorkspaceEnv)
+	argv = appendRepeated(argv, "--workspace-env-file", options.WorkspaceEnvFiles)
 	if options.CampEnvironment != nil {
 		values, err := options.CampEnvironment.values()
 		if err != nil {
@@ -113,8 +202,22 @@ func (c *Client) Up(ctx context.Context, options UpOptions) (ports.Result, error
 			argv = append(argv, "--workspace-env", value)
 		}
 	}
-	for _, value := range options.InitEnv {
-		argv = append(argv, "--init-env", value)
+	argv = appendRepeated(argv, "--init-env", options.InitEnv)
+	if options.Dotfiles != "" {
+		argv = append(argv, "--dotfiles", options.Dotfiles)
+	}
+	if options.Recreate {
+		argv = append(argv, "--recreate=true")
+	}
+	if options.Reset {
+		argv = append(argv, "--reset=true")
+	}
+	argv = appendRepeated(argv, "--prebuild-repository", options.PrebuildRepositories)
+	argv = appendRepeated(argv, "--ide-option", options.IDEOptions)
+	argv = appendOptionalBool(argv, "--configure-ssh", options.ConfigureSSH)
+	argv = appendOptionalBool(argv, "--gpg-agent-forwarding", options.GPGAgentForwarding)
+	if options.SSHConfigPath != "" {
+		argv = append(argv, "--ssh-config", options.SSHConfigPath)
 	}
 	argv = append(argv, options.ForwardedArgv...)
 	argv = append(argv, options.WorkspacePath)
@@ -145,6 +248,25 @@ func (c *Client) SSHCommand(options SSHOptions) (ports.Command, error) {
 	if options.WorkspaceID == "" || unsafeArgument(options.WorkspaceID) {
 		return ports.Command{}, errors.New("DevPod workspace ID is invalid")
 	}
+	conflicts := []string{"--start-services"}
+	conflicts = appendActiveFlag(conflicts, options.Context != "", "--context")
+	conflicts = appendActiveFlag(conflicts, options.Workdir != "", "--workdir")
+	conflicts = appendActiveFlag(conflicts, options.User != "", "--user")
+	conflicts = appendActiveFlag(conflicts, len(options.ForwardPorts) > 0, "--forward-ports", "-L")
+	conflicts = appendActiveFlag(conflicts, len(options.ReverseForwards) > 0, "--reverse-forward-ports", "-R")
+	conflicts = appendActiveFlag(conflicts, len(options.SendEnv) > 0, "--send-env")
+	conflicts = appendActiveFlag(conflicts, len(options.SetEnv) > 0, "--set-env")
+	conflicts = appendActiveFlag(conflicts, options.ForwardPortsTimeout != "", "--forward-ports-timeout")
+	conflicts = appendActiveFlag(conflicts, options.AgentForwarding != nil, "--agent-forwarding")
+	conflicts = appendActiveFlag(conflicts, options.GPGAgentForwarding != nil, "--gpg-agent-forwarding")
+	conflicts = appendActiveFlag(conflicts, options.Stdio != nil, "--stdio")
+	conflicts = appendActiveFlag(conflicts, options.SSHKeepAliveInterval != "", "--ssh-keepalive-interval")
+	conflicts = appendActiveFlag(conflicts, options.GitSSHSigningKey != "", "--git-ssh-signing-key")
+	conflicts = appendActiveFlag(conflicts, options.TermMode != "", "--term-mode")
+	conflicts = appendActiveFlag(conflicts, options.InstallTerminfo != nil, "--install-terminfo")
+	if err := rejectRawConflicts(options.ForwardedArgv, conflicts...); err != nil {
+		return ports.Command{}, err
+	}
 	argv := []string{"ssh"}
 	if options.Context != "" {
 		argv = append(argv, "--context", options.Context)
@@ -155,15 +277,26 @@ func (c *Client) SSHCommand(options SSHOptions) (ports.Command, error) {
 	if options.User != "" {
 		argv = append(argv, "--user", options.User)
 	}
-	for _, value := range options.ForwardPorts {
-		argv = append(argv, "--forward-ports", value)
+	argv = appendRepeated(argv, "--forward-ports", options.ForwardPorts)
+	argv = appendRepeated(argv, "--reverse-forward-ports", options.ReverseForwards)
+	argv = appendRepeated(argv, "--send-env", options.SendEnv)
+	argv = appendRepeated(argv, "--set-env", options.SetEnv)
+	if options.ForwardPortsTimeout != "" {
+		argv = append(argv, "--forward-ports-timeout", options.ForwardPortsTimeout)
 	}
-	for _, value := range options.ReverseForwards {
-		argv = append(argv, "--reverse-forward-ports", value)
+	argv = appendOptionalBool(argv, "--agent-forwarding", options.AgentForwarding)
+	argv = appendOptionalBool(argv, "--gpg-agent-forwarding", options.GPGAgentForwarding)
+	argv = appendOptionalBool(argv, "--stdio", options.Stdio)
+	if options.SSHKeepAliveInterval != "" {
+		argv = append(argv, "--ssh-keepalive-interval", options.SSHKeepAliveInterval)
 	}
-	for _, value := range options.SetEnv {
-		argv = append(argv, "--set-env", value)
+	if options.GitSSHSigningKey != "" {
+		argv = append(argv, "--git-ssh-signing-key", options.GitSSHSigningKey)
 	}
+	if options.TermMode != "" {
+		argv = append(argv, "--term-mode", options.TermMode)
+	}
+	argv = appendOptionalBool(argv, "--install-terminfo", options.InstallTerminfo)
 	argv = append(argv, options.ForwardedArgv...)
 	argv = append(argv, "--start-services="+strconv.FormatBool(options.StartServices))
 	argv = append(argv, options.WorkspaceID)
@@ -325,4 +458,55 @@ func encodeCommand(argv []string) string {
 
 func unsafeArgument(value string) bool {
 	return strings.ContainsAny(value, "\x00\r\n")
+}
+
+func appendRepeated(argv []string, flag string, values []string) []string {
+	for _, value := range values {
+		argv = append(argv, flag, value)
+	}
+	return argv
+}
+
+func appendOptionalBool(argv []string, flag string, value *bool) []string {
+	if value == nil {
+		return argv
+	}
+	return append(argv, flag+"="+strconv.FormatBool(*value))
+}
+
+func appendActiveFlag(flags []string, active bool, names ...string) []string {
+	if !active {
+		return flags
+	}
+	return append(flags, names...)
+}
+
+func rejectRawConflicts(argv []string, typedFlags ...string) error {
+	typed := make(map[string]struct{}, len(typedFlags))
+	for _, flag := range typedFlags {
+		typed[flag] = struct{}{}
+	}
+	for _, argument := range argv {
+		flag := rawFlagName(argument)
+		if _, conflict := typed[flag]; conflict {
+			return fmt.Errorf("%w: %s", ErrDevPodArgumentConflict, flag)
+		}
+	}
+	return nil
+}
+
+func rawFlagName(argument string) string {
+	if strings.HasPrefix(argument, "--") {
+		if index := strings.IndexByte(argument, '='); index >= 0 {
+			return argument[:index]
+		}
+		return argument
+	}
+	if strings.HasPrefix(argument, "-L") {
+		return "-L"
+	}
+	if strings.HasPrefix(argument, "-R") {
+		return "-R"
+	}
+	return ""
 }

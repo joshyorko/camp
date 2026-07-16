@@ -394,3 +394,201 @@ func TestStopAndDeleteRequireExplicitGates(t *testing.T) {
 		})
 	}
 }
+
+func TestUpPreservesEveryTypedRepeatedPublicFlag(t *testing.T) {
+	t.Parallel()
+	runner := &recordingRunner{}
+	client := NewClient("/opt/devpod", runner)
+	openIDE := false
+	configureSSH := false
+	gpgForwarding := true
+	_, err := client.Up(context.Background(), UpOptions{
+		WorkspacePath:        "/tmp/capsule root",
+		WorkspaceID:          "camp-second-brain",
+		Context:              "default",
+		Provider:             "ssh",
+		Machine:              "harvester-dev",
+		ProviderOptions:      []string{"HOST=dev-a", "PORT=2222"},
+		DevcontainerImage:    "ghcr.io/example/dev:locked",
+		DevcontainerPath:     ".devcontainer/devcontainer.json",
+		DevcontainerID:       "primary",
+		FallbackImage:        "ubuntu@sha256:abc",
+		AdditionalFeatures:   `{"ghcr.io/devcontainers/features/git:1":{}}`,
+		Mounts:               []string{"type=bind,source=/state,target=/state", "type=volume,source=cache,target=/cache"},
+		WorkspaceEnv:         []string{"EDITOR=code", "LANG=C.UTF-8"},
+		WorkspaceEnvFiles:    []string{"/etc/camp/base.env", "/etc/camp/user.env"},
+		InitEnv:              []string{"CAMP_INIT=1", "CAMP_MODE=remote"},
+		Dotfiles:             "https://example.test/dotfiles.git",
+		Recreate:             true,
+		PrebuildRepositories: []string{"ghcr.io/example/prebuild-a", "ghcr.io/example/prebuild-b"},
+		IDE:                  IDEVSCodeInsiders,
+		IDEOptions:           []string{"DISABLE_TELEMETRY=true", "DEFAULT_EXTENSIONS=one,two"},
+		OpenIDE:              &openIDE,
+		ConfigureSSH:         &configureSSH,
+		GPGAgentForwarding:   &gpgForwarding,
+		SSHConfigPath:        "/tmp/camp ssh/config",
+		ForwardedArgv:        []string{"--log-output", "plain"},
+	})
+	if err != nil {
+		t.Fatalf("Up() error = %v", err)
+	}
+	want := []string{
+		"up", "--ide", "vscode-insiders", "--open-ide=false",
+		"--context", "default", "--id", "camp-second-brain", "--provider", "ssh", "--machine", "harvester-dev",
+		"--provider-option", "HOST=dev-a", "--provider-option", "PORT=2222",
+		"--devcontainer-image", "ghcr.io/example/dev:locked", "--devcontainer-path", ".devcontainer/devcontainer.json", "--devcontainer-id", "primary",
+		"--fallback-image", "ubuntu@sha256:abc", "--additional-features", `{"ghcr.io/devcontainers/features/git:1":{}}`,
+		"--mount", "type=bind,source=/state,target=/state", "--mount", "type=volume,source=cache,target=/cache",
+		"--workspace-env", "EDITOR=code", "--workspace-env", "LANG=C.UTF-8",
+		"--workspace-env-file", "/etc/camp/base.env", "--workspace-env-file", "/etc/camp/user.env",
+		"--init-env", "CAMP_INIT=1", "--init-env", "CAMP_MODE=remote",
+		"--dotfiles", "https://example.test/dotfiles.git", "--recreate=true",
+		"--prebuild-repository", "ghcr.io/example/prebuild-a", "--prebuild-repository", "ghcr.io/example/prebuild-b",
+		"--ide-option", "DISABLE_TELEMETRY=true", "--ide-option", "DEFAULT_EXTENSIONS=one,two",
+		"--configure-ssh=false", "--gpg-agent-forwarding=true", "--ssh-config", "/tmp/camp ssh/config",
+		"--log-output", "plain", "/tmp/capsule root",
+	}
+	if len(runner.commands) != 1 || !reflect.DeepEqual(runner.commands[0].Argv, want) {
+		t.Fatalf("commands = %#v, want argv %#v", runner.commands, want)
+	}
+}
+
+func TestT3CodeUpUsesSafeTerminalDevPodSetup(t *testing.T) {
+	t.Parallel()
+	runner := &recordingRunner{}
+	_, err := NewClient("devpod", runner).Up(context.Background(), UpOptions{
+		WorkspacePath: "/tmp/root", WorkspaceID: "camp", IDE: IDET3Code,
+	})
+	if err != nil {
+		t.Fatalf("Up() error = %v", err)
+	}
+	want := []string{"up", "--ide", "none", "--open-ide=false", "--id", "camp", "/tmp/root"}
+	if !reflect.DeepEqual(runner.commands[0].Argv, want) {
+		t.Fatalf("argv = %#v, want %#v", runner.commands[0].Argv, want)
+	}
+}
+
+func TestTerminalAndT3UpRejectDevPodOpenIDETrue(t *testing.T) {
+	t.Parallel()
+	openIDE := true
+	for _, ide := range []IDE{IDETerminal, IDET3Code} {
+		runner := &recordingRunner{}
+		_, err := NewClient("devpod", runner).Up(context.Background(), UpOptions{
+			WorkspacePath: "/tmp/root", WorkspaceID: "camp", IDE: ide, OpenIDE: &openIDE,
+		})
+		if !errors.Is(err, ErrInvalidIDEEntry) {
+			t.Fatalf("Up(IDE %q) error = %v, want ErrInvalidIDEEntry", ide, err)
+		}
+		if len(runner.commands) != 0 {
+			t.Fatalf("Up(IDE %q) commands = %#v, want none", ide, runner.commands)
+		}
+	}
+}
+
+func TestUpForwardsExplicitReset(t *testing.T) {
+	t.Parallel()
+	runner := &recordingRunner{}
+	_, err := NewClient("devpod", runner).Up(context.Background(), UpOptions{
+		WorkspacePath: "/tmp/root", WorkspaceID: "camp", Reset: true,
+	})
+	if err != nil {
+		t.Fatalf("Up() error = %v", err)
+	}
+	want := []string{"up", "--ide", "none", "--open-ide=false", "--id", "camp", "--reset=true", "/tmp/root"}
+	if !reflect.DeepEqual(runner.commands[0].Argv, want) {
+		t.Fatalf("argv = %#v, want %#v", runner.commands[0].Argv, want)
+	}
+}
+
+func TestSSHPreservesEveryTypedRepeatedPublicFlag(t *testing.T) {
+	t.Parallel()
+	runner := &recordingRunner{}
+	client := NewClient("/opt/devpod", runner)
+	agent := false
+	gpg := true
+	stdio := false
+	installTerminfo := true
+	_, err := client.SSH(context.Background(), SSHOptions{
+		WorkspaceID:          "camp-second-brain",
+		Context:              "default",
+		Workdir:              "/workspaces/Second Brain",
+		User:                 "vscode",
+		ForwardPorts:         []string{"127.0.0.1:3773:127.0.0.1:3773", "127.0.0.1:8080:127.0.0.1:8080"},
+		ReverseForwards:      []string{"127.0.0.1:5000:127.0.0.1:5000", "127.0.0.1:8081:127.0.0.1:8081"},
+		SendEnv:              []string{"SSH_AUTH_SOCK", "TERM"},
+		SetEnv:               []string{"CAMP_CAPSULE=second-brain", "CAMP_CHECKPOINT=42"},
+		ForwardPortsTimeout:  "10m",
+		AgentForwarding:      &agent,
+		GPGAgentForwarding:   &gpg,
+		Stdio:                &stdio,
+		SSHKeepAliveInterval: "30s",
+		GitSSHSigningKey:     "/home/vscode/.ssh/signing key.pub",
+		TermMode:             "strict",
+		InstallTerminfo:      &installTerminfo,
+		StartServices:        true,
+		ForwardedArgv:        []string{"--log-output", "plain"},
+	})
+	if err != nil {
+		t.Fatalf("SSH() error = %v", err)
+	}
+	want := []string{
+		"ssh", "--context", "default", "--workdir", "/workspaces/Second Brain", "--user", "vscode",
+		"--forward-ports", "127.0.0.1:3773:127.0.0.1:3773", "--forward-ports", "127.0.0.1:8080:127.0.0.1:8080",
+		"--reverse-forward-ports", "127.0.0.1:5000:127.0.0.1:5000", "--reverse-forward-ports", "127.0.0.1:8081:127.0.0.1:8081",
+		"--send-env", "SSH_AUTH_SOCK", "--send-env", "TERM",
+		"--set-env", "CAMP_CAPSULE=second-brain", "--set-env", "CAMP_CHECKPOINT=42",
+		"--forward-ports-timeout", "10m", "--agent-forwarding=false", "--gpg-agent-forwarding=true", "--stdio=false",
+		"--ssh-keepalive-interval", "30s", "--git-ssh-signing-key", "/home/vscode/.ssh/signing key.pub",
+		"--term-mode", "strict", "--install-terminfo=true", "--log-output", "plain", "--start-services=true", "camp-second-brain",
+	}
+	if len(runner.commands) != 1 || !reflect.DeepEqual(runner.commands[0].Argv, want) {
+		t.Fatalf("commands = %#v, want argv %#v", runner.commands, want)
+	}
+}
+
+func TestTypedAndRawDevPodFlagConflictsFailWithoutRunning(t *testing.T) {
+	t.Parallel()
+	agent := false
+	tests := []struct {
+		name string
+		run  func(*Client) error
+	}{
+		{"up provider equals form", func(client *Client) error {
+			_, err := client.Up(context.Background(), UpOptions{WorkspacePath: "/tmp/root", Provider: "docker", ForwardedArgv: []string{"--provider=ssh"}})
+			return err
+		}},
+		{"up invariant IDE", func(client *Client) error {
+			_, err := client.Up(context.Background(), UpOptions{WorkspacePath: "/tmp/root", ForwardedArgv: []string{"--ide", "vscode"}})
+			return err
+		}},
+		{"up repeated mount", func(client *Client) error {
+			_, err := client.Up(context.Background(), UpOptions{WorkspacePath: "/tmp/root", Mounts: []string{"type=volume,source=a,target=/a"}, ForwardedArgv: []string{"--mount", "type=volume,source=b,target=/b"}})
+			return err
+		}},
+		{"ssh reverse short form", func(client *Client) error {
+			_, err := client.SSH(context.Background(), SSHOptions{WorkspaceID: "camp", ReverseForwards: []string{"127.0.0.1:1:127.0.0.1:1"}, ForwardedArgv: []string{"-R", "127.0.0.1:2:127.0.0.1:2"}})
+			return err
+		}},
+		{"ssh explicit agent bool", func(client *Client) error {
+			_, err := client.SSH(context.Background(), SSHOptions{WorkspaceID: "camp", AgentForwarding: &agent, ForwardedArgv: []string{"--agent-forwarding=true"}})
+			return err
+		}},
+		{"ssh invariant services", func(client *Client) error {
+			_, err := client.SSH(context.Background(), SSHOptions{WorkspaceID: "camp", ForwardedArgv: []string{"--start-services", "true"}})
+			return err
+		}},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+			runner := &recordingRunner{}
+			err := test.run(NewClient("devpod", runner))
+			if !errors.Is(err, ErrDevPodArgumentConflict) {
+				t.Fatalf("error = %v, want ErrDevPodArgumentConflict", err)
+			}
+			if len(runner.commands) != 0 {
+				t.Fatalf("commands = %#v, want none", runner.commands)
+			}
+		})
+	}
+}
