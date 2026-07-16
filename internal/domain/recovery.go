@@ -38,6 +38,7 @@ type SourceDecision struct {
 	Kind        SourceDecisionKind `json:"kind" yaml:"kind"`
 	Root        string             `json:"root,omitempty" yaml:"root,omitempty"`
 	Initialized bool               `json:"initialized" yaml:"initialized"`
+	Lineage     *Lineage           `json:"lineage,omitempty" yaml:"lineage,omitempty"`
 	Generation  *GenerationRef     `json:"generation,omitempty" yaml:"generation,omitempty"`
 }
 

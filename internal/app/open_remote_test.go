@@ -5,6 +5,8 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
+	"errors"
 	"io"
 	"os"
 	"path/filepath"
@@ -63,6 +65,330 @@ func TestOpenRemoteBranchUsesSourceGenerationAndReentryDoesNotRehydrate(t *testi
 	}
 	if second.Snapshot.SessionID != first.Snapshot.SessionID || environment.hydrator.calls != 1 || environment.leases.branchCalls != 1 || environment.leases.acquireCalls != 0 || len(environment.devpod.ups) != 1 {
 		t.Fatalf("re-entry repeated lifecycle: snapshot=%#v hydrate=%d leases=%#v ups=%d", second.Snapshot, environment.hydrator.calls, environment.leases, len(environment.devpod.ups))
+	}
+}
+
+func TestOpenJournalsRemoteLeaseAcquisitionIntentAndFact(t *testing.T) {
+	t.Parallel()
+	environment := newRemoteOpenTestEnvironment(t)
+	result, err := environment.open.Run(context.Background(), OpenRequest{
+		SessionID: "lease-journal-session", Capsule: "brain", Branch: "feature", SourceLineage: domain.Lineage{Branch: "main"},
+		Mode: domain.SessionReadWrite, RemoteAvailable: true, Target: "MemoryD", EntryMode: domain.EntryTerminal,
+		Context: "default", Provider: "docker", Machine: "machine-a", Runtime: environment.runtime, Backend: environment.backend,
+	})
+	if err != nil {
+		t.Fatalf("Open() error = %v", err)
+	}
+	if result.Snapshot.Lease.Lease == nil || result.Snapshot.Lease.Revision == "" {
+		t.Fatalf("lease was not persisted in snapshot: %#v", result.Snapshot.Lease)
+	}
+	body, err := os.ReadFile(filepath.Join(environment.paths.SessionRoot, result.Snapshot.SessionID, "journal.jsonl"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Contains(body, []byte(`"transition":"RemoteLeaseAcquisition"`)) {
+		t.Fatalf("journal has no lease acquisition transition: %s", body)
+	}
+	var receipt struct {
+		Machine          string                `json:"machine"`
+		OpenedGeneration *domain.GenerationRef `json:"openedGeneration"`
+		CreatedAt        time.Time             `json:"createdAt"`
+		HeartbeatAt      time.Time             `json:"heartbeatAt"`
+		ExpiresAt        time.Time             `json:"expiresAt"`
+		BranchSource     bool                  `json:"branchSource"`
+		ObservedRevision string                `json:"observedRevision"`
+	}
+	for _, line := range bytes.Split(body, []byte{'\n'}) {
+		var entry struct {
+			Kind string            `json:"kind"`
+			Fact *ports.FactRecord `json:"fact"`
+		}
+		if len(line) == 0 || json.Unmarshal(line, &entry) != nil || entry.Kind != "fact" || entry.Fact == nil || entry.Fact.Transition != "RemoteLeaseAcquisition" {
+			continue
+		}
+		if err := json.Unmarshal(entry.Fact.Output, &receipt); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if receipt.Machine != "machine-a" || receipt.OpenedGeneration == nil || *receipt.OpenedGeneration != remoteOpenGeneration() ||
+		!receipt.CreatedAt.Equal(time.Unix(100, 0).UTC()) || !receipt.HeartbeatAt.Equal(receipt.CreatedAt) || !receipt.ExpiresAt.Equal(receipt.CreatedAt.Add(30*time.Minute)) ||
+		!receipt.BranchSource || receipt.ObservedRevision != "main-r1" {
+		t.Fatalf("lease receipt = %#v", receipt)
+	}
+	loaded, pending, err := environment.open.deps.Journal.Load(context.Background(), result.Snapshot.SessionID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(pending) != 0 || loaded.Lease.Lease == nil || loaded.Lease.Revision == "" {
+		t.Fatalf("journal lease state = %#v pending=%#v", loaded.Lease, pending)
+	}
+}
+
+func TestOpenRejectsMismatchedReturnedLeaseBeforeRecordingFact(t *testing.T) {
+	t.Parallel()
+	environment := newRemoteOpenTestEnvironment(t)
+	environment.leases.mutate = func(token *coordination.LeaseToken) {
+		token.Lease.OpenedGeneration = &domain.GenerationRef{Generation: 41, ArchiveSHA256: strings.Repeat("b", 64)}
+	}
+	const sessionID = "mismatched-returned-lease-session"
+	_, err := environment.open.Run(context.Background(), OpenRequest{
+		SessionID: sessionID, Capsule: "brain", Branch: "feature", SourceLineage: domain.Lineage{Branch: "main"},
+		Mode: domain.SessionReadWrite, RemoteAvailable: true, Target: "MemoryD", EntryMode: domain.EntryTerminal,
+		Context: "default", Provider: "docker", Machine: "machine-a", Runtime: environment.runtime, Backend: environment.backend,
+	})
+	if err == nil {
+		t.Fatal("Open() accepted a lease token for the wrong opened generation")
+	}
+	loaded, pending, loadErr := environment.open.deps.Journal.Load(context.Background(), sessionID)
+	if loadErr != nil || loaded.Lease.Lease != nil || len(pending) != 1 || pending[0].Intent.Transition != "RemoteLeaseAcquisition" {
+		t.Fatalf("mismatched lease snapshot=%#v pending=%#v error=%v", loaded.Lease, pending, loadErr)
+	}
+	if environment.hydrator.calls != 0 || len(environment.devpod.ups) != 0 {
+		t.Fatalf("effects after mismatched lease: hydrate=%d up=%d", environment.hydrator.calls, len(environment.devpod.ups))
+	}
+}
+
+func TestOpenReconcilesUnknownRemoteLeaseAcquisitionWithoutReacquiring(t *testing.T) {
+	t.Parallel()
+	environment := newRemoteOpenTestEnvironment(t)
+	leases := &unknownOutcomeOpenLeases{generation: remoteOpenGeneration(), now: time.Unix(100, 0).UTC()}
+	environment.open.deps.Leases = leases
+	const sessionID = "lease-outcome-unknown-session"
+	_, err := environment.open.Run(context.Background(), OpenRequest{
+		SessionID: sessionID, Capsule: "brain", Branch: "feature", SourceLineage: domain.Lineage{Branch: "main"},
+		Mode: domain.SessionReadWrite, RemoteAvailable: true, Target: "MemoryD", EntryMode: domain.EntryTerminal,
+		Context: "default", Provider: "docker", Machine: "machine-a", Runtime: environment.runtime, Backend: environment.backend,
+	})
+	if !errors.Is(err, ports.ErrAmbiguous) {
+		t.Fatalf("Open() error = %v, want ErrAmbiguous", err)
+	}
+	before, pending, err := environment.open.deps.Journal.Load(context.Background(), sessionID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if before.Lease.Lease != nil || len(pending) != 1 || pending[0].Intent.Transition != "RemoteLeaseAcquisition" {
+		t.Fatalf("pre-reconciliation snapshot lease = %#v pending=%#v", before.Lease, pending)
+	}
+
+	reconciled, err := environment.open.Reconcile(context.Background(), sessionID)
+	if err != nil {
+		t.Fatalf("Reconcile() error = %v", err)
+	}
+	if reconciled.Lease.Lease == nil || reconciled.Lease.Lease.SessionID != sessionID || reconciled.Lease.Revision != "lease-r1" {
+		t.Fatalf("reconciled lease = %#v", reconciled.Lease)
+	}
+	if reconciled.OpenedGeneration == nil || *reconciled.OpenedGeneration != remoteOpenGeneration() || reconciled.CurrentBase == nil || *reconciled.CurrentBase != remoteOpenGeneration() {
+		t.Fatalf("reconciled baseline opened=%#v current=%#v", reconciled.OpenedGeneration, reconciled.CurrentBase)
+	}
+	if reconciled.CurrentPointer != nil || reconciled.ExpectedPointerRevision != "" || reconciled.Recovery.Source.Kind != domain.SourceDecisionRemote ||
+		reconciled.Recovery.Source.Lineage == nil || *reconciled.Recovery.Source.Lineage != (domain.Lineage{Branch: "main"}) ||
+		reconciled.Recovery.Source.Generation == nil || *reconciled.Recovery.Source.Generation != remoteOpenGeneration() {
+		t.Fatalf("reconciled absent-branch source pointer=%#v revision=%q source=%#v", reconciled.CurrentPointer, reconciled.ExpectedPointerRevision, reconciled.Recovery.Source)
+	}
+	if leases.branchCalls != 1 || leases.readCalls != 1 {
+		t.Fatalf("lease calls after reconciliation = branch:%d read:%d, want branch:1 read:1", leases.branchCalls, leases.readCalls)
+	}
+	_, pending, err = environment.open.deps.Journal.Load(context.Background(), sessionID)
+	if err != nil || len(pending) != 0 {
+		t.Fatalf("post-reconciliation pending=%#v error=%v", pending, err)
+	}
+}
+
+func TestOpenReconcileAbsentLeaseRemainsPendingWithoutReacquiring(t *testing.T) {
+	t.Parallel()
+	environment := newRemoteOpenTestEnvironment(t)
+	leases := &absentOutcomeOpenLeases{}
+	environment.open.deps.Leases = leases
+	const sessionID = "lease-outcome-absent-session"
+	_, err := environment.open.Run(context.Background(), OpenRequest{
+		SessionID: sessionID, Capsule: "brain", Branch: "feature", SourceLineage: domain.Lineage{Branch: "main"},
+		Mode: domain.SessionReadWrite, RemoteAvailable: true, Target: "MemoryD", EntryMode: domain.EntryTerminal,
+		Context: "default", Provider: "docker", Machine: "machine-a", Runtime: environment.runtime, Backend: environment.backend,
+	})
+	if !errors.Is(err, ports.ErrAmbiguous) {
+		t.Fatalf("Open() error = %v, want ErrAmbiguous", err)
+	}
+	_, err = environment.open.Reconcile(context.Background(), sessionID)
+	if !errors.Is(err, ports.ErrNotFound) {
+		t.Fatalf("Reconcile() error = %v, want ErrNotFound", err)
+	}
+	if leases.branchCalls != 1 || leases.readCalls != 1 {
+		t.Fatalf("lease calls after reconciliation = branch:%d read:%d, want branch:1 read:1", leases.branchCalls, leases.readCalls)
+	}
+	loaded, pending, loadErr := environment.open.deps.Journal.Load(context.Background(), sessionID)
+	if loadErr != nil || loaded.Lease.Lease != nil || len(pending) != 1 || pending[0].Intent.Transition != "RemoteLeaseAcquisition" {
+		t.Fatalf("absent snapshot lease=%#v pending=%#v error=%v", loaded.Lease, pending, loadErr)
+	}
+}
+
+func TestOpenReconcileRejectsApproximateLeaseWithoutRecordingFact(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name   string
+		mutate func(*coordination.LeaseToken)
+	}{
+		{name: "schema", mutate: func(token *coordination.LeaseToken) { token.Lease.SchemaVersion = 0 }},
+		{name: "opened generation", mutate: func(token *coordination.LeaseToken) {
+			token.Lease.OpenedGeneration = &domain.GenerationRef{Generation: 41, ArchiveSHA256: strings.Repeat("b", 64)}
+		}},
+		{name: "created time", mutate: func(token *coordination.LeaseToken) { token.Lease.CreatedAt = token.Lease.CreatedAt.Add(time.Second) }},
+		{name: "heartbeat time", mutate: func(token *coordination.LeaseToken) {
+			token.Lease.HeartbeatAt = token.Lease.HeartbeatAt.Add(time.Second)
+		}},
+		{name: "expiry terms", mutate: func(token *coordination.LeaseToken) { token.Lease.ExpiresAt = token.Lease.ExpiresAt.Add(time.Second) }},
+		{name: "revision", mutate: func(token *coordination.LeaseToken) { token.Revision = "" }},
+	}
+	for _, test := range tests {
+		test := test
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+			environment := newRemoteOpenTestEnvironment(t)
+			leases := &unknownOutcomeOpenLeases{generation: remoteOpenGeneration(), now: time.Unix(100, 0).UTC(), mutate: test.mutate}
+			environment.open.deps.Leases = leases
+			sessionID := "approximate-lease-" + strings.ReplaceAll(test.name, " ", "-")
+			_, err := environment.open.Run(context.Background(), OpenRequest{
+				SessionID: sessionID, Capsule: "brain", Branch: "feature", SourceLineage: domain.Lineage{Branch: "main"},
+				Mode: domain.SessionReadWrite, RemoteAvailable: true, Target: "MemoryD", EntryMode: domain.EntryTerminal,
+				Context: "default", Provider: "docker", Machine: "machine-a", Runtime: environment.runtime, Backend: environment.backend,
+			})
+			if !errors.Is(err, ports.ErrAmbiguous) {
+				t.Fatalf("Open() error = %v, want ErrAmbiguous", err)
+			}
+			if _, err = environment.open.Reconcile(context.Background(), sessionID); err == nil {
+				t.Fatal("Reconcile() accepted an approximate lease")
+			}
+			loaded, pending, loadErr := environment.open.deps.Journal.Load(context.Background(), sessionID)
+			if loadErr != nil || loaded.Lease.Lease != nil || len(pending) != 1 || leases.branchCalls != 1 || leases.readCalls != 1 {
+				t.Fatalf("snapshot lease=%#v pending=%#v branch=%d read=%d error=%v", loaded.Lease, pending, leases.branchCalls, leases.readCalls, loadErr)
+			}
+		})
+	}
+}
+
+func TestOpenReconcileRejectsPointerDriftWithoutRecordingLeaseFact(t *testing.T) {
+	t.Parallel()
+	environment := newRemoteOpenTestEnvironment(t)
+	pointers := &recordingOpenPointers{source: remoteOpenPointer()}
+	leases := &unknownOutcomeOpenLeases{generation: remoteOpenGeneration(), now: time.Unix(100, 0).UTC()}
+	environment.open.deps.Pointers = pointers
+	environment.open.deps.Leases = leases
+	const sessionID = "lease-pointer-drift-session"
+	_, err := environment.open.Run(context.Background(), OpenRequest{
+		SessionID: sessionID, Capsule: "brain", Branch: "feature", SourceLineage: domain.Lineage{Branch: "main"},
+		Mode: domain.SessionReadWrite, RemoteAvailable: true, Target: "MemoryD", EntryMode: domain.EntryTerminal,
+		Context: "default", Provider: "docker", Machine: "machine-a", Runtime: environment.runtime, Backend: environment.backend,
+	})
+	if !errors.Is(err, ports.ErrAmbiguous) {
+		t.Fatalf("Open() error = %v, want ErrAmbiguous", err)
+	}
+	pointers.source.Revision = "main-r2"
+	if _, err = environment.open.Reconcile(context.Background(), sessionID); !errors.Is(err, coordination.ErrPointerChanged) {
+		t.Fatalf("Reconcile() error = %v, want ErrPointerChanged", err)
+	}
+	loaded, pending, loadErr := environment.open.deps.Journal.Load(context.Background(), sessionID)
+	if loadErr != nil || loaded.Lease.Lease != nil || len(pending) != 1 || leases.branchCalls != 1 || leases.readCalls != 0 {
+		t.Fatalf("snapshot lease=%#v pending=%#v branch=%d read=%d error=%v", loaded.Lease, pending, leases.branchCalls, leases.readCalls, loadErr)
+	}
+}
+
+func TestOpenReconcileReadOnlySnapshotNeverObservesOrAcquiresLease(t *testing.T) {
+	t.Parallel()
+	environment := newRemoteOpenTestEnvironment(t)
+	pointers := &recordingOpenPointers{source: remoteOpenPointer()}
+	leases := &absentOutcomeOpenLeases{}
+	environment.open.deps.Pointers = pointers
+	environment.open.deps.Leases = leases
+	now := time.Unix(100, 0).UTC()
+	const sessionID = "read-only-lease-intent-session"
+	snapshot := domain.JournalSnapshot{
+		SchemaVersion: domain.SchemaVersion, SessionID: sessionID, Capsule: "brain", Lineage: domain.Lineage{Branch: "feature"},
+		Mode: domain.SessionReadOnly, State: domain.SessionOpening, CreatedAt: now, UpdatedAt: now,
+	}
+	if err := environment.open.deps.Journal.Create(context.Background(), snapshot); err != nil {
+		t.Fatal(err)
+	}
+	source := remoteOpenPointer()
+	input := openLeaseAcquisitionInput{
+		Capsule: "brain", Lineage: snapshot.Lineage, Owner: coordination.LeaseOwner{SessionID: sessionID, Machine: "machine-a"},
+		Observed: &source, Source: &source, ObservedRevision: string(source.Revision), BranchSource: true, Now: now, LeaseTTL: time.Minute,
+	}
+	intent := ports.IntentRecord{ID: transitionID(sessionID, "RemoteLeaseAcquisition"), SessionID: sessionID, Transition: "RemoteLeaseAcquisition", Attempt: 1, Timestamp: now, Input: safeJSON(input)}
+	if err := environment.open.deps.Journal.RecordIntent(context.Background(), intent); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := environment.open.Reconcile(context.Background(), sessionID); !errors.Is(err, ErrOpenReadOnlyLease) {
+		t.Fatalf("Reconcile() error = %v, want ErrOpenReadOnlyLease", err)
+	}
+	if len(pointers.calls) != 0 || leases.readCalls != 0 || leases.branchCalls != 0 {
+		t.Fatalf("read-only reconciliation effects: pointers=%v lease-read=%d lease-acquire=%d", pointers.calls, leases.readCalls, leases.branchCalls)
+	}
+}
+
+func TestOpenReconcileRejectsInconsistentBranchSourceIntent(t *testing.T) {
+	t.Parallel()
+	environment := newRemoteOpenTestEnvironment(t)
+	pointers := &recordingOpenPointers{source: remoteOpenPointer()}
+	now := time.Unix(100, 0).UTC()
+	source := remoteOpenPointer()
+	opened := source.Pointer.Generation
+	const sessionID = "inconsistent-branch-source-session"
+	lease := coordination.LeaseToken{Lease: domain.WriterLease{
+		SchemaVersion: domain.SchemaVersion, Capsule: "brain", Lineage: domain.Lineage{Branch: "feature"}, SessionID: sessionID, Machine: "machine-a",
+		OpenedGeneration: &opened, CreatedAt: now, HeartbeatAt: now, ExpiresAt: now.Add(time.Minute),
+	}, Revision: "lease-r1"}
+	leases := &unknownOutcomeOpenLeases{token: lease, available: true}
+	environment.open.deps.Pointers = pointers
+	environment.open.deps.Leases = leases
+	snapshot := domain.JournalSnapshot{
+		SchemaVersion: domain.SchemaVersion, SessionID: sessionID, Capsule: "brain", Lineage: domain.Lineage{Branch: "feature"},
+		Mode: domain.SessionReadWrite, State: domain.SessionOpening, CreatedAt: now, UpdatedAt: now,
+	}
+	if err := environment.open.deps.Journal.Create(context.Background(), snapshot); err != nil {
+		t.Fatal(err)
+	}
+	observed := source
+	observed.Revision = "different-observation-r1"
+	input := openLeaseAcquisitionInput{
+		Capsule: "brain", Lineage: snapshot.Lineage, Owner: coordination.LeaseOwner{SessionID: sessionID, Machine: "machine-a"},
+		Observed: &observed, Source: &source, ObservedRevision: string(observed.Revision), BranchSource: true, Now: now, LeaseTTL: time.Minute,
+	}
+	intent := ports.IntentRecord{ID: transitionID(sessionID, "RemoteLeaseAcquisition"), SessionID: sessionID, Transition: "RemoteLeaseAcquisition", Attempt: 1, Timestamp: now, Input: safeJSON(input)}
+	if err := environment.open.deps.Journal.RecordIntent(context.Background(), intent); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := environment.open.Reconcile(context.Background(), sessionID); err == nil {
+		t.Fatal("Reconcile() accepted mismatched observed and source pointers")
+	}
+	_, pending, err := environment.open.deps.Journal.Load(context.Background(), sessionID)
+	if err != nil || len(pending) != 1 {
+		t.Fatalf("pending=%#v error=%v", pending, err)
+	}
+}
+
+func TestOpenReconciliationRejectsAnotherSessionsLeaseWithoutReacquiring(t *testing.T) {
+	t.Parallel()
+	environment := newRemoteOpenTestEnvironment(t)
+	leases := &conflictingOutcomeOpenLeases{generation: remoteOpenGeneration(), now: time.Unix(100, 0).UTC()}
+	environment.open.deps.Leases = leases
+	const sessionID = "lease-outcome-conflict-session"
+	_, err := environment.open.Run(context.Background(), OpenRequest{
+		SessionID: sessionID, Capsule: "brain", Branch: "feature", SourceLineage: domain.Lineage{Branch: "main"},
+		Mode: domain.SessionReadWrite, RemoteAvailable: true, Target: "MemoryD", EntryMode: domain.EntryTerminal,
+		Context: "default", Provider: "docker", Machine: "machine-a", Runtime: environment.runtime, Backend: environment.backend,
+	})
+	if !errors.Is(err, ports.ErrAmbiguous) {
+		t.Fatalf("Open() error = %v, want ErrAmbiguous", err)
+	}
+	_, err = environment.open.Reconcile(context.Background(), sessionID)
+	if !errors.Is(err, coordination.ErrLeaseHeld) {
+		t.Fatalf("Reconcile() error = %v, want ErrLeaseHeld", err)
+	}
+	if leases.branchCalls != 1 || leases.readCalls != 1 {
+		t.Fatalf("lease calls after conflict = branch:%d read:%d, want branch:1 read:1", leases.branchCalls, leases.readCalls)
+	}
+	loaded, pending, loadErr := environment.open.deps.Journal.Load(context.Background(), sessionID)
+	if loadErr != nil || loaded.Lease.Lease != nil || len(pending) != 1 || pending[0].Intent.Transition != "RemoteLeaseAcquisition" {
+		t.Fatalf("conflict snapshot lease=%#v pending=%#v error=%v", loaded.Lease, pending, loadErr)
 	}
 }
 
@@ -249,13 +575,26 @@ func remoteOpenMetadata() domain.GenerationMetadata {
 
 type recordingOpenPointers struct {
 	source coordination.PointerRecord
+	calls  []string
 }
 
 func (r *recordingOpenPointers) Read(_ context.Context, _ string, lineage domain.Lineage) (coordination.PointerRecord, error) {
+	r.calls = append(r.calls, lineage.Branch)
 	if lineage.IsMain() {
 		return r.source, nil
 	}
 	return coordination.PointerRecord{}, ports.ErrNotFound
+}
+
+func (r *recordingOpenPointers) Revalidate(ctx context.Context, observed coordination.PointerRecord) error {
+	current, err := r.Read(ctx, observed.Pointer.Capsule, observed.Pointer.Lineage)
+	if err != nil {
+		return err
+	}
+	if current.Revision != observed.Revision || !bytes.Equal(safeJSON(current.Pointer), safeJSON(observed.Pointer)) {
+		return coordination.ErrPointerChanged
+	}
+	return nil
 }
 
 type recordingOpenGenerations struct {
@@ -270,32 +609,122 @@ type recordingOpenLeases struct {
 	generation   domain.GenerationRef
 	now          time.Time
 	owner        coordination.LeaseOwner
+	mutate       func(*coordination.LeaseToken)
 	branchCalls  int
 	acquireCalls int
+}
+
+type unknownOutcomeOpenLeases struct {
+	generation  domain.GenerationRef
+	now         time.Time
+	token       coordination.LeaseToken
+	available   bool
+	mutate      func(*coordination.LeaseToken)
+	branchCalls int
+	readCalls   int
+}
+
+type absentOutcomeOpenLeases struct {
+	branchCalls int
+	readCalls   int
+}
+
+type conflictingOutcomeOpenLeases struct {
+	generation  domain.GenerationRef
+	now         time.Time
+	token       coordination.LeaseToken
+	branchCalls int
+	readCalls   int
+}
+
+func (r *conflictingOutcomeOpenLeases) Read(context.Context, string, domain.Lineage) (coordination.LeaseToken, error) {
+	r.readCalls++
+	return r.token, nil
+}
+
+func (r *conflictingOutcomeOpenLeases) Acquire(context.Context, string, domain.Lineage, coordination.LeaseOwner, *coordination.PointerRecord, time.Time, time.Duration) (coordination.LeaseToken, error) {
+	return coordination.LeaseToken{}, errors.New("unexpected main-lineage lease acquisition")
+}
+
+func (r *conflictingOutcomeOpenLeases) AcquireBranchFrom(_ context.Context, capsule string, lineage domain.Lineage, _ coordination.LeaseOwner, _ coordination.PointerRecord, _ time.Time, ttl time.Duration) (coordination.LeaseToken, error) {
+	r.branchCalls++
+	opened := r.generation
+	r.token = coordination.LeaseToken{Lease: domain.WriterLease{
+		SchemaVersion: domain.SchemaVersion, Capsule: capsule, Lineage: lineage, SessionID: "other-session", Machine: "machine-b",
+		OpenedGeneration: &opened, CreatedAt: r.now, HeartbeatAt: r.now, ExpiresAt: r.now.Add(ttl),
+	}, Revision: "other-lease-r1"}
+	return coordination.LeaseToken{}, ports.ErrAmbiguous
+}
+
+func (r *absentOutcomeOpenLeases) Read(context.Context, string, domain.Lineage) (coordination.LeaseToken, error) {
+	r.readCalls++
+	return coordination.LeaseToken{}, ports.ErrNotFound
+}
+
+func (r *absentOutcomeOpenLeases) Acquire(context.Context, string, domain.Lineage, coordination.LeaseOwner, *coordination.PointerRecord, time.Time, time.Duration) (coordination.LeaseToken, error) {
+	return coordination.LeaseToken{}, errors.New("unexpected main-lineage lease acquisition")
+}
+
+func (r *absentOutcomeOpenLeases) AcquireBranchFrom(context.Context, string, domain.Lineage, coordination.LeaseOwner, coordination.PointerRecord, time.Time, time.Duration) (coordination.LeaseToken, error) {
+	r.branchCalls++
+	if r.branchCalls == 1 {
+		return coordination.LeaseToken{}, ports.ErrAmbiguous
+	}
+	return coordination.LeaseToken{}, errors.New("reconciliation repeated lease acquisition")
+}
+
+func (r *unknownOutcomeOpenLeases) Read(context.Context, string, domain.Lineage) (coordination.LeaseToken, error) {
+	r.readCalls++
+	if !r.available {
+		return coordination.LeaseToken{}, ports.ErrNotFound
+	}
+	return r.token, nil
+}
+
+func (r *unknownOutcomeOpenLeases) Acquire(context.Context, string, domain.Lineage, coordination.LeaseOwner, *coordination.PointerRecord, time.Time, time.Duration) (coordination.LeaseToken, error) {
+	return coordination.LeaseToken{}, errors.New("unexpected main-lineage lease acquisition")
+}
+
+func (r *unknownOutcomeOpenLeases) AcquireBranchFrom(_ context.Context, capsule string, lineage domain.Lineage, owner coordination.LeaseOwner, _ coordination.PointerRecord, _ time.Time, ttl time.Duration) (coordination.LeaseToken, error) {
+	r.branchCalls++
+	opened := r.generation
+	r.token = coordination.LeaseToken{Lease: domain.WriterLease{
+		SchemaVersion: domain.SchemaVersion, Capsule: capsule, Lineage: lineage, SessionID: owner.SessionID, Machine: owner.Machine,
+		OpenedGeneration: &opened, CreatedAt: r.now, HeartbeatAt: r.now, ExpiresAt: r.now.Add(ttl),
+	}, Revision: "lease-r1"}
+	r.available = true
+	if r.mutate != nil {
+		r.mutate(&r.token)
+	}
+	return coordination.LeaseToken{}, ports.ErrAmbiguous
 }
 
 func (r *recordingOpenLeases) Read(context.Context, string, domain.Lineage) (coordination.LeaseToken, error) {
 	return coordination.LeaseToken{}, ports.ErrNotFound
 }
 
-func (r *recordingOpenLeases) Acquire(_ context.Context, _ string, _ domain.Lineage, owner coordination.LeaseOwner, _ *coordination.PointerRecord, _ time.Time, _ time.Duration) (coordination.LeaseToken, error) {
+func (r *recordingOpenLeases) Acquire(_ context.Context, _ string, _ domain.Lineage, owner coordination.LeaseOwner, _ *coordination.PointerRecord, now time.Time, ttl time.Duration) (coordination.LeaseToken, error) {
 	r.acquireCalls++
 	r.owner = owner
-	return r.token(owner, domain.Lineage{Branch: "main"}), nil
+	return r.token(owner, domain.Lineage{Branch: "main"}, now, ttl), nil
 }
 
-func (r *recordingOpenLeases) AcquireBranchFrom(_ context.Context, _ string, lineage domain.Lineage, owner coordination.LeaseOwner, _ coordination.PointerRecord, _ time.Time, _ time.Duration) (coordination.LeaseToken, error) {
+func (r *recordingOpenLeases) AcquireBranchFrom(_ context.Context, _ string, lineage domain.Lineage, owner coordination.LeaseOwner, _ coordination.PointerRecord, now time.Time, ttl time.Duration) (coordination.LeaseToken, error) {
 	r.branchCalls++
 	r.owner = owner
-	return r.token(owner, lineage), nil
+	return r.token(owner, lineage, now, ttl), nil
 }
 
-func (r *recordingOpenLeases) token(owner coordination.LeaseOwner, lineage domain.Lineage) coordination.LeaseToken {
+func (r *recordingOpenLeases) token(owner coordination.LeaseOwner, lineage domain.Lineage, now time.Time, ttl time.Duration) coordination.LeaseToken {
 	opened := r.generation
-	return coordination.LeaseToken{Lease: domain.WriterLease{
+	token := coordination.LeaseToken{Lease: domain.WriterLease{
 		SchemaVersion: domain.SchemaVersion, Capsule: "brain", Lineage: lineage, SessionID: owner.SessionID, Machine: owner.Machine,
-		OpenedGeneration: &opened, CreatedAt: r.now, HeartbeatAt: r.now, ExpiresAt: r.now.Add(time.Hour),
+		OpenedGeneration: &opened, CreatedAt: now, HeartbeatAt: now, ExpiresAt: now.Add(ttl),
 	}, Revision: "lease-r1"}
+	if r.mutate != nil {
+		r.mutate(&token)
+	}
+	return token
 }
 
 type recordingOpenHydrator struct {

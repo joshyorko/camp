@@ -20,18 +20,21 @@ import (
 	"github.com/joshyorko/camp/internal/config"
 	"github.com/joshyorko/camp/internal/coordination"
 	"github.com/joshyorko/camp/internal/domain"
+	journalstore "github.com/joshyorko/camp/internal/journal"
 	"github.com/joshyorko/camp/internal/ports"
 	"github.com/joshyorko/camp/internal/target"
 	"github.com/joshyorko/camp/internal/workspace"
 )
 
 var (
-	ErrOpenDependencies = errors.New("open dependencies are incomplete")
-	ErrRecoveryRequired = errors.New("session requires recovery before entry")
+	ErrOpenDependencies  = errors.New("open dependencies are incomplete")
+	ErrRecoveryRequired  = errors.New("session requires recovery before entry")
+	ErrOpenReadOnlyLease = errors.New("read-only session cannot reconcile a writer lease")
 )
 
 type OpenPointerReader interface {
 	Read(context.Context, string, domain.Lineage) (coordination.PointerRecord, error)
+	Revalidate(context.Context, coordination.PointerRecord) error
 }
 
 type OpenGenerationReader interface {
@@ -111,6 +114,32 @@ type OpenResult struct {
 	RecoveryCommand string
 }
 
+type openLeaseAcquisitionInput struct {
+	Capsule          string                      `json:"capsule"`
+	Lineage          domain.Lineage              `json:"lineage"`
+	Owner            coordination.LeaseOwner     `json:"owner"`
+	Observed         *coordination.PointerRecord `json:"observed,omitempty"`
+	Source           *coordination.PointerRecord `json:"source,omitempty"`
+	ObservedRevision string                      `json:"observedRevision,omitempty"`
+	BranchSource     bool                        `json:"branchSource"`
+	Now              time.Time                   `json:"now"`
+	LeaseTTL         time.Duration               `json:"leaseTtl"`
+}
+
+type openLeaseReceipt struct {
+	Capsule          string                `json:"capsule"`
+	Lineage          domain.Lineage        `json:"lineage"`
+	Session          string                `json:"sessionId"`
+	Machine          string                `json:"machine"`
+	Revision         string                `json:"revision"`
+	OpenedGeneration *domain.GenerationRef `json:"openedGeneration,omitempty"`
+	CreatedAt        time.Time             `json:"createdAt"`
+	HeartbeatAt      time.Time             `json:"heartbeatAt"`
+	ExpiresAt        time.Time             `json:"expiresAt"`
+	BranchSource     bool                  `json:"branchSource"`
+	ObservedRevision string                `json:"observedRevision"`
+}
+
 type Open struct {
 	deps OpenDependencies
 }
@@ -136,6 +165,112 @@ func (o *Open) Run(ctx context.Context, request OpenRequest) (OpenResult, error)
 		return o.reenter(ctx, snapshot, request)
 	}
 	return o.create(ctx, request)
+}
+
+func (o *Open) Reconcile(ctx context.Context, sessionID string) (domain.JournalSnapshot, error) {
+	if o == nil || o.deps.Journal == nil || o.deps.Pointers == nil || o.deps.Leases == nil || o.deps.Clock == nil || sessionID == "" {
+		return domain.JournalSnapshot{}, errors.New("open reconciliation dependencies or session are incomplete")
+	}
+	return journalstore.Reconcile(ctx, o.deps.Journal, sessionID, map[string]journalstore.Observer{
+		"RemoteLeaseAcquisition": o.observeRemoteLeaseAcquisition,
+	})
+}
+
+func (o *Open) observeRemoteLeaseAcquisition(ctx context.Context, snapshot domain.JournalSnapshot, intent ports.IntentRecord) (ports.FactRecord, domain.JournalSnapshot, error) {
+	if snapshot.Mode != domain.SessionReadWrite {
+		return ports.FactRecord{}, snapshot, ErrOpenReadOnlyLease
+	}
+	var input openLeaseAcquisitionInput
+	if err := json.Unmarshal(intent.Input, &input); err != nil {
+		return ports.FactRecord{}, snapshot, fmt.Errorf("decode lease acquisition intent: %w", err)
+	}
+	if input.Capsule != snapshot.Capsule || input.Lineage != snapshot.Lineage || input.Owner.SessionID != snapshot.SessionID || input.Owner.Machine == "" || input.Now.IsZero() || input.LeaseTTL <= 0 {
+		return ports.FactRecord{}, snapshot, errors.New("lease acquisition intent does not match the pending session")
+	}
+	if input.BranchSource {
+		if input.Lineage.IsMain() || input.Source == nil || input.Observed == nil || input.ObservedRevision != string(input.Observed.Revision) ||
+			input.Source.Pointer.Capsule != input.Capsule || input.Source.Pointer.Lineage == input.Lineage || !sameOpenPointerRecord(*input.Observed, *input.Source) {
+			return ports.FactRecord{}, snapshot, errors.New("branch lease acquisition intent has an inconsistent source")
+		}
+		if _, err := o.deps.Pointers.Read(ctx, input.Capsule, input.Lineage); err == nil || !errors.Is(err, ports.ErrNotFound) {
+			if err == nil {
+				err = coordination.ErrPointerChanged
+			}
+			return ports.FactRecord{}, snapshot, fmt.Errorf("revalidate absent branch pointer: %w", err)
+		}
+		if err := o.deps.Pointers.Revalidate(ctx, *input.Source); err != nil {
+			return ports.FactRecord{}, snapshot, err
+		}
+	} else {
+		if input.Source != nil || input.Observed == nil || input.ObservedRevision != string(input.Observed.Revision) || input.Observed.Pointer.Lineage != input.Lineage {
+			return ports.FactRecord{}, snapshot, errors.New("lease acquisition intent has an inconsistent observed pointer")
+		}
+		if err := o.deps.Pointers.Revalidate(ctx, *input.Observed); err != nil {
+			return ports.FactRecord{}, snapshot, err
+		}
+	}
+	now := o.deps.Clock.Now().UTC()
+	if now.IsZero() {
+		return ports.FactRecord{}, snapshot, errors.New("open reconciliation clock returned zero time")
+	}
+	token, err := o.deps.Leases.Read(ctx, input.Capsule, input.Lineage)
+	if err != nil {
+		return ports.FactRecord{}, snapshot, err
+	}
+	openedFrom, err := validateOpenLeaseToken(input, token, now)
+	if err != nil {
+		return ports.FactRecord{}, snapshot, err
+	}
+	opened := openedFrom.Pointer.Generation
+	next := snapshot
+	next.OpenedGeneration = cloneGeneration(&opened)
+	next.CurrentBase = cloneGeneration(&opened)
+	openedLineage := openedFrom.Pointer.Lineage
+	next.Recovery.Source = domain.SourceDecision{Kind: domain.SourceDecisionRemote, Lineage: &openedLineage, Generation: cloneGeneration(&opened)}
+	if openedFrom.Pointer.Lineage == input.Lineage {
+		next.CurrentPointer = clonePointer(&openedFrom.Pointer)
+		next.ExpectedPointerRevision = string(openedFrom.Revision)
+	} else {
+		next.CurrentPointer = nil
+		next.ExpectedPointerRevision = ""
+	}
+	next.Lease = domain.LeaseRecord{Lease: &token.Lease, Revision: string(token.Revision)}
+	receipt, err := json.Marshal(leaseReceipt(input, token))
+	if err != nil {
+		return ports.FactRecord{}, snapshot, err
+	}
+	return ports.FactRecord{IntentID: intent.ID, SessionID: intent.SessionID, Transition: intent.Transition, Timestamp: now, Output: receipt}, next, nil
+}
+
+func validateOpenLeaseToken(input openLeaseAcquisitionInput, token coordination.LeaseToken, observedAt time.Time) (*coordination.PointerRecord, error) {
+	if token.Lease.SessionID != input.Owner.SessionID || token.Lease.Machine != input.Owner.Machine {
+		return nil, fmt.Errorf("lineage lease belongs to session %q: %w", token.Lease.SessionID, coordination.ErrLeaseHeld)
+	}
+	openedFrom := input.Observed
+	if input.BranchSource {
+		openedFrom = input.Source
+	}
+	if openedFrom == nil || openedFrom.Revision == "" {
+		return nil, errors.New("lease acquisition intent lacks its opened pointer")
+	}
+	opened := openedFrom.Pointer.Generation
+	expectedExpiry := input.Now.Add(input.LeaseTTL)
+	if token.Lease.SchemaVersion != domain.SchemaVersion || token.Lease.Capsule != input.Capsule || token.Lease.Lineage != input.Lineage ||
+		token.Lease.SessionID != input.Owner.SessionID || token.Lease.Machine != input.Owner.Machine || !sameGeneration(token.Lease.OpenedGeneration, &opened) ||
+		!token.Lease.CreatedAt.Equal(input.Now) || !token.Lease.HeartbeatAt.Equal(input.Now) || !token.Lease.ExpiresAt.Equal(expectedExpiry) ||
+		token.Revision == "" || observedAt.Before(input.Now) || !expectedExpiry.After(observedAt) {
+		return nil, errors.New("observed lease acquisition does not exactly match the pending intent")
+	}
+	return openedFrom, nil
+}
+
+func leaseReceipt(input openLeaseAcquisitionInput, token coordination.LeaseToken) openLeaseReceipt {
+	return openLeaseReceipt{
+		Capsule: input.Capsule, Lineage: input.Lineage, Session: token.Lease.SessionID, Machine: token.Lease.Machine,
+		Revision: string(token.Revision), OpenedGeneration: cloneGeneration(token.Lease.OpenedGeneration),
+		CreatedAt: token.Lease.CreatedAt, HeartbeatAt: token.Lease.HeartbeatAt, ExpiresAt: token.Lease.ExpiresAt,
+		BranchSource: input.BranchSource, ObservedRevision: input.ObservedRevision,
+	}
 }
 
 func (o *Open) validate(request OpenRequest) error {
@@ -318,7 +453,8 @@ func (o *Open) create(ctx context.Context, request OpenRequest) (OpenResult, err
 		finalRoot := filepath.Join(o.deps.Ownership.MaterializationRoot(), request.Capsule, request.Branch, sessionID)
 		stageRoot := filepath.Join(sessionRoot, "materialization-stage")
 		hydrationRequest := hydration.Request{SessionID: sessionID, Capsule: request.Capsule, Generation: opened, Metadata: metadata, SessionRoot: sessionRoot, StageRoot: stageRoot, FinalRoot: finalRoot, HaulPath: snapshot.Recovery.Session.HaulPath, Token: token}
-		snapshot.Recovery.Source = domain.SourceDecision{Kind: domain.SourceDecisionRemote, Generation: cloneGeneration(&opened)}
+		sourceLineage := fetchLineage
+		snapshot.Recovery.Source = domain.SourceDecision{Kind: domain.SourceDecisionRemote, Lineage: &sourceLineage, Generation: cloneGeneration(&opened)}
 		snapshot.Recovery.Cleanup.RemoveOwnedMaterialization = true
 		if err := journal.phase(ctx, "MaterializationPlanned", safeJSON(struct {
 			Token string `json:"token"`
@@ -480,20 +616,37 @@ func (o *Open) observeRemote(ctx context.Context, request OpenRequest, lineage d
 }
 
 func (o *Open) acquireRemoteLease(ctx context.Context, request OpenRequest, lineage domain.Lineage, observed, source *coordination.PointerRecord, log *openJournal) (coordination.LeaseToken, error) {
-	if o.deps.Leases == nil {
+	if o.deps.Leases == nil || log == nil {
 		return coordination.LeaseToken{}, errors.New("remote lease manager is missing")
 	}
 	owner := coordination.LeaseOwner{SessionID: request.SessionID, Machine: request.Machine}
 	if owner.SessionID == "" {
 		return coordination.LeaseToken{}, errors.New("remote session id is missing")
 	}
-	var token coordination.LeaseToken
-	var err error
-	if source != nil && !lineage.IsMain() && observed == source {
-		token, err = o.deps.Leases.AcquireBranchFrom(ctx, request.Capsule, lineage, owner, *source, o.deps.Clock.Now().UTC(), request.LeaseTTL)
-	} else {
-		token, err = o.deps.Leases.Acquire(ctx, request.Capsule, lineage, owner, observed, o.deps.Clock.Now().UTC(), request.LeaseTTL)
+	now := o.deps.Clock.Now().UTC()
+	input := openLeaseAcquisitionInput{Capsule: request.Capsule, Lineage: lineage, Owner: owner, Observed: observed, Source: source, BranchSource: source != nil, Now: now, LeaseTTL: request.LeaseTTL}
+	if observed != nil {
+		input.ObservedRevision = string(observed.Revision)
 	}
+	var token coordination.LeaseToken
+	receipt := openLeaseReceipt{}
+	err := log.phase(ctx, "RemoteLeaseAcquisition", input, &receipt, func() error {
+		var err error
+		if source != nil && !lineage.IsMain() && observed == source {
+			token, err = o.deps.Leases.AcquireBranchFrom(ctx, request.Capsule, lineage, owner, *source, now, request.LeaseTTL)
+		} else {
+			token, err = o.deps.Leases.Acquire(ctx, request.Capsule, lineage, owner, observed, now, request.LeaseTTL)
+		}
+		if err != nil {
+			return err
+		}
+		if _, err := validateOpenLeaseToken(input, token, now); err != nil {
+			return err
+		}
+		log.snapshot.Lease = domain.LeaseRecord{Lease: &token.Lease, Revision: string(token.Revision)}
+		receipt = leaseReceipt(input, token)
+		return nil
+	})
 	if err != nil {
 		return coordination.LeaseToken{}, err
 	}
@@ -597,6 +750,13 @@ func clonePointer(pointer *domain.LatestPointer) *domain.LatestPointer {
 	copy := *pointer
 	copy.Parent = cloneGeneration(pointer.Parent)
 	return &copy
+}
+
+func sameOpenPointerRecord(left, right coordination.PointerRecord) bool {
+	leftPointer, rightPointer := left.Pointer, right.Pointer
+	leftParent, rightParent := leftPointer.Parent, rightPointer.Parent
+	leftPointer.Parent, rightPointer.Parent = nil, nil
+	return left.Revision == right.Revision && leftPointer == rightPointer && sameGeneration(leftParent, rightParent)
 }
 
 func newSessionID() (string, error) {
