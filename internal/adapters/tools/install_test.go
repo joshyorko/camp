@@ -1,3 +1,5 @@
+//go:build linux
+
 package tools
 
 import (
@@ -348,6 +350,36 @@ func TestInstallerDoesNotTrustForgedRawBinaryIdentityRecord(t *testing.T) {
 	assertRegularExecutable(t, second.Path, contents)
 	if requests.Load() != 2 {
 		t.Fatalf("download requests = %d, want authoritative repair", requests.Load())
+	}
+}
+
+func TestReadInstallIdentityRejectsUnsafeFiles(t *testing.T) {
+	body := []byte(`{"repository":"example/devpod"}`)
+	directory := t.TempDir()
+	regular := filepath.Join(directory, "regular")
+	if err := os.WriteFile(regular, body, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if got, err := readInstallIdentity(regular); err != nil || !bytes.Equal(got, body) {
+		t.Fatalf("regular identity = %q, %v", got, err)
+	}
+	unsafe := map[string]func(string) error{
+		"symlink":  func(path string) error { return os.Symlink(regular, path) },
+		"hardlink": func(path string) error { return os.Link(regular, path) },
+		"oversize": func(path string) error {
+			return os.WriteFile(path, bytes.Repeat([]byte("x"), maxInstallIdentityBytes+1), 0o600)
+		},
+	}
+	for name, create := range unsafe {
+		t.Run(name, func(t *testing.T) {
+			path := filepath.Join(directory, name)
+			if err := create(path); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := readInstallIdentity(path); err == nil {
+				t.Fatal("unsafe identity file was accepted")
+			}
+		})
 	}
 }
 

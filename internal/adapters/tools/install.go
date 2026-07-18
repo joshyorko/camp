@@ -1,3 +1,5 @@
+//go:build linux
+
 package tools
 
 import (
@@ -25,6 +27,7 @@ import (
 const (
 	defaultMaxDownloadBytes   = int64(256 << 20)
 	defaultMaxExecutableBytes = int64(512 << 20)
+	maxInstallIdentityBytes   = 64 << 10
 	ExternalHostCapability    = "external-host-capability"
 )
 
@@ -503,7 +506,7 @@ func inspectReleaseTarGzip(source, executableName string, limit int64, output io
 }
 
 func verifyManaged(name string, asset Asset, binaryPath, markerPath string, want installIdentity, downloadLimit, executableLimit int64) (string, error) {
-	body, err := os.ReadFile(markerPath)
+	body, err := readInstallIdentity(markerPath)
 	if err != nil {
 		return "", err
 	}
@@ -536,6 +539,38 @@ func verifyManaged(name string, asset Asset, binaryPath, markerPath string, want
 		return "", errors.New("managed raw tool does not match locked asset checksum")
 	}
 	return digest, nil
+}
+
+func readInstallIdentity(path string) ([]byte, error) {
+	fd, err := unix.Open(path, unix.O_RDONLY|unix.O_CLOEXEC|unix.O_NOFOLLOW, 0)
+	if err != nil {
+		return nil, err
+	}
+	file := os.NewFile(uintptr(fd), path)
+	if file == nil {
+		_ = unix.Close(fd)
+		return nil, errors.New("open managed tool identity")
+	}
+	defer file.Close()
+	var before unix.Stat_t
+	if err := unix.Fstat(fd, &before); err != nil {
+		return nil, err
+	}
+	if before.Mode&unix.S_IFMT != unix.S_IFREG || before.Nlink != 1 || before.Size < 0 || before.Size > maxInstallIdentityBytes {
+		return nil, errors.New("managed tool identity file shape, link count, or size is invalid")
+	}
+	body, err := io.ReadAll(io.LimitReader(file, maxInstallIdentityBytes+1))
+	if err != nil || int64(len(body)) != before.Size {
+		return nil, errors.New("read managed tool identity within size limit")
+	}
+	var after unix.Stat_t
+	if err := unix.Fstat(fd, &after); err != nil {
+		return nil, err
+	}
+	if before.Dev != after.Dev || before.Ino != after.Ino || before.Size != after.Size || before.Mtim != after.Mtim || before.Ctim != after.Ctim {
+		return nil, errors.New("managed tool identity changed while reading")
+	}
+	return body, nil
 }
 
 func verifyDataFile(path string, limit int64) (string, error) {
