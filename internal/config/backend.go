@@ -5,6 +5,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"net"
 	"net/url"
 	"strings"
 )
@@ -87,6 +88,9 @@ func ResolveBackend(raw string, values S3Values) (Backend, error) {
 
 func validBucket(bucket string) bool {
 	if len(bucket) < 3 || len(bucket) > 63 || strings.Contains(bucket, "..") {
+		return false
+	}
+	if net.ParseIP(bucket) != nil {
 		return false
 	}
 	for index, char := range bucket {

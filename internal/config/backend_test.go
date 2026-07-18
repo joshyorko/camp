@@ -37,6 +37,7 @@ func TestResolveBackendRejectsCredentialsAndUnsafeS3Configuration(t *testing.T) 
 		{raw: "s3://bucket/prefix", values: S3Values{Endpoint: "http://s3.example", Region: "us-east-1"}},
 		{raw: "s3://bucket/prefix", values: S3Values{Endpoint: "https://s3.example", Region: "us-east-1", Insecure: true}},
 		{raw: "s3://Bad_Bucket/prefix", values: S3Values{Endpoint: "https://s3.example", Region: "us-east-1"}},
+		{raw: "s3://192.168.1.1/prefix", values: S3Values{Endpoint: "https://s3.example", Region: "us-east-1"}},
 	} {
 		if _, err := ResolveBackend(test.raw, test.values); err == nil {
 			t.Fatalf("ResolveBackend(%q, %#v) succeeded", test.raw, test.values)

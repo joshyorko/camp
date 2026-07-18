@@ -3,6 +3,8 @@ package app
 import (
 	"context"
 	"errors"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -11,6 +13,8 @@ import (
 	"time"
 
 	devpodadapter "github.com/joshyorko/camp/internal/adapters/devpod"
+	"github.com/joshyorko/camp/internal/adapters/objectstore"
+	"github.com/joshyorko/camp/internal/adapters/s3store"
 	"github.com/joshyorko/camp/internal/capsule"
 	"github.com/joshyorko/camp/internal/config"
 	"github.com/joshyorko/camp/internal/domain"
@@ -18,6 +22,70 @@ import (
 	"github.com/joshyorko/camp/internal/ports"
 	"github.com/joshyorko/camp/internal/target"
 )
+
+func TestOpenComposesResolvedS3BackendAndPersistsSanitizedIdentity(t *testing.T) {
+	environment := newOpenTestEnvironment(t)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { http.NotFound(w, r) }))
+	defer server.Close()
+	backend, err := config.ResolveBackend("s3://camp-bucket/team", config.S3Values{
+		Endpoint: server.URL, Region: "us-east-1", PathStyle: true, Insecure: true,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	deps := environment.open.deps
+	opener, err := NewOpenWithBackend(context.Background(), deps, backend, objectstore.Options{
+		HTTPClient: server.Client(), Signer: s3store.SignFunc(func(*http.Request) error { return nil }),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	root := filepath.Join(t.TempDir(), "source")
+	if err := os.MkdirAll(root, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	result, err := opener.Run(context.Background(), OpenRequest{
+		SessionID: "s3-session", Capsule: "brain", Branch: "main", ExplicitRoot: root,
+		Runtime: environment.runtime, ResolvedBackend: backend,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	configuration := result.Snapshot.Recovery.Configuration
+	if configuration.BackendKind != "s3" || configuration.BackendURL != "s3://camp-bucket/team" || configuration.BackendFingerprint != backend.Fingerprint {
+		t.Fatalf("recovery backend identity = %#v", configuration)
+	}
+	if _, err := environment.open.Reconcile(context.Background(), "s3-session"); !errors.Is(err, ErrOpenSessionMismatch) {
+		t.Fatalf("file-composed recovery error = %v, want backend mismatch", err)
+	}
+}
+
+func TestOpenResolvedFileBackendRemainsSupported(t *testing.T) {
+	environment := newOpenTestEnvironment(t)
+	backend, err := config.ResolveBackend(environment.backend.SanitizedURL, config.S3Values{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	deps := environment.open.deps
+	opener, err := NewOpenWithBackend(context.Background(), deps, backend, objectstore.Options{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	root := filepath.Join(t.TempDir(), "source")
+	if err := os.MkdirAll(root, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	result, err := opener.Run(context.Background(), OpenRequest{
+		SessionID: "file-session", Capsule: "brain", Branch: "main", ExplicitRoot: root,
+		Runtime: environment.runtime, ResolvedBackend: backend,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Snapshot.Recovery.Configuration.BackendKind != "file" {
+		t.Fatalf("recovery backend = %#v", result.Snapshot.Recovery.Configuration)
+	}
+}
 
 func TestOpenAdoptsRootPreservesOwnershipAndResolvesTargetAfterCommit(t *testing.T) {
 	t.Parallel()

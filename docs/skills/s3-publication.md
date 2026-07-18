@@ -8,10 +8,18 @@ discovery. Credentials are retrieved at request time and must not enter
 `s3store.Config`, backend descriptors, object metadata, object keys, journals,
 or logs.
 
-Resolve a backend through `config.ResolveBackend`, then construct its
-`ports.ObjectStore` through `objectstore.New`. The `s3://` URL contains only the
-bucket and optional clean prefix. Endpoint, region, path-style addressing, and
-transport policy are separate bootstrap values. HTTPS is the default policy;
+Resolve a backend through `config.ResolveBackend`. Application composition must
+then pass that descriptor through `app.NewOpenWithBackend`, which constructs the
+`ports.ObjectStore`, binds the pointer, generation, and lease repositories to
+that same store, and carries the resolved identity into session recovery through
+`config.DurableBackendConfiguration`. A standalone factory test is not
+production wiring proof; application tests must show both `s3://` acceptance and
+unchanged `file://` session creation with the expected durable identity.
+
+The `s3://` URL contains only the bucket and optional clean prefix. Endpoint,
+region, path-style addressing, and transport policy are separate bootstrap
+values. IP-address-shaped and other non-DNS bucket names are rejected. HTTPS is
+the default policy;
 an `http://` endpoint is rejected unless `insecure: true` (or
 `CAMP_S3_INSECURE=true`) is explicit, and `insecure: true` is rejected for an
 HTTPS endpoint. Bucket names are DNS-compatible and endpoint URLs cannot carry

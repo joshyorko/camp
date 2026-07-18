@@ -202,6 +202,32 @@ func TestPutImmutableRejectsReadbackMismatch(t *testing.T) {
 	}
 }
 
+func TestPutImmutableRejectsWrongExpectedSizeBeforeMultipart(t *testing.T) {
+	body := []byte("archive")
+	digestBytes := sha256.Sum256(body)
+	digest := hex.EncodeToString(digestBytes[:])
+	multipartStarted := false
+	store := newStore(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodHead:
+			http.NotFound(w, r)
+		case r.Method == http.MethodPost && r.URL.Query().Has("uploads"):
+			multipartStarted = true
+			_, _ = io.WriteString(w, `<InitiateMultipartUploadResult><UploadId>upload-1</UploadId></InitiateMultipartUploadResult>`)
+		default:
+			http.Error(w, "unexpected", http.StatusBadRequest)
+		}
+	}))
+
+	_, err := store.PutImmutable(context.Background(), "capsule/generation.tar.zst", &countingSource{body: body}, digest, int64(len(body)+1))
+	if !errors.Is(err, ports.ErrIntegrity) {
+		t.Fatalf("PutImmutable error = %v, want integrity error", err)
+	}
+	if multipartStarted {
+		t.Fatal("multipart upload started before expected size verification")
+	}
+}
+
 func TestPutImmutableUploadsMultipleOrderedParts(t *testing.T) {
 	body := bytes.Repeat([]byte("x"), (8<<20)+1)
 	digestBytes := sha256.Sum256(body)
