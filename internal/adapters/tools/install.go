@@ -258,7 +258,7 @@ func (i *Installer) Ensure(ctx context.Context, name, goos, arch string) (Resolu
 	}
 	stagedBinary := filepath.Join(stage, name)
 	if isArchiveAsset(name, asset) {
-		if err := extractSingleTarGzip(downloadPath, stagedBinary, name, i.maxExecutableBytes); err != nil {
+		if err := extractReleaseTarGzip(downloadPath, stagedBinary, name, i.maxExecutableBytes); err != nil {
 			return Resolution{}, err
 		}
 		if err := os.Rename(downloadPath, filepath.Join(stage, "source.tar.gz")); err != nil {
@@ -419,12 +419,12 @@ func isArchiveAsset(name string, asset Asset) bool {
 	return name == "hauler" || strings.HasSuffix(strings.ToLower(asset.URL), ".tar.gz") || strings.HasSuffix(strings.ToLower(asset.URL), ".tgz")
 }
 
-func extractSingleTarGzip(source, destination, executableName string, limit int64) error {
+func extractReleaseTarGzip(source, destination, executableName string, limit int64) error {
 	output, err := os.OpenFile(destination, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o600)
 	if err != nil {
 		return fmt.Errorf("create staged archive executable: %w", err)
 	}
-	_, inspectErr := inspectSingleTarGzip(source, executableName, limit, output)
+	_, inspectErr := inspectReleaseTarGzip(source, executableName, limit, output)
 	if inspectErr == nil {
 		inspectErr = output.Sync()
 	}
@@ -438,7 +438,7 @@ func extractSingleTarGzip(source, destination, executableName string, limit int6
 	return nil
 }
 
-func inspectSingleTarGzip(source, executableName string, limit int64, output io.Writer) (string, error) {
+func inspectReleaseTarGzip(source, executableName string, limit int64, output io.Writer) (string, error) {
 	file, err := os.Open(source)
 	if err != nil {
 		return "", fmt.Errorf("open verified tool archive: %w", err)
@@ -450,31 +450,54 @@ func inspectSingleTarGzip(source, executableName string, limit int64, output io.
 	}
 	defer gzipReader.Close()
 	tarReader := tar.NewReader(gzipReader)
-	header, err := tarReader.Next()
-	if err != nil {
-		return "", errors.New("tool archive must contain exactly one executable")
-	}
-	cleanName := filepath.ToSlash(filepath.Clean(header.Name))
-	if header.Name == "" || filepath.IsAbs(header.Name) || cleanName != executableName || strings.Contains(header.Name, "\\") || header.Typeflag != tar.TypeReg || header.Mode&0o111 == 0 {
-		return "", errors.New("tool archive contains an unsafe or unexpected entry")
-	}
-	if header.Size < 0 || header.Size > limit {
-		return "", errors.New("tool archive executable exceeds decompression limit")
-	}
 	hash := sha256.New()
-	writer := io.Writer(hash)
-	if output != nil {
-		writer = io.MultiWriter(output, hash)
+	seen := make(map[string]struct{}, 3)
+	var totalSize int64
+	for {
+		header, nextErr := tarReader.Next()
+		if nextErr == io.EOF {
+			break
+		}
+		if nextErr != nil {
+			return "", errors.New("tool archive contains malformed entries")
+		}
+		cleanName := filepath.ToSlash(filepath.Clean(header.Name))
+		if header.Name == "" || filepath.IsAbs(header.Name) || cleanName != header.Name || strings.Contains(header.Name, "\\") || header.Typeflag != tar.TypeReg {
+			return "", errors.New("tool archive contains an unsafe or unexpected entry")
+		}
+		if _, duplicate := seen[header.Name]; duplicate {
+			return "", errors.New("tool archive contains duplicate entries")
+		}
+		seen[header.Name] = struct{}{}
+		if header.Size < 0 || header.Size > limit || totalSize > limit-header.Size {
+			return "", errors.New("tool archive exceeds decompression limit")
+		}
+		totalSize += header.Size
+
+		writer := io.Discard
+		switch header.Name {
+		case executableName:
+			if header.Mode&0o111 == 0 {
+				return "", errors.New("tool archive executable has unsafe mode")
+			}
+			writer = hash
+			if output != nil {
+				writer = io.MultiWriter(output, hash)
+			}
+		case "LICENSE", "README.md":
+			if header.Mode&0o111 != 0 {
+				return "", errors.New("tool archive metadata has unsafe mode")
+			}
+		default:
+			return "", errors.New("tool archive contains an unsafe or unexpected entry")
+		}
+		written, copyErr := io.Copy(writer, tarReader)
+		if copyErr != nil || written != header.Size {
+			return "", errors.New("tool archive entry size is invalid")
+		}
 	}
-	written, copyErr := io.Copy(writer, io.LimitReader(tarReader, limit+1))
-	if copyErr == nil && (written != header.Size || written > limit) {
-		copyErr = errors.New("tool archive executable size is invalid")
-	}
-	if copyErr != nil {
-		return "", fmt.Errorf("extract tool archive executable: %w", copyErr)
-	}
-	if _, err := tarReader.Next(); err != io.EOF {
-		return "", errors.New("tool archive contains multiple or malformed entries")
+	if _, ok := seen[executableName]; !ok {
+		return "", errors.New("tool archive must contain exactly one executable")
 	}
 	return hex.EncodeToString(hash.Sum(nil)), nil
 }
@@ -505,7 +528,7 @@ func verifyManaged(name string, asset Asset, binaryPath, markerPath string, want
 		if sourceErr != nil || sourceDigest != asset.SHA256 {
 			return "", errors.New("managed tool source archive does not match locked asset checksum")
 		}
-		derivedDigest, sourceErr := inspectSingleTarGzip(source, name, executableLimit, nil)
+		derivedDigest, sourceErr := inspectReleaseTarGzip(source, name, executableLimit, nil)
 		if sourceErr != nil || derivedDigest != digest {
 			return "", errors.New("managed archive executable does not match locked source asset")
 		}

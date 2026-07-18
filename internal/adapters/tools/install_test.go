@@ -18,6 +18,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -425,9 +426,13 @@ func TestInstallerRejectsSymlinkAndHardlinkPATHCandidates(t *testing.T) {
 	}
 }
 
-func TestInstallerValidatesAndInstallsSingleBinaryTarGzip(t *testing.T) {
+func TestInstallerValidatesAndInstallsReleaseShapedTarGzip(t *testing.T) {
 	binary := []byte("pinned hauler fixture")
-	archive := tarGzipFixture(t, []tarFixture{{Name: "hauler", Mode: 0o755, Body: binary}})
+	archive := tarGzipFixture(t, []tarFixture{
+		{Name: "LICENSE", Mode: 0o644, Body: []byte("license metadata")},
+		{Name: "README.md", Mode: 0o644, Body: []byte("readme metadata")},
+		{Name: "hauler", Mode: 0o755, Body: binary},
+	})
 	server := newAssetServer(t, archive)
 	defer server.Close()
 	installer, err := NewInstaller(testToolLock("hauler", server.URL+"/download", digest(archive)), t.TempDir(),
@@ -457,7 +462,10 @@ func TestInstallerRejectsUnsafeTarGzipShapes(t *testing.T) {
 		{name: "symlink", entries: []tarFixture{{Name: "hauler", Type: tar.TypeSymlink, Linkname: "/bin/true"}}},
 		{name: "hardlink", entries: []tarFixture{{Name: "hauler", Type: tar.TypeLink, Linkname: "other"}}},
 		{name: "traversal", entries: []tarFixture{{Name: "../hauler", Mode: 0o755, Body: []byte("x")}}},
-		{name: "multiple entries", entries: []tarFixture{{Name: "hauler", Mode: 0o755, Body: []byte("x")}, {Name: "extra", Mode: 0o755, Body: []byte("y")}}},
+		{name: "unexpected entry", entries: []tarFixture{{Name: "hauler", Mode: 0o755, Body: []byte("x")}, {Name: "extra", Mode: 0o644, Body: []byte("y")}}},
+		{name: "duplicate executable", entries: []tarFixture{{Name: "hauler", Mode: 0o755, Body: []byte("x")}, {Name: "hauler", Mode: 0o755, Body: []byte("y")}}},
+		{name: "duplicate metadata", entries: []tarFixture{{Name: "LICENSE", Mode: 0o644, Body: []byte("x")}, {Name: "LICENSE", Mode: 0o644, Body: []byte("y")}, {Name: "hauler", Mode: 0o755, Body: []byte("z")}}},
+		{name: "executable metadata", entries: []tarFixture{{Name: "LICENSE", Mode: 0o755, Body: []byte("x")}, {Name: "hauler", Mode: 0o755, Body: []byte("z")}}},
 		{name: "directory", entries: []tarFixture{{Name: "hauler", Type: tar.TypeDir, Mode: 0o755}}},
 		{name: "decompression bomb", entries: []tarFixture{{Name: "hauler", Mode: 0o755, Body: bytes.Repeat([]byte("x"), 64)}}, limit: 32},
 	}
@@ -756,6 +764,48 @@ func TestInstallerCoversLinuxAMD64AndARM64Assets(t *testing.T) {
 	}
 	if paths["amd64"] == paths["arm64"] {
 		t.Fatalf("architecture destinations collided at %q", paths["amd64"])
+	}
+}
+
+func TestInstallerCleanInstallsRealPinnedTools(t *testing.T) {
+	if os.Getenv("CAMP_TEST_REAL_TOOLS") != "1" {
+		t.Skip("set CAMP_TEST_REAL_TOOLS=1 to download and execute pinned release assets")
+	}
+	if runtime.GOOS != "linux" || (runtime.GOARCH != "amd64" && runtime.GOARCH != "arm64") {
+		t.Skipf("real pinned tools are not executable on %s/%s", runtime.GOOS, runtime.GOARCH)
+	}
+	file, err := os.Open("../../../tools.lock.yaml")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer file.Close()
+	lock, err := ParseLock(file)
+	if err != nil {
+		t.Fatal(err)
+	}
+	installer, err := NewInstaller(lock, t.TempDir(), WithLookPath(func(string) (string, error) {
+		return "", os.ErrNotExist
+	}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, name := range []string{"devpod", "hauler"} {
+		t.Run(name, func(t *testing.T) {
+			resolution, ensureErr := installer.Ensure(context.Background(), name, runtime.GOOS, runtime.GOARCH)
+			if ensureErr != nil {
+				t.Fatal(ensureErr)
+			}
+			if !resolution.Managed || resolution.Architecture != runtime.GOARCH {
+				t.Fatalf("real clean install resolution = %#v", resolution)
+			}
+			output, commandErr := exec.Command(resolution.Path, "version").CombinedOutput()
+			if commandErr != nil {
+				t.Fatalf("execute real pinned %s: %v: %s", name, commandErr, output)
+			}
+			if !strings.Contains(string(output), resolution.Version) {
+				t.Fatalf("real pinned %s version output %q does not contain %q", name, output, resolution.Version)
+			}
+		})
 	}
 }
 
