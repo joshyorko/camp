@@ -6,12 +6,17 @@ import (
 	"compress/gzip"
 	"context"
 	"crypto/sha256"
+	"crypto/tls"
+	"crypto/x509"
+	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -549,6 +554,90 @@ func TestInstallerRecoversAfterEveryInterruptedInstallStage(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestInstallerRecoversAfterProcessDeathAtEveryInstallStage(t *testing.T) {
+	contents := []byte("process-death binary")
+	for _, stage := range []InstallStage{StageDownload, StageVerify, StageChmod, StageFsync, StageRename} {
+		t.Run(string(stage), func(t *testing.T) {
+			var requests atomic.Int32
+			server := httptest.NewTLSServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+				requests.Add(1)
+				_, _ = writer.Write(contents)
+			}))
+			defer server.Close()
+			root := t.TempDir()
+			certificate := base64.StdEncoding.EncodeToString(server.Certificate().Raw)
+			command := exec.Command(os.Args[0], "-test.run=^TestInstallerCrashHelper$", "-test.v")
+			command.Env = append(os.Environ(),
+				"CAMP_TEST_TOOL_CRASH_STAGE="+string(stage),
+				"CAMP_TEST_TOOL_CRASH_ROOT="+root,
+				"CAMP_TEST_TOOL_CRASH_URL="+server.URL+"/devpod",
+				"CAMP_TEST_TOOL_CRASH_DIGEST="+digest(contents),
+				"CAMP_TEST_TOOL_CRASH_CERT="+certificate,
+			)
+			output, err := command.CombinedOutput()
+			var exitError *exec.ExitError
+			if !errors.As(err, &exitError) || exitError.ExitCode() != 91 {
+				t.Fatalf("crash helper error = %v, output = %s", err, output)
+			}
+
+			installer, err := NewInstaller(testToolLock("devpod", server.URL+"/devpod", digest(contents)), root,
+				WithHTTPClient(server.Client()), WithAllowedHosts(strings.TrimPrefix(server.URL, "https://")),
+				WithLookPath(func(string) (string, error) { return "", os.ErrNotExist }),
+			)
+			if err != nil {
+				t.Fatal(err)
+			}
+			resolution, err := installer.Ensure(context.Background(), "devpod", "linux", "amd64")
+			if err != nil {
+				t.Fatal(err)
+			}
+			assertRegularExecutable(t, resolution.Path, contents)
+			wantRequests := int32(2)
+			if stage == StageRename {
+				wantRequests = 1
+			}
+			if requests.Load() != wantRequests {
+				t.Fatalf("download requests = %d, want %d", requests.Load(), wantRequests)
+			}
+		})
+	}
+}
+
+func TestInstallerCrashHelper(t *testing.T) {
+	stage := InstallStage(os.Getenv("CAMP_TEST_TOOL_CRASH_STAGE"))
+	if stage == "" {
+		return
+	}
+	certificateDER, err := base64.StdEncoding.DecodeString(os.Getenv("CAMP_TEST_TOOL_CRASH_CERT"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	certificate, err := x509.ParseCertificate(certificateDER)
+	if err != nil {
+		t.Fatal(err)
+	}
+	roots := x509.NewCertPool()
+	roots.AddCert(certificate)
+	client := &http.Client{Transport: &http.Transport{TLSClientConfig: &tls.Config{RootCAs: roots}}}
+	assetURL := os.Getenv("CAMP_TEST_TOOL_CRASH_URL")
+	parsedURL, err := url.Parse(assetURL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	installer, err := NewInstaller(testToolLock("devpod", assetURL, os.Getenv("CAMP_TEST_TOOL_CRASH_DIGEST")), os.Getenv("CAMP_TEST_TOOL_CRASH_ROOT"),
+		WithHTTPClient(client), WithAllowedHosts(parsedURL.Host),
+		WithLookPath(func(string) (string, error) { return "", os.ErrNotExist }),
+		WithInstallHook(stage, func() error { os.Exit(91); return nil }),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := installer.Ensure(context.Background(), "devpod", "linux", "amd64"); err != nil {
+		t.Fatal(err)
+	}
+	t.Fatal("crash hook was not reached")
 }
 
 func TestInstallerSerializesConcurrentFirstUse(t *testing.T) {
