@@ -12,6 +12,9 @@ Local workspace return is accepted only when the provider is marked local and th
 - Do not clean up adopted content. Camp-created materializations require matching canonical path, ownership marker, device, and inode evidence.
 - After a successful checkpoint build, the application recovery command is `camp recover <session-id>`; that command is not yet wired into the public CLI.
 - Ownership-marker tests that exercise the named temporary-file substitution path must inject `createNamedOwnershipMarkerTemporary`. Linux filesystems may allow the production `O_TMPFILE` path and therefore produce no temporary filename.
+- Service status must call `ServiceSupervisor.Observe`; journaled `ready` state is not live evidence. Observation reconstructs the exact recorded Pasta/Hauler command, inspects the recorded helper and child identities, and reruns listener/readiness checks. PID reuse and listeners remaining after a stopped helper fail closed. The stopped check is read-only; PID-file removal remains exclusive to the explicit absence/cleanup path.
+- Service restart records `ServiceRestart` before stopping anything, stops through the identity-checked child-first supervisor path, and reuses only the recorded command and endpoint contract with a new launch token. Application restart holds the session operation lock and runs the ownership/session/lease safety guard before calling the supervisor.
+- Service logs are addressed by a journal-owned service name, never a caller path. `ServiceLogReader` accepts only a regular, private, single-link file below its configured canonical log root, rejects symlinks and path escape, and returns at most the configured tail bound.
 
 ## Evidence
 
@@ -20,3 +23,5 @@ Local workspace return is accepted only when the provider is marked local and th
 - `internal/workspace/local.go` and `internal/workspace/local_test.go`
 - `internal/workspace/remote.go` and `internal/workspace/remote_test.go`
 - `internal/capsule/ownership.go` and `internal/capsule/ownership_test.go`
+- `internal/adapters/supervisor/supervisor.go`, `logs.go`, and their focused tests
+- `internal/app/serve.go` and `internal/app/serve_test.go`

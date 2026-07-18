@@ -236,7 +236,7 @@ func (i *unitInspector) Ready(ctx context.Context, service ServiceSpec, helper, 
 	return UnitEvidence{HostEndpoint: wantHost, GuestEndpoint: net.JoinHostPort("127.0.0.1", strconv.Itoa(service.Mapping.GuestPort)), ChildNetNS: child.NetNS}, nil
 }
 
-func (i *unitInspector) Absent(ctx context.Context, record domain.ServiceUnitRecord) error {
+func (i *unitInspector) Stopped(ctx context.Context, record domain.ServiceUnitRecord) error {
 	for _, port := range []int{record.Mapping.HostPort, record.Mapping.GuestPort} {
 		if port <= 0 {
 			continue
@@ -258,10 +258,19 @@ func (i *unitInspector) Absent(ctx context.Context, record domain.ServiceUnitRec
 			if parseErr != nil || pid != record.Helper.Identity.PID {
 				return fmt.Errorf("private pidfile ownership changed: %w", ErrUnitInvariant)
 			}
-			if err := os.Remove(record.PIDPath); err != nil {
-				return err
-			}
 		} else if !errors.Is(err, os.ErrNotExist) {
+			return err
+		}
+	}
+	return nil
+}
+
+func (i *unitInspector) Absent(ctx context.Context, record domain.ServiceUnitRecord) error {
+	if err := i.Stopped(ctx, record); err != nil {
+		return err
+	}
+	if record.PIDPath != "" {
+		if err := os.Remove(record.PIDPath); err != nil && !errors.Is(err, os.ErrNotExist) {
 			return err
 		}
 	}
