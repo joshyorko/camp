@@ -178,8 +178,10 @@ func argumentAfterRootHelp(args []string) (string, bool) {
 			continue
 		}
 		if strings.HasPrefix(arg, "-") {
-			if beforeCommand && (arg == "--help" || arg == "-h") {
-				rootHelp = true
+			if beforeCommand {
+				if help, ok := explicitHelpFlagValue(arg); ok {
+					rootHelp = help
+				}
 			}
 			continue
 		}
@@ -189,6 +191,19 @@ func argumentAfterRootHelp(args []string) (string, bool) {
 		beforeCommand = false
 	}
 	return "", false
+}
+
+func explicitHelpFlagValue(arg string) (bool, bool) {
+	if arg == "--help" || arg == "-h" {
+		return true, true
+	}
+	for _, prefix := range []string{"--help=", "-h="} {
+		if strings.HasPrefix(arg, prefix) {
+			value, err := strconv.ParseBool(strings.TrimPrefix(arg, prefix))
+			return value, err == nil
+		}
+	}
+	return false, false
 }
 
 func isValidJSONFlag(arg string) bool {
@@ -210,8 +225,11 @@ func helpArguments(args []string) []string {
 			afterTerminator = true
 			continue
 		}
-		if !afterTerminator && (isValidJSONFlag(arg) || arg == "--help" || arg == "-h") {
-			continue
+		if !afterTerminator {
+			_, validHelp := explicitHelpFlagValue(arg)
+			if isValidJSONFlag(arg) || validHelp {
+				continue
+			}
 		}
 		filtered = append(filtered, arg)
 	}

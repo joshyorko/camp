@@ -241,6 +241,58 @@ func TestExecuteRejectsArgumentsAfterRootHelpFlag(t *testing.T) {
 	}
 }
 
+func TestExecuteNormalizesExplicitHelpBoolValues(t *testing.T) {
+	t.Parallel()
+
+	for _, args := range [][]string{
+		{"--help=true", "garbage"},
+		{"--help=1", "garbage"},
+		{"--help=t", "garbage"},
+		{"--help=TRUE", "garbage"},
+		{"-h=true", "garbage"},
+		{"-h=1", "garbage"},
+		{"--json", "--help=1", "garbage"},
+	} {
+		t.Run(strings.Join(args, " "), func(t *testing.T) {
+			t.Parallel()
+			var stdout bytes.Buffer
+			var stderr bytes.Buffer
+			exitCode := Execute(context.Background(), NewRoot(), args, Streams{Out: &stdout, ErrOut: &stderr})
+			if exitCode != int(ExitUsage) {
+				t.Fatalf("Execute(%q) exit code = %d, want %d", args, exitCode, ExitUsage)
+			}
+			if args[0] == "--json" {
+				if stderr.Len() != 0 || !strings.Contains(stdout.String(), `"code": "usage"`) {
+					t.Fatalf("Execute(%q) stdout=%q stderr=%q, want JSON usage", args, stdout.String(), stderr.String())
+				}
+				return
+			}
+			if stdout.Len() != 0 || !strings.Contains(stderr.String(), "unexpected argument") {
+				t.Fatalf("Execute(%q) stdout=%q stderr=%q, want human help-argument usage", args, stdout.String(), stderr.String())
+			}
+		})
+	}
+
+	for _, args := range [][]string{
+		{"--help=false", "garbage"},
+		{"--help=0", "garbage"},
+		{"-h=false", "garbage"},
+	} {
+		t.Run(strings.Join(args, " "), func(t *testing.T) {
+			t.Parallel()
+			var stdout bytes.Buffer
+			var stderr bytes.Buffer
+			exitCode := Execute(context.Background(), NewRoot(), args, Streams{Out: &stdout, ErrOut: &stderr})
+			if exitCode != int(ExitUsage) {
+				t.Fatalf("Execute(%q) exit code = %d, want %d", args, exitCode, ExitUsage)
+			}
+			if stdout.Len() != 0 || !strings.Contains(stderr.String(), "unknown command") {
+				t.Fatalf("Execute(%q) stdout=%q stderr=%q, want non-help positional usage", args, stdout.String(), stderr.String())
+			}
+		})
+	}
+}
+
 func TestOutputModeIsAvailableToInjectedHandlers(t *testing.T) {
 	t.Parallel()
 

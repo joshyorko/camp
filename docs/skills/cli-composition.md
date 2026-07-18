@@ -12,7 +12,7 @@ Unknown commands and arbitrary arguments return the stable usage exit code 2. Hu
 
 Cobra's help flag and generated `help` command bypass normal positional validation. Keep strict help-path validation at the `cli.Execute` boundary: unavailable or unknown help topics, extra topic components, and garbage combined with `--help` must exit 2 in both human and JSON modes without emitting successful help. Valid root and completion help must remain available.
 
-Help preflight must normalize every boolean spelling accepted by `strconv.ParseBool`, preserve final-flag-wins behavior, and stop interpreting flags after `--`; raw presence of `--json` is not the output mode. Wrap Cobra flag-parse failures as typed usage errors at `FlagErrorFunc`, and classify only typed exit errors afterward. Never infer usage from message fragments such as `requires` or `accepts`, because application failures legitimately use those words.
+Help preflight must normalize explicit values for both `--json` and `--help`/`-h` using every boolean spelling accepted by `strconv.ParseBool`, preserve final-flag-wins behavior, preserve explicit false, and stop interpreting flags after `--`; raw flag presence is not parsed state. Wrap Cobra flag-parse failures as typed usage errors at `FlagErrorFunc`, and classify only typed exit errors afterward. Never infer usage from message fragments such as `requires` or `accepts`, because application failures legitimately use those words.
 
 The regression test must keep `camp open` nonzero until a real `open` handler is registered with production dependencies. Adding a command name to help or completion without that composition would turn a truthful rejection into a fake lifecycle surface.
 
