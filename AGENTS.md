@@ -22,6 +22,35 @@ Follow standard Go formatting and package conventions: tabs via `gofmt`, short l
 
 Use Go's `testing` package and table-driven tests where multiple cases share behavior. Name tests `TestXxx` and place unit tests beside the implementation. Add integration coverage in `integration/` for cross-package or real-tool contracts. Safety-sensitive changes should test failure and recovery paths, especially unknown outcomes, ownership checks, immutable publication, and cleanup guards.
 
+Filesystem-safety tests must inject the temporary-file strategy when they need the named fallback. Do not assume the filesystem rejects Linux `O_TMPFILE`; the production ownership-marker path deliberately attempts it before the named fallback.
+
+## Mandatory Self-Improvement Contract
+
+Every implementation, review, debugging, reconnaissance, and verification task must leave Camp's repository-local operational guidance measurably better in correctness, completeness, discoverability, determinism, testability, or recovery guidance.
+
+- `docs/skills/` is the canonical home for reusable operational knowledge. Correct or extend an existing guide before creating another one.
+- Document only behavior backed by code, tests, commands, observed failures, or authoritative upstream behavior. Never present planned behavior as implemented.
+- Replace stale or contradictory guidance when evidence changes. Keep personal preferences out of shared project instructions.
+- Do not create per-run diaries or add cosmetic prose. Keep the change as small as the durable learning permits.
+- Mutating lanes update the relevant canonical guide in their branch or worktree. Read-only lanes propose an exact delta for the root integration agent.
+
+Every agent dispatch must include:
+
+> Before completing, improve the relevant project documentation or agent skill with durable, verified knowledge learned during this task. Do not add cosmetic prose or a session diary. Report the exact documentation delta and its evidence.
+
+Every child or remote lane must return:
+
+```text
+Documentation improvement:
+- Canonical file changed or proposed:
+- Durable learning captured:
+- Evidence:
+- Stale or ambiguous guidance removed:
+- Remaining uncertainty:
+```
+
+The root integration agent may declare the parent task complete only after every lane has returned that receipt, each durable learning has been integrated or explicitly rejected with a reason, and the canonical guides contain no contradictory claims. The final report must list the documentation improvements from the full run.
+
 ## Commit & Pull Request Guidelines
 
 Recent history uses concise Conventional Commit prefixes such as `feat:`, `fix:`, `test:`, and `docs:`. Keep each commit focused and imperative. Pull requests should explain the behavior and safety impact, identify affected ADRs or issues, list exact verification commands, and disclose skipped real-tool gates. Include screenshots only for documentation or visual asset changes.
