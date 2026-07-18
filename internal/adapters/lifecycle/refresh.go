@@ -2,6 +2,7 @@ package lifecycle
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"path/filepath"
@@ -39,7 +40,7 @@ func (r *ServingRefresher) Refresh(ctx context.Context, request app.ServingRefre
 	if err != nil {
 		return err
 	}
-	if snapshot.SessionID != request.SessionID || len(pending) != 0 {
+	if snapshot.SessionID != request.SessionID || !matchingRefreshPending(pending, request) {
 		return errors.New("serving refresh snapshot is not stable")
 	}
 	directories := map[string]string{"registry": request.RegistrySnapshotRoot, "fileserver": filepath.Dir(request.HaulPath)}
@@ -53,6 +54,9 @@ func (r *ServingRefresher) Refresh(ctx context.Context, request app.ServingRefre
 		spec, err := refreshedServiceSpec(snapshot.SessionID, record, directories[name], request.Generation.Generation)
 		if err != nil {
 			return fmt.Errorf("prepare serving refresh service %q: %w", name, err)
+		}
+		if err := spec.Validate(); err != nil {
+			return fmt.Errorf("validate serving refresh service %q: %w", name, err)
 		}
 		records = append(records, record)
 		specs = append(specs, spec)
@@ -68,6 +72,21 @@ func (r *ServingRefresher) Refresh(ctx context.Context, request app.ServingRefre
 		snapshot = next
 	}
 	return nil
+}
+
+func matchingRefreshPending(pending []ports.PendingIntent, request app.ServingRefreshRequest) bool {
+	if len(pending) == 0 {
+		return true
+	}
+	if len(pending) != 1 {
+		return false
+	}
+	intent := pending[0].Intent
+	if intent.SessionID != request.SessionID || intent.Transition != "ServingContentRefreshed" {
+		return false
+	}
+	var recorded app.ServingRefreshRequest
+	return json.Unmarshal(intent.Input, &recorded) == nil && recorded == request
 }
 
 func refreshedServiceSpec(sessionID string, record domain.ServiceUnitRecord, directory string, generation uint64) (supervisor.ServiceSpec, error) {

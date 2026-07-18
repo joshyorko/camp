@@ -2,6 +2,7 @@ package lifecycle
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"path/filepath"
 	"reflect"
@@ -198,6 +199,29 @@ func TestServingRefresherRotatesBothRecordedServices(t *testing.T) {
 	}
 }
 
+func TestServingRefresherAcceptsMatchingPendingCheckpointRefresh(t *testing.T) {
+	snapshot := lifecycleSnapshot(t.TempDir())
+	services := &fakeServices{}
+	request := app.ServingRefreshRequest{
+		SessionID: snapshot.SessionID, Generation: domain.GenerationRef{Generation: 8, ArchiveSHA256: "sha"},
+		HaulPath: filepath.Join(t.TempDir(), "generation.tar.zst"), RegistrySnapshotRoot: filepath.Join(t.TempDir(), "registry"),
+	}
+	input, err := json.Marshal(request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	journal := &fakeJournal{snapshot: snapshot, pending: []ports.PendingIntent{{Intent: ports.IntentRecord{
+		ID: snapshot.SessionID + "-checkpoint-7", SessionID: snapshot.SessionID, Transition: "ServingContentRefreshed", Attempt: 1, Input: input,
+	}}}}
+
+	if err := NewServingRefresher(journal, services).Refresh(context.Background(), request); err != nil {
+		t.Fatalf("Refresh() error = %v", err)
+	}
+	if len(services.ensureSpecs) != 2 {
+		t.Fatalf("Ensure() calls = %d", len(services.ensureSpecs))
+	}
+}
+
 func TestServingRefresherValidatesAllRecordsBeforeStoppingAnything(t *testing.T) {
 	snapshot := lifecycleSnapshot(t.TempDir())
 	snapshot.Services[1].Child.Argv = []string{"/opt/hauler", "serve", "fileserver"}
@@ -208,6 +232,22 @@ func TestServingRefresherValidatesAllRecordsBeforeStoppingAnything(t *testing.T)
 	})
 	if err == nil {
 		t.Fatal("Refresh() error = nil")
+	}
+	if len(services.stopNames) != 0 {
+		t.Fatalf("stopped services = %#v", services.stopNames)
+	}
+}
+
+func TestServingRefresherValidatesProductionServiceSpecsBeforeStoppingAnything(t *testing.T) {
+	snapshot := lifecycleSnapshot(t.TempDir())
+	snapshot.Services[1].Confinement.Executable = "pasta"
+	services := &fakeServices{}
+	err := NewServingRefresher(&fakeJournal{snapshot: snapshot}, services).Refresh(context.Background(), app.ServingRefreshRequest{
+		SessionID: snapshot.SessionID, Generation: domain.GenerationRef{Generation: 8, ArchiveSHA256: "sha"},
+		HaulPath: filepath.Join(t.TempDir(), "generation.tar.zst"), RegistrySnapshotRoot: filepath.Join(t.TempDir(), "registry"),
+	})
+	if err == nil {
+		t.Fatal("Refresh() error = nil, want invalid production service spec rejection")
 	}
 	if len(services.stopNames) != 0 {
 		t.Fatalf("stopped services = %#v", services.stopNames)
