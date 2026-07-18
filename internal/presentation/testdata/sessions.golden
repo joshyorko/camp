@@ -1,0 +1,5 @@
+SESSION       CAPSULE  BRANCH   STATE       SERVICES             PUBLICATION  CLEANUP    RECOVERY
+a-opening     brain    feature  opening     registry=unknown     none         pending    none
+b-open        brain    main     open        registry=live        none         pending    none
+c-recovering  brain    main     recovering  files=pid-reused     orphaned:45  failed     cleanup-only
+d-closed      brain    main     closed      -                    published:44 succeeded  none
