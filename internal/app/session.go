@@ -3,7 +3,6 @@ package app
 import (
 	"context"
 	"errors"
-	"fmt"
 	"sort"
 	"strings"
 
@@ -20,12 +19,54 @@ type sessionLister interface {
 }
 
 type SessionSelector struct {
-	Capsule       string
-	Branch        string
-	CanonicalRoot string
+	SessionID      string
+	Capsule        string
+	Branch         string
+	CanonicalRoot  string
+	DefaultCapsule string
+	DefaultBranch  string
 }
 
+type SelectionPurpose string
+
+const (
+	SelectionActiveMutation SelectionPurpose = "active-mutation"
+	SelectionHistory        SelectionPurpose = "history"
+	SelectionRecovery       SelectionPurpose = "recovery"
+)
+
+type SelectionCode string
+
+const (
+	SelectionNotFound  SelectionCode = "session_not_found"
+	SelectionAmbiguous SelectionCode = "session_ambiguous"
+)
+
+type SessionSelectionError struct {
+	Code         SelectionCode
+	Candidates   []string
+	NextCommands []string
+	cause        error
+}
+
+func (e *SessionSelectionError) Error() string {
+	message := e.cause.Error()
+	if len(e.Candidates) > 0 {
+		message += ": " + strings.Join(e.Candidates, ", ")
+	}
+	if len(e.NextCommands) > 0 {
+		message += "; next: " + strings.Join(e.NextCommands, " or ")
+	}
+	return message
+}
+
+func (e *SessionSelectionError) Unwrap() error { return e.cause }
+
 func SelectActiveSession(ctx context.Context, sessions sessionLister, selector SessionSelector) (domain.JournalSnapshot, error) {
+	return SelectSession(ctx, sessions, selector, SelectionActiveMutation)
+}
+
+func SelectSession(ctx context.Context, sessions sessionLister, selector SessionSelector, purpose SelectionPurpose) (domain.JournalSnapshot, error) {
 	if sessions == nil {
 		return domain.JournalSnapshot{}, errors.New("session lister is nil")
 	}
@@ -33,18 +74,24 @@ func SelectActiveSession(ctx context.Context, sessions sessionLister, selector S
 	if err != nil {
 		return domain.JournalSnapshot{}, err
 	}
-	matches := make([]domain.JournalSnapshot, 0, len(listed))
+	eligible := make([]domain.JournalSnapshot, 0, len(listed))
 	for _, snapshot := range listed {
-		if !activeSessionState(snapshot.State) ||
-			(selector.Capsule != "" && snapshot.Capsule != selector.Capsule) ||
-			(selector.Branch != "" && snapshot.Lineage.Branch != selector.Branch) ||
-			(selector.CanonicalRoot != "" && snapshot.Materialization.CanonicalPath != selector.CanonicalRoot) {
+		if !sessionEligible(snapshot, purpose) {
 			continue
 		}
-		matches = append(matches, snapshot)
+		eligible = append(eligible, snapshot)
 	}
+	matches := applySessionPrecedence(eligible, selector)
 	if len(matches) == 0 {
-		return domain.JournalSnapshot{}, ErrNoActiveSession
+		commands := []string{"camp list"}
+		if selector.Capsule != "" {
+			commands = append(commands, "camp open --capsule "+selector.Capsule)
+		}
+		cause := error(ErrNoActiveSession)
+		if purpose != SelectionActiveMutation {
+			cause = errors.New("no matching Camp session")
+		}
+		return domain.JournalSnapshot{}, &SessionSelectionError{Code: SelectionNotFound, NextCommands: commands, cause: cause}
 	}
 	if len(matches) == 1 {
 		return matches[0], nil
@@ -54,7 +101,60 @@ func SelectActiveSession(ctx context.Context, sessions sessionLister, selector S
 		ids = append(ids, snapshot.SessionID)
 	}
 	sort.Strings(ids)
-	return domain.JournalSnapshot{}, fmt.Errorf("%w: %s", ErrAmbiguousActiveSession, strings.Join(ids, ", "))
+	commands := make([]string, 0, len(ids))
+	for _, id := range ids {
+		commands = append(commands, "camp status --session "+id)
+	}
+	cause := error(ErrAmbiguousActiveSession)
+	if purpose != SelectionActiveMutation {
+		cause = errors.New("multiple matching Camp sessions")
+	}
+	return domain.JournalSnapshot{}, &SessionSelectionError{Code: SelectionAmbiguous, Candidates: ids, NextCommands: commands, cause: cause}
+}
+
+func applySessionPrecedence(sessions []domain.JournalSnapshot, selector SessionSelector) []domain.JournalSnapshot {
+	if selector.SessionID != "" {
+		return filterSessions(sessions, func(snapshot domain.JournalSnapshot) bool { return snapshot.SessionID == selector.SessionID })
+	}
+	if selector.Capsule != "" || selector.Branch != "" {
+		return filterSessions(sessions, func(snapshot domain.JournalSnapshot) bool {
+			return (selector.Capsule == "" || snapshot.Capsule == selector.Capsule) &&
+				(selector.Branch == "" || snapshot.Lineage.Branch == selector.Branch)
+		})
+	}
+	if selector.CanonicalRoot != "" {
+		return filterSessions(sessions, func(snapshot domain.JournalSnapshot) bool {
+			return snapshot.Materialization.CanonicalPath == selector.CanonicalRoot
+		})
+	}
+	if selector.DefaultCapsule != "" || selector.DefaultBranch != "" {
+		return filterSessions(sessions, func(snapshot domain.JournalSnapshot) bool {
+			return (selector.DefaultCapsule == "" || snapshot.Capsule == selector.DefaultCapsule) &&
+				(selector.DefaultBranch == "" || snapshot.Lineage.Branch == selector.DefaultBranch)
+		})
+	}
+	return sessions
+}
+
+func filterSessions(sessions []domain.JournalSnapshot, keep func(domain.JournalSnapshot) bool) []domain.JournalSnapshot {
+	filtered := make([]domain.JournalSnapshot, 0, len(sessions))
+	for _, snapshot := range sessions {
+		if keep(snapshot) {
+			filtered = append(filtered, snapshot)
+		}
+	}
+	return filtered
+}
+
+func sessionEligible(snapshot domain.JournalSnapshot, purpose SelectionPurpose) bool {
+	switch purpose {
+	case SelectionActiveMutation:
+		return activeSessionState(snapshot.State)
+	case SelectionHistory, SelectionRecovery:
+		return true
+	default:
+		return false
+	}
 }
 
 func activeSessionState(state domain.SessionState) bool {
