@@ -19,17 +19,28 @@ func NewSelector(local, remote ports.WorkspaceTransport) *Selector {
 }
 
 func (s *Selector) ReturnToStaging(ctx context.Context, request ports.MirrorRequest) (ports.MirrorResult, error) {
+	if err := s.Validate(request); err != nil {
+		return ports.MirrorResult{}, err
+	}
+	transport := s.remote
+	if request.LocalProvider {
+		transport = s.local
+	}
+	return transport.ReturnToStaging(ctx, request)
+}
+
+func (s *Selector) Validate(request ports.MirrorRequest) error {
 	if s == nil {
-		return ports.MirrorResult{}, ErrTransportUnavailable
+		return ErrTransportUnavailable
 	}
 	transport := s.remote
 	if request.LocalProvider {
 		transport = s.local
 	}
 	if transport == nil {
-		return ports.MirrorResult{}, ErrTransportUnavailable
+		return ErrTransportUnavailable
 	}
-	return transport.ReturnToStaging(ctx, request)
+	return nil
 }
 
 var _ ports.WorkspaceTransport = (*Selector)(nil)

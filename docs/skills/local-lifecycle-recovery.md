@@ -13,6 +13,7 @@ Local workspace return is accepted only when the provider is marked local and th
 - Treat a pending journal intent as reconciliation work, not permission to repeat a side effect.
 - A pending or ambiguous `WorkspaceMirrored` attempt blocks another checkpoint. Partial remote staging is evidence, not disposable scratch: preserve the returned attempt ID/root for observation. Do not stop/delete the provider workspace or remove controller staging when mirroring or pointer CAS fails.
 - `WorkspaceRecord.mirror` is a required value object in serialized snapshots; an empty `{}` truthfully means no mirror attempt has been recorded. Completed and ambiguous facts carry the durable logical-attempt number used to allocate the next unique checkpoint attempt after restart.
+- Validate that the persisted workspace type has a matching composed transport before recording `WorkspaceMirrored`. Missing composition is a configuration error with no side effect and must not create false pending reconciliation work.
 - Remote close order is final publication, provider stop/delete, forwarders/services/supervisor, conditional lease release, then owned staging/materialization cleanup. `--keep-workspace` changes the provider action but does not make controller staging user-owned.
 - Do not clean up adopted content. Camp-created materializations require matching canonical path, ownership marker, device, and inode evidence.
 - After a successful checkpoint build, the application recovery command is `camp recover <session-id>`; that command is not yet wired into the public CLI.

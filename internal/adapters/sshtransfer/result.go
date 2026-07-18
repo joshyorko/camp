@@ -63,7 +63,10 @@ func ClassifyTransfer(attempt TransferAttempt) (TransferResult, error) {
 	if cause == nil && attempt.Method == MethodTarPipe && attempt.Consumer.ExitCode != 0 {
 		cause = fmt.Errorf("consumer exited with status %d", attempt.Consumer.ExitCode)
 	}
-	started := attempt.ProducerStarted || attempt.ConsumerStarted
+	started := attempt.ProducerStarted
+	if attempt.Method == MethodTarPipe {
+		started = attempt.ConsumerStarted
+	}
 	if cause == nil && (!attempt.ProducerStarted || (attempt.Method == MethodTarPipe && !attempt.ConsumerStarted)) {
 		cause = errors.New("transfer did not start completely")
 	}

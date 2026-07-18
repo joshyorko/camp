@@ -417,6 +417,44 @@ func TestCheckpointPublisherRejectsUnexpectedLocalMirrorModeBeforeBuild(t *testi
 	}
 }
 
+func TestCheckpointPublisherRejectsMissingPersistedTransportBeforeMirrorIntent(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	sandbox := t.TempDir()
+	root := filepath.Join(sandbox, "root")
+	if err := os.MkdirAll(filepath.Join(root, ".camp"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	store, err := filebackend.New(filepath.Join(sandbox, "backend"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := time.Unix(100, 0).UTC()
+	lease := domain.WriterLease{SchemaVersion: domain.SchemaVersion, SessionID: "session-missing-local", Capsule: "brain", Lineage: domain.Lineage{Branch: "main"}, Machine: "machine", CreatedAt: now, HeartbeatAt: now, ExpiresAt: now.Add(time.Hour)}
+	snapshot := domain.JournalSnapshot{
+		SchemaVersion: domain.SchemaVersion, SessionID: lease.SessionID, Capsule: lease.Capsule, Lineage: lease.Lineage, Mode: domain.SessionReadWrite,
+		Lease: domain.LeaseRecord{Lease: &lease, Revision: "lease-r1"}, Workspace: domain.WorkspaceRecord{StagingRoot: root, Provider: "docker", LocalProvider: true, LocalFolder: root}, State: domain.SessionOpen,
+	}
+	prepareCheckpointRuntime(t, &snapshot, sandbox)
+	log, err := journal.NewStore(filepath.Join(sandbox, "journal"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := log.Create(ctx, snapshot); err != nil {
+		t.Fatal(err)
+	}
+	publisher := NewCheckpointPublisher(log, &fakeLockValidator{}, &fakeLeaseValidator{}, CheckpointTransports{Remote: &fakeMirror{}}, newCheckpointFakes(now).pipeline(), &fakeCheckpointBuilder{}, coordination.NewGenerationRepository(store), coordination.NewPointerRepository(store), fixedAppClock{now: now})
+	token := ports.OperationToken{ID: "lock", Owner: ports.OperationOwner{SessionID: snapshot.SessionID, Operation: "sync"}}
+
+	if _, err := publisher.Publish(ctx, token, snapshot.SessionID); !errors.Is(err, workspace.ErrTransportUnavailable) {
+		t.Fatalf("Publish() error = %v, want ErrTransportUnavailable", err)
+	}
+	_, pending, err := log.Load(ctx, snapshot.SessionID)
+	if err != nil || len(pending) != 0 {
+		t.Fatalf("pending = %#v error=%v, want no false mirror intent", pending, err)
+	}
+}
+
 func TestCheckpointPublisherBuildsFromReturnedRemoteMirrorRoot(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()

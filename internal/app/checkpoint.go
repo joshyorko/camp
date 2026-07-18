@@ -59,7 +59,7 @@ type CheckpointPublisher struct {
 	journal     ports.Journal
 	locks       ports.OperationTokenValidator
 	leases      checkpointLeaseValidator
-	mirror      ports.WorkspaceTransport
+	mirror      *workspace.Selector
 	pipeline    CheckpointPipeline
 	builder     checkpointBuilder
 	generations *coordination.GenerationRepository
@@ -139,6 +139,9 @@ func (p *CheckpointPublisher) Publish(ctx context.Context, operation ports.Opera
 		StagingRoot: snapshot.Workspace.StagingRoot, WorkspaceLocalFolder: snapshot.Workspace.LocalFolder,
 		WorkspaceID: snapshot.Workspace.ID, Context: snapshot.Workspace.Context,
 		AttemptID: attemptID,
+	}
+	if err := p.mirror.Validate(mirrorRequest); err != nil {
+		return CheckpointResult{}, err
 	}
 	mirrorIntent := checkpointAttemptIntent(sessionID, attemptID, "WorkspaceMirrored", 1, now, mirrorRequest)
 	if err := p.journal.RecordIntent(ctx, mirrorIntent); err != nil {

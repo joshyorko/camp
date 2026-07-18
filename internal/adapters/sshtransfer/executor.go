@@ -15,11 +15,13 @@ import (
 
 type Executor struct{}
 
+const diagnosticCaptureLimit = 64 << 10
+
 func NewExecutor() *Executor { return &Executor{} }
 
 func (e *Executor) RunRsync(ctx context.Context, command ports.Command) TransferAttempt {
 	attempt := TransferAttempt{Method: MethodRsync}
-	cmd, stdout, stderr := prepareCommand(ctx, command)
+	cmd, stdout, stderr := prepareCommand(ctx, command, true)
 	if err := cmd.Start(); err != nil {
 		attempt.Unavailable = errors.Is(err, exec.ErrNotFound) || errors.Is(err, os.ErrNotExist)
 		attempt.Err = err
@@ -46,25 +48,26 @@ func (e *Executor) RunTarPipeline(ctx context.Context, pipeline TarPipe) Transfe
 	producerCommand.Stdout = writer
 	consumerCommand := pipeline.Consumer
 	consumerCommand.Stdin = reader
-	producer, producerStdout, producerStderr := prepareCommand(ctx, producerCommand)
-	consumer, consumerStdout, consumerStderr := prepareCommand(ctx, consumerCommand)
+	producer, producerStdout, producerStderr := prepareCommand(ctx, producerCommand, false)
+	consumer, consumerStdout, consumerStderr := prepareCommand(ctx, consumerCommand, true)
 
-	if err := consumer.Start(); err != nil {
-		attempt.Unavailable = errors.Is(err, exec.ErrNotFound) || errors.Is(err, os.ErrNotExist)
-		attempt.Err = err
-		return attempt
-	}
-	attempt.ConsumerStarted = true
 	if err := producer.Start(); err != nil {
 		attempt.Unavailable = errors.Is(err, exec.ErrNotFound) || errors.Is(err, os.ErrNotExist)
 		attempt.Err = err
-		_ = writer.Close()
-		_ = consumer.Process.Kill()
-		consumerErr := consumer.Wait()
-		attempt.Consumer = commandResult(consumerErr, consumerStdout, consumerStderr)
 		return attempt
 	}
 	attempt.ProducerStarted = true
+	if err := consumer.Start(); err != nil {
+		attempt.Unavailable = errors.Is(err, exec.ErrNotFound) || errors.Is(err, os.ErrNotExist)
+		attempt.Err = err
+		_ = reader.Close()
+		_ = writer.Close()
+		_ = producer.Process.Kill()
+		producerErr := producer.Wait()
+		attempt.Producer = commandResult(producerErr, producerStdout, producerStderr)
+		return attempt
+	}
+	attempt.ConsumerStarted = true
 	_ = reader.Close()
 	producerErr := producer.Wait()
 	_ = writer.Close()
@@ -75,14 +78,18 @@ func (e *Executor) RunTarPipeline(ctx context.Context, pipeline TarPipe) Transfe
 	return attempt
 }
 
-func prepareCommand(ctx context.Context, command ports.Command) (*exec.Cmd, *bytes.Buffer, *bytes.Buffer) {
+func prepareCommand(ctx context.Context, command ports.Command, captureStdout bool) (*exec.Cmd, *diagnosticBuffer, *diagnosticBuffer) {
 	cmd := exec.CommandContext(ctx, command.Executable, command.Argv...)
 	cmd.Dir = command.Directory
 	cmd.Stdin = command.Stdin
 	cmd.Env = commandEnvironment(command.Environment)
-	stdout := &bytes.Buffer{}
-	stderr := &bytes.Buffer{}
-	cmd.Stdout = joinedOutput(stdout, command.Stdout)
+	stdout := &diagnosticBuffer{}
+	stderr := &diagnosticBuffer{}
+	if captureStdout {
+		cmd.Stdout = joinedOutput(stdout, command.Stdout)
+	} else {
+		cmd.Stdout = command.Stdout
+	}
 	cmd.Stderr = joinedOutput(stderr, command.Stderr)
 	return cmd, stdout, stderr
 }
@@ -116,7 +123,7 @@ func commandEnvironment(overrides map[string]string) []string {
 	return environment
 }
 
-func commandResult(err error, stdout, stderr *bytes.Buffer) ports.Result {
+func commandResult(err error, stdout, stderr *diagnosticBuffer) ports.Result {
 	exitCode := 0
 	if err != nil {
 		exitCode = -1
@@ -126,6 +133,23 @@ func commandResult(err error, stdout, stderr *bytes.Buffer) ports.Result {
 		}
 	}
 	return ports.Result{ExitCode: exitCode, Stdout: stdout.Bytes(), Stderr: stderr.Bytes()}
+}
+
+type diagnosticBuffer struct{ buffer bytes.Buffer }
+
+func (b *diagnosticBuffer) Len() int      { return b.buffer.Len() }
+func (b *diagnosticBuffer) Bytes() []byte { return b.buffer.Bytes() }
+
+func (b *diagnosticBuffer) Write(payload []byte) (int, error) {
+	original := len(payload)
+	remaining := diagnosticCaptureLimit - b.Len()
+	if remaining > 0 {
+		if len(payload) > remaining {
+			payload = payload[:remaining]
+		}
+		_, _ = b.buffer.Write(payload)
+	}
+	return original, nil
 }
 
 func contextError(ctx context.Context, err error) error {
