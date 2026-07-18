@@ -10,7 +10,6 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
-	"strconv"
 	"testing"
 	"time"
 
@@ -33,10 +32,17 @@ type controllerResult struct {
 	Generation       domain.GenerationRef   `json:"generation"`
 	Published        bool                   `json:"published"`
 	PointerChanged   bool                   `json:"pointerChanged"`
-	RecoveryCommand  string                 `json:"recoveryCommand"`
 	Pointer          domain.GenerationRef   `json:"pointer"`
 	History          []domain.GenerationRef `json:"history,omitempty"`
 	DownloadedSHA256 string                 `json:"downloadedSha256,omitempty"`
+	DownloadedSize   int64                  `json:"downloadedSize,omitempty"`
+}
+
+type controllerProcess struct {
+	cmd    *exec.Cmd
+	result string
+	ready  string
+	output *bytes.Buffer
 }
 
 func runMinIOTwoWriterScenario(t *testing.T, fixture *minioFixture) {
@@ -57,39 +63,25 @@ func runMinIOTwoWriterScenario(t *testing.T, fixture *minioFixture) {
 
 	root := t.TempDir()
 	start := filepath.Join(root, "start")
-	type process struct {
-		cmd    *exec.Cmd
-		result string
-		ready  string
-		output *bytes.Buffer
-	}
-	processes := make([]process, 0, 2)
-	for index, session := range []string{"controller-a", "controller-b"} {
+	processes := make([]controllerProcess, 0, 2)
+	for _, session := range []string{"controller-a", "controller-b"} {
 		controllerRoot := filepath.Join(root, session)
 		if err := os.MkdirAll(controllerRoot, 0o700); err != nil {
 			t.Fatal(err)
 		}
 		resultPath := filepath.Join(controllerRoot, "result.json")
 		readyPath := filepath.Join(controllerRoot, "ready")
-		cmd := exec.Command(os.Args[0], "-test.run=^TestMinIOControllerHelperProcess$")
-		output := new(bytes.Buffer)
-		cmd.Stdout = output
-		cmd.Stderr = output
-		cmd.Env = append(os.Environ(),
-			"CAMP_MINIO_HELPER=writer", "CAMP_MINIO_ENDPOINT="+fixture.endpoint,
-			"CAMP_MINIO_ACCESS="+fixture.signer.accessKey, "CAMP_MINIO_SECRET="+fixture.signer.secretKey,
-			"CAMP_CONTROLLER_SESSION="+session, "CAMP_CONTROLLER_RESULT="+resultPath,
-			"CAMP_CONTROLLER_READY="+readyPath, "CAMP_CONTROLLER_START="+start,
-			"XDG_CONFIG_HOME="+filepath.Join(controllerRoot, "config"),
-			"XDG_DATA_HOME="+filepath.Join(controllerRoot, "data"),
-			"XDG_STATE_HOME="+filepath.Join(controllerRoot, "state"),
-			"XDG_CACHE_HOME="+filepath.Join(controllerRoot, "cache"),
-			"CAMP_WRITER_INDEX="+strconv.Itoa(index),
-		)
-		if err := cmd.Start(); err != nil {
-			t.Fatal(err)
+		environment := []string{
+			"CAMP_MINIO_HELPER=writer", "CAMP_MINIO_ENDPOINT=" + fixture.endpoint,
+			"CAMP_MINIO_ACCESS=" + fixture.signer.accessKey, "CAMP_MINIO_SECRET=" + fixture.signer.secretKey,
+			"CAMP_CONTROLLER_SESSION=" + session, "CAMP_CONTROLLER_RESULT=" + resultPath,
+			"CAMP_CONTROLLER_READY=" + readyPath, "CAMP_CONTROLLER_START=" + start,
+			"XDG_CONFIG_HOME=" + filepath.Join(controllerRoot, "config"),
+			"XDG_DATA_HOME=" + filepath.Join(controllerRoot, "data"),
+			"XDG_STATE_HOME=" + filepath.Join(controllerRoot, "state"),
+			"XDG_CACHE_HOME=" + filepath.Join(controllerRoot, "cache"),
 		}
-		processes = append(processes, process{cmd: cmd, result: resultPath, ready: readyPath, output: output})
+		processes = append(processes, startController(t, environment, resultPath, readyPath))
 	}
 	waitForFiles(t, processes[0].ready, processes[1].ready)
 	if err := os.WriteFile(start, []byte("race\n"), 0o600); err != nil {
@@ -107,20 +99,29 @@ func runMinIOTwoWriterScenario(t *testing.T, fixture *minioFixture) {
 		t.Fatalf("writer results = %#v, want one winner and one typed CAS loser", results)
 	}
 	loser := losers[0]
-	if loser.RecoveryCommand != "camp recover "+loser.Session {
-		t.Fatalf("loser recovery command = %q", loser.RecoveryCommand)
-	}
 	if _, _, err := generations.ReadMetadata(context.Background(), "brain", lineage, loser.Generation); err != nil {
 		t.Fatalf("losing generation sidecar was not retained: %v", err)
 	}
-	reader, _, err := store.Get(context.Background(), mustGenerationKey(t, lineage, loser.Generation))
+	reader, archive, err := store.Get(context.Background(), mustGenerationKey(t, lineage, loser.Generation))
 	if err != nil {
 		t.Fatalf("losing generation archive was not retained: %v", err)
 	}
-	_ = reader.Close()
+	loserBytes, err := io.ReadAll(reader)
+	if err != nil {
+		t.Fatalf("read losing generation archive: %v", err)
+	}
+	if err := reader.Close(); err != nil {
+		t.Fatalf("close losing generation archive: %v", err)
+	}
+	if archive.Size != int64(len(loserBytes)) || int64(len(loserBytes)) != int64(len(writerBody(loser.Session))) || sha256Hex(loserBytes) != loser.Generation.ArchiveSHA256 {
+		t.Fatalf("losing archive integrity: metadata=%#v size=%d sha256=%s", archive, len(loserBytes), sha256Hex(loserBytes))
+	}
 	branch := domain.Lineage{Branch: "conflict-" + loser.Session}
-	branchPointer := domain.LatestPointer{SchemaVersion: domain.SchemaVersion, Capsule: "brain", Lineage: branch, Generation: loser.Generation, Parent: &baseline.Pointer.Generation, ObjectKey: mustGenerationKey(t, lineage, loser.Generation), Size: int64(len(writerBody(loser.Session))), CreatedAt: time.Unix(200, 0).UTC(), SessionID: loser.Session}
-	if _, err := pointers.Create(context.Background(), branchPointer); err != nil {
+	branchMetadata := generationMetadata(t, loser.Session, branch, loser.Generation.Generation, &baseline.Pointer.Generation, loserBytes)
+	if _, err := generations.PutAndVerify(context.Background(), branchMetadata, bytesSource(loserBytes)); err != nil {
+		t.Fatalf("publish retained loser branch metadata: %v", err)
+	}
+	if _, err := pointers.Create(context.Background(), pointerFor(branchMetadata)); err != nil {
 		t.Fatalf("publish retained loser branch: %v", err)
 	}
 
@@ -129,22 +130,53 @@ func runMinIOTwoWriterScenario(t *testing.T, fixture *minioFixture) {
 		t.Fatal(err)
 	}
 	freshResult := filepath.Join(freshRoot, "result.json")
-	cmd := exec.Command(os.Args[0], "-test.run=^TestMinIOControllerHelperProcess$")
-	cmd.Env = append(os.Environ(), "CAMP_MINIO_HELPER=reopen", "CAMP_MINIO_ENDPOINT="+fixture.endpoint,
-		"CAMP_MINIO_ACCESS="+fixture.signer.accessKey, "CAMP_MINIO_SECRET="+fixture.signer.secretKey,
-		"CAMP_CONTROLLER_RESULT="+freshResult, "XDG_CONFIG_HOME="+filepath.Join(freshRoot, "config"),
-		"XDG_DATA_HOME="+filepath.Join(freshRoot, "data"), "XDG_STATE_HOME="+filepath.Join(freshRoot, "state"),
-		"XDG_CACHE_HOME="+filepath.Join(freshRoot, "cache"))
-	if output, err := cmd.CombinedOutput(); err != nil {
-		t.Fatalf("fresh controller: %v: %s", err, output)
-	}
-	fresh := readControllerResult(t, freshResult)
-	if fresh.Pointer != winners[0].Generation || fresh.DownloadedSHA256 != winners[0].Generation.ArchiveSHA256 || len(fresh.History) != 3 {
+	fresh := runFreshController(t, fixture, freshRoot, freshResult, "main")
+	if fresh.Pointer != winners[0].Generation || fresh.DownloadedSHA256 != winners[0].Generation.ArchiveSHA256 || fresh.DownloadedSize != int64(len(writerBody(winners[0].Session))) || len(fresh.History) != 3 {
 		t.Fatalf("fresh controller evidence = %#v, winner = %#v", fresh, winners[0])
+	}
+	branchRoot := filepath.Join(root, "fresh-branch-controller")
+	if err := os.MkdirAll(branchRoot, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	branchResult := runFreshController(t, fixture, branchRoot, filepath.Join(branchRoot, "result.json"), branch.Branch)
+	if branchResult.Pointer != loser.Generation || branchResult.DownloadedSHA256 != loser.Generation.ArchiveSHA256 || branchResult.DownloadedSize != int64(len(loserBytes)) || len(branchResult.History) != 1 || branchResult.History[0] != loser.Generation {
+		t.Fatalf("fresh branch evidence = %#v, loser = %#v", branchResult, loser)
 	}
 	if uploads := fixture.listUploads(t, portabilityBucket, "brain/"); len(uploads) != 0 {
 		t.Fatalf("multipart cleanup = %v", uploads)
 	}
+}
+
+func runFreshController(t *testing.T, fixture *minioFixture, root, result, branch string) controllerResult {
+	t.Helper()
+	process := startController(t, []string{"CAMP_MINIO_HELPER=reopen", "CAMP_MINIO_ENDPOINT=" + fixture.endpoint,
+		"CAMP_MINIO_ACCESS=" + fixture.signer.accessKey, "CAMP_MINIO_SECRET=" + fixture.signer.secretKey,
+		"CAMP_CONTROLLER_RESULT=" + result, "CAMP_CONTROLLER_BRANCH=" + branch,
+		"XDG_CONFIG_HOME=" + filepath.Join(root, "config"), "XDG_DATA_HOME=" + filepath.Join(root, "data"),
+		"XDG_STATE_HOME=" + filepath.Join(root, "state"), "XDG_CACHE_HOME=" + filepath.Join(root, "cache")}, result, "")
+	if err := process.cmd.Wait(); err != nil {
+		t.Fatalf("fresh controller: %v: %s", err, process.output.Bytes())
+	}
+	return readControllerResult(t, result)
+}
+
+func startController(t *testing.T, environment []string, result, ready string) controllerProcess {
+	t.Helper()
+	cmd := exec.Command(os.Args[0], "-test.run=^TestMinIOControllerHelperProcess$")
+	output := new(bytes.Buffer)
+	cmd.Stdout = output
+	cmd.Stderr = output
+	cmd.Env = append(os.Environ(), environment...)
+	if err := cmd.Start(); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		if cmd.ProcessState == nil {
+			_ = cmd.Process.Kill()
+			_ = cmd.Wait()
+		}
+	})
+	return controllerProcess{cmd: cmd, result: result, ready: ready, output: output}
 }
 
 func TestMinIOControllerHelperProcess(t *testing.T) {
@@ -153,7 +185,11 @@ func TestMinIOControllerHelperProcess(t *testing.T) {
 		return
 	}
 	store := portabilityStore(t, os.Getenv("CAMP_MINIO_ENDPOINT"), os.Getenv("CAMP_MINIO_ACCESS"), os.Getenv("CAMP_MINIO_SECRET"))
-	lineage := domain.Lineage{Branch: "main"}
+	branch := os.Getenv("CAMP_CONTROLLER_BRANCH")
+	if branch == "" {
+		branch = "main"
+	}
+	lineage := domain.Lineage{Branch: branch}
 	pointers := coordination.NewPointerRepository(store)
 	generations := coordination.NewGenerationRepository(store)
 	result := controllerResult{}
@@ -179,7 +215,6 @@ func TestMinIOControllerHelperProcess(t *testing.T) {
 		if err != nil && !result.PointerChanged {
 			t.Fatal(err)
 		}
-		result.RecoveryCommand = "camp recover " + result.Session
 	} else {
 		pointer, err := pointers.Read(context.Background(), "brain", lineage)
 		if err != nil {
@@ -202,6 +237,7 @@ func TestMinIOControllerHelperProcess(t *testing.T) {
 		}
 		result.Pointer = pointer.Pointer.Generation
 		result.DownloadedSHA256 = sha256Hex(body)
+		result.DownloadedSize = int64(len(body))
 		for _, item := range history {
 			result.History = append(result.History, item.Generation)
 		}

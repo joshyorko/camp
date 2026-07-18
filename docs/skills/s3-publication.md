@@ -105,13 +105,26 @@ disjoint `XDG_CONFIG_HOME`, `XDG_DATA_HOME`, `XDG_STATE_HOME`, and
 same pointer revision and uploaded its independently named immutable archive
 and sidecar. Then release both processes to call the production pointer
 repository's compare-and-swap operation. Valid evidence has exactly one winner,
-a typed `coordination.ErrPointerChanged` loser, a readable losing archive and
-sidecar, and no active multipart uploads. A third process with a new XDG root
-must reconstruct pointer and history from MinIO and verify the downloaded
-winner digest.
+a typed `coordination.ErrPointerChanged` loser, and no active multipart
+uploads. Register kill-and-wait cleanup immediately after every helper process
+starts so a parent-side assertion or timeout cannot strand a controller.
+
+Retained-loser evidence must read the archive to EOF and verify its exact size
+and SHA-256, not merely prove that `GET` opens. Branch recovery requires writing
+and reconciling metadata under the branch lineage before creating its pointer.
+A separate fresh-XDG branch reader must then read the branch pointer, list and
+validate its sidecar, download the archive, and verify the same size and digest.
+Pointer creation by itself is not branch-reopen evidence.
+
+A third process with a new XDG root must reconstruct the winning main pointer
+and history from MinIO and verify the downloaded winner digest. Integration
+harnesses must not synthesize recovery commands. An exact recovery-command
+assertion becomes valid only when production application conflict handling
+returns that command.
 
 `TestS3TwoWriterConflict` is this repository/adapter-level process contract. It
-also proves that the retained loser can root a branch at the recorded parent.
+also proves that branch-scoped metadata and a pointer rooted at the recorded
+parent let a fresh process reopen the retained loser.
 It does not prove a Camp lifecycle reopen: that claim requires a production
 backend factory, S3 runtime configuration and credential-chain composition,
 and lifecycle CLI/application wiring. Until those boundaries exist, do not
