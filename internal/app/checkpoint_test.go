@@ -19,6 +19,7 @@ import (
 	"github.com/joshyorko/camp/internal/journal"
 	"github.com/joshyorko/camp/internal/ports"
 	registryadapter "github.com/joshyorko/camp/internal/registry"
+	"github.com/joshyorko/camp/internal/workspace"
 )
 
 func sha256Bytes(body []byte) string {
@@ -142,6 +143,7 @@ func (v *fakeLeaseValidator) Revalidate(context.Context, coordination.LeaseToken
 type fakeMirror struct {
 	calls int
 	mode  ports.MirrorMode
+	root  string
 }
 
 func (m *fakeMirror) ReturnToStaging(_ context.Context, request ports.MirrorRequest) (ports.MirrorResult, error) {
@@ -150,7 +152,11 @@ func (m *fakeMirror) ReturnToStaging(_ context.Context, request ports.MirrorRequ
 	if mode == "" {
 		mode = ports.MirrorLocalNoop
 	}
-	return ports.MirrorResult{Mode: mode, Root: request.StagingRoot}, nil
+	root := m.root
+	if root == "" {
+		root = request.StagingRoot
+	}
+	return ports.MirrorResult{Mode: mode, Root: root}, nil
 }
 
 func TestCheckpointPublisherUploadsCASesAndAdvancesBaselineOnlyThroughFact(t *testing.T) {
@@ -208,7 +214,7 @@ func TestCheckpointPublisherUploadsCASesAndAdvancesBaselineOnlyThroughFact(t *te
 	if err != nil {
 		t.Fatalf("Publish() error = %v", err)
 	}
-	if !result.Published || result.Generation.Generation != 43 || result.RefreshError != "" || result.RecoveryCommand != "camp recover "+snapshot.SessionID || lockValidator.calls != 1 || leaseValidator.calls != 1 || mirror.calls != 1 || fakes.capture.calls != 1 || fakes.seal.calls != 1 || fakes.refresh.calls != 1 {
+	if !result.Published || result.Generation.Generation != 43 || result.RefreshError != "" || result.RecoveryCommand != "camp recover "+snapshot.SessionID || lockValidator.calls != 1 || leaseValidator.calls != 2 || mirror.calls != 1 || fakes.capture.calls != 1 || fakes.seal.calls != 1 || fakes.refresh.calls != 1 {
 		t.Fatalf("result=%#v calls lock=%d lease=%d mirror=%d", result, lockValidator.calls, leaseValidator.calls, mirror.calls)
 	}
 	if len(builder.inventory.Images) != 2 || builder.inventory.Images[1].CapturedReference != "127.0.0.1:45001/manual/tool:latest" {
@@ -369,6 +375,58 @@ func TestCheckpointPublisherRejectsUnexpectedLocalMirrorModeBeforeBuild(t *testi
 	}
 	if builder.root != "" {
 		t.Fatalf("builder ran against %q after mirror-mode mismatch", builder.root)
+	}
+}
+
+func TestCheckpointPublisherBuildsFromReturnedRemoteMirrorRoot(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	sandbox := t.TempDir()
+	stagingRoot := filepath.Join(sandbox, "staging")
+	remoteCut := filepath.Join(sandbox, "remote-cut")
+	for _, root := range []string{stagingRoot, remoteCut} {
+		if err := os.MkdirAll(filepath.Join(root, ".camp"), 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	store, err := filebackend.New(filepath.Join(sandbox, "backend"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := time.Unix(100, 0).UTC()
+	lineage := domain.Lineage{Branch: "main"}
+	lease := domain.WriterLease{
+		SchemaVersion: domain.SchemaVersion, SessionID: "session-remote", Capsule: "brain", Lineage: lineage,
+		Machine: "machine-a", CreatedAt: now.Add(-time.Minute), HeartbeatAt: now, ExpiresAt: now.Add(time.Minute),
+	}
+	snapshot := domain.JournalSnapshot{
+		SchemaVersion: domain.SchemaVersion, SessionID: lease.SessionID, Capsule: lease.Capsule, Lineage: lineage, Mode: domain.SessionReadWrite,
+		Lease: domain.LeaseRecord{Lease: &lease, Revision: "lease-r1"}, Workspace: domain.WorkspaceRecord{
+			StagingRoot: stagingRoot, Provider: "ssh", LocalProvider: false,
+		}, State: domain.SessionOpen,
+	}
+	prepareCheckpointRuntime(t, &snapshot, sandbox)
+	log, err := journal.NewStore(filepath.Join(sandbox, "journal"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := log.Create(ctx, snapshot); err != nil {
+		t.Fatal(err)
+	}
+	builder := &fakeCheckpointBuilder{}
+	publisher := NewCheckpointPublisher(
+		log, &fakeLockValidator{}, &fakeLeaseValidator{},
+		&fakeMirror{mode: workspace.MirrorDevPodSSH, root: remoteCut},
+		newCheckpointFakes(now).pipeline(), builder,
+		coordination.NewGenerationRepository(store), coordination.NewPointerRepository(store), fixedAppClock{now: now},
+	)
+	token := ports.OperationToken{ID: "lock", Owner: ports.OperationOwner{SessionID: snapshot.SessionID, Operation: "sync"}}
+	result, err := publisher.Publish(ctx, token, snapshot.SessionID)
+	if err != nil {
+		t.Fatalf("Publish() error = %v", err)
+	}
+	if !result.Published || builder.root != remoteCut {
+		t.Fatalf("result=%#v builder root=%q, want returned remote root %q", result, builder.root, remoteCut)
 	}
 }
 

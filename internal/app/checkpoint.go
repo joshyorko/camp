@@ -19,6 +19,7 @@ import (
 	"github.com/joshyorko/camp/internal/images"
 	"github.com/joshyorko/camp/internal/ports"
 	registryadapter "github.com/joshyorko/camp/internal/registry"
+	"github.com/joshyorko/camp/internal/workspace"
 )
 
 type checkpointBuilder interface {
@@ -137,8 +138,18 @@ func (p *CheckpointPublisher) Publish(ctx context.Context, operation ports.Opera
 	if err != nil {
 		return CheckpointResult{}, err
 	}
-	if mirrored.Mode != ports.MirrorLocalNoop || mirrored.Root == "" || mirrored.Root != snapshot.Workspace.StagingRoot {
-		return CheckpointResult{}, errors.New("local workspace mirror did not preserve the staging root")
+	if mirrored.Root == "" {
+		return CheckpointResult{}, errors.New("workspace mirror returned an empty staging root")
+	}
+	if snapshot.Workspace.LocalProvider {
+		if mirrored.Mode != ports.MirrorLocalNoop || mirrored.Root != snapshot.Workspace.StagingRoot {
+			return CheckpointResult{}, errors.New("local workspace mirror did not preserve the staging root")
+		}
+	} else if mirrored.Mode != workspace.MirrorDevPodSSH {
+		return CheckpointResult{}, errors.New("remote workspace mirror did not return a DevPod SSH staging root")
+	}
+	if err := p.leases.Revalidate(ctx, lease, now); err != nil {
+		return CheckpointResult{}, fmt.Errorf("revalidate checkpoint writer lease after workspace mirror: %w", err)
 	}
 	if err := p.journal.RecordFact(context.WithoutCancel(ctx), checkpointFact(mirrorIntent, now), snapshot); err != nil {
 		return CheckpointResult{}, err
