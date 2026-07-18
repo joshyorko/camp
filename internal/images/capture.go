@@ -67,6 +67,12 @@ func (c *Capturer) Capture(ctx context.Context, request CaptureRequest) (domain.
 		case resolveErr == nil && wasCaptured && known.CapturedManifestDigest == resolved:
 			image.CapturedManifestDigest = resolved
 			continue
+		case resolveErr == nil && !wasCaptured:
+			if err := verifyExistingCapture(ctx, engine, *image, repository, resolved); err != nil {
+				return domain.ImageInventory{}, err
+			}
+			image.CapturedManifestDigest = resolved
+			continue
 		case resolveErr == nil:
 			return domain.ImageInventory{}, fmt.Errorf("captured reference %q already resolves to %s: %w", image.CapturedReference, resolved, ErrCapturedDigestMismatch)
 		case !errors.Is(resolveErr, ports.ErrNotFound):
@@ -77,6 +83,25 @@ func (c *Capturer) Capture(ctx context.Context, request CaptureRequest) (domain.
 		}
 	}
 	return domain.ImageInventory{SchemaVersion: domain.SchemaVersion, GeneratedAt: c.clock.Now().UTC(), Images: assigned}, nil
+}
+
+func verifyExistingCapture(ctx context.Context, engine Engine, image domain.Image, repository, resolved string) error {
+	inspection, err := engine.run(ctx, "image", "inspect", image.EngineImageID)
+	if err != nil || inspection.ExitCode != 0 {
+		return commandError("inspect existing captured image", inspection.ExitCode, err)
+	}
+	var inspected []struct {
+		ID          string   `json:"Id"`
+		RepoDigests []string `json:"RepoDigests"`
+	}
+	if err := json.Unmarshal(inspection.Stdout, &inspected); err != nil || len(inspected) != 1 || inspected[0].ID != image.EngineImageID {
+		return fmt.Errorf("existing captured reference lacks the exact local image identity: %w", ErrCapturedDigestMismatch)
+	}
+	wantRepoDigest := strings.SplitN(image.CapturedReference, "/", 2)[0] + "/" + repository + "@" + resolved
+	if !containsString(inspected[0].RepoDigests, wantRepoDigest) {
+		return fmt.Errorf("existing captured reference lacks verified repo digest %q: %w", wantRepoDigest, ErrCapturedDigestMismatch)
+	}
+	return nil
 }
 
 func (c *Capturer) pushAndVerify(ctx context.Context, engine Engine, image *domain.Image, endpoint, repository, tag string) (resultErr error) {
