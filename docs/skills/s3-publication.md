@@ -133,10 +133,12 @@ returns that command.
 also proves that branch-scoped metadata and a pointer rooted at the recorded
 parent let a fresh process reopen the retained loser.
 It does not prove a Camp lifecycle reopen: that claim requires a production
-backend factory, S3 runtime configuration and credential-chain composition,
-and lifecycle CLI/application wiring. Until those boundaries exist, do not
-replace them with an integration-only factory or describe repository-level
-download evidence as DevPod/Hauler reopen evidence.
+CLI path that resolves the S3 runtime configuration and credential chain,
+constructs the merged writer-safe backend composition, and drives lifecycle
+reopen through the application. The backend factory and application
+composition are present, but this test deliberately exercises the narrower
+repository/adapter boundary. Do not describe its repository-level download
+evidence as production CLI or DevPod/Hauler reopen evidence.
 
 Run the process contract with Docker available:
 
