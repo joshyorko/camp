@@ -16,7 +16,9 @@ the resolved identity into session recovery through
 `config.DurableBackendConfiguration`. The constructor-bound descriptor is
 authoritative: a request may repeat it but must fail closed if it supplies a
 different identity or if no backend was constructor-bound, because request
-metadata cannot select or relabel already-injected repositories. Factory and
+metadata cannot select or relabel already-injected repositories. The legacy
+file-backend request field is likewise an identity assertion, not a store
+selector, and must match the constructor backend. Factory and
 application tests prove this composition seam; they are not executable wiring
 proof. Until `cmd/camp` calls this seam, describe the feature as backend
 composition rather than production CLI wiring.
@@ -32,7 +34,16 @@ an `http://` endpoint is rejected unless `insecure: true` (or
 HTTPS endpoint. Bucket names are DNS-compatible and endpoint URLs cannot carry
 credentials, paths, queries, or fragments. Dotted bucket names require
 path-style addressing with HTTPS because wildcard certificates do not cover a
-multi-label virtual-host bucket prefix.
+multi-label virtual-host bucket prefix. IP-literal endpoints also require
+path-style addressing because prepending a bucket would no longer address the
+configured origin.
+
+Before an S3 store is bound to pointer, generation, lease, or hydration work,
+the writer composition runs `ProbeWriter` against a random disposable key. The
+probe must prove create-if-absent, conditional replacement, stale-write
+rejection, exact readback, conditional delete, and cleanup. A failed or
+ambiguous probe prevents repository binding; merely constructing an HTTP client
+is not writer-safety evidence.
 
 Durable recovery records contain only backend kind, sanitized `s3://` identity,
 and its configuration fingerprint. Endpoint and addressing policy contribute

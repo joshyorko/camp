@@ -183,7 +183,7 @@ func NewOpen(deps OpenDependencies) *Open {
 }
 
 func NewOpenWithBackend(ctx context.Context, deps OpenDependencies, backend config.Backend, options objectstore.Options) (*Open, error) {
-	store, err := objectstore.New(ctx, backend, options)
+	store, err := objectstore.NewWriter(ctx, backend, options)
 	if err != nil {
 		return nil, fmt.Errorf("compose open object store: %w", err)
 	}
@@ -564,6 +564,12 @@ func (o *Open) validate(request OpenRequest) error {
 	if !validResolvedBackend(backend) {
 		return errors.New("open backend is not a strict credential-free backend descriptor")
 	}
+	if request.Backend.Root != "" || request.Backend.SanitizedURL != "" || request.Backend.Fingerprint != "" {
+		requested := config.Backend{Kind: config.BackendFile, SanitizedURL: request.Backend.SanitizedURL, Fingerprint: request.Backend.Fingerprint, File: &request.Backend}
+		if !sameBackendIdentity(requested, backend) {
+			return fmt.Errorf("open request file backend identity does not match the constructor backend: %w", ErrOpenSessionMismatch)
+		}
+	}
 	if request.ResolvedBackend.Kind != "" && o.deps.ResolvedBackend.Kind == "" {
 		return fmt.Errorf("open request backend identity has no constructor-bound object store: %w", ErrOpenSessionMismatch)
 	}
@@ -754,10 +760,7 @@ func (o *Open) effectiveBackend(request OpenRequest) config.Backend {
 	if o.deps.ResolvedBackend.Kind != "" {
 		return o.deps.ResolvedBackend
 	}
-	file := request.Backend
-	if file.Root == "" && file.SanitizedURL == "" && file.Fingerprint == "" {
-		file = o.deps.Backend
-	}
+	file := o.deps.Backend
 	if file.Root == "" && file.SanitizedURL == "" && file.Fingerprint == "" {
 		return config.Backend{}
 	}

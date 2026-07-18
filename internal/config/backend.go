@@ -76,6 +76,9 @@ func ResolveBackend(raw string, values S3Values) (Backend, error) {
 	if endpoint.Scheme == "https" && !values.PathStyle && strings.Contains(parsed.Host, ".") {
 		return Backend{}, errors.New("dotted S3 buckets require path-style addressing with HTTPS")
 	}
+	if net.ParseIP(endpoint.Hostname()) != nil && !values.PathStyle {
+		return Backend{}, errors.New("IP-literal S3 endpoints require path-style addressing")
+	}
 	region := strings.TrimSpace(values.Region)
 	if region == "" || region != values.Region {
 		return Backend{}, errors.New("S3 region is required")

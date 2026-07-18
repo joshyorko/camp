@@ -21,6 +21,28 @@ type Options struct {
 	Signer     s3store.Signer
 }
 
+const writerProbePrefix = "camp-probes/"
+
+func NewWriter(ctx context.Context, backend config.Backend, options Options) (ports.ObjectStore, error) {
+	store, err := New(ctx, backend, options)
+	if err != nil {
+		return nil, err
+	}
+	if backend.Kind != config.BackendS3 {
+		return store, nil
+	}
+	prober, ok := store.(interface {
+		ProbeWriter(context.Context, string) error
+	})
+	if !ok {
+		return nil, errors.New("S3 object store does not support writer safety probing")
+	}
+	if err := prober.ProbeWriter(ctx, writerProbePrefix); err != nil {
+		return nil, fmt.Errorf("verify S3 writer safety: %w", err)
+	}
+	return store, nil
+}
+
 func New(ctx context.Context, backend config.Backend, options Options) (ports.ObjectStore, error) {
 	switch backend.Kind {
 	case config.BackendFile:

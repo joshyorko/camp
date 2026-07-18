@@ -3,6 +3,8 @@ package app
 import (
 	"context"
 	"errors"
+	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -26,7 +28,7 @@ import (
 
 func TestOpenComposesResolvedS3BackendAndPersistsSanitizedIdentity(t *testing.T) {
 	environment := newOpenTestEnvironment(t)
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { http.NotFound(w, r) }))
+	server := newSafeS3WriterServer(t)
 	defer server.Close()
 	backend, err := config.ResolveBackend("s3://camp-bucket/team", config.S3Values{
 		Endpoint: server.URL, Region: "us-east-1", PathStyle: true, Insecure: true,
@@ -59,6 +61,44 @@ func TestOpenComposesResolvedS3BackendAndPersistsSanitizedIdentity(t *testing.T)
 	if _, err := environment.open.Reconcile(context.Background(), "s3-session"); !errors.Is(err, ErrOpenSessionMismatch) {
 		t.Fatalf("file-composed recovery error = %v, want backend mismatch", err)
 	}
+}
+
+func newSafeS3WriterServer(t *testing.T) *httptest.Server {
+	t.Helper()
+	var body []byte
+	revision := 0
+	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		etag := fmt.Sprintf(`"revision-%d"`, revision)
+		switch r.Method {
+		case http.MethodPut:
+			if r.Header.Get("If-None-Match") == "*" && body != nil || r.Header.Get("If-Match") != "" && r.Header.Get("If-Match") != etag {
+				http.Error(w, "condition failed", http.StatusPreconditionFailed)
+				return
+			}
+			body, _ = io.ReadAll(r.Body)
+			revision++
+			w.Header().Set("ETag", fmt.Sprintf(`"revision-%d"`, revision))
+		case http.MethodGet, http.MethodHead:
+			if body == nil {
+				http.NotFound(w, r)
+				return
+			}
+			w.Header().Set("ETag", etag)
+			w.Header().Set("Content-Length", fmt.Sprint(len(body)))
+			if r.Method == http.MethodGet {
+				_, _ = w.Write(body)
+			}
+		case http.MethodDelete:
+			if r.Header.Get("If-Match") != etag {
+				http.Error(w, "condition failed", http.StatusPreconditionFailed)
+				return
+			}
+			body = nil
+			w.WriteHeader(http.StatusNoContent)
+		default:
+			http.Error(w, "unexpected", http.StatusBadRequest)
+		}
+	}))
 }
 
 func TestOpenResolvedFileBackendRemainsSupported(t *testing.T) {
@@ -157,6 +197,64 @@ func TestOpenRejectsResolvedBackendWithoutConstructorBinding(t *testing.T) {
 		t.Fatalf("Open() error = %v, want unbound backend mismatch", err)
 	}
 	if _, _, loadErr := environment.open.deps.Journal.Load(context.Background(), "unbound-backend"); !errors.Is(loadErr, os.ErrNotExist) {
+		t.Fatalf("journal load error = %v, want no session side effect", loadErr)
+	}
+}
+
+func TestNewOpenWithBackendRejectsUnsafeConditionalWriterBeforeBinding(t *testing.T) {
+	environment := newOpenTestEnvironment(t)
+	var body []byte
+	revision := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.Method {
+		case http.MethodPut:
+			body, _ = io.ReadAll(r.Body)
+			revision++
+			w.Header().Set("ETag", fmt.Sprintf(`"revision-%d"`, revision))
+		case http.MethodGet:
+			w.Header().Set("ETag", fmt.Sprintf(`"revision-%d"`, revision))
+			w.Header().Set("Content-Length", fmt.Sprint(len(body)))
+			_, _ = w.Write(body)
+		case http.MethodDelete:
+			body = nil
+			w.WriteHeader(http.StatusNoContent)
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+	backend, err := config.ResolveBackend("s3://camp-bucket/team", config.S3Values{
+		Endpoint: server.URL, Region: "us-east-1", PathStyle: true, Insecure: true,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = NewOpenWithBackend(context.Background(), environment.open.deps, backend, objectstore.Options{
+		HTTPClient: server.Client(), Signer: s3store.SignFunc(func(*http.Request) error { return nil }),
+	})
+	if !errors.Is(err, s3store.ErrUnsafeWriter) {
+		t.Fatalf("NewOpenWithBackend() error = %v, want unsafe writer", err)
+	}
+}
+
+func TestOpenRejectsRequestFileBackendThatDiffersFromConstructor(t *testing.T) {
+	environment := newOpenTestEnvironment(t)
+	different, err := config.ResolveFileBackend("file://" + filepath.Join(t.TempDir(), "different-backend"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	root := filepath.Join(t.TempDir(), "source")
+	if err := os.MkdirAll(root, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	_, err = environment.open.Run(context.Background(), OpenRequest{
+		SessionID: "file-backend-mismatch", Capsule: "brain", Branch: "main", ExplicitRoot: root,
+		Runtime: environment.runtime, Backend: different,
+	})
+	if !errors.Is(err, ErrOpenSessionMismatch) {
+		t.Fatalf("Open() error = %v, want backend mismatch", err)
+	}
+	if _, _, loadErr := environment.open.deps.Journal.Load(context.Background(), "file-backend-mismatch"); !errors.Is(loadErr, os.ErrNotExist) {
 		t.Fatalf("journal load error = %v, want no session side effect", loadErr)
 	}
 }
