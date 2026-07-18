@@ -2,6 +2,7 @@ package tools
 
 import (
 	"os"
+	"strings"
 	"testing"
 )
 
@@ -61,4 +62,41 @@ func TestDistributionLockRejectsUnsupportedPlatform(t *testing.T) {
 	if _, _, err := lock.Resolve("devpod", "windows", "amd64"); err == nil {
 		t.Fatal("Resolve accepted unsupported windows platform")
 	}
+}
+
+func TestDistributionLockRejectsMalformedManagedToolIdentitiesAndDestinations(t *testing.T) {
+	tests := []struct {
+		name       string
+		toolName   string
+		repository string
+		version    string
+		commit     string
+		assets     string
+	}{
+		{name: "unsafe destination name", toolName: "../devpod", repository: "example/devpod", version: "v1", commit: strings.Repeat("a", 40), assets: validAssetYAML()},
+		{name: "malformed repository", toolName: "devpod", repository: "example/../devpod", version: "v1", commit: strings.Repeat("a", 40), assets: validAssetYAML()},
+		{name: "unsafe version", toolName: "devpod", repository: "example/devpod", version: "../v1", commit: strings.Repeat("a", 40), assets: validAssetYAML()},
+		{name: "malformed commit", toolName: "devpod", repository: "example/devpod", version: "v1", commit: "main", assets: validAssetYAML()},
+		{name: "no assets", toolName: "devpod", repository: "example/devpod", version: "v1", commit: strings.Repeat("a", 40), assets: "{}"},
+		{name: "empty platform", toolName: "devpod", repository: "example/devpod", version: "v1", commit: strings.Repeat("a", 40), assets: "{linux: {}}"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			document := "schemaVersion: 1\ntools:\n  " + tt.toolName + ":\n    repository: " + tt.repository + "\n    version: " + tt.version + "\n    commit: " + tt.commit + "\n    assets: " + tt.assets + "\nfixtures:\n  room:\n    repository: example/room\n    version: v1\n    commit: " + strings.Repeat("b", 40) + "\n"
+			if _, err := ParseLock(strings.NewReader(document)); err == nil {
+				t.Fatal("ParseLock accepted malformed managed tool identity")
+			}
+		})
+	}
+}
+
+func TestDistributionLockRejectsDuplicateArchitectureDestination(t *testing.T) {
+	document := "schemaVersion: 1\ntools:\n  devpod:\n    repository: example/devpod\n    version: v1\n    commit: " + strings.Repeat("a", 40) + "\n    assets:\n      linux:\n        amd64:\n          url: https://github.com/example/one\n          sha256: " + strings.Repeat("1", 64) + "\n        amd64:\n          url: https://github.com/example/two\n          sha256: " + strings.Repeat("2", 64) + "\nfixtures:\n  room:\n    repository: example/room\n    version: v1\n    commit: " + strings.Repeat("b", 40) + "\n"
+	if _, err := ParseLock(strings.NewReader(document)); err == nil {
+		t.Fatal("ParseLock accepted duplicate architecture destination")
+	}
+}
+
+func validAssetYAML() string {
+	return "{linux: {amd64: {url: https://github.com/example/devpod, sha256: " + strings.Repeat("1", 64) + "}}}"
 }

@@ -11,6 +11,13 @@ import (
 
 var sha256Pattern = regexp.MustCompile(`^[0-9a-f]{64}$`)
 
+var (
+	toolNamePattern   = regexp.MustCompile(`^[a-z0-9][a-z0-9._-]*$`)
+	repositoryPattern = regexp.MustCompile(`^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$`)
+	versionPattern    = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._+-]*$`)
+	commitPattern     = regexp.MustCompile(`^[0-9a-f]{40}$`)
+)
+
 type Lock struct {
 	SchemaVersion int             `yaml:"schemaVersion"`
 	Tools         map[string]Tool `yaml:"tools"`
@@ -83,12 +90,18 @@ func (l Lock) validate() error {
 		return errors.New("distribution tool lock has no tools")
 	}
 	for name, tool := range l.Tools {
-		if tool.Repository == "" || tool.Version == "" || tool.Commit == "" {
+		if !toolNamePattern.MatchString(name) || !repositoryPattern.MatchString(tool.Repository) || !versionPattern.MatchString(tool.Version) || !commitPattern.MatchString(tool.Commit) {
 			return fmt.Errorf("tool %q identity is incomplete", name)
 		}
+		if len(tool.Assets) == 0 {
+			return fmt.Errorf("tool %q has no assets", name)
+		}
 		for goos, platforms := range tool.Assets {
+			if !toolNamePattern.MatchString(goos) || len(platforms) == 0 {
+				return fmt.Errorf("tool %q platform %q has no assets", name, goos)
+			}
 			for arch, asset := range platforms {
-				if asset.URL == "" || !sha256Pattern.MatchString(asset.SHA256) {
+				if !toolNamePattern.MatchString(arch) || asset.URL == "" || !sha256Pattern.MatchString(asset.SHA256) {
 					return fmt.Errorf("tool %q asset %s/%s is incomplete", name, goos, arch)
 				}
 			}
