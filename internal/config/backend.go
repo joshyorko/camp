@@ -73,6 +73,9 @@ func ResolveBackend(raw string, values S3Values) (Backend, error) {
 	if !validBucket(parsed.Host) {
 		return Backend{}, errors.New("S3 bucket must be a DNS-compatible name")
 	}
+	if endpoint.Scheme == "https" && !values.PathStyle && strings.Contains(parsed.Host, ".") {
+		return Backend{}, errors.New("dotted S3 buckets require path-style addressing with HTTPS")
+	}
 	region := strings.TrimSpace(values.Region)
 	if region == "" || region != values.Region {
 		return Backend{}, errors.New("S3 region is required")

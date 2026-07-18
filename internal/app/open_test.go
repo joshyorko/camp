@@ -13,6 +13,7 @@ import (
 	"time"
 
 	devpodadapter "github.com/joshyorko/camp/internal/adapters/devpod"
+	"github.com/joshyorko/camp/internal/adapters/hydration"
 	"github.com/joshyorko/camp/internal/adapters/objectstore"
 	"github.com/joshyorko/camp/internal/adapters/s3store"
 	"github.com/joshyorko/camp/internal/capsule"
@@ -117,6 +118,45 @@ func TestOpenRejectsRequestBackendThatDiffersFromComposedStore(t *testing.T) {
 		t.Fatalf("Open() error = %v, want backend mismatch", err)
 	}
 	if _, _, loadErr := environment.open.deps.Journal.Load(context.Background(), "backend-mismatch"); !errors.Is(loadErr, os.ErrNotExist) {
+		t.Fatalf("journal load error = %v, want no session side effect", loadErr)
+	}
+}
+
+func TestNewOpenWithBackendRebindsHydrationToComposedStore(t *testing.T) {
+	environment := newOpenTestEnvironment(t)
+	backend, err := config.ResolveBackend(environment.backend.SanitizedURL, config.S3Values{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	deps := environment.open.deps
+	deps.Hydrator = hydration.NewController(nil, nil, nil, nil, hydration.Hooks{})
+	opener, err := NewOpenWithBackend(context.Background(), deps, backend, objectstore.Options{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if opener.deps.Hydrator == deps.Hydrator {
+		t.Fatal("hydrator retained its previously injected generation store")
+	}
+}
+
+func TestOpenRejectsResolvedBackendWithoutConstructorBinding(t *testing.T) {
+	environment := newOpenTestEnvironment(t)
+	backend, err := config.ResolveBackend(environment.backend.SanitizedURL, config.S3Values{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	root := filepath.Join(t.TempDir(), "source")
+	if err := os.MkdirAll(root, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	_, err = environment.open.Run(context.Background(), OpenRequest{
+		SessionID: "unbound-backend", Capsule: "brain", Branch: "main", ExplicitRoot: root,
+		Runtime: environment.runtime, ResolvedBackend: backend,
+	})
+	if !errors.Is(err, ErrOpenSessionMismatch) {
+		t.Fatalf("Open() error = %v, want unbound backend mismatch", err)
+	}
+	if _, _, loadErr := environment.open.deps.Journal.Load(context.Background(), "unbound-backend"); !errors.Is(loadErr, os.ErrNotExist) {
 		t.Fatalf("journal load error = %v, want no session side effect", loadErr)
 	}
 }

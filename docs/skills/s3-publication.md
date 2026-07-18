@@ -11,13 +11,15 @@ or logs.
 Resolve a backend through `config.ResolveBackend`. The application composition
 seam passes that descriptor through `app.NewOpenWithBackend`, which constructs the
 `ports.ObjectStore`, binds the pointer, generation, and lease repositories to
-that same store, and carries the resolved identity into session recovery through
+that same store, rebinds the hydration controller's archive reads, and carries
+the resolved identity into session recovery through
 `config.DurableBackendConfiguration`. The constructor-bound descriptor is
 authoritative: a request may repeat it but must fail closed if it supplies a
-different identity, because request metadata cannot relabel the already-composed
-store. Factory and application tests prove this composition seam; they are not
-executable wiring proof. Until `cmd/camp` calls this seam, describe the feature
-as backend composition rather than production CLI wiring.
+different identity or if no backend was constructor-bound, because request
+metadata cannot select or relabel already-injected repositories. Factory and
+application tests prove this composition seam; they are not executable wiring
+proof. Until `cmd/camp` calls this seam, describe the feature as backend
+composition rather than production CLI wiring.
 
 The `s3://` URL contains only the bucket and optional clean prefix. Endpoint,
 region, path-style addressing, and transport policy are separate bootstrap
@@ -28,7 +30,9 @@ rejected. HTTPS is the default policy;
 an `http://` endpoint is rejected unless `insecure: true` (or
 `CAMP_S3_INSECURE=true`) is explicit, and `insecure: true` is rejected for an
 HTTPS endpoint. Bucket names are DNS-compatible and endpoint URLs cannot carry
-credentials, paths, queries, or fragments.
+credentials, paths, queries, or fragments. Dotted bucket names require
+path-style addressing with HTTPS because wildcard certificates do not cover a
+multi-label virtual-host bucket prefix.
 
 Durable recovery records contain only backend kind, sanitized `s3://` identity,
 and its configuration fingerprint. Endpoint and addressing policy contribute

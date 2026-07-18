@@ -191,6 +191,15 @@ func NewOpenWithBackend(ctx context.Context, deps OpenDependencies, backend conf
 	deps.Pointers = coordination.NewPointerRepository(store)
 	deps.Generations = coordination.NewGenerationRepository(store)
 	deps.Leases = coordination.NewLeaseRepository(store)
+	if deps.Hydrator != nil {
+		hydrator, ok := deps.Hydrator.(interface {
+			WithStore(hydration.GenerationStore) *hydration.Controller
+		})
+		if !ok {
+			return nil, errors.New("compose open hydrator: hydrator cannot bind the selected object store")
+		}
+		deps.Hydrator = hydrator.WithStore(store)
+	}
 	return NewOpen(deps), nil
 }
 
@@ -555,6 +564,9 @@ func (o *Open) validate(request OpenRequest) error {
 	if !validResolvedBackend(backend) {
 		return errors.New("open backend is not a strict credential-free backend descriptor")
 	}
+	if request.ResolvedBackend.Kind != "" && o.deps.ResolvedBackend.Kind == "" {
+		return fmt.Errorf("open request backend identity has no constructor-bound object store: %w", ErrOpenSessionMismatch)
+	}
 	if request.ResolvedBackend.Kind != "" && o.deps.ResolvedBackend.Kind != "" && !sameBackendIdentity(request.ResolvedBackend, o.deps.ResolvedBackend) {
 		return fmt.Errorf("open request backend identity does not match the composed object store: %w", ErrOpenSessionMismatch)
 	}
@@ -741,9 +753,6 @@ func (o *Open) create(ctx context.Context, request OpenRequest) (OpenResult, err
 func (o *Open) effectiveBackend(request OpenRequest) config.Backend {
 	if o.deps.ResolvedBackend.Kind != "" {
 		return o.deps.ResolvedBackend
-	}
-	if request.ResolvedBackend.Kind != "" {
-		return request.ResolvedBackend
 	}
 	file := request.Backend
 	if file.Root == "" && file.SanitizedURL == "" && file.Fingerprint == "" {

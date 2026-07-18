@@ -94,6 +94,15 @@ func NewController(store GenerationStore, hauler Hauler, archive ArchiveExtracto
 	return &Controller{store: store, hauler: hauler, archive: archive, ownership: ownership, hooks: hooks}
 }
 
+func (c *Controller) WithStore(store GenerationStore) *Controller {
+	if c == nil {
+		return nil
+	}
+	copy := *c
+	copy.store = store
+	return &copy
+}
+
 func (c *Controller) WithHooks(hooks Hooks) *Controller {
 	if c == nil {
 		return nil
