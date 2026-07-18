@@ -41,7 +41,6 @@ type userConfig struct {
 	Source         string `yaml:"source"`
 	RegistryPort   int    `yaml:"registryPort"`
 	FileserverPort int    `yaml:"fileserverPort"`
-	AccessToken    string `yaml:"accessToken"`
 }
 
 func ResolveBootstrap(input BootstrapInput) (Bootstrap, error) {
@@ -54,14 +53,11 @@ func ResolveBootstrap(input BootstrapInput) (Bootstrap, error) {
 		}
 		path = filepath.Join(root, "camp", "config.yaml")
 	}
-	user, info, err := readUserConfig(path)
+	user, _, err := readUserConfig(path)
 	if err != nil && !errors.Is(err, os.ErrNotExist) {
 		return Bootstrap{}, err
 	}
 	if err == nil {
-		if user.AccessToken != "" && info.Mode().Perm()&0o077 != 0 {
-			return Bootstrap{}, fmt.Errorf("host config %q contains secrets but mode is %04o; require 0600", path, info.Mode().Perm())
-		}
 		applyUser(&config, user)
 	}
 	applyBootstrapEnvironment(&config, input.Environment)
@@ -116,7 +112,6 @@ func applyUser(config *Bootstrap, user userConfig) {
 	if user.FileserverPort != 0 {
 		config.FileserverPort = user.FileserverPort
 	}
-	config.AccessToken = user.AccessToken
 }
 
 func applyBootstrapEnvironment(config *Bootstrap, environment map[string]string) {

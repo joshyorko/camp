@@ -10,6 +10,12 @@ Production composition is not only command registration. Before lifecycle handle
 
 Unknown commands and arbitrary arguments must return a nonzero error. The current root-only command accepts `camp open` and an unknown token as positional arguments and exits successfully; tests for the real tree must lock down arity, stderr, and stable exit codes.
 
+## Configuration and provider boundary
+
+Camp-owned user configuration persists only the typed non-secret fields in `config.Persistent`. Updates take an adjacent exclusive lock, write a mode-0600 temporary file, fsync it, rename it over the destination, and fsync the parent directory. URL userinfo and credential-shaped query parameters are rejected before effects. `CAMP_ACCESS_TOKEN` remains runtime-only; the legacy `accessToken` YAML field is rejected.
+
+Provider reads must redact values using DevPod's option schema: any option marked `password: true` is redacted even when its name is innocuous. Provider mutation currently fails unsupported before effects. The pinned DevPod `pkg/config.SaveConfig` implementation at commit `86b6f9f5` writes the live file with `os.WriteFile` and provides neither locking nor temp-file/fsync/rename publication, so delegating `provider set-options` would not satisfy Camp's atomic durability contract.
+
 ## Proof commands
 
 ```bash
@@ -26,3 +32,5 @@ A command is usable only when its handler is wired to production dependencies an
 - `internal/target/` and `internal/workspace/`
 - `internal/adapters/devpod/client_test.go`
 - `internal/adapters/hauler/client_test.go`
+- `internal/config/store.go`, `bootstrap.go`, and their focused tests
+- pinned DevPod `cmd/provider/options.go`, `cmd/provider/set_options.go`, and `pkg/config/config.go` at `86b6f9f5`
