@@ -59,7 +59,7 @@ func TestConfinementResolverRejectsIncompatiblePasta(t *testing.T) {
 	}
 }
 
-func TestPastaLoopbackBuildsOnlyAcceptedStructuredArgv(t *testing.T) {
+func TestPastaLoopbackBuildsSELinuxChildContextWrapperWithoutChangingLauncher(t *testing.T) {
 	t.Parallel()
 	child := ports.Command{
 		Executable:  "/opt/hauler",
@@ -67,7 +67,7 @@ func TestPastaLoopbackBuildsOnlyAcceptedStructuredArgv(t *testing.T) {
 		Environment: map[string]string{"HOME": "/state/home", "TMPDIR": "/state/tmp"},
 	}
 	spec, err := BuildPastaLoopback(PastaLoopback{
-		Capability: ConfinementCapability{Executable: "/usr/bin/pasta", Version: "pasta 2026_05_26", EnvironmentFingerprint: "env-sha"},
+		Capability: ConfinementCapability{Executable: "/usr/bin/pasta", Version: "pasta 2026_05_26", EnvironmentFingerprint: "env-sha", ChildContextPrefix: []string{"/usr/bin/runcon", "-t", "unconfined_t"}},
 		Mapping:    PortMapping{HostAddress: "127.0.0.1", HostPort: 5000, GuestPort: 5100},
 		LogPath:    "/state/private/pasta.log",
 		PIDPath:    "/state/private/pasta.pid",
@@ -80,6 +80,7 @@ func TestPastaLoopbackBuildsOnlyAcceptedStructuredArgv(t *testing.T) {
 		"--foreground", "--quiet", "--log-file", "/state/private/pasta.log", "--pid", "/state/private/pasta.pid",
 		"--ipv4-only", "--host-lo-to-ns-lo", "--tcp-ports", "127.0.0.1/5000:5100",
 		"--udp-ports", "none", "--tcp-ns", "none", "--udp-ns", "none", "--",
+		"/usr/bin/runcon", "-t", "unconfined_t",
 		"/opt/hauler", "store", "--store", "/state/store", "serve", "registry", "--directory", "/state/registry", "--port", "5100", "--readonly=false",
 	}
 	if spec.Command.Executable != "/usr/bin/pasta" || !reflect.DeepEqual(spec.Command.Argv, want) {

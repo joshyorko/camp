@@ -79,14 +79,45 @@ func (r *ConfinementResolver) Resolve(ctx context.Context) (ports.ConfinementCap
 			return ports.ConfinementCapability{}, unavailable("incompatible-options", boundary, fmt.Errorf("pasta help lacks %s", option))
 		}
 	}
-	fingerprintSource := strings.Join([]string{executable, version, boundary, runtime.GOOS, runtime.GOARCH, strconv.Itoa(os.Getuid())}, "\x00")
+	childContextPrefix, err := r.childContextPrefix()
+	if err != nil {
+		return ports.ConfinementCapability{}, unavailable("selinux-child-context", boundary, err)
+	}
+	fingerprintSource := strings.Join(append([]string{executable, version, boundary, runtime.GOOS, runtime.GOARCH, strconv.Itoa(os.Getuid())}, childContextPrefix...), "\x00")
 	digest := sha256.Sum256([]byte(fingerprintSource))
 	return ports.ConfinementCapability{
 		Executable:             executable,
 		Version:                version,
 		EnvironmentFingerprint: hex.EncodeToString(digest[:]),
 		Boundary:               boundary,
+		ChildContextPrefix:     childContextPrefix,
 	}, nil
+}
+
+func (r *ConfinementResolver) childContextPrefix() ([]string, error) {
+	enforcing, err := os.ReadFile("/sys/fs/selinux/enforce")
+	if errors.Is(err, os.ErrNotExist) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, fmt.Errorf("read SELinux enforcement state: %w", err)
+	}
+	if strings.TrimSpace(string(enforcing)) != "1" {
+		return nil, nil
+	}
+	runcon, err := r.lookup("runcon")
+	if err != nil {
+		return nil, fmt.Errorf("SELinux enforcing but runcon is unavailable: %w", err)
+	}
+	runcon, err = filepath.Abs(runcon)
+	if err != nil || !filepath.IsAbs(runcon) {
+		return nil, fmt.Errorf("resolve runcon: %w", err)
+	}
+	info, err := os.Stat(runcon)
+	if err != nil || info.IsDir() || info.Mode()&0o111 == 0 {
+		return nil, fmt.Errorf("validate runcon: %w", err)
+	}
+	return []string{runcon, "-t", "unconfined_t"}, nil
 }
 
 func unavailable(reason, boundary string, cause error) *ConfinementUnavailable {

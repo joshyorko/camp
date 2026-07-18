@@ -122,8 +122,15 @@ func BuildPastaLoopback(unit PastaLoopback) (ports.ProcessSpec, error) {
 		"--foreground", "--quiet", "--log-file", unit.LogPath, "--pid", unit.PIDPath,
 		"--ipv4-only", "--host-lo-to-ns-lo", "--tcp-ports", mapping,
 		"--udp-ports", "none", "--tcp-ns", "none", "--udp-ns", "none", "--",
-		unit.Child.Executable,
 	}
+	if len(unit.Capability.ChildContextPrefix) != 0 {
+		prefix := unit.Capability.ChildContextPrefix
+		if len(prefix) != 3 || !filepath.IsAbs(prefix[0]) || prefix[1] != "-t" || prefix[2] != "unconfined_t" {
+			return ports.ProcessSpec{}, errors.New("PastaLoopback child context prefix is invalid")
+		}
+		argv = append(argv, prefix...)
+	}
+	argv = append(argv, unit.Child.Executable)
 	argv = append(argv, unit.Child.Argv...)
 	if mapping == "" {
 		return ports.ProcessSpec{}, fmt.Errorf("invalid mapping")
