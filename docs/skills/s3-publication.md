@@ -31,3 +31,19 @@ Focused verification lives in
 ```sh
 go test ./internal/adapters/s3store -run '^TestPutImmutable' -count=1 -v
 ```
+
+The non-skipping real fixture in `integration/minio_s3store_test.go` runs MinIO
+`RELEASE.2025-04-22T22-12-26Z` from the pinned image digest
+`sha256:a1ea29fa28355559ef137d71fc570e508a214ec84ff8083e39bc5428980b015e`.
+It proves create, streamed idempotent readback, conflicting-byte rejection,
+cancellation with zero remaining multipart uploads, and reconciliation after a
+committed completion response is deliberately lost. It also directly races an
+uploaded contender against an existing key: MinIO returns HTTP 412 when
+`CompleteMultipartUpload` carries `If-None-Match: *`, verifying the conditional
+completion requirement rather than assuming it from synthetic HTTP tests.
+
+Run the real contract with Docker available:
+
+```sh
+go test ./integration -run '^TestMinIOImmutableLifecycle$' -count=1 -v -timeout=3m
+```
