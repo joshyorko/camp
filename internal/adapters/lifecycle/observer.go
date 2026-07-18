@@ -48,6 +48,9 @@ func (o *SessionObserver) Observe(ctx context.Context, snapshot domain.JournalSn
 			return app.SessionEvidence{}, fmt.Errorf("observe service %q child: %w", service.Name, err)
 		}
 		evidence.Services[service.Name] = app.ServiceEvidence{Helper: helper, Child: child}
+		if snapshot.State == domain.SessionClosed && helper == app.ProcessIdentityAbsent && child == app.ProcessIdentityAbsent {
+			continue
+		}
 		if helper == app.ProcessIdentityMatch || helper == app.ProcessIdentityAbsent {
 			observation, err := o.services.Observe(ctx, service)
 			if err != nil {

@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"time"
 
+	"github.com/joshyorko/camp/internal/adapters/supervisor"
 	"github.com/joshyorko/camp/internal/coordination"
 	"github.com/joshyorko/camp/internal/domain"
 	"github.com/joshyorko/camp/internal/ports"
@@ -69,7 +70,7 @@ func (e *CloseEffects) StopForwarders(ctx context.Context, snapshot domain.Journ
 		if err := validateProcessIdentity(forwarding.Process.Identity); err != nil {
 			return fmt.Errorf("forwarder %q: %w", forwarding.Name, err)
 		}
-		if err := e.processes.Stop(ctx, forwarding.Process.Identity, 5*time.Second); err != nil {
+		if err := e.processes.Stop(ctx, forwarding.Process.Identity, 5*time.Second); err != nil && !errors.Is(err, supervisor.ErrProcessIdentity) {
 			return fmt.Errorf("stop forwarder %q: %w", forwarding.Name, err)
 		}
 	}
@@ -98,7 +99,11 @@ func (e *CloseEffects) StopSupervisor(ctx context.Context, snapshot domain.Journ
 	if err := validateProcessIdentity(snapshot.Supervisor.Identity); err != nil {
 		return fmt.Errorf("session supervisor: %w", err)
 	}
-	return e.processes.Stop(ctx, snapshot.Supervisor.Identity, 5*time.Second)
+	err := e.processes.Stop(ctx, snapshot.Supervisor.Identity, 5*time.Second)
+	if errors.Is(err, supervisor.ErrProcessIdentity) {
+		return nil
+	}
+	return err
 }
 
 func (e *CloseEffects) ReleaseLease(ctx context.Context, snapshot domain.JournalSnapshot) error {

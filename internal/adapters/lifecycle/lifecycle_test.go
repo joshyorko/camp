@@ -98,6 +98,19 @@ func TestCloseEffectsFailClosedOnIncompleteRecordedIdentity(t *testing.T) {
 	}
 }
 
+func TestCloseEffectsTreatRecordedPIDReuseAsAlreadyStopped(t *testing.T) {
+	processes := &fakeProcesses{stopErr: supervisor.ErrProcessIdentity}
+	effects := NewCloseEffects(&fakeWorkspace{}, processes, &fakeServices{}, &fakeLeases{}, &fakeOwnership{})
+	snapshot := lifecycleSnapshot(t.TempDir())
+
+	if err := effects.StopForwarders(context.Background(), snapshot); err != nil {
+		t.Fatalf("StopForwarders() error = %v", err)
+	}
+	if err := effects.StopSupervisor(context.Background(), snapshot); err != nil {
+		t.Fatalf("StopSupervisor() error = %v", err)
+	}
+}
+
 func TestSessionObserverReportsOnlyLiveListenerValidatedEvidence(t *testing.T) {
 	snapshot := lifecycleSnapshot(t.TempDir())
 	processes := &fakeProcesses{statuses: map[int]ports.ProcessStatus{
@@ -170,6 +183,21 @@ func TestSessionObserverFailsClosedWhenStoppedServiceListenerRemains(t *testing.
 	}
 }
 
+func TestSessionObserverClosedHistoryDoesNotInspectReusedPorts(t *testing.T) {
+	snapshot := lifecycleSnapshot(t.TempDir())
+	snapshot.State = domain.SessionClosed
+	processes := &fakeProcesses{statuses: map[int]ports.ProcessStatus{}}
+	services := &fakeServices{observeErr: errors.New("port belongs to a later session")}
+
+	evidence, err := NewSessionObserver(processes, services).Observe(context.Background(), snapshot)
+	if err != nil {
+		t.Fatalf("Observe() error = %v", err)
+	}
+	if evidence.Services["registry"] != (app.ServiceEvidence{Helper: app.ProcessIdentityAbsent, Child: app.ProcessIdentityAbsent}) {
+		t.Fatalf("registry evidence = %#v", evidence.Services["registry"])
+	}
+}
+
 func TestServingRefresherRotatesBothRecordedServices(t *testing.T) {
 	snapshot := lifecycleSnapshot(t.TempDir())
 	journal := &fakeJournal{snapshot: snapshot}
@@ -190,7 +218,7 @@ func TestServingRefresherRotatesBothRecordedServices(t *testing.T) {
 	if len(services.ensureSpecs) != 2 {
 		t.Fatalf("Ensure() calls = %d", len(services.ensureSpecs))
 	}
-	assertDirectoryArgument(t, services.ensureSpecs[0].Child.Argv, request.RegistrySnapshotRoot)
+	assertDirectoryArgument(t, services.ensureSpecs[0].Child.Argv, filepath.Join(filepath.Dir(snapshot.Services[0].PIDPath), "registry"))
 	assertDirectoryArgument(t, services.ensureSpecs[1].Child.Argv, filepath.Dir(request.HaulPath))
 	for _, spec := range services.ensureSpecs {
 		if spec.LaunchToken != snapshot.SessionID+"-generation-8-"+spec.Name {
@@ -343,6 +371,7 @@ func (f *fakeWorkspace) DeleteInContext(_ context.Context, contextName, workspac
 type fakeProcesses struct {
 	events   *[]string
 	statuses map[int]ports.ProcessStatus
+	stopErr  error
 }
 
 func (f *fakeProcesses) Start(context.Context, ports.ProcessSpec) (domain.ProcessIdentity, error) {
@@ -366,7 +395,7 @@ func (f *fakeProcesses) Stop(_ context.Context, identity domain.ProcessIdentity,
 	if f.events != nil {
 		*f.events = append(*f.events, "process:"+itoa(identity.PID))
 	}
-	return nil
+	return f.stopErr
 }
 
 type fakeServices struct {

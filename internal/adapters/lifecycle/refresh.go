@@ -51,7 +51,11 @@ func (r *ServingRefresher) Refresh(ctx context.Context, request app.ServingRefre
 		if !ok {
 			return fmt.Errorf("serving refresh service %q is missing", name)
 		}
-		spec, err := refreshedServiceSpec(snapshot.SessionID, record, directories[name], request.Generation.Generation)
+		directory := directories[name]
+		if name == hauler.RegistryServiceName {
+			directory = recordedServingDirectory(record.Child.Argv)
+		}
+		spec, err := refreshedServiceSpec(snapshot.SessionID, record, directory, request.Generation.Generation)
 		if err != nil {
 			return fmt.Errorf("prepare serving refresh service %q: %w", name, err)
 		}
@@ -72,6 +76,15 @@ func (r *ServingRefresher) Refresh(ctx context.Context, request app.ServingRefre
 		snapshot = next
 	}
 	return nil
+}
+
+func recordedServingDirectory(argv []string) string {
+	for index := 0; index+1 < len(argv); index++ {
+		if argv[index] == "--directory" {
+			return argv[index+1]
+		}
+	}
+	return ""
 }
 
 func matchingRefreshPending(pending []ports.PendingIntent, request app.ServingRefreshRequest) bool {
