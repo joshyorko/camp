@@ -18,6 +18,8 @@ The application-level `OperationalQueries` type is the reusable read-only seam f
 
 `HistoryFor` first selects a session, then queries generation history with that session's capsule and lineage. It returns `GenerationReadModel` values rather than storage metadata and sorts them by generation descending, creation time descending, and digest ascending. This keeps command output deterministic even when an adapter does not preserve ordering.
 
+Recovery uses `SelectionRecovery`, but selection alone never authorizes effects. `Recover.Run` first observes the selected record, reloads it from the journal, rejects changes to capsule, lineage, mode, materialization root, workspace identity, or lease revision, and dispatches lifecycle versus cleanup reconciliation only after `RecoverySafetyGuard` revalidates ownership, pending-transition identity, and the active writer lease. It observes again immediately before the reconciler and fails closed if evidence changed; after reconciliation it observes once more to build the returned session read model. Cleanup failure takes precedence over lifecycle state so a published checkpoint is not repeated while cleanup-only recovery runs.
+
 JSON output uses a top-level `schemaVersion`, stable error codes, deterministic arrays, redacted strings, no ANSI, and stdout even for failures. Human successes use stdout and human failures use stderr. Update the presentation goldens whenever this contract intentionally changes.
 
 Verification:
