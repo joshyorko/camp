@@ -1,21 +1,49 @@
-# S3 Publication
+# S3 immutable publication
 
-## Current boundary
+Camp's S3 adapter publishes immutable objects with the existing injected HTTP
+`Signer` seam. This slice does not adopt the AWS SDK for Go v2: backend
+composition and runtime credential-chain selection remain separate work.
+Credentials must stay inside the signer and must not enter `s3store.Config`,
+object metadata, object keys, journals, or logs.
 
-The S3 adapter implements signed get, head, list, conditional mutation, conditional delete, and a writer-safety probe. Immutable multipart publication is not implemented: `internal/adapters/s3store/store.go` returns `S3 multipart immutable upload is not implemented` from `PutImmutable`.
+`PutImmutable` first uses `HEAD` to detect an existing key. An existing object is
+accepted only when its expected size and `x-amz-meta-sha256` agree and a `GET`
+readback reproduces the expected SHA-256, size, and opaque revision. Different
+bytes return `ports.ErrConflict`; multipart ETags are opaque revisions and are
+never interpreted as content hashes.
 
-The executable has no production backend factory or configuration path selecting S3. File-backed publication remains the only composed backend. Do not claim MinIO or clean-machine portability until a real backend fixture and two-process lifecycle pass.
+For a missing key, Camp opens the restartable source once to verify the exact
+size and SHA-256 before creating remote multipart state, then opens it again to
+upload deterministic, ascending parts bounded to 8 MiB. Completion carries
+`If-None-Match: *`, preserving create-only publication.
 
-## Writer safety
+Every failure before completion attempts `AbortMultipartUpload` using an
+independent bounded cleanup context. Abort failures are joined to the primary
+error so cleanup loss is not hidden. Cancellation is checked while verifying
+and uploading the source and before completion. A 5xx completion result is
+ambiguous: Camp observes the key with `HEAD` and verified `GET` readback. A
+verified object is accepted; an unverified outcome remains `ports.ErrAmbiguous`
+and is not blindly completed again or aborted.
 
-Before accepting an S3-compatible endpoint for writer use, `ProbeWriterSafety` verifies create-only behavior, readback body and revision, conditional replacement, stale-revision rejection, conditional delete, and post-delete absence. A backend that violates those semantics returns `ErrUnsafeWriter`.
+Focused verification lives in
+`internal/adapters/s3store/multipart_test.go`. Run it with:
 
-The multipart contract test requires multipart initiation, part upload, completion, and verified readback metadata. It is intentionally red until `PutImmutable` satisfies that contract.
+```sh
+go test ./internal/adapters/s3store -run '^TestPutImmutable' -count=1 -v
+```
 
-## Evidence
+The non-skipping real fixture in `integration/minio_s3store_test.go` runs MinIO
+`RELEASE.2025-04-22T22-12-26Z` from the pinned image digest
+`sha256:a1ea29fa28355559ef137d71fc570e508a214ec84ff8083e39bc5428980b015e`.
+It proves create, streamed idempotent readback, conflicting-byte rejection,
+cancellation with zero remaining multipart uploads, and reconciliation after a
+committed completion response is deliberately lost. It also directly races an
+uploaded contender against an existing key: MinIO returns HTTP 412 when
+`CompleteMultipartUpload` carries `If-None-Match: *`, verifying the conditional
+completion requirement rather than assuming it from synthetic HTTP tests.
 
-- `internal/adapters/s3store/store.go`
-- `internal/adapters/s3store/probe.go`
-- `internal/adapters/s3store/store_test.go`
-- `internal/adapters/s3store/multipart_test.go`
-- `internal/adapters/filebackend/store.go`
+Run the real contract with Docker available:
+
+```sh
+go test ./integration -run '^TestMinIOImmutableLifecycle$' -count=1 -v -timeout=3m
+```

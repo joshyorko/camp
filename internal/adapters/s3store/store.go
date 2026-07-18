@@ -116,8 +116,258 @@ func (s *Store) Head(ctx context.Context, key string) (ports.ObjectMeta, error) 
 	return objectMeta(key, response.Header)
 }
 
-func (s *Store) PutImmutable(context.Context, string, ports.RestartableSource, string, int64) (ports.ObjectMeta, error) {
-	return ports.ObjectMeta{}, errors.New("S3 multipart immutable upload is not implemented")
+func (s *Store) PutImmutable(ctx context.Context, key string, source ports.RestartableSource, expectedSHA256 string, expectedSize int64) (meta ports.ObjectMeta, resultErr error) {
+	if err := validateKey(key); err != nil {
+		return ports.ObjectMeta{}, err
+	}
+	if source == nil || expectedSize < 0 || !validSHA256(expectedSHA256) {
+		return ports.ObjectMeta{}, fmt.Errorf("immutable object %q expectations: %w", key, ports.ErrIntegrity)
+	}
+	current, err := s.Head(ctx, key)
+	switch {
+	case err == nil:
+		if current.Size == expectedSize && current.SHA256 == expectedSHA256 {
+			if err := s.verifyRemote(ctx, key, current.Revision, expectedSHA256, expectedSize); err != nil {
+				return ports.ObjectMeta{}, err
+			}
+			return current, nil
+		}
+		return ports.ObjectMeta{}, fmt.Errorf("immutable object %q contains different bytes: %w", key, ports.ErrConflict)
+	case !errors.Is(err, ports.ErrNotFound):
+		return ports.ObjectMeta{}, err
+	}
+	if err := verifySource(ctx, key, source, expectedSHA256, expectedSize); err != nil {
+		return ports.ObjectMeta{}, err
+	}
+
+	uploadID, err := s.createMultipart(ctx, key, expectedSHA256)
+	if err != nil {
+		return ports.ObjectMeta{}, err
+	}
+	completed := false
+	defer func() {
+		if !completed {
+			if abortErr := s.abortMultipart(key, uploadID); abortErr != nil {
+				resultErr = errors.Join(resultErr, abortErr)
+			}
+		}
+	}()
+	parts, err := s.uploadParts(ctx, key, uploadID, source, expectedSize)
+	if err != nil {
+		return ports.ObjectMeta{}, err
+	}
+	if err := s.completeMultipart(ctx, key, uploadID, parts); err != nil {
+		if errors.Is(err, ports.ErrAmbiguous) {
+			observed, observeErr := s.Head(context.WithoutCancel(ctx), key)
+			if observeErr == nil && observed.Size == expectedSize && observed.SHA256 == expectedSHA256 {
+				if verifyErr := s.verifyRemote(context.WithoutCancel(ctx), key, observed.Revision, expectedSHA256, expectedSize); verifyErr == nil {
+					completed = true
+					return observed, nil
+				}
+			}
+			// Completion may have committed remotely. Never abort an upload whose
+			// outcome cannot be distinguished from success.
+			completed = true
+		}
+		return ports.ObjectMeta{}, err
+	}
+	completed = true
+	meta, err = s.Head(ctx, key)
+	if err != nil {
+		return ports.ObjectMeta{}, fmt.Errorf("read back immutable object %q: %w", key, err)
+	}
+	if meta.Size != expectedSize || meta.SHA256 != expectedSHA256 {
+		return ports.ObjectMeta{}, fmt.Errorf("immutable object %q readback has size %d and sha256 %s: %w", key, meta.Size, meta.SHA256, ports.ErrIntegrity)
+	}
+	return meta, nil
+}
+
+func (s *Store) verifyRemote(ctx context.Context, key string, revision ports.Revision, expectedSHA256 string, expectedSize int64) error {
+	reader, meta, err := s.Get(ctx, key)
+	if err != nil {
+		return fmt.Errorf("read immutable object %q for verification: %w", key, err)
+	}
+	hash := sha256.New()
+	size, copyErr := io.Copy(hash, &contextReader{ctx: ctx, reader: reader})
+	closeErr := reader.Close()
+	if copyErr != nil {
+		return fmt.Errorf("verify immutable object %q: %w", key, copyErr)
+	}
+	if closeErr != nil {
+		return fmt.Errorf("close immutable object %q: %w", key, closeErr)
+	}
+	digest := hex.EncodeToString(hash.Sum(nil))
+	if meta.Revision != revision || size != expectedSize || digest != expectedSHA256 {
+		return fmt.Errorf("immutable object %q readback has revision %q, size %d, and sha256 %s: %w", key, meta.Revision, size, digest, ports.ErrIntegrity)
+	}
+	return nil
+}
+
+func validSHA256(value string) bool {
+	decoded, err := hex.DecodeString(value)
+	return err == nil && len(decoded) == sha256.Size && value == strings.ToLower(value)
+}
+
+func verifySource(ctx context.Context, key string, source ports.RestartableSource, expectedSHA256 string, expectedSize int64) error {
+	reader, err := source.Open()
+	if err != nil {
+		return fmt.Errorf("open immutable source for %q: %w", key, err)
+	}
+	if reader == nil {
+		return fmt.Errorf("open immutable source for %q: nil reader: %w", key, ports.ErrIntegrity)
+	}
+	hash := sha256.New()
+	size, copyErr := io.Copy(hash, &contextReader{ctx: ctx, reader: reader})
+	closeErr := reader.Close()
+	if copyErr != nil {
+		return fmt.Errorf("verify immutable source for %q: %w", key, copyErr)
+	}
+	if closeErr != nil {
+		return fmt.Errorf("close immutable source for %q: %w", key, closeErr)
+	}
+	digest := hex.EncodeToString(hash.Sum(nil))
+	if size != expectedSize || digest != expectedSHA256 {
+		return fmt.Errorf("immutable source for %q has size %d and sha256 %s: %w", key, size, digest, ports.ErrIntegrity)
+	}
+	return nil
+}
+
+type contextReader struct {
+	ctx    context.Context
+	reader io.Reader
+}
+
+func (r *contextReader) Read(buffer []byte) (int, error) {
+	if err := r.ctx.Err(); err != nil {
+		return 0, err
+	}
+	return r.reader.Read(buffer)
+}
+
+func (s *Store) createMultipart(ctx context.Context, key, digest string) (string, error) {
+	request, err := s.multipartRequest(ctx, http.MethodPost, key, url.Values{"uploads": {""}}, nil)
+	if err != nil {
+		return "", err
+	}
+	request.Header.Set("X-Amz-Meta-Sha256", digest)
+	response, err := s.do(request)
+	if err != nil {
+		return "", err
+	}
+	defer response.Body.Close()
+	if response.StatusCode < 200 || response.StatusCode >= 300 {
+		return "", responseError(response, "create multipart upload", key, true)
+	}
+	var result struct {
+		UploadID string `xml:"UploadId"`
+	}
+	if err := xml.NewDecoder(io.LimitReader(response.Body, 1<<20)).Decode(&result); err != nil || result.UploadID == "" {
+		return "", fmt.Errorf("decode multipart upload for %q: %w", key, ports.ErrIntegrity)
+	}
+	return result.UploadID, nil
+}
+
+type completedPart struct {
+	ETag       string `xml:"ETag"`
+	PartNumber int    `xml:"PartNumber"`
+}
+
+const multipartPartSize int64 = 8 << 20
+
+func (s *Store) uploadParts(ctx context.Context, key, uploadID string, source ports.RestartableSource, size int64) ([]completedPart, error) {
+	reader, err := source.Open()
+	if err != nil {
+		return nil, fmt.Errorf("reopen immutable source for %q: %w", key, err)
+	}
+	if reader == nil {
+		return nil, fmt.Errorf("reopen immutable source for %q: nil reader: %w", key, ports.ErrIntegrity)
+	}
+	defer reader.Close()
+	parts := make([]completedPart, 0, int(size/multipartPartSize)+1)
+	remaining := size
+	for number := 1; remaining > 0 || number == 1; number++ {
+		partSize := min(remaining, multipartPartSize)
+		request, err := s.multipartRequest(ctx, http.MethodPut, key, url.Values{"partNumber": {strconv.Itoa(number)}, "uploadId": {uploadID}}, io.LimitReader(reader, partSize))
+		if err != nil {
+			return nil, err
+		}
+		request.ContentLength = partSize
+		response, err := s.do(request)
+		if err != nil {
+			return nil, err
+		}
+		if response.StatusCode < 200 || response.StatusCode >= 300 {
+			err := responseError(response, "upload multipart part", key, true)
+			response.Body.Close()
+			return nil, err
+		}
+		etag := response.Header.Get("ETag")
+		response.Body.Close()
+		if etag == "" {
+			return nil, fmt.Errorf("multipart part %d for %q returned no opaque revision: %w", number, key, ports.ErrIntegrity)
+		}
+		parts = append(parts, completedPart{ETag: etag, PartNumber: number})
+		remaining -= partSize
+	}
+	return parts, nil
+}
+
+func (s *Store) completeMultipart(ctx context.Context, key, uploadID string, parts []completedPart) error {
+	body, err := xml.Marshal(struct {
+		XMLName xml.Name        `xml:"CompleteMultipartUpload"`
+		Parts   []completedPart `xml:"Part"`
+	}{Parts: parts})
+	if err != nil {
+		return err
+	}
+	request, err := s.multipartRequest(ctx, http.MethodPost, key, url.Values{"uploadId": {uploadID}}, bytes.NewReader(body))
+	if err != nil {
+		return err
+	}
+	request.Header.Set("If-None-Match", "*")
+	response, err := s.do(request)
+	if err != nil {
+		return err
+	}
+	defer response.Body.Close()
+	if response.StatusCode < 200 || response.StatusCode >= 300 {
+		return responseError(response, "complete multipart upload", key, true)
+	}
+	var result struct {
+		XMLName xml.Name
+		ETag    string `xml:"ETag"`
+	}
+	if err := xml.NewDecoder(io.LimitReader(response.Body, 1<<20)).Decode(&result); err != nil || result.XMLName.Local != "CompleteMultipartUploadResult" || result.ETag == "" {
+		return fmt.Errorf("decode completed multipart upload for %q: %w", key, ports.ErrIntegrity)
+	}
+	return nil
+}
+
+func (s *Store) abortMultipart(key, uploadID string) error {
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	request, err := s.multipartRequest(ctx, http.MethodDelete, key, url.Values{"uploadId": {uploadID}}, nil)
+	if err != nil {
+		return err
+	}
+	response, err := s.do(request)
+	if err != nil {
+		return fmt.Errorf("abort multipart upload for %q: %w", key, err)
+	}
+	defer response.Body.Close()
+	if response.StatusCode < 200 || response.StatusCode >= 300 {
+		return responseError(response, "abort multipart upload", key, true)
+	}
+	return nil
+}
+
+func (s *Store) multipartRequest(ctx context.Context, method, key string, query url.Values, body io.Reader) (*http.Request, error) {
+	request, err := s.newObjectRequest(ctx, method, key, body)
+	if err != nil {
+		return nil, err
+	}
+	request.URL.RawQuery = query.Encode()
+	return request, nil
 }
 
 func (s *Store) PutConditional(ctx context.Context, key string, body []byte, condition ports.WriteCondition) (ports.ObjectMeta, error) {
