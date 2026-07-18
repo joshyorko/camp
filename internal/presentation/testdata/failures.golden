@@ -1,0 +1,9 @@
+error [session_not_found]: no matching Camp session
+next: camp list
+error [session_ambiguous]: multiple active Camp sessions
+next: camp status --session a
+next: camp status --session b
+error [publication_orphaned]: generation uploaded but pointer not committed
+next: camp recover orphan
+error [cleanup_failed]: checkpoint published; cleanup failed
+next: camp recover closed
