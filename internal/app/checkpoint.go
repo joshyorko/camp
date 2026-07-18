@@ -59,12 +59,17 @@ type CheckpointPublisher struct {
 	journal     ports.Journal
 	locks       ports.OperationTokenValidator
 	leases      checkpointLeaseValidator
-	mirror      ports.WorkspaceTransport
+	mirror      *workspace.Selector
 	pipeline    CheckpointPipeline
 	builder     checkpointBuilder
 	generations *coordination.GenerationRepository
 	pointers    *coordination.PointerRepository
 	clock       ports.Clock
+}
+
+type CheckpointTransports struct {
+	Local  ports.WorkspaceTransport
+	Remote ports.WorkspaceTransport
 }
 
 type CheckpointDisposition string
@@ -83,8 +88,8 @@ type CheckpointResult struct {
 	RecoveryCommand string                     `json:"recoveryCommand,omitempty"`
 }
 
-func NewCheckpointPublisher(journal ports.Journal, locks ports.OperationTokenValidator, leases checkpointLeaseValidator, mirror ports.WorkspaceTransport, pipeline CheckpointPipeline, builder checkpointBuilder, generations *coordination.GenerationRepository, pointers *coordination.PointerRepository, clock ports.Clock) *CheckpointPublisher {
-	return &CheckpointPublisher{journal: journal, locks: locks, leases: leases, mirror: mirror, pipeline: pipeline, builder: builder, generations: generations, pointers: pointers, clock: clock}
+func NewCheckpointPublisher(journal ports.Journal, locks ports.OperationTokenValidator, leases checkpointLeaseValidator, transports CheckpointTransports, pipeline CheckpointPipeline, builder checkpointBuilder, generations *coordination.GenerationRepository, pointers *coordination.PointerRepository, clock ports.Clock) *CheckpointPublisher {
+	return &CheckpointPublisher{journal: journal, locks: locks, leases: leases, mirror: workspace.NewSelector(transports.Local, transports.Remote), pipeline: pipeline, builder: builder, generations: generations, pointers: pointers, clock: clock}
 }
 
 func (p *CheckpointPublisher) Publish(ctx context.Context, operation ports.OperationToken, sessionID string) (CheckpointResult, error) {
@@ -123,31 +128,50 @@ func (p *CheckpointPublisher) Publish(ctx context.Context, operation ports.Opera
 	if err := p.leases.Revalidate(ctx, lease, now); err != nil {
 		return CheckpointResult{}, fmt.Errorf("validate checkpoint writer lease: %w", err)
 	}
+	if snapshot.Workspace.Mirror.LogicalAttempt == ^uint64(0) {
+		return CheckpointResult{}, errors.New("checkpoint mirror attempt overflow")
+	}
+	logicalAttempt := snapshot.Workspace.Mirror.LogicalAttempt + 1
+	attemptID := sessionID + "-checkpoint-" + strconv.FormatUint(logicalAttempt, 10)
 
-	mirrorIntent := checkpointIntent(sessionID, "WorkspaceMirrored", 1, now, ports.MirrorRequest{
+	mirrorRequest := ports.MirrorRequest{
 		Provider: snapshot.Workspace.Provider, LocalProvider: snapshot.Workspace.LocalProvider,
 		StagingRoot: snapshot.Workspace.StagingRoot, WorkspaceLocalFolder: snapshot.Workspace.LocalFolder,
-	})
+		WorkspaceID: snapshot.Workspace.ID, Context: snapshot.Workspace.Context,
+		AttemptID: attemptID,
+	}
+	if err := p.mirror.Validate(mirrorRequest); err != nil {
+		return CheckpointResult{}, err
+	}
+	mirrorIntent := checkpointAttemptIntent(sessionID, attemptID, "WorkspaceMirrored", 1, now, mirrorRequest)
 	if err := p.journal.RecordIntent(ctx, mirrorIntent); err != nil {
 		return CheckpointResult{}, err
 	}
-	mirrored, err := p.mirror.ReturnToStaging(ctx, ports.MirrorRequest{
-		Provider: snapshot.Workspace.Provider, LocalProvider: snapshot.Workspace.LocalProvider,
-		StagingRoot: snapshot.Workspace.StagingRoot, WorkspaceLocalFolder: snapshot.Workspace.LocalFolder,
-	})
+	mirrored, err := p.mirror.ReturnToStaging(ctx, mirrorRequest)
 	if err != nil {
+		var unknown *workspace.MirrorOutcomeUnknown
+		if errors.As(err, &unknown) {
+			if !validRemoteMirrorResult(unknown.Result, mirrorRequest.AttemptID) {
+				return CheckpointResult{}, errors.Join(err, errors.New("ambiguous workspace mirror returned an invalid attempt identity"))
+			}
+			snapshot.Workspace.Mirror = mirrorAttemptRecord(logicalAttempt, unknown.Result, domain.MirrorAmbiguous)
+			if factErr := p.journal.RecordFact(context.WithoutCancel(ctx), checkpointFact(mirrorIntent, now), snapshot); factErr != nil {
+				return CheckpointResult{}, errors.Join(err, factErr)
+			}
+		}
 		return CheckpointResult{}, err
 	}
 	if mirrored.Root == "" {
 		return CheckpointResult{}, errors.New("workspace mirror returned an empty staging root")
 	}
 	if snapshot.Workspace.LocalProvider {
-		if mirrored.Mode != ports.MirrorLocalNoop || mirrored.Root != snapshot.Workspace.StagingRoot {
+		if mirrored.Mode != ports.MirrorLocalNoop || mirrored.Root != snapshot.Workspace.StagingRoot || mirrored.AttemptID != mirrorRequest.AttemptID {
 			return CheckpointResult{}, errors.New("local workspace mirror did not preserve the staging root")
 		}
-	} else if mirrored.Mode != workspace.MirrorDevPodSSH {
+	} else if !validRemoteMirrorResult(mirrored, mirrorRequest.AttemptID) {
 		return CheckpointResult{}, errors.New("remote workspace mirror did not return a DevPod SSH staging root")
 	}
+	snapshot.Workspace.Mirror = mirrorAttemptRecord(logicalAttempt, mirrored, domain.MirrorCompleted)
 	if err := p.leases.Revalidate(ctx, lease, now); err != nil {
 		return CheckpointResult{}, fmt.Errorf("revalidate checkpoint writer lease after workspace mirror: %w", err)
 	}
@@ -163,7 +187,7 @@ func (p *CheckpointPublisher) Publish(ctx context.Context, operation ports.Opera
 		Capsule: snapshot.Capsule, RegistryAuthority: runtime.authority, RegistryEndpoint: runtime.endpoint,
 		Previous: snapshot.Images,
 	}
-	captureIntent := checkpointIntent(sessionID, "WorkspaceImagesInventoried", 2, now, captureRequest)
+	captureIntent := checkpointAttemptIntent(sessionID, attemptID, "WorkspaceImagesInventoried", 2, now, captureRequest)
 	if err := p.journal.RecordIntent(ctx, captureIntent); err != nil {
 		return CheckpointResult{}, err
 	}
@@ -178,7 +202,7 @@ func (p *CheckpointPublisher) Publish(ctx context.Context, operation ports.Opera
 
 	cutRoot := filepath.Join(mirrored.Root, ".camp", "build", "registry-cut-"+strconv.FormatUint(generation, 10))
 	sealRequest := registryadapter.SnapshotRequest{OverlayRoot: runtime.overlay, SnapshotRoot: cutRoot, CatalogEndpoint: runtime.endpoint}
-	sealIntent := checkpointIntent(sessionID, "RegistrySnapshotSealed", 3, now, sealRequest)
+	sealIntent := checkpointAttemptIntent(sessionID, attemptID, "RegistrySnapshotSealed", 3, now, sealRequest)
 	if err := p.journal.RecordIntent(ctx, sealIntent); err != nil {
 		return CheckpointResult{}, err
 	}
@@ -203,7 +227,7 @@ func (p *CheckpointPublisher) Publish(ctx context.Context, operation ports.Opera
 	if tools == (domain.ToolVersions{}) && snapshot.CurrentPointer != nil {
 		tools = snapshot.CurrentPointer.Tools
 	}
-	buildIntent := checkpointIntent(sessionID, "RootSnapshotStable", 4, now, struct {
+	buildIntent := checkpointAttemptIntent(sessionID, attemptID, "RootSnapshotStable", 4, now, struct {
 		Root       string `json:"root"`
 		Generation uint64 `json:"generation"`
 	}{Root: mirrored.Root, Generation: generation})
@@ -224,7 +248,7 @@ func (p *CheckpointPublisher) Publish(ctx context.Context, operation ports.Opera
 		return result, err
 	}
 
-	uploadIntent := checkpointIntent(sessionID, "GenerationUploaded", 5, now, struct {
+	uploadIntent := checkpointAttemptIntent(sessionID, attemptID, "GenerationUploaded", 5, now, struct {
 		ObjectKey string `json:"objectKey"`
 		SHA256    string `json:"sha256"`
 		Size      int64  `json:"size"`
@@ -245,7 +269,7 @@ func (p *CheckpointPublisher) Publish(ctx context.Context, operation ports.Opera
 		Generation: built.Metadata.Generation, Parent: parent, ObjectKey: built.Metadata.ObjectKey,
 		Size: built.Metadata.Size, CreatedAt: built.Metadata.CreatedAt, Tools: built.Metadata.Tools, SessionID: sessionID,
 	}
-	pointerIntent := checkpointIntent(sessionID, "PointerCommitted", 6, now, next)
+	pointerIntent := checkpointAttemptIntent(sessionID, attemptID, "PointerCommitted", 6, now, next)
 	if err := p.journal.RecordIntent(ctx, pointerIntent); err != nil {
 		return result, err
 	}
@@ -278,7 +302,7 @@ func (p *CheckpointPublisher) Publish(ctx context.Context, operation ports.Opera
 		SessionID: sessionID, Generation: result.Generation, HaulPath: built.Artifact.Path,
 		RegistrySnapshotRoot: sealed.Root,
 	}
-	refreshIntent := checkpointIntent(sessionID, "ServingContentRefreshed", 7, now, refreshRequest)
+	refreshIntent := checkpointAttemptIntent(sessionID, attemptID, "ServingContentRefreshed", 7, now, refreshRequest)
 	if err := p.journal.RecordIntent(context.WithoutCancel(ctx), refreshIntent); err != nil {
 		result.RefreshError = err.Error()
 		return result, nil
@@ -309,6 +333,11 @@ func checkpointIntent(sessionID, transition string, sequence int, timestamp time
 	return ports.IntentRecord{ID: sessionID + "-checkpoint-" + strconv.Itoa(sequence), SessionID: sessionID, Transition: transition, Attempt: 1, Timestamp: timestamp, Input: body}
 }
 
+func checkpointAttemptIntent(sessionID, attemptID, transition string, sequence int, timestamp time.Time, input any) ports.IntentRecord {
+	body, _ := json.Marshal(input)
+	return ports.IntentRecord{ID: attemptID + "-" + strconv.Itoa(sequence), SessionID: sessionID, Transition: transition, Attempt: 1, Timestamp: timestamp, Input: body}
+}
+
 func checkpointFact(intent ports.IntentRecord, timestamp time.Time) ports.FactRecord {
 	return ports.FactRecord{IntentID: intent.ID, SessionID: intent.SessionID, Transition: intent.Transition, Timestamp: timestamp}
 }
@@ -319,6 +348,18 @@ func cloneGeneration(reference *domain.GenerationRef) *domain.GenerationRef {
 	}
 	copy := *reference
 	return &copy
+}
+
+func mirrorAttemptRecord(logicalAttempt uint64, result ports.MirrorResult, state domain.MirrorState) domain.MirrorAttemptRecord {
+	return domain.MirrorAttemptRecord{
+		LogicalAttempt: logicalAttempt, AttemptID: result.AttemptID, State: state, Root: result.Root, RemoteRoot: result.RemoteRoot,
+		Method: result.Method, Exclusions: append([]string(nil), result.Exclusions...),
+	}
+}
+
+func validRemoteMirrorResult(result ports.MirrorResult, attemptID string) bool {
+	return result.Mode == workspace.MirrorDevPodSSH && result.Root != "" &&
+		(result.AttemptID == attemptID+"-rsync" || result.AttemptID == attemptID+"-tar")
 }
 
 func validateCheckpointSnapshot(snapshot domain.JournalSnapshot) error {

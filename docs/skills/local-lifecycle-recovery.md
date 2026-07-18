@@ -6,9 +6,15 @@ The application packages contain typed open, checkpoint, sync, close, attach, an
 
 Local workspace return is accepted only when the provider is marked local and the canonical staging root equals the canonical workspace-local folder. `internal/workspace/local.go` returns `MirrorLocalNoop`; it does not copy data. For a non-local provider, the checkpoint publisher accepts only `MirrorDevPodSSH`, builds from the returned nonempty staging root, and revalidates the writer lease after the mirror before recording the fact.
 
+`app.NewCheckpointPublisher` accepts separate local and remote transports and always composes them through `workspace.NewSelector`. The selector uses the persisted `WorkspaceRecord.LocalProvider` value carried in `MirrorRequest`; it never probes or guesses locality. An open request that defaults the provider to Docker also persists `LocalProvider=true`, while an explicitly composed remote provider remains non-local. A missing matching transport fails closed. The public CLI still has no lifecycle commands, so application and close-path tests prove publication composition but not an executable CLI lifecycle.
+
 ## Recovery rules
 
 - Treat a pending journal intent as reconciliation work, not permission to repeat a side effect.
+- A pending `WorkspaceMirrored` intent blocks another checkpoint because its side-effect outcome is unknown. An ambiguous mirror fact does not block a later checkpoint: preserve its returned attempt ID/root as evidence, then allocate the next logical attempt and a fresh attempt-specific staging destination. Do not stop/delete the provider workspace or remove controller staging when mirroring or pointer CAS fails.
+- `WorkspaceRecord.mirror` is a required value object in serialized snapshots; an empty `{}` truthfully means no mirror attempt has been recorded. Completed and ambiguous facts carry the durable logical-attempt number used to allocate the next unique checkpoint attempt after restart.
+- Validate that the persisted workspace type has a matching composed transport before recording `WorkspaceMirrored`. For remote transports, validate the persisted workspace ID and DevPod context against the composed transport at the same pre-intent boundary. Missing composition or identity mismatch is an effect-free configuration error and must not create false pending reconciliation work.
+- Remote close order is final publication, provider stop/delete, forwarders/services/supervisor, conditional lease release, then owned staging/materialization cleanup. `--keep-workspace` changes the provider action but does not make controller staging user-owned.
 - Do not clean up adopted content. Camp-created materializations require matching canonical path, ownership marker, device, and inode evidence.
 - After a successful checkpoint build, the application recovery command is `camp recover <session-id>`; that command is not yet wired into the public CLI.
 - Ownership-marker tests that exercise the named temporary-file substitution path must inject `createNamedOwnershipMarkerTemporary`. Linux filesystems may allow the production `O_TMPFILE` path and therefore produce no temporary filename.

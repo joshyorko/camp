@@ -35,7 +35,7 @@ func TestOpenAdoptsRootPreservesOwnershipAndResolvesTargetAfterCommit(t *testing
 
 	result, err := environment.open.Run(context.Background(), OpenRequest{
 		SessionID: "adopted-session", Capsule: "brain", Branch: "main", Mode: domain.SessionReadWrite,
-		ExplicitRoot: root, Target: "MemoryD", EntryMode: domain.EntryTerminal, Context: "default", Provider: "docker",
+		ExplicitRoot: root, Target: "MemoryD", EntryMode: domain.EntryTerminal,
 		Runtime: environment.runtime, Backend: environment.backend,
 	})
 	if err != nil {
@@ -43,6 +43,9 @@ func TestOpenAdoptsRootPreservesOwnershipAndResolvesTargetAfterCommit(t *testing
 	}
 	if result.Snapshot.State != domain.SessionOpen || result.Snapshot.Materialization.Mode != domain.MaterializationAdopted || result.Snapshot.Materialization.CleanupPermitted {
 		t.Fatalf("snapshot = %#v", result.Snapshot)
+	}
+	if result.Snapshot.Workspace.Provider != "docker" || !result.Snapshot.Workspace.LocalProvider {
+		t.Fatalf("workspace classification = %#v, want default local docker provider", result.Snapshot.Workspace)
 	}
 	if result.Target.Relative != "MemoryD" || result.Target.Absolute != filepath.Join(root, "MemoryD") {
 		t.Fatalf("target = %#v", result.Target)

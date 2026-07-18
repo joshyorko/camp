@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"strings"
 	"testing"
 	"time"
 
@@ -14,6 +15,7 @@ import (
 	"github.com/joshyorko/camp/internal/domain"
 	"github.com/joshyorko/camp/internal/journal"
 	"github.com/joshyorko/camp/internal/ports"
+	"github.com/joshyorko/camp/internal/workspace"
 )
 
 type fakeCloseEffects struct {
@@ -130,7 +132,7 @@ func TestCloseComposesWithRealCheckpointPublisherWithoutSelfCreatedPendingIntent
 	}
 	fakes := newCheckpointFakes(now)
 	publisher := NewCheckpointPublisher(
-		log, &fakeLockValidator{}, &fakeLeaseValidator{}, &fakeMirror{}, fakes.pipeline(), &fakeCheckpointBuilder{},
+		log, &fakeLockValidator{}, &fakeLeaseValidator{}, localCheckpointTransports(&fakeMirror{}), fakes.pipeline(), &fakeCheckpointBuilder{},
 		coordination.NewGenerationRepository(backend), coordination.NewPointerRepository(backend), fixedAppClock{now: now},
 	)
 	events := []string{}
@@ -190,7 +192,7 @@ func TestBranchSessionAdvancesFromSourceThroughTwoSyncsAndClose(t *testing.T) {
 		SchemaVersion: domain.SchemaVersion, SessionID: lease.Lease.SessionID, Capsule: "brain", Lineage: branch,
 		Mode: domain.SessionReadWrite, Tools: source.Pointer.Tools, OpenedGeneration: &sourceRef, CurrentBase: &sourceRef,
 		Lease:           domain.LeaseRecord{Lease: &lease.Lease, Revision: string(lease.Revision)},
-		Workspace:       domain.WorkspaceRecord{StagingRoot: root, Provider: "docker", LocalProvider: true, LocalFolder: root},
+		Workspace:       domain.WorkspaceRecord{ID: "camp-brain", Context: "default", StagingRoot: root, Provider: "ssh", LocalProvider: false},
 		Materialization: domain.Materialization{Mode: domain.MaterializationCreated, CleanupPermitted: true},
 		State:           domain.SessionOpen, Cleanup: domain.Cleanup{State: domain.CleanupPending}, CreatedAt: now, UpdatedAt: now,
 	}
@@ -203,8 +205,9 @@ func TestBranchSessionAdvancesFromSourceThroughTwoSyncsAndClose(t *testing.T) {
 		t.Fatal(err)
 	}
 	fakes := newCheckpointFakes(now)
+	mirror := &fakeMirror{mode: workspace.MirrorDevPodSSH, root: root}
 	publisher := NewCheckpointPublisher(
-		log, &fakeLockValidator{}, leases, &fakeMirror{}, fakes.pipeline(), &fakeCheckpointBuilder{},
+		log, &fakeLockValidator{}, leases, CheckpointTransports{Remote: mirror}, fakes.pipeline(), &fakeCheckpointBuilder{},
 		coordination.NewGenerationRepository(backend), pointers, fixedAppClock{now: now},
 	)
 	events := []string{}
@@ -224,6 +227,14 @@ func TestBranchSessionAdvancesFromSourceThroughTwoSyncsAndClose(t *testing.T) {
 	if first.Generation.Generation != 43 || second.Generation.Generation != 44 || closed.Generation.Generation != 45 {
 		t.Fatalf("generation progression = %d -> %d -> %d", first.Generation.Generation, second.Generation.Generation, closed.Generation.Generation)
 	}
+	wantAttempts := []string{"branch-session-checkpoint-1", "branch-session-checkpoint-2", "branch-session-checkpoint-3"}
+	gotAttempts := make([]string, 0, len(mirror.requests))
+	for _, request := range mirror.requests {
+		gotAttempts = append(gotAttempts, request.AttemptID)
+	}
+	if !reflect.DeepEqual(gotAttempts, wantAttempts) {
+		t.Fatalf("mirror attempts = %#v, want %#v", gotAttempts, wantAttempts)
+	}
 	branchPointer, err := pointers.Read(ctx, snapshot.Capsule, branch)
 	if err != nil || branchPointer.Pointer.Generation.Generation != 45 || branchPointer.Pointer.Parent == nil || branchPointer.Pointer.Parent.Generation != 44 {
 		t.Fatalf("branch pointer = %#v, %v", branchPointer, err)
@@ -233,7 +244,7 @@ func TestBranchSessionAdvancesFromSourceThroughTwoSyncsAndClose(t *testing.T) {
 		t.Fatalf("main pointer changed = %#v, %v", mainPointer, err)
 	}
 	loaded, pending, err := log.Load(ctx, snapshot.SessionID)
-	if err != nil || len(pending) != 0 || loaded.OpenedGeneration == nil || *loaded.OpenedGeneration != sourceRef || loaded.CurrentBase == nil || loaded.CurrentBase.Generation != 45 || loaded.State != domain.SessionClosed {
+	if err != nil || len(pending) != 0 || loaded.OpenedGeneration == nil || *loaded.OpenedGeneration != sourceRef || loaded.CurrentBase == nil || loaded.CurrentBase.Generation != 45 || loaded.Workspace.Mirror.LogicalAttempt != 3 || loaded.State != domain.SessionClosed {
 		t.Fatalf("branch journal = %#v pending=%#v error=%v", loaded, pending, err)
 	}
 }
@@ -254,6 +265,43 @@ func TestClosePreservesPublicationWhenCleanupFailsAndLeavesCleanupOnlyRecovery(t
 	loaded, pending, loadErr := log.Load(context.Background(), snapshot.SessionID)
 	if loadErr != nil || !loaded.Checkpoint.PublicationSucceeded || loaded.Cleanup.State != domain.CleanupFailed || len(pending) != 1 || pending[0].Intent.Transition != "ServicesStopped" {
 		t.Fatalf("failed cleanup snapshot = %#v pending=%#v error=%v", loaded, pending, loadErr)
+	}
+}
+
+func TestCloseRemoteRetainsProviderAndStagingWhenPublicationConflicts(t *testing.T) {
+	t.Parallel()
+	log, snapshot := newCloseJournal(t, domain.SessionReadWrite, domain.Materialization{Mode: domain.MaterializationCreated, CleanupPermitted: true})
+	events := []string{}
+	result, err := NewClose(log,
+		&fakeOperationLocker{events: &events, token: ports.OperationToken{ID: "lock"}},
+		&fakeCheckpointPublisher{events: &events, err: coordination.ErrPointerChanged},
+		&fakeCloseEffects{events: &events}, fixedAppClock{now: time.Unix(200, 0)},
+	).Run(context.Background(), CloseRequest{SessionID: snapshot.SessionID})
+	if !errors.Is(err, coordination.ErrPointerChanged) || result.PublicationSucceeded || result.CleanupSucceeded {
+		t.Fatalf("Run() = %#v, %v", result, err)
+	}
+	want := []string{"lock:close", "publish:session-close:close", "unlock:close"}
+	if !reflect.DeepEqual(events, want) {
+		t.Fatalf("events = %#v, want publication failure before provider/staging cleanup %#v", events, want)
+	}
+}
+
+func TestCloseRemotePublishesBeforeDevPodStopAndCleansStagingLast(t *testing.T) {
+	t.Parallel()
+	log, snapshot := newCloseJournal(t, domain.SessionReadWrite, domain.Materialization{Mode: domain.MaterializationCreated, CleanupPermitted: true})
+	events := []string{}
+	generation := domain.GenerationRef{Generation: 43, ArchiveSHA256: strings.Repeat("a", 64)}
+	_, err := NewClose(log,
+		&fakeOperationLocker{events: &events, token: ports.OperationToken{ID: "lock"}},
+		&fakeCheckpointPublisher{events: &events, result: CheckpointResult{Published: true, Generation: generation}},
+		&fakeCloseEffects{events: &events}, fixedAppClock{now: time.Unix(200, 0)},
+	).Run(context.Background(), CloseRequest{SessionID: snapshot.SessionID})
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := []string{"lock:close", "publish:session-close:close", "workspace", "forwarders", "services", "supervisor", "lease", "materialization", "unlock:close"}
+	if !reflect.DeepEqual(events, want) {
+		t.Fatalf("events = %#v, want publication -> DevPod stop/delete -> lease -> staging cleanup %#v", events, want)
 	}
 }
 
