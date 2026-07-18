@@ -2,6 +2,7 @@ package hauler
 
 import (
 	"context"
+	"errors"
 	"reflect"
 	"testing"
 
@@ -13,6 +14,49 @@ type recordingRunner struct{ commands []ports.Command }
 func (r *recordingRunner) Run(_ context.Context, command ports.Command) (ports.Result, error) {
 	r.commands = append(r.commands, command)
 	return ports.Result{}, nil
+}
+
+func TestHaulerPassthroughPolicyFailsClosedBeforeEffects(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name string
+		argv []string
+		want error
+	}{
+		{name: "store mutation", argv: []string{"store", "load"}, want: ErrHaulerPassthroughDenied},
+		{name: "service lifecycle", argv: []string{"store", "serve", "registry"}, want: ErrHaulerPassthroughDenied},
+		{name: "reserved store", argv: []string{"version", "--store", "/tmp/other"}, want: ErrHaulerPassthroughConflict},
+		{name: "reserved environment", argv: []string{"version", "--env", "HOME=/tmp/other"}, want: ErrHaulerPassthroughConflict},
+		{name: "argv boundary", argv: []string{"version\x00store"}, want: ErrHaulerPassthroughInvalid},
+		{name: "unknown", argv: []string{"future-command"}, want: ErrHaulerPassthroughUnknown},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			runner := &recordingRunner{}
+			_, err := NewClient("hauler", runner).Passthrough(context.Background(), test.argv)
+			if !errors.Is(err, test.want) {
+				t.Fatalf("Passthrough(%#v) error = %v, want %v", test.argv, err, test.want)
+			}
+			if len(runner.commands) != 0 {
+				t.Fatalf("commands = %#v, want none", runner.commands)
+			}
+		})
+	}
+}
+
+func TestHaulerPassthroughAllowsOnlyExactEffectFreeCommands(t *testing.T) {
+	t.Parallel()
+	for _, argv := range [][]string{{"version"}, {"help"}, {"--help"}} {
+		runner := &recordingRunner{}
+		_, err := NewClient("/opt/hauler", runner).Passthrough(context.Background(), argv)
+		if err != nil {
+			t.Fatalf("Passthrough(%#v) error = %v", argv, err)
+		}
+		want := ports.Command{Executable: "/opt/hauler", Argv: argv}
+		if len(runner.commands) != 1 || !reflect.DeepEqual(runner.commands[0], want) {
+			t.Fatalf("commands = %#v, want %#v", runner.commands, want)
+		}
+	}
 }
 
 func TestExactHaulerV201Argv(t *testing.T) {
