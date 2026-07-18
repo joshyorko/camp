@@ -14,6 +14,10 @@ type Selector struct {
 	remote ports.WorkspaceTransport
 }
 
+type mirrorRequestValidator interface {
+	Validate(ports.MirrorRequest) error
+}
+
 func NewSelector(local, remote ports.WorkspaceTransport) *Selector {
 	return &Selector{local: local, remote: remote}
 }
@@ -39,6 +43,9 @@ func (s *Selector) Validate(request ports.MirrorRequest) error {
 	}
 	if transport == nil {
 		return ErrTransportUnavailable
+	}
+	if validator, ok := transport.(mirrorRequestValidator); ok {
+		return validator.Validate(request)
 	}
 	return nil
 }

@@ -363,9 +363,6 @@ func validRemoteMirrorResult(result ports.MirrorResult, attemptID string) bool {
 }
 
 func validateCheckpointSnapshot(snapshot domain.JournalSnapshot) error {
-	if snapshot.Workspace.Mirror.State == domain.MirrorAmbiguous {
-		return errors.New("checkpoint requires recovery of an ambiguous workspace mirror")
-	}
 	lease := snapshot.Lease.Lease
 	if snapshot.SchemaVersion != domain.SchemaVersion || snapshot.SessionID == "" || snapshot.Capsule == "" || snapshot.Lineage.Branch == "" {
 		return errors.New("checkpoint snapshot identity is incomplete")

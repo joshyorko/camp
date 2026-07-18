@@ -455,6 +455,45 @@ func TestCheckpointPublisherRejectsMissingPersistedTransportBeforeMirrorIntent(t
 	}
 }
 
+func TestCheckpointPublisherRejectsRemoteIdentityMismatchBeforeMirrorIntent(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	sandbox := t.TempDir()
+	root := filepath.Join(sandbox, "root")
+	if err := os.MkdirAll(filepath.Join(root, ".camp"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	store, err := filebackend.New(filepath.Join(sandbox, "backend"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := time.Unix(100, 0).UTC()
+	lease := domain.WriterLease{SchemaVersion: domain.SchemaVersion, SessionID: "session-remote-identity", Capsule: "brain", Lineage: domain.Lineage{Branch: "main"}, Machine: "machine", CreatedAt: now, HeartbeatAt: now, ExpiresAt: now.Add(time.Hour)}
+	snapshot := domain.JournalSnapshot{
+		SchemaVersion: domain.SchemaVersion, SessionID: lease.SessionID, Capsule: lease.Capsule, Lineage: lease.Lineage, Mode: domain.SessionReadWrite,
+		Lease: domain.LeaseRecord{Lease: &lease, Revision: "lease-r1"}, Workspace: domain.WorkspaceRecord{ID: "persisted-workspace", Context: "persisted-context", StagingRoot: root, Provider: "ssh"}, State: domain.SessionOpen,
+	}
+	prepareCheckpointRuntime(t, &snapshot, sandbox)
+	log, err := journal.NewStore(filepath.Join(sandbox, "journal"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := log.Create(ctx, snapshot); err != nil {
+		t.Fatal(err)
+	}
+	remote := workspace.NewRemote(workspace.RemoteConfig{WorkspaceID: "different-workspace", Context: snapshot.Workspace.Context}, nil, nil, nil, nil)
+	publisher := NewCheckpointPublisher(log, &fakeLockValidator{}, &fakeLeaseValidator{}, CheckpointTransports{Remote: remote}, newCheckpointFakes(now).pipeline(), &fakeCheckpointBuilder{}, coordination.NewGenerationRepository(store), coordination.NewPointerRepository(store), fixedAppClock{now: now})
+	token := ports.OperationToken{ID: "lock", Owner: ports.OperationOwner{SessionID: snapshot.SessionID, Operation: "sync"}}
+
+	if _, err := publisher.Publish(ctx, token, snapshot.SessionID); !errors.Is(err, workspace.ErrRemoteIdentityMismatch) {
+		t.Fatalf("Publish() error = %v, want ErrRemoteIdentityMismatch", err)
+	}
+	_, pending, err := log.Load(ctx, snapshot.SessionID)
+	if err != nil || len(pending) != 0 {
+		t.Fatalf("pending = %#v error=%v, want no mirror intent", pending, err)
+	}
+}
+
 func TestCheckpointPublisherBuildsFromReturnedRemoteMirrorRoot(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
@@ -517,7 +556,7 @@ func TestCheckpointPublisherBuildsFromReturnedRemoteMirrorRoot(t *testing.T) {
 	}
 }
 
-func TestCheckpointPublisherRecordsAmbiguousMirrorAndBlocksBlindRetry(t *testing.T) {
+func TestCheckpointPublisherRetriesAmbiguousMirrorWithNextLogicalAttempt(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
 	sandbox := t.TempDir()
@@ -548,8 +587,18 @@ func TestCheckpointPublisherRecordsAmbiguousMirrorAndBlocksBlindRetry(t *testing
 	if err != nil || len(pending) != 0 || loaded.Workspace.Mirror.State != domain.MirrorAmbiguous || loaded.Workspace.Mirror.Root != unknown.Result.Root {
 		t.Fatalf("ambiguous mirror = %#v pending=%#v error=%v", loaded.Workspace.Mirror, pending, err)
 	}
-	if _, err := publisher.Publish(ctx, token, snapshot.SessionID); err == nil || mirror.calls != 1 {
-		t.Fatalf("blind retry error=%v mirror calls=%d", err, mirror.calls)
+	mirror.err = nil
+	mirror.result = &ports.MirrorResult{
+		Mode: workspace.MirrorDevPodSSH, Root: sandbox, AttemptID: "session-ambiguous-checkpoint-2-rsync",
+		Method: "rsync", RemoteRoot: "/workspaces/brain",
+	}
+	result, err := publisher.Publish(ctx, token, snapshot.SessionID)
+	if err != nil || !result.Published || mirror.calls != 2 {
+		t.Fatalf("retry result=%#v error=%v mirror calls=%d", result, err, mirror.calls)
+	}
+	loaded, pending, err = log.Load(ctx, snapshot.SessionID)
+	if err != nil || len(pending) != 0 || loaded.Workspace.Mirror.State != domain.MirrorCompleted || loaded.Workspace.Mirror.LogicalAttempt != 2 || loaded.Workspace.Mirror.AttemptID != mirror.result.AttemptID {
+		t.Fatalf("recovered mirror = %#v pending=%#v error=%v", loaded.Workspace.Mirror, pending, err)
 	}
 }
 

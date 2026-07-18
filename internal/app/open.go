@@ -574,6 +574,7 @@ func normalizeOpenRequest(request OpenRequest) OpenRequest {
 	}
 	if request.Provider == "" {
 		request.Provider = "docker"
+		request.LocalProvider = true
 	}
 	if request.LeaseTTL <= 0 {
 		request.LeaseTTL = 30 * time.Minute

@@ -72,11 +72,8 @@ func (r *Remote) ReturnToStaging(ctx context.Context, request ports.MirrorReques
 	if err := ctx.Err(); err != nil {
 		return ports.MirrorResult{}, err
 	}
-	if request.LocalProvider || request.Provider == "" || request.StagingRoot == "" || request.AttemptID == "" || request.WorkspaceID == "" || r == nil || r.resolver == nil || r.staging == nil || r.rsync == nil {
-		return ports.MirrorResult{}, ErrNotRemoteMirror
-	}
-	if request.WorkspaceID != r.config.WorkspaceID || request.Context != r.config.Context {
-		return ports.MirrorResult{}, ErrRemoteIdentityMismatch
+	if err := r.Validate(request); err != nil {
+		return ports.MirrorResult{}, err
 	}
 	remoteRoot, err := r.resolver.ResolveWorkspaceFolderInContext(ctx, request.Context, request.WorkspaceID)
 	if err != nil {
@@ -132,6 +129,19 @@ func (r *Remote) ReturnToStaging(ctx context.Context, request ports.MirrorReques
 		return remoteMirrorResult(destination, tarAttemptID, sshtransfer.MethodTarPipe, remoteRoot), nil
 	}
 	return remoteMirrorResult(destination, rsyncAttemptID, sshtransfer.MethodRsync, remoteRoot), nil
+}
+
+func (r *Remote) Validate(request ports.MirrorRequest) error {
+	if request.LocalProvider || request.Provider == "" || request.StagingRoot == "" || request.AttemptID == "" || request.WorkspaceID == "" || r == nil {
+		return ErrNotRemoteMirror
+	}
+	if request.WorkspaceID != r.config.WorkspaceID || request.Context != r.config.Context {
+		return ErrRemoteIdentityMismatch
+	}
+	if r.resolver == nil || r.staging == nil || r.rsync == nil {
+		return ErrNotRemoteMirror
+	}
+	return nil
 }
 
 func remoteMirrorResult(root, attemptID string, method sshtransfer.Method, remoteRoot string) ports.MirrorResult {
