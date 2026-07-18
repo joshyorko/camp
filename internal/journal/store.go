@@ -199,6 +199,7 @@ func composeFactSnapshot(current, candidate domain.JournalSnapshot, transition s
 			current.Services = candidate.Services
 			return current
 		}
+		candidate.Lease = current.Lease
 	case "WorkspaceMirrored", "WorkspaceImagesInventoried", "RegistrySnapshotSealed", "RootSnapshotStable", "GenerationUploaded", "PointerCommitted":
 		candidate.Lease = current.Lease
 	}
