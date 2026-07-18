@@ -1,10 +1,27 @@
 # S3 immutable publication
 
-Camp's S3 adapter publishes immutable objects with the existing injected HTTP
-`Signer` seam. This slice does not adopt the AWS SDK for Go v2: backend
-composition and runtime credential-chain selection remain separate work.
-Credentials must stay inside the signer and must not enter `s3store.Config`,
-object metadata, object keys, journals, or logs.
+Camp keeps the S3 adapter's narrow injected HTTP `Signer` seam and uses the AWS
+SDK for Go v2 only in `internal/adapters/objectstore`, where the production
+factory loads the standard runtime credential chain and supplies a SigV4
+signer. This preserves focused protocol tests without reimplementing credential
+discovery. Credentials are retrieved at request time and must not enter
+`s3store.Config`, backend descriptors, object metadata, object keys, journals,
+or logs.
+
+Resolve a backend through `config.ResolveBackend`, then construct its
+`ports.ObjectStore` through `objectstore.New`. The `s3://` URL contains only the
+bucket and optional clean prefix. Endpoint, region, path-style addressing, and
+transport policy are separate bootstrap values. HTTPS is the default policy;
+an `http://` endpoint is rejected unless `insecure: true` (or
+`CAMP_S3_INSECURE=true`) is explicit, and `insecure: true` is rejected for an
+HTTPS endpoint. Bucket names are DNS-compatible and endpoint URLs cannot carry
+credentials, paths, queries, or fragments.
+
+Durable recovery records contain only backend kind, sanitized `s3://` identity,
+and its configuration fingerprint. Endpoint and addressing policy contribute
+to that fingerprint but credential-source configuration and resolved secrets do
+not. Path-style requests use `<endpoint>/<bucket>/<prefix>/<key>`; virtual-host
+requests use `<bucket>.<endpoint>/<prefix>/<key>` before SigV4 signing.
 
 `PutImmutable` first uses `HEAD` to detect an existing key. An existing object is
 accepted only when its expected size and `x-amz-meta-sha256` agree and a `GET`

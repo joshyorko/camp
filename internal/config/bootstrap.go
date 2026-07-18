@@ -21,6 +21,7 @@ type Overrides struct {
 	S3Endpoint       *string
 	S3Region         *string
 	S3PathStyle      *bool
+	S3Insecure       *bool
 }
 
 type BootstrapInput struct {
@@ -144,6 +145,11 @@ func applyBootstrapEnvironment(config *Bootstrap, environment map[string]string)
 			config.S3.PathStyle = parsed
 		}
 	}
+	if value, ok := environmentValue(environment, "CAMP_S3_INSECURE"); ok {
+		if parsed, err := strconv.ParseBool(value); err == nil {
+			config.S3.Insecure = parsed
+		}
+	}
 	if value, ok := environmentValue(environment, "CAMP_REGISTRY_PORT"); ok {
 		if parsed, err := strconv.Atoi(value); err == nil {
 			config.RegistryPort = parsed
@@ -180,6 +186,9 @@ func applyBootstrapFlags(config *Bootstrap, flags Overrides) {
 	}
 	if flags.S3PathStyle != nil {
 		config.S3.PathStyle = *flags.S3PathStyle
+	}
+	if flags.S3Insecure != nil {
+		config.S3.Insecure = *flags.S3Insecure
 	}
 }
 

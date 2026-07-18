@@ -34,9 +34,24 @@ func TestResolveBackendRejectsCredentialsAndUnsafeS3Configuration(t *testing.T) 
 		{raw: "s3://bucket/../escape", values: S3Values{Endpoint: "https://s3.example", Region: "us-east-1"}},
 		{raw: "s3://bucket/prefix", values: S3Values{Endpoint: "https://token@s3.example", Region: "us-east-1"}},
 		{raw: "s3://bucket/prefix", values: S3Values{Endpoint: "http://s3.example", Region: ""}},
+		{raw: "s3://bucket/prefix", values: S3Values{Endpoint: "http://s3.example", Region: "us-east-1"}},
+		{raw: "s3://bucket/prefix", values: S3Values{Endpoint: "https://s3.example", Region: "us-east-1", Insecure: true}},
+		{raw: "s3://Bad_Bucket/prefix", values: S3Values{Endpoint: "https://s3.example", Region: "us-east-1"}},
 	} {
 		if _, err := ResolveBackend(test.raw, test.values); err == nil {
 			t.Fatalf("ResolveBackend(%q, %#v) succeeded", test.raw, test.values)
 		}
+	}
+}
+
+func TestResolveBackendAllowsExplicitInsecureHTTP(t *testing.T) {
+	backend, err := ResolveBackend("s3://camp-bucket/prefix", S3Values{
+		Endpoint: "http://minio.internal:9000", Region: "us-east-1", Insecure: true,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !backend.S3.Insecure {
+		t.Fatal("resolved backend lost explicit insecure policy")
 	}
 }

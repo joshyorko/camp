@@ -47,15 +47,16 @@ func TestBootstrapResolvesSafeS3SettingsWithoutCredentialFields(t *testing.T) {
 	result, err := ResolveBootstrap(BootstrapInput{
 		ConfigPath: path,
 		Environment: map[string]string{
-			"CAMP_S3_ENDPOINT": "https://minio.env.example",
+			"CAMP_S3_ENDPOINT": "http://minio.env.example",
 			"CAMP_S3_REGION":   "env-region",
+			"CAMP_S3_INSECURE": "true",
 		},
 		Flags: Overrides{S3Region: ptr("flag-region")},
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if result.S3.Endpoint != "https://minio.env.example" || result.S3.Region != "flag-region" || !result.S3.PathStyle {
+	if result.S3.Endpoint != "http://minio.env.example" || result.S3.Region != "flag-region" || !result.S3.PathStyle || !result.S3.Insecure {
 		t.Fatalf("S3 settings = %#v", result.S3)
 	}
 	backend, err := ResolveBackend(result.Backend, result.S3)
