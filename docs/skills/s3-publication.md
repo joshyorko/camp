@@ -91,8 +91,57 @@ uploaded contender against an existing key: MinIO returns HTTP 412 when
 `CompleteMultipartUpload` carries `If-None-Match: *`, verifying the conditional
 completion requirement rather than assuming it from synthetic HTTP tests.
 
+MinIO's `/minio/health/ready` can return HTTP 200 before bucket APIs finish
+initializing. Real fixtures therefore treat successful bucket creation as the
+strong setup boundary: retry transient HTTP 503 responses within a bounded
+deadline, close every response body, and fail immediately on other statuses.
+`TestCreateMinIOBucketRetriesUntilServerAPIsInitialize` fixes the observed
+`XMinioServerNotInitialized` startup race without hiding unrelated failures.
+
 Run the real contract with Docker available:
 
 ```sh
 go test ./integration -run '^TestMinIOImmutableLifecycle$' -count=1 -v -timeout=3m
+```
+
+## Independent-controller acceptance
+
+S3 concurrency and portability evidence must use separate OS processes with
+disjoint `XDG_CONFIG_HOME`, `XDG_DATA_HOME`, `XDG_STATE_HOME`, and
+`XDG_CACHE_HOME`. Synchronize contenders only after each process has read the
+same pointer revision and uploaded its independently named immutable archive
+and sidecar. Then release both processes to call the production pointer
+repository's compare-and-swap operation. Valid evidence has exactly one winner,
+a typed `coordination.ErrPointerChanged` loser, and no active multipart
+uploads. Register kill-and-wait cleanup immediately after every helper process
+starts so a parent-side assertion or timeout cannot strand a controller.
+
+Retained-loser evidence must read the archive to EOF and verify its exact size
+and SHA-256, not merely prove that `GET` opens. Branch recovery requires writing
+and reconciling metadata under the branch lineage before creating its pointer.
+A separate fresh-XDG branch reader must then read the branch pointer, list and
+validate its sidecar, download the archive, and verify the same size and digest.
+Pointer creation by itself is not branch-reopen evidence.
+
+A third process with a new XDG root must reconstruct the winning main pointer
+and history from MinIO and verify the downloaded winner digest. Integration
+harnesses must not synthesize recovery commands. An exact recovery-command
+assertion becomes valid only when production application conflict handling
+returns that command.
+
+`TestS3TwoWriterConflict` is this repository/adapter-level process contract. It
+also proves that branch-scoped metadata and a pointer rooted at the recorded
+parent let a fresh process reopen the retained loser.
+It does not prove a Camp lifecycle reopen: that claim requires a production
+CLI path that resolves the S3 runtime configuration and credential chain,
+constructs the merged writer-safe backend composition, and drives lifecycle
+reopen through the application. The backend factory and application
+composition are present, but this test deliberately exercises the narrower
+repository/adapter boundary. Do not describe its repository-level download
+evidence as production CLI or DevPod/Hauler reopen evidence.
+
+Run the process contract with Docker available:
+
+```sh
+go test ./integration -run '^TestS3TwoWriterConflict$' -count=1 -v -timeout=3m
 ```

@@ -9,6 +9,7 @@ import (
 	"encoding/hex"
 	"encoding/xml"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"net/url"
@@ -91,6 +92,22 @@ func TestMinIOImmutableLifecycle(t *testing.T) {
 			t.Fatalf("conditional completion status = %d, want %d", status, http.StatusPreconditionFailed)
 		}
 	})
+}
+
+func TestCreateMinIOBucketRetriesUntilServerAPIsInitialize(t *testing.T) {
+	statuses := []int{http.StatusServiceUnavailable, http.StatusServiceUnavailable, http.StatusOK}
+	attempt := 0
+	err := createMinIOBucketWhenReady(context.Background(), func() (*http.Response, error) {
+		status := statuses[attempt]
+		attempt++
+		return &http.Response{StatusCode: status, Status: http.StatusText(status), Body: io.NopCloser(strings.NewReader("XMinioServerNotInitialized"))}, nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if attempt != len(statuses) {
+		t.Fatalf("bucket API attempts = %d, want %d", attempt, len(statuses))
+	}
 }
 
 type bytesSource []byte
@@ -208,11 +225,37 @@ func (f *minioFixture) store(t *testing.T, client *http.Client) *s3store.Store {
 
 func (f *minioFixture) createBucket(t *testing.T, bucket string) {
 	t.Helper()
-	response := f.do(t, http.MethodPut, "/"+bucket, nil, nil, nil)
-	defer response.Body.Close()
-	if response.StatusCode != http.StatusOK {
-		body, _ := io.ReadAll(response.Body)
-		t.Fatalf("create bucket status = %s: %s", response.Status, body)
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+	if err := createMinIOBucketWhenReady(ctx, func() (*http.Response, error) {
+		return f.do(t, http.MethodPut, "/"+bucket, nil, nil, nil), nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func createMinIOBucketWhenReady(ctx context.Context, request func() (*http.Response, error)) error {
+	for {
+		response, err := request()
+		if err != nil {
+			return fmt.Errorf("create MinIO bucket: %w", err)
+		}
+		body, readErr := io.ReadAll(io.LimitReader(response.Body, 4<<10))
+		closeErr := response.Body.Close()
+		if readErr != nil || closeErr != nil {
+			return fmt.Errorf("read MinIO bucket response: %w", errors.Join(readErr, closeErr))
+		}
+		if response.StatusCode == http.StatusOK {
+			return nil
+		}
+		if response.StatusCode != http.StatusServiceUnavailable {
+			return fmt.Errorf("create bucket status = %s: %s", response.Status, body)
+		}
+		select {
+		case <-ctx.Done():
+			return fmt.Errorf("create bucket status = %s before readiness deadline: %s: %w", response.Status, body, ctx.Err())
+		case <-time.After(50 * time.Millisecond):
+		}
 	}
 }
 
