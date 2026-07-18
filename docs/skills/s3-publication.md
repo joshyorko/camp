@@ -39,11 +39,13 @@ path-style addressing because prepending a bucket would no longer address the
 configured origin.
 
 Before an S3 store is bound to pointer, generation, lease, or hydration work,
-the writer composition runs `ProbeWriter` against a random disposable key. The
-probe must prove create-if-absent, conditional replacement, stale-write
-rejection, exact readback, conditional delete, and cleanup. A failed or
-ambiguous probe prevents repository binding; merely constructing an HTTP client
-is not writer-safety evidence.
+the writer composition must use `objectstore.NewWriter`, which runs
+`ProbeWriter` against a random disposable key. The low-level `objectstore.New`
+factory does not certify writer safety and must not be bound directly to writer
+repositories. The probe must prove create-if-absent, conditional replacement,
+stale-write rejection, exact readback, conditional delete, and cleanup. A failed
+or ambiguous probe prevents repository binding; merely constructing an HTTP
+client is not writer-safety evidence.
 
 Durable recovery records contain only backend kind, sanitized `s3://` identity,
 and its configuration fingerprint. Endpoint and addressing policy contribute
