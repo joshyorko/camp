@@ -592,3 +592,46 @@ func TestTypedAndRawDevPodFlagConflictsFailWithoutRunning(t *testing.T) {
 		})
 	}
 }
+
+func TestDevPodPassthroughPolicyFailsClosedBeforeEffects(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name string
+		argv []string
+		want error
+	}{
+		{name: "lifecycle", argv: []string{"up", "."}, want: ErrDevPodPassthroughDenied},
+		{name: "session identity", argv: []string{"status", "camp-session"}, want: ErrDevPodPassthroughDenied},
+		{name: "reserved context", argv: []string{"version", "--context", "other"}, want: ErrDevPodPassthroughConflict},
+		{name: "reserved environment", argv: []string{"version", "--env", "CAMP_CAPSULE=other"}, want: ErrDevPodPassthroughConflict},
+		{name: "argv boundary", argv: []string{"version\nup"}, want: ErrDevPodPassthroughInvalid},
+		{name: "unknown", argv: []string{"future-command"}, want: ErrDevPodPassthroughUnknown},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			runner := &recordingRunner{}
+			_, err := NewClient("devpod", runner).Passthrough(context.Background(), test.argv)
+			if !errors.Is(err, test.want) {
+				t.Fatalf("Passthrough(%#v) error = %v, want %v", test.argv, err, test.want)
+			}
+			if len(runner.commands) != 0 {
+				t.Fatalf("commands = %#v, want none", runner.commands)
+			}
+		})
+	}
+}
+
+func TestDevPodPassthroughAllowsOnlyExactEffectFreeCommands(t *testing.T) {
+	t.Parallel()
+	for _, argv := range [][]string{{"version"}, {"help"}, {"--help"}} {
+		runner := &recordingRunner{}
+		_, err := NewClient("/opt/devpod", runner).Passthrough(context.Background(), argv)
+		if err != nil {
+			t.Fatalf("Passthrough(%#v) error = %v", argv, err)
+		}
+		want := ports.Command{Executable: "/opt/devpod", Argv: argv}
+		if len(runner.commands) != 1 || !reflect.DeepEqual(runner.commands[0], want) {
+			t.Fatalf("commands = %#v, want %#v", runner.commands, want)
+		}
+	}
+}

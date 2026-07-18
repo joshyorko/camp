@@ -14,6 +14,12 @@ Build public output from application read models, never by marshaling journal sn
 
 Keep publication, cleanup, and recovery independent. A published generation remains `published` when cleanup later fails, and that combination produces `cleanup-only` recovery. Uploaded or verified generations without pointer commitment are `orphaned`; record a proven compare-and-swap loss as `pointer-conflict`.
 
+The application-level `OperationalQueries` type is the reusable read-only seam for `list`, `status`, and `history` composition. `List` observes every journal snapshot before building session read models; `Status` uses history-purpose selection so an explicitly selected closed session remains inspectable. If process observation fails, return the error instead of publishing persisted service state as current evidence. A nil observer is allowed for callers that intentionally accept `unknown` service liveness.
+
+`HistoryFor` first selects a session, then queries generation history with that session's capsule and lineage. It returns `GenerationReadModel` values rather than storage metadata and sorts them by generation descending, creation time descending, and digest ascending. This keeps command output deterministic even when an adapter does not preserve ordering.
+
+Recovery uses `SelectionRecovery`, but selection alone never authorizes effects. `Recover.Run` first observes the selected record, reloads it from the journal, rejects changes to capsule, lineage, mode, materialization root, workspace identity, or lease revision, and dispatches lifecycle versus cleanup reconciliation only after `RecoverySafetyGuard` revalidates ownership, pending-transition identity, and the active writer lease. It observes again immediately before the reconciler and fails closed if evidence changed; after reconciliation it observes once more to build the returned session read model. Cleanup failure takes precedence over lifecycle state so a published checkpoint is not repeated while cleanup-only recovery runs.
+
 JSON output uses a top-level `schemaVersion`, stable error codes, deterministic arrays, redacted strings, no ANSI, and stdout even for failures. Human successes use stdout and human failures use stderr. Update the presentation goldens whenever this contract intentionally changes.
 
 Verification:

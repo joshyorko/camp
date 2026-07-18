@@ -38,9 +38,22 @@ type UnitEvidence struct {
 	ChildNetNS    string
 }
 
+type UnitState string
+
+const (
+	UnitLive    UnitState = "live"
+	UnitStopped UnitState = "stopped"
+)
+
+type UnitObservation struct {
+	State  UnitState
+	Record domain.ServiceUnitRecord
+}
+
 type UnitInspector interface {
 	Prebind(context.Context, PortMapping) error
 	Ready(context.Context, ServiceSpec, ports.ProcessStatus, ports.ProcessStatus) (UnitEvidence, error)
+	Stopped(context.Context, domain.ServiceUnitRecord) error
 	Absent(context.Context, domain.ServiceUnitRecord) error
 }
 
@@ -66,6 +79,128 @@ type startIntentPayload struct {
 
 func NewServiceSupervisor(journal ports.Journal, processes ports.ProcessManager, inspector UnitInspector) *ServiceSupervisor {
 	return &ServiceSupervisor{journal: journal, processes: processes, inspector: inspector}
+}
+
+func (s *ServiceSupervisor) Observe(ctx context.Context, record domain.ServiceUnitRecord) (UnitObservation, error) {
+	if s == nil || s.processes == nil || s.inspector == nil {
+		return UnitObservation{}, errors.New("service supervisor dependencies are incomplete")
+	}
+	spec, err := serviceSpecFromRecord(record)
+	if err != nil {
+		return UnitObservation{}, err
+	}
+	helper, err := s.processes.Inspect(ctx, record.Helper.Identity)
+	if err != nil {
+		return UnitObservation{}, err
+	}
+	if !helper.Running {
+		if err := s.inspector.Stopped(ctx, record); err != nil {
+			return UnitObservation{}, err
+		}
+		return UnitObservation{State: UnitStopped, Record: record}, nil
+	}
+	processSpec, err := spec.processSpec()
+	if err != nil {
+		return UnitObservation{}, err
+	}
+	if helper.Identity != record.Helper.Identity {
+		return UnitObservation{}, ErrProcessIdentity
+	}
+	if err := validateHelper(processSpec, helper); err != nil {
+		return UnitObservation{}, err
+	}
+	observed, err := s.observe(ctx, spec, helper)
+	if err != nil {
+		return UnitObservation{}, err
+	}
+	if observed.Helper.Identity != record.Helper.Identity || observed.Child.Identity != record.Child.Identity {
+		return UnitObservation{}, ErrProcessIdentity
+	}
+	return UnitObservation{State: UnitLive, Record: observed}, nil
+}
+
+func (s *ServiceSupervisor) Restart(ctx context.Context, sessionID, serviceName, launchToken string) (domain.ServiceUnitRecord, domain.JournalSnapshot, error) {
+	if s == nil || s.journal == nil || s.processes == nil || s.inspector == nil || sessionID == "" || serviceName == "" || launchToken == "" {
+		return domain.ServiceUnitRecord{}, domain.JournalSnapshot{}, errors.New("service restart dependencies or identity are incomplete")
+	}
+	snapshot, pending, err := s.journal.Load(ctx, sessionID)
+	if err != nil {
+		return domain.ServiceUnitRecord{}, domain.JournalSnapshot{}, err
+	}
+	record, ok := recordedService(snapshot, serviceName)
+	if !ok {
+		return domain.ServiceUnitRecord{}, snapshot, fmt.Errorf("service %q is not recorded", serviceName)
+	}
+	intent := ports.IntentRecord{ID: serviceName + "-" + launchToken + "-restart", SessionID: sessionID, Transition: "ServiceRestart", Attempt: 1, Timestamp: time.Now().UTC()}
+	restartPending := false
+	for _, item := range pending {
+		if item.Intent.ID == intent.ID && item.Intent.Transition == intent.Transition {
+			restartPending = true
+			continue
+		}
+		return domain.ServiceUnitRecord{}, snapshot, fmt.Errorf("service restart requires recovery of pending transition %q", item.Intent.Transition)
+	}
+	if restartPending && record.LaunchToken == launchToken {
+		observation, err := s.Observe(ctx, record)
+		if err != nil || observation.State != UnitLive {
+			return domain.ServiceUnitRecord{}, snapshot, errors.Join(err, ErrUnitInvariant)
+		}
+		if err := s.journal.RecordFact(context.WithoutCancel(ctx), ports.FactRecord{IntentID: intent.ID, SessionID: sessionID, Transition: intent.Transition, Timestamp: time.Now().UTC()}, snapshot); err != nil {
+			return domain.ServiceUnitRecord{}, snapshot, err
+		}
+		return record, snapshot, nil
+	}
+	if !restartPending {
+		if err := s.journal.RecordIntent(ctx, intent); err != nil {
+			return domain.ServiceUnitRecord{}, snapshot, err
+		}
+	}
+	observation, err := s.Observe(ctx, record)
+	if err != nil {
+		return domain.ServiceUnitRecord{}, snapshot, err
+	}
+	if observation.State == UnitLive {
+		if err := s.Stop(ctx, record); err != nil {
+			return domain.ServiceUnitRecord{}, snapshot, err
+		}
+	}
+	spec, err := serviceSpecFromRecord(record)
+	if err != nil {
+		return domain.ServiceUnitRecord{}, snapshot, err
+	}
+	spec.SessionID = sessionID
+	spec.LaunchToken = launchToken
+	restarted, next, err := s.Ensure(ctx, snapshot, spec)
+	if err != nil {
+		return domain.ServiceUnitRecord{}, snapshot, err
+	}
+	fact := ports.FactRecord{IntentID: intent.ID, SessionID: sessionID, Transition: intent.Transition, Timestamp: time.Now().UTC()}
+	if err := s.journal.RecordFact(context.WithoutCancel(ctx), fact, next); err != nil {
+		return domain.ServiceUnitRecord{}, next, err
+	}
+	return restarted, next, nil
+}
+
+func serviceSpecFromRecord(record domain.ServiceUnitRecord) (ServiceSpec, error) {
+	if record.Name == "" || record.LaunchToken == "" || record.Child.DesiredExecutable == "" || len(record.Child.Argv) < 2 || record.Child.Argv[0] != record.Child.DesiredExecutable || record.Helper.DesiredExecutable != record.Confinement.Executable {
+		return ServiceSpec{}, fmt.Errorf("recorded service identity is incomplete: %w", ErrUnitInvariant)
+	}
+	return ServiceSpec{
+		SessionID: "observed-" + record.Name, Name: record.Name, LaunchToken: record.LaunchToken,
+		Capability: ConfinementCapability{Executable: record.Confinement.Executable, Version: record.Confinement.Version, EnvironmentFingerprint: record.Confinement.EnvironmentFingerprint, Boundary: record.Confinement.Boundary},
+		Mapping:    PortMapping{HostAddress: record.Mapping.HostAddress, HostPort: record.Mapping.HostPort, GuestPort: record.Mapping.GuestPort},
+		LogPath:    record.LogPath, PIDPath: record.PIDPath,
+		Child: ports.Command{Executable: record.Child.DesiredExecutable, Argv: append([]string(nil), record.Child.Argv[1:]...)},
+	}, nil
+}
+
+func recordedService(snapshot domain.JournalSnapshot, name string) (domain.ServiceUnitRecord, bool) {
+	for _, service := range snapshot.Services {
+		if service.Name == name {
+			return service, true
+		}
+	}
+	return domain.ServiceUnitRecord{}, false
 }
 
 func (s *ServiceSupervisor) Ensure(ctx context.Context, snapshot domain.JournalSnapshot, service ServiceSpec) (domain.ServiceUnitRecord, domain.JournalSnapshot, error) {

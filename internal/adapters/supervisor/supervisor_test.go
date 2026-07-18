@@ -24,18 +24,23 @@ type fakeUnitProcessManager struct {
 	group      []ports.ProcessStatus
 	groupErr   error
 	stopOrder  []domain.ProcessIdentity
+	inspectErr error
 }
 
 func (m *fakeUnitProcessManager) Start(ctx context.Context, _ ports.ProcessSpec) (domain.ProcessIdentity, error) {
 	_, pending, err := m.log.Load(ctx, m.sessionID)
-	if err != nil || len(pending) != 1 || pending[0].Intent.Transition != "ServiceStart" {
+	foundStart := false
+	for _, item := range pending {
+		foundStart = foundStart || item.Intent.Transition == "ServiceStart"
+	}
+	if err != nil || !foundStart {
 		return domain.ProcessIdentity{}, errors.New("start effect happened before durable intent")
 	}
 	m.startCount++
 	return m.start, nil
 }
 func (m *fakeUnitProcessManager) Inspect(context.Context, domain.ProcessIdentity) (ports.ProcessStatus, error) {
-	return m.helper, nil
+	return m.helper, m.inspectErr
 }
 func (m *fakeUnitProcessManager) InspectPID(context.Context, int) (ports.ProcessStatus, error) {
 	return m.helper, nil
@@ -52,17 +57,103 @@ func (m *fakeUnitProcessManager) Stop(_ context.Context, identity domain.Process
 }
 
 type fakeUnitInspector struct {
-	prebindErr error
-	absentErr  error
-	evidence   UnitEvidence
+	prebindErr   error
+	absentErr    error
+	stoppedErr   error
+	evidence     UnitEvidence
+	readyCalls   int
+	stoppedCalls int
+	absentCalls  int
 }
 
 func (i *fakeUnitInspector) Prebind(context.Context, PortMapping) error { return i.prebindErr }
 func (i *fakeUnitInspector) Ready(context.Context, ServiceSpec, ports.ProcessStatus, ports.ProcessStatus) (UnitEvidence, error) {
+	i.readyCalls++
 	return i.evidence, nil
 }
+
+func TestServiceSupervisorObserveRejectsPIDReuseAndStaleListeners(t *testing.T) {
+	t.Parallel()
+	record, spec, helper, child := observedServiceFixture(t)
+	manager := &fakeUnitProcessManager{helper: helper, children: []ports.ProcessStatus{child}}
+	inspector := &fakeUnitInspector{evidence: UnitEvidence{ChildNetNS: child.NetNS}}
+	controller := NewServiceSupervisor(nil, manager, inspector)
+
+	observation, err := controller.Observe(context.Background(), record)
+	if err != nil || observation.State != UnitLive || observation.Record.Child.Identity != child.Identity {
+		t.Fatalf("Observe(live) = %#v, %v", observation, err)
+	}
+	manager.inspectErr = ErrProcessIdentity
+	if _, err := controller.Observe(context.Background(), record); !errors.Is(err, ErrProcessIdentity) {
+		t.Fatalf("Observe(reused) error = %v", err)
+	}
+	manager.inspectErr = nil
+	manager.helper.Running = false
+	inspector.stoppedErr = ErrUnitInvariant
+	if _, err := controller.Observe(context.Background(), record); !errors.Is(err, ErrUnitInvariant) {
+		t.Fatalf("Observe(stale listener) error = %v", err)
+	}
+	if inspector.absentCalls != 0 || inspector.stoppedCalls != 1 {
+		t.Fatalf("Observe(stopped) cleanup calls=%d pure checks=%d", inspector.absentCalls, inspector.stoppedCalls)
+	}
+	_ = spec
+}
+
+func TestServiceSupervisorRestartJournalsBeforeStopAndReusesRecordedCommand(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	record, _, helper, child := observedServiceFixture(t)
+	log, err := journal.NewStore(filepath.Join(t.TempDir(), "journal"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	snapshot := domain.JournalSnapshot{SchemaVersion: domain.SchemaVersion, SessionID: "restart-session", Services: []domain.ServiceUnitRecord{record}}
+	if err := log.Create(ctx, snapshot); err != nil {
+		t.Fatal(err)
+	}
+	manager := &fakeUnitProcessManager{log: log, sessionID: snapshot.SessionID, helper: helper, children: []ports.ProcessStatus{child}, start: helper.Identity}
+	inspector := &fakeUnitInspector{evidence: UnitEvidence{ChildNetNS: child.NetNS}}
+	controller := NewServiceSupervisor(log, manager, inspector)
+
+	restarted, next, err := controller.Restart(ctx, snapshot.SessionID, record.Name, "restart-token")
+	if err != nil {
+		t.Fatalf("Restart() error = %v", err)
+	}
+	if restarted.LaunchToken != "restart-token" || next.Services[0].LaunchToken != "restart-token" {
+		t.Fatalf("Restart() record = %#v next=%#v", restarted, next.Services)
+	}
+	if !reflect.DeepEqual(manager.stopOrder, []domain.ProcessIdentity{child.Identity, helper.Identity}) || manager.startCount != 1 {
+		t.Fatalf("restart stop/start = %#v/%d", manager.stopOrder, manager.startCount)
+	}
+	_, pending, err := log.Load(ctx, snapshot.SessionID)
+	if err != nil || len(pending) != 0 {
+		t.Fatalf("restart pending = %#v, %v", pending, err)
+	}
+}
+
+func observedServiceFixture(t *testing.T) (domain.ServiceUnitRecord, ServiceSpec, ports.ProcessStatus, ports.ProcessStatus) {
+	t.Helper()
+	privateRoot := t.TempDir()
+	helperID := domain.ProcessIdentity{PID: 301, BootID: "boot", StartTicks: 30}
+	childID := domain.ProcessIdentity{PID: 302, BootID: "boot", StartTicks: 31}
+	childArgv := []string{"/opt/hauler", "store", "--store", "/state/store", "serve", "registry", "--directory", "/state/registry", "--port", "5100", "--readonly=false"}
+	spec := ServiceSpec{SessionID: "restart-session", Name: "registry", LaunchToken: "original-token", Capability: ConfinementCapability{Executable: "/usr/bin/pasta", Version: "v", EnvironmentFingerprint: "f"}, Mapping: PortMapping{HostAddress: "127.0.0.1", HostPort: 5000, GuestPort: 5100}, LogPath: filepath.Join(privateRoot, "registry.log"), PIDPath: filepath.Join(privateRoot, "registry.pid"), Child: ports.Command{Executable: "/opt/hauler", Argv: childArgv[1:]}}
+	built, err := spec.processSpec()
+	if err != nil {
+		t.Fatal(err)
+	}
+	helper := ports.ProcessStatus{Identity: helperID, Running: true, Executable: "/usr/bin/pasta", Argv: append([]string{built.Command.Executable}, built.Command.Argv...), PGID: helperID.PID, SID: helperID.PID, NetNS: "net:[host]"}
+	child := ports.ProcessStatus{Identity: childID, Running: true, Executable: "/opt/hauler", Argv: childArgv, ParentPID: helperID.PID, PGID: helperID.PID, SID: helperID.PID, NetNS: "net:[child]"}
+	record := domain.ServiceUnitRecord{Name: spec.Name, LaunchToken: spec.LaunchToken, Confinement: domain.ConfinementRecord{Executable: spec.Capability.Executable, Version: spec.Capability.Version, EnvironmentFingerprint: spec.Capability.EnvironmentFingerprint}, Mapping: domain.EndpointMapping{HostAddress: spec.Mapping.HostAddress, HostPort: spec.Mapping.HostPort, GuestPort: spec.Mapping.GuestPort}, PIDPath: spec.PIDPath, LogPath: spec.LogPath, Helper: processRecord(spec.Capability.Executable, helper), Child: processRecord(spec.Child.Executable, child), DesiredState: domain.RuntimeDesiredRunning, ObservedState: domain.RuntimeObservedReady}
+	return record, spec, helper, child
+}
 func (i *fakeUnitInspector) Absent(context.Context, domain.ServiceUnitRecord) error {
+	i.absentCalls++
 	return i.absentErr
+}
+func (i *fakeUnitInspector) Stopped(context.Context, domain.ServiceUnitRecord) error {
+	i.stoppedCalls++
+	return i.stoppedErr
 }
 
 func TestServiceSupervisorJournalsBeforeStartAndDiscoversCrashBeforeFact(t *testing.T) {

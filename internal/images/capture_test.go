@@ -120,3 +120,38 @@ func TestCapturerRejectsKnownReferenceDigestMismatchBeforeTagOrPush(t *testing.T
 		t.Fatalf("commands after mismatch = %#v", executor.commands)
 	}
 }
+
+func TestCapturerRecoversUnjournaledPushOnlyFromExactLocalImageAndDigest(t *testing.T) {
+	t.Parallel()
+	created := time.Unix(100, 0).UTC()
+	engineImage := EngineImage{ID: "sha256:aaa", Tags: []string{"example.test/team/app:v1"}, Platform: domain.Platform{OS: "linux", Architecture: "amd64"}, CreatedAt: created}
+	assigned, err := AssignReferences("127.0.0.1:45001", "brain", []EngineImage{engineImage})
+	if err != nil {
+		t.Fatal(err)
+	}
+	repository, _, err := splitCapturedTag(assigned[0].CapturedReference)
+	if err != nil {
+		t.Fatal(err)
+	}
+	digest := "sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"
+	repoDigest := "127.0.0.1:45001/" + repository + "@" + digest
+	inspect := `[{"Id":"sha256:aaa","RepoTags":["example.test/team/app:v1"],"RepoDigests":["` + repoDigest + `"],"Created":"` + created.Format(time.RFC3339Nano) + `","Architecture":"amd64","Os":"linux","Config":{"Labels":{}}}]`
+	executor := &recordingWorkspaceExecutor{results: []ports.Result{
+		{Stdout: []byte("26.1.0\n")}, {Stdout: []byte("sha256:aaa\n")}, {Stdout: []byte(inspect)}, {Stdout: []byte(inspect)},
+	}}
+	catalog := &fakeRegistryCatalog{results: []string{digest}}
+
+	result, err := NewCapturer(executor, catalog, imageClock{now: time.Unix(200, 0).UTC()}).Capture(context.Background(), CaptureRequest{
+		Scope: EngineScope{Context: "default", WorkspaceID: "brain-main"}, Capsule: "brain",
+		RegistryAuthority: "127.0.0.1:45001", RegistryEndpoint: "http://127.0.0.1:45001",
+	})
+	if err != nil {
+		t.Fatalf("Capture(recovery) error = %v", err)
+	}
+	if len(result.Images) != 1 || result.Images[0].CapturedManifestDigest != digest {
+		t.Fatalf("Capture(recovery) = %#v", result)
+	}
+	if len(executor.commands) != 4 || !reflect.DeepEqual(executor.commands[3].Argv, []string{"docker", "image", "inspect", engineImage.ID}) {
+		t.Fatalf("recovery commands = %#v", executor.commands)
+	}
+}
