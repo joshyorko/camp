@@ -23,6 +23,7 @@ type ServiceEvidence struct {
 
 type SessionEvidence struct {
 	Services        map[string]ServiceEvidence
+	Supervisor      ProcessIdentityEvidence
 	PointerConflict bool
 }
 

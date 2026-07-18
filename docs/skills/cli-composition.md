@@ -6,7 +6,9 @@ The executable is intentionally a root-only Cobra command. There is no productio
 
 When adding commands, compose existing application use cases and adapters instead of moving lifecycle logic into Cobra handlers. Preserve exact argument arrays through typed ports; do not rebuild shell command strings.
 
-Production composition is not only command registration. Before lifecycle handlers can be truthful, composition must supply ownership-safe close effects, a live session observer, a serving refresher after checkpoint publication, and typed propagation of DevPod and IDE options through `app.OpenRequest`. Target entry must preserve the canonical `target.Resolver` → effective DevPod workspace root → `workspace.MapTarget` chain. Until those seams exist, a Cobra command that calls only package fakes or journal state is not a usable command.
+Production composition is not only command registration. The `internal/adapters/lifecycle` package now supplies the production `app.CloseEffects`, live `SessionEvidence` observer, and post-publication serving refresher seams. Command composition must still provide those adapters and typed propagation of DevPod and IDE options through `app.OpenRequest`. Target entry must preserve the canonical `target.Resolver` → effective DevPod workspace root → `workspace.MapTarget` chain. A Cobra command that calls only package fakes or journal state is not a usable command.
+
+`lifecycle.CloseEffects` acts only on identities recorded in the session snapshot. Workspace cleanup distinguishes delete from `--keep-workspace` stop, forwarders and the supervisor use full PID/boot/start identities, services delegate to the child-first service supervisor, lease release uses the exact recorded revision, and materialization cleanup delegates to the ownership marker/device/inode guard. `lifecycle.SessionObserver` reports PID reuse explicitly and accepts live service evidence only after the existing supervisor inspector validates process topology and listeners; stopped services still require listener-absence validation. `lifecycle.ServingRefresher` validates both recorded Hauler service commands before stopping either one, then restarts registry and fileserver serving roots with generation-specific launch tokens. Refresh remains post-publication and an error remains an operational refresh failure rather than a publication rollback.
 
 Unknown commands and arbitrary arguments must return a nonzero error. The current root-only command accepts `camp open` and an unknown token as positional arguments and exits successfully; tests for the real tree must lock down arity, stderr, and stable exit codes.
 
@@ -29,6 +31,7 @@ A command is usable only when its handler is wired to production dependencies an
 
 - `cmd/camp/main.go`
 - `internal/app/open.go`, `close.go`, `checkpoint.go`, and `operations.go`
+- `internal/adapters/lifecycle/`
 - `internal/target/` and `internal/workspace/`
 - `internal/adapters/devpod/client_test.go`
 - `internal/adapters/hauler/client_test.go`
