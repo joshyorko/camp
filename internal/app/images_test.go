@@ -2,6 +2,7 @@ package app
 
 import (
 	"context"
+	"errors"
 	"reflect"
 	"testing"
 	"time"
@@ -104,6 +105,23 @@ func TestImageOperationsCaptureReconcilesItsExactPendingIntent(t *testing.T) {
 	}
 }
 
+func TestImageOperationsCaptureReturnsCanonicalIdentityDriftError(t *testing.T) {
+	t.Parallel()
+	listed := imageSessionSnapshot()
+	loaded := listed
+	loaded.Lineage.Branch = "drifted"
+	order := []string{}
+	journal := &fakeImageJournal{snapshot: loaded, listed: &listed, order: &order}
+	usecase := NewImageOperations(journal, &imageLocker{order: &order}, &imageGuard{order: &order}, &imageController{order: &order}, &fakeImageCapturer{order: &order}, &fakeImageRestorer{}, fixedAppClock{now: time.Unix(200, 0)})
+
+	if _, err := usecase.Capture(context.Background(), SessionSelector{SessionID: listed.SessionID}, nil); !errors.Is(err, ErrRecoveryIdentityChanged) {
+		t.Fatalf("Capture() error = %v, want ErrRecoveryIdentityChanged", err)
+	}
+	if want := []string{"lock", "load", "unlock"}; !reflect.DeepEqual(order, want) {
+		t.Fatalf("Capture() order = %#v, want %#v", order, want)
+	}
+}
+
 func imageSessionSnapshot() domain.JournalSnapshot {
 	snapshot := readModelSnapshot()
 	snapshot.SchemaVersion = domain.SchemaVersion
@@ -116,6 +134,7 @@ func imageSessionSnapshot() domain.JournalSnapshot {
 
 type fakeImageJournal struct {
 	snapshot domain.JournalSnapshot
+	listed   *domain.JournalSnapshot
 	order    *[]string
 	pending  []ports.PendingIntent
 	lastFact ports.FactRecord
@@ -123,6 +142,9 @@ type fakeImageJournal struct {
 
 func (f *fakeImageJournal) Create(context.Context, domain.JournalSnapshot) error { return nil }
 func (f *fakeImageJournal) List(context.Context) ([]domain.JournalSnapshot, error) {
+	if f.listed != nil {
+		return []domain.JournalSnapshot{*f.listed}, nil
+	}
 	return []domain.JournalSnapshot{f.snapshot}, nil
 }
 func (f *fakeImageJournal) Load(context.Context, string) (domain.JournalSnapshot, []ports.PendingIntent, error) {

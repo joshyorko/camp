@@ -170,7 +170,7 @@ func (u *ImageOperations) prepareMutation(ctx context.Context, selector SessionS
 	}
 	if !sameRecoveryIdentity(selected, loaded) {
 		_ = u.locks.Release(context.WithoutCancel(ctx), token)
-		return domain.JournalSnapshot{}, ports.OperationToken{}, domain.JournalSnapshot{}, checkpointRegistry{}, nil, errors.New("image operation session changed")
+		return domain.JournalSnapshot{}, ports.OperationToken{}, domain.JournalSnapshot{}, checkpointRegistry{}, nil, ErrRecoveryIdentityChanged
 	}
 	var matching *ports.IntentRecord
 	if len(pending) > 0 {

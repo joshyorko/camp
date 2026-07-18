@@ -14,7 +14,7 @@ Unknown commands and arbitrary arguments must return a nonzero error. The curren
 
 Camp-owned user configuration persists only the typed non-secret fields in `config.Persistent`. Updates take an adjacent exclusive lock, write a mode-0600 temporary file, fsync it, rename it over the destination, and fsync the parent directory. URL userinfo and credential-shaped query parameters are rejected before effects. `CAMP_ACCESS_TOKEN` remains runtime-only; the legacy `accessToken` YAML field is rejected.
 
-Provider reads must redact values using DevPod's option schema: any option marked `password: true` is redacted even when its name is innocuous. Provider mutation currently fails unsupported before effects. The pinned DevPod `pkg/config.SaveConfig` implementation at commit `86b6f9f5` writes the live file with `os.WriteFile` and provides neither locking nor temp-file/fsync/rename publication, so delegating `provider set-options` would not satisfy Camp's atomic durability contract.
+Provider reads must redact values using DevPod's option schema: any option marked `password: true` is redacted even when its name is innocuous. A missing provider reader is a composition error and must return a clear error instead of panicking. Provider mutation currently fails unsupported before reader or persistence effects. The pinned DevPod `pkg/config.SaveConfig` implementation at commit `86b6f9f5` writes the live file with `os.WriteFile` and provides neither locking nor temp-file/fsync/rename publication, so delegating `provider set-options` would not satisfy Camp's atomic durability contract.
 
 ## Proof commands
 

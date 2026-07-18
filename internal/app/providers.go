@@ -29,6 +29,9 @@ type Providers struct{ reader ProviderReader }
 func NewProviders(reader ProviderReader) *Providers { return &Providers{reader: reader} }
 
 func (p *Providers) List(ctx context.Context) ([]Provider, error) {
+	if p == nil || p.reader == nil {
+		return nil, errors.New("provider reader is nil")
+	}
 	providers, err := p.reader.ListProviders(ctx)
 	if err != nil {
 		return nil, err
