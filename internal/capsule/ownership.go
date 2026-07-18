@@ -42,11 +42,12 @@ type ownershipMarker struct {
 }
 
 type ownershipMarkerOperations struct {
-	write         func(*os.File, []byte) error
-	sync          func(*os.File) error
-	beforePublish func(int, string) error
-	publish       func(int, int, string) error
-	afterPublish  func()
+	createTemporary func(int, ownershipMarker) (int, string, error)
+	write           func(*os.File, []byte) error
+	sync            func(*os.File) error
+	beforePublish   func(int, string) error
+	publish         func(int, int, string) error
+	afterPublish    func()
 }
 
 type ownershipMarkerFileIdentity struct {
@@ -343,12 +344,11 @@ func reconcileOwnershipMarkerPublication(directory *os.File, marker ownershipMar
 }
 
 func createOwnershipMarker(directory *os.File, body []byte, marker ownershipMarker, operations ownershipMarkerOperations) error {
-	fd, err := unix.Openat(int(directory.Fd()), ".", unix.O_TMPFILE|unix.O_RDWR|unix.O_CLOEXEC, 0o600)
-	temporaryName := ""
-	if errors.Is(err, unix.EOPNOTSUPP) || errors.Is(err, unix.EINVAL) || errors.Is(err, unix.EISDIR) {
-		temporaryName = ownershipMarkerTemporaryName(marker.Token)
-		fd, err = unix.Openat(int(directory.Fd()), temporaryName, unix.O_RDWR|unix.O_CREAT|unix.O_EXCL|unix.O_CLOEXEC|unix.O_NOFOLLOW, 0o600)
+	createTemporary := operations.createTemporary
+	if createTemporary == nil {
+		createTemporary = createOwnershipMarkerTemporary
 	}
+	fd, temporaryName, err := createTemporary(int(directory.Fd()), marker)
 	if err != nil {
 		return fmt.Errorf("create ownership marker temporary file: %w", err)
 	}
@@ -421,6 +421,20 @@ func createOwnershipMarker(directory *os.File, body []byte, marker ownershipMark
 		return fmt.Errorf("sync ownership marker: %w", err)
 	}
 	return nil
+}
+
+func createOwnershipMarkerTemporary(directoryFD int, marker ownershipMarker) (int, string, error) {
+	fd, err := unix.Openat(directoryFD, ".", unix.O_TMPFILE|unix.O_RDWR|unix.O_CLOEXEC, 0o600)
+	if !errors.Is(err, unix.EOPNOTSUPP) && !errors.Is(err, unix.EINVAL) && !errors.Is(err, unix.EISDIR) {
+		return fd, "", err
+	}
+	return createNamedOwnershipMarkerTemporary(directoryFD, marker)
+}
+
+func createNamedOwnershipMarkerTemporary(directoryFD int, marker ownershipMarker) (int, string, error) {
+	temporaryName := ownershipMarkerTemporaryName(marker.Token)
+	fd, err := unix.Openat(directoryFD, temporaryName, unix.O_RDWR|unix.O_CREAT|unix.O_EXCL|unix.O_CLOEXEC|unix.O_NOFOLLOW, 0o600)
+	return fd, temporaryName, err
 }
 
 func writeOwnershipMarker(file *os.File, body []byte) error {
