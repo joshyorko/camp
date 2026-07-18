@@ -37,3 +37,29 @@ func TestBootstrapPrecedenceFlagsEnvironmentUserDefaultsAndRejectsPersistedSecre
 }
 
 func ptr(value string) *string { return &value }
+
+func TestBootstrapResolvesSafeS3SettingsWithoutCredentialFields(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.yaml")
+	body := []byte("defaultCapsule: brain\nbackend: s3://bucket/camp\ns3:\n  endpoint: https://minio.user.example\n  region: user-region\n  pathStyle: true\n")
+	if err := os.WriteFile(path, body, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	result, err := ResolveBootstrap(BootstrapInput{
+		ConfigPath: path,
+		Environment: map[string]string{
+			"CAMP_S3_ENDPOINT": "https://minio.env.example",
+			"CAMP_S3_REGION":   "env-region",
+		},
+		Flags: Overrides{S3Region: ptr("flag-region")},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.S3.Endpoint != "https://minio.env.example" || result.S3.Region != "flag-region" || !result.S3.PathStyle {
+		t.Fatalf("S3 settings = %#v", result.S3)
+	}
+	backend, err := ResolveBackend(result.Backend, result.S3)
+	if err != nil || backend.Kind != BackendS3 {
+		t.Fatalf("resolved backend = %#v, %v", backend, err)
+	}
+}
