@@ -79,6 +79,15 @@ type ForwardingRecord struct {
 	ObservedState     RuntimeState  `json:"observedState" yaml:"observedState"`
 }
 
+type ForwardingRequest struct {
+	Name              string `json:"name" yaml:"name"`
+	WorkspaceID       string `json:"workspaceId" yaml:"workspaceId"`
+	Context           string `json:"context" yaml:"context"`
+	LocalEndpoint     string `json:"localEndpoint" yaml:"localEndpoint"`
+	WorkspaceEndpoint string `json:"workspaceEndpoint" yaml:"workspaceEndpoint"`
+	LogPath           string `json:"logPath" yaml:"logPath"`
+}
+
 type WorkspaceCleanupAction string
 
 const (

@@ -84,6 +84,11 @@ type OpenServiceStarter interface {
 	Start(context.Context, domain.JournalSnapshot) (domain.JournalSnapshot, error)
 }
 
+type OpenForwarderManager interface {
+	Start(context.Context, domain.ForwardingRequest) (domain.ForwardingRecord, error)
+	Stop(context.Context, domain.ForwardingRecord) error
+}
+
 type OpenDependencies struct {
 	Journal         ports.Journal
 	Paths           config.XDGPaths
@@ -99,6 +104,7 @@ type OpenDependencies struct {
 	Providers       OpenProviderEnsurer
 	Target          OpenTargetResolver
 	Services        OpenServiceStarter
+	Forwarders      OpenForwarderManager
 	Clock           ports.Clock
 }
 
@@ -273,6 +279,7 @@ func (o *Open) Reconcile(ctx context.Context, sessionID string) (domain.JournalS
 		return snapshot, err
 	}
 	reconciled, err := journalstore.Reconcile(ctx, o.deps.Journal, sessionID, map[string]journalstore.Observer{
+		"LocalLeaseAcquisition":   withOpenRecoveryObjective(o.observeRemoteLeaseAcquisition),
 		"RemoteLeaseAcquisition":  withOpenRecoveryObjective(o.observeRemoteLeaseAcquisition),
 		"WorkspaceUp":             withOpenRecoveryObjective(o.observeWorkspaceUp),
 		"WorkspaceRootResolved":   withOpenRecoveryObjective(o.observeWorkspaceRootResolved),
@@ -486,7 +493,7 @@ func (o *Open) observeTerminalEntryDispatched(_ context.Context, snapshot domain
 }
 
 func (o *Open) observeRemoteLeaseAcquisition(ctx context.Context, snapshot domain.JournalSnapshot, intent ports.IntentRecord) (ports.FactRecord, domain.JournalSnapshot, error) {
-	if o.deps.Pointers == nil || o.deps.Leases == nil {
+	if o.deps.Leases == nil {
 		return ports.FactRecord{}, snapshot, errors.New("lease reconciliation dependencies are incomplete")
 	}
 	if snapshot.Mode != domain.SessionReadWrite {
@@ -513,13 +520,18 @@ func (o *Open) observeRemoteLeaseAcquisition(ctx context.Context, snapshot domai
 		if err := o.deps.Pointers.Revalidate(ctx, *input.Source); err != nil {
 			return ports.FactRecord{}, snapshot, err
 		}
-	} else {
+	} else if input.Observed != nil {
+		if o.deps.Pointers == nil {
+			return ports.FactRecord{}, snapshot, errors.New("pointer reconciliation dependency is incomplete")
+		}
 		if input.Source != nil || input.Observed == nil || input.ObservedRevision != string(input.Observed.Revision) || input.Observed.Pointer.Lineage != input.Lineage {
 			return ports.FactRecord{}, snapshot, errors.New("lease acquisition intent has an inconsistent observed pointer")
 		}
 		if err := o.deps.Pointers.Revalidate(ctx, *input.Observed); err != nil {
 			return ports.FactRecord{}, snapshot, err
 		}
+	} else if input.Source != nil || input.ObservedRevision != "" || input.BranchSource || snapshot.Recovery.Source.Kind != domain.SourceDecisionAdopted {
+		return ports.FactRecord{}, snapshot, errors.New("local lease acquisition intent is inconsistent")
 	}
 	now := o.deps.Clock.Now().UTC()
 	if now.IsZero() {
@@ -533,18 +545,20 @@ func (o *Open) observeRemoteLeaseAcquisition(ctx context.Context, snapshot domai
 	if err != nil {
 		return ports.FactRecord{}, snapshot, err
 	}
-	opened := openedFrom.Pointer.Generation
 	next := snapshot
-	next.OpenedGeneration = cloneGeneration(&opened)
-	next.CurrentBase = cloneGeneration(&opened)
-	openedLineage := openedFrom.Pointer.Lineage
-	next.Recovery.Source = domain.SourceDecision{Kind: domain.SourceDecisionRemote, Lineage: &openedLineage, Generation: cloneGeneration(&opened)}
-	if openedFrom.Pointer.Lineage == input.Lineage {
-		next.CurrentPointer = clonePointer(&openedFrom.Pointer)
-		next.ExpectedPointerRevision = string(openedFrom.Revision)
-	} else {
-		next.CurrentPointer = nil
-		next.ExpectedPointerRevision = ""
+	if openedFrom != nil {
+		opened := openedFrom.Pointer.Generation
+		next.OpenedGeneration = cloneGeneration(&opened)
+		next.CurrentBase = cloneGeneration(&opened)
+		openedLineage := openedFrom.Pointer.Lineage
+		next.Recovery.Source = domain.SourceDecision{Kind: domain.SourceDecisionRemote, Lineage: &openedLineage, Generation: cloneGeneration(&opened)}
+		if openedFrom.Pointer.Lineage == input.Lineage {
+			next.CurrentPointer = clonePointer(&openedFrom.Pointer)
+			next.ExpectedPointerRevision = string(openedFrom.Revision)
+		} else {
+			next.CurrentPointer = nil
+			next.ExpectedPointerRevision = ""
+		}
 	}
 	next.Lease = domain.LeaseRecord{Lease: &token.Lease, Revision: string(token.Revision)}
 	receipt, err := json.Marshal(leaseReceipt(input, token))
@@ -562,13 +576,16 @@ func validateOpenLeaseToken(input openLeaseAcquisitionInput, token coordination.
 	if input.BranchSource {
 		openedFrom = input.Source
 	}
-	if openedFrom == nil || openedFrom.Revision == "" {
-		return nil, errors.New("lease acquisition intent lacks its opened pointer")
+	var opened *domain.GenerationRef
+	if openedFrom != nil {
+		if openedFrom.Revision == "" {
+			return nil, errors.New("lease acquisition intent lacks its opened pointer revision")
+		}
+		opened = &openedFrom.Pointer.Generation
 	}
-	opened := openedFrom.Pointer.Generation
 	expectedExpiry := input.Now.Add(input.LeaseTTL)
 	if token.Lease.SchemaVersion != domain.SchemaVersion || token.Lease.Capsule != input.Capsule || token.Lease.Lineage != input.Lineage ||
-		token.Lease.SessionID != input.Owner.SessionID || token.Lease.Machine != input.Owner.Machine || !sameGeneration(token.Lease.OpenedGeneration, &opened) ||
+		token.Lease.SessionID != input.Owner.SessionID || token.Lease.Machine != input.Owner.Machine || !sameGeneration(token.Lease.OpenedGeneration, opened) ||
 		!token.Lease.CreatedAt.Equal(input.Now) || !token.Lease.HeartbeatAt.Equal(input.Now) || !token.Lease.ExpiresAt.Equal(expectedExpiry) ||
 		token.Revision == "" || observedAt.Before(input.Now) || !expectedExpiry.After(observedAt) {
 		return nil, errors.New("observed lease acquisition does not exactly match the pending intent")
@@ -727,6 +744,13 @@ func (o *Open) create(ctx context.Context, request OpenRequest) (OpenResult, err
 			return nil
 		}); err != nil {
 			return OpenResult{}, err
+		}
+		if request.Mode == domain.SessionReadWrite {
+			lease, err := o.acquireLocalLease(ctx, request, lineage, journal)
+			if err != nil {
+				return OpenResult{}, err
+			}
+			snapshot.Lease = domain.LeaseRecord{Lease: &lease.Lease, Revision: string(lease.Revision)}
 		}
 	} else {
 		if o.deps.Pointers == nil || o.deps.Generations == nil || o.deps.Hydrator == nil {
@@ -1154,6 +1178,40 @@ func (o *Open) completeWorkspaceOpen(ctx context.Context, snapshot domain.Journa
 	if err != nil {
 		return OpenResult{}, err
 	}
+	if o.deps.Forwarders != nil {
+		existing := make(map[string]struct{}, len(snapshot.Recovery.Forwarding))
+		for _, record := range snapshot.Recovery.Forwarding {
+			existing[record.Name] = struct{}{}
+		}
+		for _, item := range []struct {
+			name string
+			port int
+		}{{"registry", snapshot.Recovery.Configuration.RegistryPort}, {"fileserver", snapshot.Recovery.Configuration.FileserverPort}} {
+			if _, ok := existing[item.name]; ok {
+				continue
+			}
+			endpoint := endpoint(item.port)
+			request := domain.ForwardingRequest{
+				Name: item.name, WorkspaceID: snapshot.Workspace.ID, Context: snapshot.Workspace.Context,
+				LocalEndpoint: endpoint, WorkspaceEndpoint: endpoint,
+				LogPath: filepath.Join(snapshot.Recovery.Session.RuntimeRoot, item.name+"-forward.log"),
+			}
+			var record domain.ForwardingRecord
+			if err := journal.phase(ctx, "ForwarderStarted:"+item.name, request, &record, func() error {
+				var err error
+				record, err = o.deps.Forwarders.Start(ctx, request)
+				if err == nil {
+					snapshot.Recovery.Forwarding = append(snapshot.Recovery.Forwarding, record)
+				}
+				return err
+			}); err != nil {
+				for index := len(snapshot.Recovery.Forwarding) - 1; index >= 0; index-- {
+					_ = o.deps.Forwarders.Stop(context.WithoutCancel(ctx), snapshot.Recovery.Forwarding[index])
+				}
+				return OpenResult{}, fmt.Errorf("start %s workspace forwarder: %w", item.name, err)
+			}
+		}
+	}
 	snapshot.State = domain.SessionOpen
 	snapshot.Recovery.Entry.Mode = request.EntryMode
 	if err := journal.phase(ctx, "SessionOpened", safeJSON(openSessionOpenedInput{ID: snapshot.Workspace.ID}), nil, func() error { return nil }); err != nil {
@@ -1334,6 +1392,33 @@ func (o *Open) acquireRemoteLease(ctx context.Context, request OpenRequest, line
 		return nil
 	})
 	if err != nil {
+		return coordination.LeaseToken{}, err
+	}
+	return token, nil
+}
+
+func (o *Open) acquireLocalLease(ctx context.Context, request OpenRequest, lineage domain.Lineage, log *openJournal) (coordination.LeaseToken, error) {
+	if o.deps.Leases == nil {
+		return coordination.LeaseToken{}, errors.New("local writer lease dependency is incomplete")
+	}
+	owner := coordination.LeaseOwner{SessionID: request.SessionID, Machine: request.Machine}
+	now := o.deps.Clock.Now().UTC()
+	input := openLeaseAcquisitionInput{Capsule: request.Capsule, Lineage: lineage, Owner: owner, Now: now, LeaseTTL: request.LeaseTTL}
+	var token coordination.LeaseToken
+	receipt := openLeaseReceipt{}
+	if err := log.phase(ctx, "LocalLeaseAcquisition", input, &receipt, func() error {
+		var err error
+		token, err = o.deps.Leases.Acquire(ctx, request.Capsule, lineage, owner, nil, now, request.LeaseTTL)
+		if err != nil {
+			return err
+		}
+		if _, err := validateOpenLeaseToken(input, token, now); err != nil {
+			return err
+		}
+		log.snapshot.Lease = domain.LeaseRecord{Lease: &token.Lease, Revision: string(token.Revision)}
+		receipt = leaseReceipt(input, token)
+		return nil
+	}); err != nil {
 		return coordination.LeaseToken{}, err
 	}
 	return token, nil

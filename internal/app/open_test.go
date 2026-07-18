@@ -20,6 +20,7 @@ import (
 	"github.com/joshyorko/camp/internal/adapters/s3store"
 	"github.com/joshyorko/camp/internal/capsule"
 	"github.com/joshyorko/camp/internal/config"
+	"github.com/joshyorko/camp/internal/coordination"
 	"github.com/joshyorko/camp/internal/domain"
 	"github.com/joshyorko/camp/internal/journal"
 	"github.com/joshyorko/camp/internal/ports"
@@ -65,9 +66,11 @@ func TestOpenComposesResolvedS3BackendAndPersistsSanitizedIdentity(t *testing.T)
 
 func newSafeS3WriterServer(t *testing.T) *httptest.Server {
 	t.Helper()
-	var body []byte
-	revision := 0
+	bodies := map[string][]byte{}
+	revisions := map[string]int{}
 	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body := bodies[r.URL.Path]
+		revision := revisions[r.URL.Path]
 		etag := fmt.Sprintf(`"revision-%d"`, revision)
 		switch r.Method {
 		case http.MethodPut:
@@ -77,6 +80,8 @@ func newSafeS3WriterServer(t *testing.T) *httptest.Server {
 			}
 			body, _ = io.ReadAll(r.Body)
 			revision++
+			bodies[r.URL.Path] = body
+			revisions[r.URL.Path] = revision
 			w.Header().Set("ETag", fmt.Sprintf(`"revision-%d"`, revision))
 		case http.MethodGet, http.MethodHead:
 			if body == nil {
@@ -93,7 +98,8 @@ func newSafeS3WriterServer(t *testing.T) *httptest.Server {
 				http.Error(w, "condition failed", http.StatusPreconditionFailed)
 				return
 			}
-			body = nil
+			delete(bodies, r.URL.Path)
+			delete(revisions, r.URL.Path)
 			w.WriteHeader(http.StatusNoContent)
 		default:
 			http.Error(w, "unexpected", http.StatusBadRequest)
@@ -287,11 +293,17 @@ func TestOpenAdoptsRootPreservesOwnershipAndResolvesTargetAfterCommit(t *testing
 	if result.Snapshot.Workspace.Provider != "docker" || !result.Snapshot.Workspace.LocalProvider {
 		t.Fatalf("workspace classification = %#v, want default local docker provider", result.Snapshot.Workspace)
 	}
+	if result.Snapshot.Lease.Lease == nil || result.Snapshot.Lease.Revision == "" || result.Snapshot.Lease.Lease.OpenedGeneration != nil {
+		t.Fatalf("local writer lease = %#v", result.Snapshot.Lease)
+	}
 	if result.Target.Relative != "MemoryD" || result.Target.Absolute != filepath.Join(root, "MemoryD") {
 		t.Fatalf("target = %#v", result.Target)
 	}
-	if !reflect.DeepEqual(*environment.events, []string{"initialized", "target", "services", "up", "folder", "ssh"}) {
+	if !reflect.DeepEqual(*environment.events, []string{"initialized", "target", "services", "up", "folder", "forward:registry", "forward:fileserver", "ssh"}) {
 		t.Fatalf("events = %#v", *environment.events)
+	}
+	if len(result.Snapshot.Recovery.Forwarding) != 2 || result.Snapshot.Recovery.Forwarding[0].Name != "registry" || result.Snapshot.Recovery.Forwarding[1].Name != "fileserver" {
+		t.Fatalf("forwarding = %#v", result.Snapshot.Recovery.Forwarding)
 	}
 	if len(environment.devpod.ups) != 1 || len(environment.devpod.ssh) != 1 {
 		t.Fatalf("DevPod calls = up:%d ssh:%d", len(environment.devpod.ups), len(environment.devpod.ssh))
@@ -576,15 +588,48 @@ func newOpenTestEnvironment(t *testing.T) openTestEnvironment {
 	devpod := &openDevPod{events: &events, folder: "/workspaces/root"}
 	resolver := &openTargetResolver{events: &events}
 	services := &openServices{events: &events}
+	forwarders := &openForwarders{events: &events}
+	leases := &localOpenLeases{}
 	runtime := config.Runtime{Bootstrap: config.Bootstrap{Capsule: "brain", RegistryPort: 5000, FileserverPort: 8080}}
 	return openTestEnvironment{
 		ownership: ownership, runtime: runtime, backend: backend, events: &events, devpod: devpod, services: services,
 		open: NewOpen(OpenDependencies{
 			Journal: log, Paths: paths, Backend: backend, Ownership: ownership, Initializer: initializer,
-			Services: services, DevPod: devpod, Target: resolver, Clock: fixedAppClock{now: time.Unix(100, 0).UTC()},
+			Services: services, Forwarders: forwarders, DevPod: devpod, Leases: leases, Target: resolver, Clock: fixedAppClock{now: time.Unix(100, 0).UTC()},
 		}),
 	}
 }
+
+type localOpenLeases struct{}
+
+func (*localOpenLeases) Read(context.Context, string, domain.Lineage) (coordination.LeaseToken, error) {
+	return coordination.LeaseToken{}, ports.ErrNotFound
+}
+func (*localOpenLeases) Acquire(_ context.Context, capsule string, lineage domain.Lineage, owner coordination.LeaseOwner, observed *coordination.PointerRecord, now time.Time, ttl time.Duration) (coordination.LeaseToken, error) {
+	if observed != nil {
+		return coordination.LeaseToken{}, errors.New("local lease unexpectedly observed a pointer")
+	}
+	return coordination.LeaseToken{Lease: domain.WriterLease{
+		SchemaVersion: domain.SchemaVersion, Capsule: capsule, Lineage: lineage, SessionID: owner.SessionID, Machine: owner.Machine,
+		CreatedAt: now, HeartbeatAt: now, ExpiresAt: now.Add(ttl),
+	}, Revision: "local-lease-r1"}, nil
+}
+func (*localOpenLeases) AcquireBranchFrom(context.Context, string, domain.Lineage, coordination.LeaseOwner, coordination.PointerRecord, time.Time, time.Duration) (coordination.LeaseToken, error) {
+	return coordination.LeaseToken{}, errors.New("local lease unexpectedly acquired from branch")
+}
+
+type openForwarders struct{ events *[]string }
+
+func (f *openForwarders) Start(_ context.Context, request domain.ForwardingRequest) (domain.ForwardingRecord, error) {
+	*f.events = append(*f.events, "forward:"+request.Name)
+	return domain.ForwardingRecord{
+		Name: request.Name, LocalEndpoint: request.LocalEndpoint, WorkspaceEndpoint: request.WorkspaceEndpoint,
+		Process:      domain.ProcessRecord{Identity: domain.ProcessIdentity{PID: len(request.Name) + 100, BootID: "boot", StartTicks: 10}},
+		DesiredState: domain.RuntimeDesiredRunning, ObservedState: domain.RuntimeObservedReady,
+	}, nil
+}
+
+func (f *openForwarders) Stop(context.Context, domain.ForwardingRecord) error { return nil }
 
 type openServices struct{ events *[]string }
 

@@ -84,7 +84,7 @@ func (p *ProductionLifecycle) Open(ctx context.Context, value string, mode Outpu
 		Mode: domain.SessionReadWrite, EntryMode: domain.EntryTerminal,
 		Machine: machine, RemoteAvailable: explicitRoot == "",
 	}
-	usecase, err := composeOpen(ctx, composition, services.starter)
+	usecase, err := composeOpen(ctx, composition, services)
 	if err != nil {
 		return err
 	}
@@ -111,11 +111,11 @@ func resolveMachineID(ctx context.Context, primary func(context.Context) (string
 	return "hostname:" + strings.TrimSpace(name), nil
 }
 
-func composeOpen(ctx context.Context, composition productionComposition, services app.OpenServiceStarter) (*app.Open, error) {
+func composeOpen(ctx context.Context, composition productionComposition, services serviceBundle) (*app.Open, error) {
 	return app.NewOpenWithBackend(ctx, app.OpenDependencies{
 		Journal: composition.journal, Paths: composition.paths, ResolvedBackend: composition.backend,
 		Ownership: composition.ownership, Initializer: composition.initializer,
-		Services: services,
+		Services: services.starter, Forwarders: lifecycleadapter.NewForwarderManager(composition.devpod, services.processes),
 		Hydrator: hydration.NewController(nil, composition.hauler, archive.NewTarZstd(), composition.ownership, hydration.Hooks{}),
 		DevPod:   composition.devpod, Providers: composition.devpod,
 		Target: target.Resolver{Zoxide: target.NewCommandZoxide("zoxide", composition.runner)}, Clock: composition.clock,
@@ -224,7 +224,7 @@ func composeLifecycle(ctx context.Context) (lifecycleComposition, error) {
 	closeUsecase := app.NewClose(base.journal, locks, publisher, effects, base.clock)
 	observer := lifecycleadapter.NewSessionObserver(services.processes, services.units)
 	guard := app.NewRecoverySafetyGuard(base.ownership, leases, base.clock)
-	openUsecase, err := composeOpen(ctx, base, services.starter)
+	openUsecase, err := composeOpen(ctx, base, services)
 	if err != nil {
 		return lifecycleComposition{}, err
 	}
@@ -304,10 +304,22 @@ func composeProduction(ctx context.Context) (productionComposition, error) {
 	}
 	runner := subprocess.NewRunner()
 	clock := host.NewClock()
+	devpodPath, err := exec.LookPath("devpod")
+	if err != nil {
+		return productionComposition{}, fmt.Errorf("resolve DevPod executable: %w", err)
+	}
+	devpodPath, err = filepath.Abs(devpodPath)
+	if err != nil {
+		return productionComposition{}, err
+	}
+	devpodPath, err = filepath.EvalSymlinks(devpodPath)
+	if err != nil {
+		return productionComposition{}, fmt.Errorf("resolve DevPod executable target: %w", err)
+	}
 	return productionComposition{
 		paths: paths, runtime: runtime, backend: backend, journal: journal, ownership: ownership,
 		initializer: capsule.NewInitializer(clock, capsule.NewCommandDigestResolver("docker", runner)),
-		runner:      runner, clock: clock, devpod: devpod.NewClient("devpod", runner), hauler: hauler.NewClient("hauler", runner),
+		runner:      runner, clock: clock, devpod: devpod.NewClient(devpodPath, runner), hauler: hauler.NewClient("hauler", runner),
 	}, nil
 }
 
