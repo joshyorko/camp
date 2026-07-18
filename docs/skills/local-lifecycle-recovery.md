@@ -4,7 +4,7 @@
 
 The application packages contain typed open, checkpoint, sync, close, attach, and supervision use cases, but `cmd/camp/main.go` currently exposes only the root Cobra command. Package tests do not prove a runnable local `camp open` to `camp close` vertical.
 
-Local workspace return is accepted only when the provider is marked local and the canonical staging root equals the canonical workspace-local folder. `internal/workspace/local.go` returns `MirrorLocalNoop`; it does not copy data. The checkpoint publisher currently rejects every other mirror mode in `internal/app/checkpoint.go`, even though `internal/workspace/remote.go` can produce a `MirrorDevPodSSH` staging root.
+Local workspace return is accepted only when the provider is marked local and the canonical staging root equals the canonical workspace-local folder. `internal/workspace/local.go` returns `MirrorLocalNoop`; it does not copy data. For a non-local provider, the checkpoint publisher accepts only `MirrorDevPodSSH`, builds from the returned nonempty staging root, and revalidates the writer lease after the mirror before recording the fact.
 
 ## Recovery rules
 
