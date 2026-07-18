@@ -91,15 +91,18 @@ func matchingRefreshPending(pending []ports.PendingIntent, request app.ServingRe
 	if len(pending) == 0 {
 		return true
 	}
-	if len(pending) != 1 {
-		return false
+	matches := 0
+	for _, item := range pending {
+		intent := item.Intent
+		if intent.SessionID != request.SessionID || intent.Transition != "ServingContentRefreshed" {
+			continue
+		}
+		var recorded app.ServingRefreshRequest
+		if json.Unmarshal(intent.Input, &recorded) == nil && recorded == request {
+			matches++
+		}
 	}
-	intent := pending[0].Intent
-	if intent.SessionID != request.SessionID || intent.Transition != "ServingContentRefreshed" {
-		return false
-	}
-	var recorded app.ServingRefreshRequest
-	return json.Unmarshal(intent.Input, &recorded) == nil && recorded == request
+	return matches == 1
 }
 
 func refreshedServiceSpec(sessionID string, record domain.ServiceUnitRecord, directory string, generation uint64) (supervisor.ServiceSpec, error) {

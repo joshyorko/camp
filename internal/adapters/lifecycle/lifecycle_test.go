@@ -238,9 +238,10 @@ func TestServingRefresherAcceptsMatchingPendingCheckpointRefresh(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	journal := &fakeJournal{snapshot: snapshot, pending: []ports.PendingIntent{{Intent: ports.IntentRecord{
-		ID: snapshot.SessionID + "-checkpoint-7", SessionID: snapshot.SessionID, Transition: "ServingContentRefreshed", Attempt: 1, Input: input,
-	}}}}
+	journal := &fakeJournal{snapshot: snapshot, pending: []ports.PendingIntent{
+		{Intent: ports.IntentRecord{ID: snapshot.SessionID + "-checkpoint-7", SessionID: snapshot.SessionID, Transition: "ServingContentRefreshed", Attempt: 1, Input: input}},
+		{Intent: ports.IntentRecord{ID: snapshot.SessionID + "-lease-renew", SessionID: snapshot.SessionID, Transition: "LeaseRenewed", Attempt: 1}},
+	}}
 
 	if err := NewServingRefresher(journal, services).Refresh(context.Background(), request); err != nil {
 		t.Fatalf("Refresh() error = %v", err)

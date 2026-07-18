@@ -292,7 +292,7 @@ func (p *CheckpointPublisher) Publish(ctx context.Context, operation ports.Opera
 		result.RefreshError = err.Error()
 		return result, nil
 	}
-	if len(pending) != 1 || pending[0].Intent.ID != refreshIntent.ID || pending[0].Intent.Transition != refreshIntent.Transition {
+	if !containsPendingIntent(pending, refreshIntent.ID) {
 		result.RefreshError = "serving refresh left unexpected pending reconciliation work"
 		return result, nil
 	}
