@@ -224,6 +224,50 @@ func (c *Client) Up(ctx context.Context, options UpOptions) (ports.Result, error
 	return c.run(ctx, argv)
 }
 
+func (c *Client) EnsureProvider(ctx context.Context, devpodContext, provider string) error {
+	if c == nil || c.runner == nil || strings.TrimSpace(devpodContext) == "" || provider != "docker" {
+		return errors.New("unsupported or incomplete DevPod provider request")
+	}
+	providers, err := c.listProviders(ctx, devpodContext)
+	if err != nil {
+		return err
+	}
+	configured, exists := providers[provider]
+	if !exists {
+		if _, err := c.run(ctx, []string{"provider", "add", provider, "--context", devpodContext, "--use"}); err != nil {
+			return fmt.Errorf("add DevPod provider %q: %w", provider, err)
+		}
+	} else if !configured.Default {
+		if _, err := c.run(ctx, []string{"provider", "use", provider, "--context", devpodContext, "--reconfigure"}); err != nil {
+			return fmt.Errorf("configure DevPod provider %q: %w", provider, err)
+		}
+	}
+	providers, err = c.listProviders(ctx, devpodContext)
+	if err != nil {
+		return err
+	}
+	if configured, ok := providers[provider]; !ok || !configured.Default {
+		return fmt.Errorf("configured DevPod provider identity %q was not verified", provider)
+	}
+	return nil
+}
+
+type providerState struct {
+	Default bool `json:"default"`
+}
+
+func (c *Client) listProviders(ctx context.Context, devpodContext string) (map[string]providerState, error) {
+	result, err := c.run(ctx, []string{"provider", "list", "--context", devpodContext, "--output", "json"})
+	if err != nil {
+		return nil, fmt.Errorf("list DevPod providers in context %q: %w", devpodContext, err)
+	}
+	providers := map[string]providerState{}
+	if err := json.Unmarshal(result.Stdout, &providers); err != nil {
+		return nil, fmt.Errorf("decode DevPod provider list: %w", err)
+	}
+	return providers, nil
+}
+
 func (c *Client) SSH(ctx context.Context, options SSHOptions) (ports.Result, error) {
 	command, err := c.SSHCommand(options)
 	if err != nil {

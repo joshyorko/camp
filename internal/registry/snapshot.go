@@ -18,13 +18,14 @@ import (
 )
 
 type Barrier interface {
-	WithCut(context.Context, func() error) error
+	WithCut(context.Context, SnapshotRequest, func() error) error
 }
 
 type SnapshotRequest struct {
 	OverlayRoot     string
 	SnapshotRoot    string
 	CatalogEndpoint string
+	SessionID       string
 }
 
 type Snapshot struct {
@@ -76,12 +77,11 @@ func (s *Snapshotter) Seal(ctx context.Context, request SnapshotRequest) (Snapsh
 		}
 	}()
 	var references []ports.RegistryReference
-	err = s.barrier.WithCut(ctx, func() error {
-		var err error
-		references, err = s.catalog.List(ctx, request.CatalogEndpoint)
-		if err != nil {
-			return err
-		}
+	references, err = s.catalog.List(ctx, request.CatalogEndpoint)
+	if err != nil {
+		return Snapshot{}, err
+	}
+	err = s.barrier.WithCut(ctx, request, func() error {
 		if err := copyRegistryTree(overlay, temporary); err != nil {
 			return err
 		}

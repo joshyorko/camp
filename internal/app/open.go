@@ -72,8 +72,16 @@ type OpenDevPod interface {
 	SSHWithStart(context.Context, devpodadapter.SSHOptions, func() error) (ports.Result, error)
 }
 
+type OpenProviderEnsurer interface {
+	EnsureProvider(context.Context, string, string) error
+}
+
 type OpenTargetResolver interface {
 	Resolve(context.Context, string, string) (target.Result, error)
+}
+
+type OpenServiceStarter interface {
+	Start(context.Context, domain.JournalSnapshot) (domain.JournalSnapshot, error)
 }
 
 type OpenDependencies struct {
@@ -88,7 +96,9 @@ type OpenDependencies struct {
 	Leases          OpenLeaseManager
 	Hydrator        OpenHydrator
 	DevPod          OpenDevPod
+	Providers       OpenProviderEnsurer
 	Target          OpenTargetResolver
+	Services        OpenServiceStarter
 	Clock           ports.Clock
 }
 
@@ -304,9 +314,12 @@ func (o *Open) observeWorkspaceUp(ctx context.Context, snapshot domain.JournalSn
 	if snapshot.OpenedGeneration != nil {
 		checkpoint = strconv.FormatUint(snapshot.OpenedGeneration.Generation, 10)
 	}
+	registryPort, fileserverPort, err := committedServicePorts(snapshot)
+	if err != nil {
+		return ports.FactRecord{}, snapshot, err
+	}
 	expectedEnvironment := devpodadapter.CampEnvironment{
-		Registry: endpoint(snapshot.Recovery.Configuration.RegistryPort), Fileserver: endpoint(snapshot.Recovery.Configuration.FileserverPort),
-		Capsule: snapshot.Capsule, Checkpoint: checkpoint,
+		Registry: endpoint(registryPort), Fileserver: endpoint(fileserverPort), Capsule: snapshot.Capsule, Checkpoint: checkpoint,
 	}
 	if intent.SessionID != snapshot.SessionID || input.ID == "" || input.ID != expectedID || input.Context == "" || input.Context != snapshot.Workspace.Context ||
 		input.Provider == "" || input.Provider != snapshot.Workspace.Provider || input.Env != expectedEnvironment || root == "" {
@@ -349,6 +362,34 @@ func (o *Open) observeWorkspaceUp(ctx context.Context, snapshot domain.JournalSn
 		return ports.FactRecord{}, snapshot, errors.New("open reconciliation clock returned zero time")
 	}
 	return ports.FactRecord{IntentID: intent.ID, SessionID: intent.SessionID, Transition: intent.Transition, Timestamp: now, Output: safeJSON(status)}, next, nil
+}
+
+func committedServicePorts(snapshot domain.JournalSnapshot) (int, int, error) {
+	if len(snapshot.Services) == 0 {
+		return snapshot.Recovery.Configuration.RegistryPort, snapshot.Recovery.Configuration.FileserverPort, nil
+	}
+	portsByName := map[string]int{}
+	for _, service := range snapshot.Services {
+		guestPort := 0
+		switch service.Name {
+		case "registry":
+			guestPort = 5000
+		case "fileserver":
+			guestPort = 8080
+		default:
+			continue
+		}
+		if _, exists := portsByName[service.Name]; exists || service.Mapping.HostAddress != "127.0.0.1" || service.Mapping.HostPort < 1 || service.Mapping.HostPort > 65535 || service.Mapping.HostPort == guestPort || service.Mapping.GuestPort != guestPort {
+			return 0, 0, errors.New("committed service mapping is invalid")
+		}
+		portsByName[service.Name] = service.Mapping.HostPort
+	}
+	registryPort, registryOK := portsByName["registry"]
+	fileserverPort, fileserverOK := portsByName["fileserver"]
+	if !registryOK || !fileserverOK {
+		return 0, 0, errors.New("committed service mappings are incomplete")
+	}
+	return registryPort, fileserverPort, nil
 }
 
 func (o *Open) observeWorkspaceRootResolved(ctx context.Context, snapshot domain.JournalSnapshot, intent ports.IntentRecord) (ports.FactRecord, domain.JournalSnapshot, error) {
@@ -545,7 +586,7 @@ func leaseReceipt(input openLeaseAcquisitionInput, token coordination.LeaseToken
 }
 
 func (o *Open) validate(request OpenRequest) error {
-	if o == nil || o.deps.Journal == nil || o.deps.Clock == nil || o.deps.Ownership == nil || o.deps.Initializer == nil || o.deps.DevPod == nil || o.deps.Target == nil {
+	if o == nil || o.deps.Journal == nil || o.deps.Clock == nil || o.deps.Ownership == nil || o.deps.Initializer == nil || o.deps.DevPod == nil || o.deps.Target == nil || o.deps.Services == nil {
 		return ErrOpenDependencies
 	}
 	if request.Capsule == "" {
@@ -837,19 +878,80 @@ func (o *Open) continueOpeningFromMaterialization(ctx context.Context, snapshot 
 	}{Relative: targetResult.Relative}), targetResult, func() error { snapshot.Recovery.Entry.Target = targetResult.Relative; return nil }); err != nil {
 		return OpenResult{}, err
 	}
+	snapshot, err = o.deps.Services.Start(ctx, snapshot)
+	if err != nil {
+		return OpenResult{}, fmt.Errorf("start production services: %w", err)
+	}
+	journal.snapshot = &snapshot
 	workspaceID := workspace.DeterministicID(request.Capsule, request.Branch, root)
 	checkpoint := ""
 	if snapshot.OpenedGeneration != nil {
 		checkpoint = strconv.FormatUint(snapshot.OpenedGeneration.Generation, 10)
 	}
-	upOptions := devpodadapter.UpOptions{WorkspacePath: root, WorkspaceID: workspaceID, Context: request.Context, Provider: request.Provider, DevcontainerPath: devcontainer.Path, CampEnvironment: &devpodadapter.CampEnvironment{Registry: endpoint(request.Runtime.RegistryPort), Fileserver: endpoint(request.Runtime.FileserverPort), Capsule: request.Capsule, Checkpoint: checkpoint}}
-	snapshot.Workspace = domain.WorkspaceRecord{ID: workspaceID, Context: request.Context, Provider: request.Provider, LocalProvider: request.LocalProvider, LocalFolder: root, Target: targetResult.Relative, StagingRoot: root}
+	devcontainerArgument, err := filepath.Rel(root, devcontainer.Path)
+	if err != nil || devcontainerArgument == "." || devcontainerArgument == ".." || strings.HasPrefix(devcontainerArgument, ".."+string(filepath.Separator)) {
+		return OpenResult{}, fmt.Errorf("derive capsule-relative devcontainer path: %w", capsule.ErrInvalidDevcontainer)
+	}
+	upOptions := devpodadapter.UpOptions{WorkspacePath: root, WorkspaceID: workspaceID, Context: request.Context, Provider: request.Provider, DevcontainerPath: devcontainerArgument, CampEnvironment: &devpodadapter.CampEnvironment{Registry: endpoint(snapshot.Recovery.Configuration.RegistryPort), Fileserver: endpoint(snapshot.Recovery.Configuration.FileserverPort), Capsule: request.Capsule, Checkpoint: checkpoint}}
+	if o.deps.Providers != nil {
+		if err := o.deps.Providers.EnsureProvider(ctx, request.Context, request.Provider); err != nil {
+			return OpenResult{}, fmt.Errorf("ensure DevPod provider: %w", err)
+		}
+	}
+	workspaceRecord := domain.WorkspaceRecord{ID: workspaceID, Context: request.Context, Provider: request.Provider, LocalProvider: request.LocalProvider, LocalFolder: root, Target: targetResult.Relative, StagingRoot: root}
 	var upResult ports.Result
-	if err := journal.phase(ctx, "WorkspaceUp", safeJSON(openWorkspaceUpInput{ID: workspaceID, Context: request.Context, Provider: request.Provider, Env: *upOptions.CampEnvironment}), &upResult, func() error { var err error; upResult, err = o.deps.DevPod.Up(ctx, upOptions); return err }); err != nil {
+	upInput := openWorkspaceUpInput{ID: workspaceID, Context: request.Context, Provider: request.Provider, Env: *upOptions.CampEnvironment}
+	intent, err := journal.ensureIntent(ctx, "WorkspaceUp", safeJSON(upInput))
+	if err != nil {
+		return OpenResult{}, err
+	}
+	upResult, err = o.deps.DevPod.Up(ctx, upOptions)
+	if err != nil {
+		if upResult.ExitCode > 0 {
+			if settleErr := o.settleKnownWorkspaceUpFailure(ctx, intent, upInput, root, upResult); settleErr != nil {
+				return OpenResult{}, errors.Join(err, settleErr)
+			}
+		}
+		return OpenResult{}, err
+	}
+	snapshot.Workspace = workspaceRecord
+	if err := journal.recordFact(ctx, intent, &upResult, nil); err != nil {
 		return OpenResult{}, err
 	}
 	snapshot.Recovery.Configuration.DevcontainerPath = devcontainer.Path
 	return o.completeWorkspaceOpen(ctx, snapshot, request, targetResult)
+}
+
+func (o *Open) settleKnownWorkspaceUpFailure(ctx context.Context, intent ports.IntentRecord, input openWorkspaceUpInput, root string, result ports.Result) error {
+	ctx = context.WithoutCancel(ctx)
+	workspaces, err := o.deps.DevPod.ListInContext(ctx, input.Context)
+	if err != nil {
+		return fmt.Errorf("verify failed WorkspaceUp absence: %w", err)
+	}
+	for _, candidate := range workspaces {
+		if candidate.ID != input.ID {
+			continue
+		}
+		if candidate.Context != input.Context || candidate.Provider.Name != input.Provider || candidate.Source.LocalFolder != root {
+			return errors.New("failed WorkspaceUp created a workspace with mismatched identity")
+		}
+		return ports.ErrAmbiguous
+	}
+	snapshot, pending, err := o.deps.Journal.Load(ctx, intent.SessionID)
+	if err != nil {
+		return fmt.Errorf("reload failed WorkspaceUp intent: %w", err)
+	}
+	if !containsPendingIntent(pending, intent.ID) {
+		return nil
+	}
+	fact := ports.FactRecord{IntentID: intent.ID, SessionID: intent.SessionID, Transition: intent.Transition, Timestamp: o.deps.Clock.Now(), Output: safeJSON(struct {
+		Failed   bool `json:"failed"`
+		ExitCode int  `json:"exitCode"`
+	}{Failed: true, ExitCode: result.ExitCode})}
+	if err := o.deps.Journal.RecordFact(ctx, fact, snapshot); err != nil {
+		return fmt.Errorf("record failed WorkspaceUp attempt: %w", err)
+	}
+	return nil
 }
 
 func (o *Open) reenter(ctx context.Context, snapshot domain.JournalSnapshot, request OpenRequest) (OpenResult, error) {

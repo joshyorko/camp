@@ -85,6 +85,10 @@ func TestExactHaulerV201Argv(t *testing.T) {
 			_, err := c.AddImage(ctx, "/tmp/store", AddImageOptions{Reference: "team/app:dev", Local: true})
 			return err
 		}, []string{"store", "--store", "/tmp/store", "add", "image", "team/app:dev", "--local"}},
+		{"add seed file", func(ctx context.Context, c *Client) error {
+			_, err := c.AddFile(ctx, "/tmp/store", "/tmp/seed", "camp-session-seed")
+			return err
+		}, []string{"store", "--store", "/tmp/store", "add", "file", "/tmp/seed", "--name", "camp-session-seed"}},
 		{"save", func(ctx context.Context, c *Client) error {
 			_, err := c.Save(ctx, "/tmp/store", "/tmp/capsule.tar.zst")
 			return err

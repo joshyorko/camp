@@ -56,6 +56,82 @@ func TestOpenReconcileWorkspaceUpUnknownOutcomeUsesStatusWithoutSecondUp(t *test
 	}
 }
 
+func TestOpenReconcileWorkspaceUpUsesCommittedServiceMappingsAfterDurableReload(t *testing.T) {
+	t.Parallel()
+	environment := newOpenTestEnvironment(t)
+	devpod := &unknownOutcomeWorkspaceDevPod{omitStatusIdentity: true}
+	environment.open.deps.DevPod = devpod
+	environment.open.deps.Services = dynamicOpenServices{registryPort: 45001, fileserverPort: 48081}
+	root := filepath.Join(t.TempDir(), "SecondBrain")
+	if err := os.MkdirAll(root, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	const sessionID = "workspace-up-dynamic-endpoints"
+	_, err := environment.open.Run(context.Background(), OpenRequest{
+		SessionID: sessionID, Capsule: "brain", Branch: "main", Mode: domain.SessionReadWrite,
+		ExplicitRoot: root, EntryMode: domain.EntryTerminal, Context: "default", Provider: "docker",
+		Runtime: environment.runtime, Backend: environment.backend,
+	})
+	if !errors.Is(err, ports.ErrAmbiguous) {
+		t.Fatalf("Open() error = %v, want ErrAmbiguous", err)
+	}
+	snapshot, pending, err := environment.open.deps.Journal.Load(context.Background(), sessionID)
+	if err != nil || len(pending) != 1 {
+		t.Fatalf("Load() pending=%#v error=%v", pending, err)
+	}
+	if snapshot.Recovery.Configuration.RegistryPort != 5000 || snapshot.Recovery.Configuration.FileserverPort != 8080 {
+		t.Fatalf("durable preferred ports unexpectedly changed: %#v", snapshot.Recovery.Configuration)
+	}
+	snapshot.Services = []domain.ServiceUnitRecord{
+		{Name: "registry", Mapping: domain.EndpointMapping{HostAddress: "127.0.0.1", HostPort: 45001, GuestPort: 5000}},
+		{Name: "fileserver", Mapping: domain.EndpointMapping{HostAddress: "127.0.0.1", HostPort: 48081, GuestPort: 8080}},
+	}
+	if _, _, err := environment.open.observeWorkspaceUp(context.Background(), snapshot, pending[0].Intent); err != nil {
+		t.Fatalf("observeWorkspaceUp() error = %v", err)
+	}
+}
+
+func TestOpenKnownWorkspaceUpFailureClearsAttemptOnlyAfterAbsenceAndRetries(t *testing.T) {
+	t.Parallel()
+	environment := newOpenTestEnvironment(t)
+	devpod := &unknownOutcomeWorkspaceDevPod{
+		workspaceAbsent: true,
+		upResults:       []ports.Result{{ExitCode: 17}, {ExitCode: -1}},
+		upErrors:        []error{errors.New("exit status 17"), ports.ErrAmbiguous},
+	}
+	environment.open.deps.DevPod = devpod
+	root := filepath.Join(t.TempDir(), "SecondBrain")
+	if err := os.MkdirAll(root, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	request := OpenRequest{
+		SessionID: "workspace-up-known-failure", Capsule: "brain", Branch: "main", Mode: domain.SessionReadWrite,
+		ExplicitRoot: root, EntryMode: domain.EntryTerminal, Context: "default", Provider: "docker",
+		Runtime: environment.runtime, Backend: environment.backend,
+	}
+	if _, err := environment.open.Run(context.Background(), request); err == nil || !strings.Contains(err.Error(), "exit status 17") {
+		t.Fatalf("first Open() error = %v", err)
+	}
+	_, pending, err := environment.open.deps.Journal.Load(context.Background(), request.SessionID)
+	if err != nil || len(pending) != 0 {
+		t.Fatalf("known failure pending=%#v error=%v", pending, err)
+	}
+	if _, err := environment.open.Run(context.Background(), request); !errors.Is(err, ports.ErrAmbiguous) {
+		t.Fatalf("retry Open() error = %v, want ErrAmbiguous", err)
+	}
+	if len(devpod.ups) != 2 || devpod.listCalls != 1 {
+		t.Fatalf("DevPod calls = up:%d list:%d, want up:2 list:1", len(devpod.ups), devpod.listCalls)
+	}
+}
+
+type dynamicOpenServices struct{ registryPort, fileserverPort int }
+
+func (s dynamicOpenServices) Start(_ context.Context, snapshot domain.JournalSnapshot) (domain.JournalSnapshot, error) {
+	snapshot.Recovery.Configuration.RegistryPort = s.registryPort
+	snapshot.Recovery.Configuration.FileserverPort = s.fileserverPort
+	return snapshot, nil
+}
+
 func TestOpenResumesOpeningAfterWorkspaceUpObservationWithoutSecondUp(t *testing.T) {
 	t.Parallel()
 	environment := newOpenTestEnvironment(t)
@@ -651,10 +727,17 @@ type unknownOutcomeWorkspaceDevPod struct {
 	omitStatusIdentity bool
 	entryStarted       chan struct{}
 	releaseEntry       chan struct{}
+	workspaceAbsent    bool
+	upResults          []ports.Result
+	upErrors           []error
 }
 
 func (d *unknownOutcomeWorkspaceDevPod) Up(_ context.Context, options devpodadapter.UpOptions) (ports.Result, error) {
 	d.ups = append(d.ups, options)
+	index := len(d.ups) - 1
+	if index < len(d.upErrors) {
+		return d.upResults[index], d.upErrors[index]
+	}
 	return ports.Result{}, ports.ErrAmbiguous
 }
 
@@ -672,7 +755,7 @@ func (d *unknownOutcomeWorkspaceDevPod) StatusInContext(_ context.Context, devpo
 
 func (d *unknownOutcomeWorkspaceDevPod) ListInContext(_ context.Context, devpodContext string) ([]devpodadapter.Workspace, error) {
 	d.listCalls++
-	if len(d.ups) == 0 {
+	if len(d.ups) == 0 || d.workspaceAbsent {
 		return nil, nil
 	}
 	up := d.ups[0]

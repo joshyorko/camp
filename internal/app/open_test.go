@@ -290,7 +290,7 @@ func TestOpenAdoptsRootPreservesOwnershipAndResolvesTargetAfterCommit(t *testing
 	if result.Target.Relative != "MemoryD" || result.Target.Absolute != filepath.Join(root, "MemoryD") {
 		t.Fatalf("target = %#v", result.Target)
 	}
-	if !reflect.DeepEqual(*environment.events, []string{"initialized", "target", "up", "folder", "ssh"}) {
+	if !reflect.DeepEqual(*environment.events, []string{"initialized", "target", "services", "up", "folder", "ssh"}) {
 		t.Fatalf("events = %#v", *environment.events)
 	}
 	if len(environment.devpod.ups) != 1 || len(environment.devpod.ssh) != 1 {
@@ -333,11 +333,26 @@ func TestOpenUsesRuntimeDevcontainerPathAsSingleSourceOfTruth(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Open() error = %v", err)
 	}
-	if len(environment.devpod.ups) != 1 || environment.devpod.ups[0].DevcontainerPath != custom {
-		t.Fatalf("DevPod devcontainer path = %#v, want %q", environment.devpod.ups, custom)
+	if len(environment.devpod.ups) != 1 || environment.devpod.ups[0].DevcontainerPath != filepath.Join("custom", "devcontainer.json") {
+		t.Fatalf("DevPod devcontainer path = %#v, want capsule-relative path", environment.devpod.ups)
 	}
 	if result.Snapshot.Recovery.Configuration.DevcontainerPath != custom {
 		t.Fatalf("recovery devcontainer path = %q, want %q", result.Snapshot.Recovery.Configuration.DevcontainerPath, custom)
+	}
+}
+
+func TestOpenStartsServicesBeforeDevPodUp(t *testing.T) {
+	t.Parallel()
+	environment := newOpenTestEnvironment(t)
+	root := filepath.Join(t.TempDir(), "brain")
+	if err := os.MkdirAll(root, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := environment.open.Run(context.Background(), OpenRequest{SessionID: "service-order", Capsule: "brain", ExplicitRoot: root, Runtime: environment.runtime, Backend: environment.backend}); err != nil {
+		t.Fatal(err)
+	}
+	if got := strings.Join(*environment.events, ","); !strings.Contains(got, "target,services,up") {
+		t.Fatalf("events = %q, want services before DevPod up", got)
 	}
 }
 
@@ -534,6 +549,7 @@ type openTestEnvironment struct {
 	backend   config.FileBackend
 	events    *[]string
 	devpod    *openDevPod
+	services  *openServices
 }
 
 func newOpenTestEnvironment(t *testing.T) openTestEnvironment {
@@ -559,14 +575,22 @@ func newOpenTestEnvironment(t *testing.T) openTestEnvironment {
 	initializer := &openInitializer{events: &events}
 	devpod := &openDevPod{events: &events, folder: "/workspaces/root"}
 	resolver := &openTargetResolver{events: &events}
+	services := &openServices{events: &events}
 	runtime := config.Runtime{Bootstrap: config.Bootstrap{Capsule: "brain", RegistryPort: 5000, FileserverPort: 8080}}
 	return openTestEnvironment{
-		ownership: ownership, runtime: runtime, backend: backend, events: &events, devpod: devpod,
+		ownership: ownership, runtime: runtime, backend: backend, events: &events, devpod: devpod, services: services,
 		open: NewOpen(OpenDependencies{
 			Journal: log, Paths: paths, Backend: backend, Ownership: ownership, Initializer: initializer,
-			DevPod: devpod, Target: resolver, Clock: fixedAppClock{now: time.Unix(100, 0).UTC()},
+			Services: services, DevPod: devpod, Target: resolver, Clock: fixedAppClock{now: time.Unix(100, 0).UTC()},
 		}),
 	}
+}
+
+type openServices struct{ events *[]string }
+
+func (s *openServices) Start(_ context.Context, snapshot domain.JournalSnapshot) (domain.JournalSnapshot, error) {
+	*s.events = append(*s.events, "services")
+	return snapshot, nil
 }
 
 type openInitializer struct {

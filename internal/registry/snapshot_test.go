@@ -18,7 +18,7 @@ type cutBarrier struct {
 	cuts    int
 }
 
-func (b *cutBarrier) WithCut(_ context.Context, seal func() error) error {
+func (b *cutBarrier) WithCut(_ context.Context, _ SnapshotRequest, seal func() error) error {
 	b.cuts++
 	if err := seal(); err != nil {
 		return err
@@ -37,7 +37,7 @@ func (c staticCatalog) List(context.Context, string) ([]ports.RegistryReference,
 
 type failingBarrier struct{ err error }
 
-func (b failingBarrier) WithCut(context.Context, func() error) error { return b.err }
+func (b failingBarrier) WithCut(context.Context, SnapshotRequest, func() error) error { return b.err }
 
 func (c staticCatalog) Resolve(context.Context, string, string, string) (string, error) {
 	panic("not used")

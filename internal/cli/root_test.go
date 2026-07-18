@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"strings"
 	"testing"
 
@@ -15,7 +16,7 @@ import (
 func TestExecuteRejectsUnavailableAndUnknownCommands(t *testing.T) {
 	t.Parallel()
 
-	for _, token := range []string{"open", "unknown-token"} {
+	for _, token := range []string{"unknown-token"} {
 		t.Run(token, func(t *testing.T) {
 			t.Parallel()
 
@@ -37,6 +38,69 @@ func TestExecuteRejectsUnavailableAndUnknownCommands(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestLifecycleCommandsDelegateWithStrictArgumentsAndInheritedMode(t *testing.T) {
+	t.Parallel()
+
+	lifecycle := &recordingLifecycle{}
+	for _, test := range []struct {
+		name string
+		args []string
+		want string
+	}{
+		{name: "init", args: []string{"--json", "init", "/brain"}, want: "init:/brain:json"},
+		{name: "open", args: []string{"open", "memoryd"}, want: "open:memoryd:human"},
+		{name: "sync", args: []string{"sync"}, want: "sync::human"},
+		{name: "close", args: []string{"close"}, want: "close::human"},
+		{name: "reopen", args: []string{"reopen", "memoryd"}, want: "reopen:memoryd:human"},
+		{name: "recover", args: []string{"recover", "session-1"}, want: "recover:session-1:human"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			root := NewRootWithLifecycle(lifecycle)
+			var stdout, stderr bytes.Buffer
+			if code := Execute(context.Background(), root, test.args, Streams{Out: &stdout, ErrOut: &stderr}); code != int(ExitSuccess) {
+				t.Fatalf("Execute(%q) = %d, stderr=%q", test.args, code, stderr.String())
+			}
+			if got := lifecycle.calls[len(lifecycle.calls)-1]; got != test.want {
+				t.Fatalf("call = %q, want %q", got, test.want)
+			}
+		})
+	}
+
+	for _, args := range [][]string{{"init", "a", "b"}, {"open", "a", "b"}, {"sync", "x"}, {"close", "x"}, {"reopen", "a", "b"}, {"recover", "a", "b"}} {
+		var stderr bytes.Buffer
+		if code := Execute(context.Background(), NewRootWithLifecycle(lifecycle), args, Streams{ErrOut: &stderr}); code != int(ExitUsage) {
+			t.Fatalf("Execute(%q) = %d, want usage; stderr=%q", args, code, stderr.String())
+		}
+	}
+}
+
+type recordingLifecycle struct{ calls []string }
+
+func (r *recordingLifecycle) Init(_ context.Context, value string, mode OutputMode, _ io.Writer) error {
+	r.calls = append(r.calls, "init:"+value+":"+string(mode))
+	return nil
+}
+func (r *recordingLifecycle) Open(_ context.Context, value string, mode OutputMode, _ io.Writer) error {
+	r.calls = append(r.calls, "open:"+value+":"+string(mode))
+	return nil
+}
+func (r *recordingLifecycle) Sync(_ context.Context, mode OutputMode, _ io.Writer) error {
+	r.calls = append(r.calls, "sync::"+string(mode))
+	return nil
+}
+func (r *recordingLifecycle) Close(_ context.Context, mode OutputMode, _ io.Writer) error {
+	r.calls = append(r.calls, "close::"+string(mode))
+	return nil
+}
+func (r *recordingLifecycle) Reopen(_ context.Context, value string, mode OutputMode, _ io.Writer) error {
+	r.calls = append(r.calls, "reopen:"+value+":"+string(mode))
+	return nil
+}
+func (r *recordingLifecycle) Recover(_ context.Context, value string, mode OutputMode, _ io.Writer) error {
+	r.calls = append(r.calls, "recover:"+value+":"+string(mode))
+	return nil
 }
 
 func TestExecuteRejectsInvalidCompletionArguments(t *testing.T) {
@@ -69,7 +133,6 @@ func TestExecuteRejectsInvalidHelpArguments(t *testing.T) {
 		args    []string
 		message string
 	}{
-		{name: "unavailable topic", args: []string{"help", "open"}, message: "unknown help topic \"open\""},
 		{name: "unknown topic", args: []string{"help", "unknown-token"}, message: "unknown help topic \"unknown-token\""},
 		{name: "extra topic component", args: []string{"help", "completion", "extra"}, message: "unknown help topic \"completion extra\""},
 		{name: "garbage after help flag", args: []string{"--help", "garbage"}, message: "unexpected argument \"garbage\" after help flag"},
@@ -156,7 +219,7 @@ func TestExecuteNormalizesJSONFlagSemantics(t *testing.T) {
 	}{
 		{
 			name:        "alternate true before invalid help topic",
-			args:        []string{"--json=1", "help", "open"},
+			args:        []string{"--json=1", "help", "unknown-token"},
 			wantExit:    ExitUsage,
 			wantJSON:    true,
 			wantMessage: "unknown help topic",
@@ -175,7 +238,7 @@ func TestExecuteNormalizesJSONFlagSemantics(t *testing.T) {
 		},
 		{
 			name:        "last bool value wins",
-			args:        []string{"--json", "--json=false", "open"},
+			args:        []string{"--json", "--json=false", "unknown-token"},
 			wantExit:    ExitUsage,
 			wantMessage: "unknown command",
 		},
@@ -320,7 +383,7 @@ func TestExecuteJSONFailureUsesStdoutAndStableUsageExit(t *testing.T) {
 
 	var stdout bytes.Buffer
 	var stderr bytes.Buffer
-	exitCode := Execute(context.Background(), NewRoot(), []string{"--json", "open"}, Streams{
+	exitCode := Execute(context.Background(), NewRoot(), []string{"--json", "unknown-token"}, Streams{
 		Out:    &stdout,
 		ErrOut: &stderr,
 	})
@@ -331,7 +394,7 @@ func TestExecuteJSONFailureUsesStdoutAndStableUsageExit(t *testing.T) {
 	if stderr.Len() != 0 {
 		t.Fatalf("stderr = %q, want empty", stderr.String())
 	}
-	want := "{\n  \"schemaVersion\": 1,\n  \"kind\": \"error\",\n  \"error\": {\n    \"code\": \"usage\",\n    \"message\": \"unknown command \\\"open\\\" for \\\"camp\\\"\"\n  }\n}\n"
+	want := "{\n  \"schemaVersion\": 1,\n  \"kind\": \"error\",\n  \"error\": {\n    \"code\": \"usage\",\n    \"message\": \"unknown command \\\"unknown-token\\\" for \\\"camp\\\"\"\n  }\n}\n"
 	if stdout.String() != want {
 		t.Fatalf("stdout:\n%s\nwant:\n%s", stdout.String(), want)
 	}
@@ -387,12 +450,9 @@ func TestRootHelpIsDeterministic(t *testing.T) {
 	if first != second {
 		t.Fatalf("help changed between identical roots:\nfirst:\n%s\nsecond:\n%s", first, second)
 	}
-	want := "Recoverable capsule workspaces\n\nUsage:\n  camp [flags]\n  camp [command]\n\nAvailable Commands:\n  completion  Generate shell completion\n  help        Help about any command\n\nFlags:\n  -h, --help   help for camp\n      --json   emit stable JSON output\n\nUse \"camp [command] --help\" for more information about a command.\n"
+	want := "Recoverable capsule workspaces\n\nUsage:\n  camp [flags]\n  camp [command]\n\nAvailable Commands:\n  close       Publish a checkpoint and close\n  completion  Generate shell completion\n  help        Help about any command\n  init        Initialize a capsule root\n  open        Open a capsule workspace\n  recover     Recover an interrupted lifecycle\n  reopen      Reopen a closed capsule workspace\n  sync        Publish a checkpoint and remain open\n\nFlags:\n  -h, --help   help for camp\n      --json   emit stable JSON output\n\nUse \"camp [command] --help\" for more information about a command.\n"
 	if first != want {
 		t.Fatalf("help:\n%s\nwant:\n%s", first, want)
-	}
-	if strings.Contains(first, "open") {
-		t.Fatalf("help advertises unavailable lifecycle command:\n%s", first)
 	}
 }
 

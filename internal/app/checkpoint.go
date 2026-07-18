@@ -201,7 +201,7 @@ func (p *CheckpointPublisher) Publish(ctx context.Context, operation ports.Opera
 	}
 
 	cutRoot := filepath.Join(mirrored.Root, ".camp", "build", "registry-cut-"+strconv.FormatUint(generation, 10))
-	sealRequest := registryadapter.SnapshotRequest{OverlayRoot: runtime.overlay, SnapshotRoot: cutRoot, CatalogEndpoint: runtime.endpoint}
+	sealRequest := registryadapter.SnapshotRequest{SessionID: sessionID, OverlayRoot: runtime.overlay, SnapshotRoot: cutRoot, CatalogEndpoint: runtime.endpoint}
 	sealIntent := checkpointAttemptIntent(sessionID, attemptID, "RegistrySnapshotSealed", 3, now, sealRequest)
 	if err := p.journal.RecordIntent(ctx, sealIntent); err != nil {
 		return CheckpointResult{}, err

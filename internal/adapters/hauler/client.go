@@ -80,6 +80,10 @@ func (c *Client) AddImage(ctx context.Context, store string, options AddImageOpt
 	return c.run(ctx, argv)
 }
 
+func (c *Client) AddFile(ctx context.Context, store, path, name string) (ports.Result, error) {
+	return c.run(ctx, append(storeArgv(store, "add", "file"), path, "--name", name))
+}
+
 func (c *Client) Save(ctx context.Context, store, filename string) (ports.Result, error) {
 	return c.run(ctx, append(storeArgv(store, "save"), "--filename", filename))
 }

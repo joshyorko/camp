@@ -24,6 +24,7 @@ type ProcessRecord struct {
 	DesiredExecutable  string          `json:"desiredExecutable" yaml:"desiredExecutable"`
 	ObservedExecutable string          `json:"observedExecutable" yaml:"observedExecutable"`
 	Argv               []string        `json:"argv" yaml:"argv"`
+	ArgvSHA256         string          `json:"argvSha256" yaml:"argvSha256"`
 	ParentPID          int             `json:"parentPid" yaml:"parentPid"`
 	PGID               int             `json:"pgid" yaml:"pgid"`
 	SID                int             `json:"sid" yaml:"sid"`

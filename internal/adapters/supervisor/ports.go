@@ -157,16 +157,17 @@ type HTTPDoer interface {
 }
 
 type unitInspector struct {
-	runner  ports.Runner
-	http    HTTPDoer
-	ss      string
-	nsenter string
+	runner   ports.Runner
+	http     HTTPDoer
+	ss       string
+	nsenter  string
+	procRoot string
 }
 
 func NewUnitInspector(runner ports.Runner, httpClient HTTPDoer) UnitInspector {
 	ss, _ := exec.LookPath("ss")
 	nsenter, _ := exec.LookPath("nsenter")
-	return &unitInspector{runner: runner, http: httpClient, ss: ss, nsenter: nsenter}
+	return &unitInspector{runner: runner, http: httpClient, ss: ss, nsenter: nsenter, procRoot: "/proc"}
 }
 
 func (i *unitInspector) Prebind(ctx context.Context, mapping PortMapping) error {
@@ -290,13 +291,53 @@ func (i *unitInspector) hostListeners(ctx context.Context, family string, port i
 
 func (i *unitInspector) guestListeners(ctx context.Context, pid, port int) (string, error) {
 	if i.runner == nil || i.ss == "" || i.nsenter == "" {
-		return "", errors.New("nsenter and ss are required for guest inspection")
+		return i.procGuestListener(ctx, pid, port)
 	}
 	result, err := i.runner.Run(ctx, ports.Command{Executable: i.nsenter, Argv: []string{"--target", strconv.Itoa(pid), "--net", "--", i.ss, "-H", "-ltnp", "sport", "=", ":" + strconv.Itoa(port)}})
 	if err != nil || result.ExitCode != 0 {
-		return "", fmt.Errorf("inspect guest listener: %w", err)
+		return i.procGuestListener(ctx, pid, port)
 	}
 	return string(result.Stdout), nil
+}
+
+func (i *unitInspector) procGuestListener(ctx context.Context, pid, port int) (string, error) {
+	root := i.procRoot
+	if root == "" {
+		root = "/proc"
+	}
+	fdRoot := filepath.Join(root, strconv.Itoa(pid), "fd")
+	entries, err := os.ReadDir(fdRoot)
+	if err != nil {
+		return "", fmt.Errorf("inspect guest socket descriptors: %w", err)
+	}
+	sockets := map[string]bool{}
+	for _, entry := range entries {
+		if err := ctx.Err(); err != nil {
+			return "", err
+		}
+		target, err := os.Readlink(filepath.Join(fdRoot, entry.Name()))
+		if err == nil && strings.HasPrefix(target, "socket:[") && strings.HasSuffix(target, "]") {
+			sockets[strings.TrimSuffix(strings.TrimPrefix(target, "socket:["), "]")] = true
+		}
+	}
+	wantPort := strings.ToUpper(strconv.FormatInt(int64(port), 16))
+	for _, table := range []string{"tcp", "tcp6"} {
+		body, err := os.ReadFile(filepath.Join(root, strconv.Itoa(pid), "net", table))
+		if err != nil {
+			continue
+		}
+		for _, line := range strings.Split(string(body), "\n") {
+			fields := strings.Fields(line)
+			if len(fields) < 10 || fields[3] != "0A" || !sockets[fields[9]] {
+				continue
+			}
+			parts := strings.Split(fields[1], ":")
+			if len(parts) == 2 && strings.TrimLeft(parts[1], "0") == strings.TrimLeft(wantPort, "0") {
+				return ":" + strconv.Itoa(port) + " pid=" + strconv.Itoa(pid), nil
+			}
+		}
+	}
+	return "", errors.New("exact Hauler child does not own the guest listener")
 }
 
 func onlyLocalEndpoint(output, expected string) bool {

@@ -914,7 +914,7 @@ func newRemoteOpenTestEnvironment(t *testing.T) remoteOpenTestEnvironment {
 			Initializer: &openInitializer{events: &events},
 			Pointers:    &recordingOpenPointers{source: remoteOpenPointer()},
 			Generations: &recordingOpenGenerations{metadata: remoteOpenMetadata()},
-			Leases:      leases, Hydrator: hydrator, DevPod: devpod, Target: &openTargetResolver{events: &events},
+			Leases:      leases, Hydrator: hydrator, Services: &openServices{events: &events}, DevPod: devpod, Target: &openTargetResolver{events: &events},
 			Clock: fixedAppClock{now: time.Unix(100, 0).UTC()},
 		}),
 	}

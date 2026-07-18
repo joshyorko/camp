@@ -278,6 +278,20 @@ func TestServiceSupervisorFailsClosedOnUnknownPortAndStopsChildFirst(t *testing.
 	}
 }
 
+func TestRecordedProcessArgvDigestRejectsKnownIdentityDrift(t *testing.T) {
+	t.Parallel()
+	status := ports.ProcessStatus{Identity: domain.ProcessIdentity{PID: 7, BootID: "b", StartTicks: 9}, Running: true, Executable: "/opt/hauler", Argv: []string{"/opt/hauler", "store"}, ParentPID: 6, PGID: 6, SID: 6, NetNS: "net:[1]"}
+	record := processRecord("/opt/hauler", status)
+	if record.ArgvSHA256 == "" {
+		t.Fatal("argv digest is empty")
+	}
+	drifted := status
+	drifted.Argv = []string{"/opt/hauler", "other"}
+	if err := validateRecordedGroup([]ports.ProcessStatus{drifted}, domain.ServiceUnitRecord{Child: record}); err == nil {
+		t.Fatal("known process argv drift was accepted")
+	}
+}
+
 func TestServiceSupervisorValidatesProcessGroupBeforeStoppingAnyMember(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()

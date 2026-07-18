@@ -210,6 +210,46 @@ func TestTask3ScopedWorkspaceEnvironmentAndArgvExecution(t *testing.T) {
 	}
 }
 
+func TestEnsureProviderConfiguresAbsentDockerThenVerifiesExactIdentity(t *testing.T) {
+	t.Parallel()
+	runner := &providerSequenceRunner{results: []ports.Result{
+		{Stdout: []byte(`{}`)},
+		{},
+		{Stdout: []byte(`{"docker":{"default":true}}`)},
+	}}
+	if err := NewClient("/opt/devpod", runner).EnsureProvider(context.Background(), "default", "docker"); err != nil {
+		t.Fatal(err)
+	}
+	want := [][]string{
+		{"provider", "list", "--context", "default", "--output", "json"},
+		{"provider", "add", "docker", "--context", "default", "--use"},
+		{"provider", "list", "--context", "default", "--output", "json"},
+	}
+	if !reflect.DeepEqual(runner.argv, want) {
+		t.Fatalf("provider argv = %#v, want %#v", runner.argv, want)
+	}
+}
+
+func TestEnsureProviderFailsClosedWhenConfiguredIdentityDoesNotMatch(t *testing.T) {
+	t.Parallel()
+	runner := &providerSequenceRunner{results: []ports.Result{{Stdout: []byte(`{}`)}, {}, {Stdout: []byte(`{"other":{"default":true}}`)}}}
+	if err := NewClient("/opt/devpod", runner).EnsureProvider(context.Background(), "default", "docker"); err == nil {
+		t.Fatal("EnsureProvider() error = nil")
+	}
+}
+
+type providerSequenceRunner struct {
+	results []ports.Result
+	argv    [][]string
+}
+
+func (r *providerSequenceRunner) Run(_ context.Context, command ports.Command) (ports.Result, error) {
+	r.argv = append(r.argv, append([]string(nil), command.Argv...))
+	result := r.results[0]
+	r.results = r.results[1:]
+	return result, nil
+}
+
 func TestTask3ReconciliationCallsAreContextScoped(t *testing.T) {
 	t.Parallel()
 	tests := []struct {

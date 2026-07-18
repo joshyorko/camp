@@ -5,9 +5,11 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"syscall"
 	"testing"
 	"time"
 
+	"github.com/joshyorko/camp/internal/domain"
 	"github.com/joshyorko/camp/internal/ports"
 )
 
@@ -78,5 +80,38 @@ func TestProcessManagerGroupFailsClosedWhenMemberCannotBeInspected(t *testing.T)
 	_, err := manager.Group(context.Background(), 7)
 	if err == nil {
 		t.Fatal("Group() silently ignored an uninspectable process-group member")
+	}
+}
+
+func TestCapabilityBearingExecutableFallsBackOnlyToValidatedAbsoluteArgv(t *testing.T) {
+	t.Parallel()
+	denied := func(string) (string, error) { return "", syscall.EPERM }
+	executable, err := resolveObservedExecutable("/proc/7/exe", []string{"/usr/bin/sleep", "30"}, denied)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want, _ := filepath.EvalSymlinks("/usr/bin/sleep")
+	if executable != want {
+		t.Fatalf("executable=%q want=%q", executable, want)
+	}
+	for _, argv := range [][]string{{"sleep", "30"}, {"/does/not/exist"}, {"/tmp"}} {
+		if _, err := resolveObservedExecutable("/proc/7/exe", argv, denied); err == nil {
+			t.Fatalf("argv %#v unexpectedly accepted", argv)
+		}
+	}
+}
+
+func TestCapabilityBearingNetNamespaceDenialIsRecordedWithoutInventingNamespace(t *testing.T) {
+	t.Parallel()
+	identity := domain.ProcessIdentity{PID: 7, BootID: "boot", StartTicks: 11}
+	got, err := resolveObservedNetNS("/proc/7/ns/net", identity, func(string) (string, error) { return "", syscall.EPERM })
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got != "kernel-denied:boot:11" {
+		t.Fatalf("netns marker=%q", got)
+	}
+	if _, err := resolveObservedNetNS("/proc/7/ns/net", identity, func(string) (string, error) { return "", os.ErrNotExist }); err == nil {
+		t.Fatal("missing namespace unexpectedly accepted")
 	}
 }

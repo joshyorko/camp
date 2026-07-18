@@ -4,10 +4,30 @@ import (
 	"context"
 	"errors"
 	"net"
+	"os"
+	"strconv"
+	"strings"
 	"testing"
 
 	"github.com/joshyorko/camp/internal/domain"
 )
+
+func TestGuestListenerFallsBackToProcSocketOwnership(t *testing.T) {
+	listener, err := net.Listen("tcp4", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer listener.Close()
+	port := listener.Addr().(*net.TCPAddr).Port
+	inspector := &unitInspector{procRoot: "/proc"}
+	got, err := inspector.guestListeners(context.Background(), os.Getpid(), port)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(got, "pid="+strconv.Itoa(os.Getpid())) {
+		t.Fatalf("guest listener = %q", got)
+	}
+}
 
 func TestPortAllocatorOmitsOccupiedPreferredPortAndReturnsDistinctCandidates(t *testing.T) {
 	t.Parallel()

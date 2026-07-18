@@ -2,6 +2,8 @@ package supervisor
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -80,6 +82,8 @@ type startIntentPayload struct {
 	PastaArgv              []string    `json:"pastaArgv"`
 	ChildExecutable        string      `json:"childExecutable"`
 	ChildArgv              []string    `json:"childArgv"`
+	LauncherArgvSHA256     string      `json:"launcherArgvSha256"`
+	ChildArgvSHA256        string      `json:"childArgvSha256"`
 }
 
 func NewServiceSupervisor(journal ports.Journal, processes ports.ProcessManager, inspector UnitInspector) *ServiceSupervisor {
@@ -232,6 +236,14 @@ func (s *ServiceSupervisor) Ensure(ctx context.Context, snapshot domain.JournalS
 		if payload.LaunchToken != service.LaunchToken || payload.Service != service.Name {
 			continue
 		}
+		expectedIntent, err := serviceStartIntent(service)
+		if err != nil {
+			return domain.ServiceUnitRecord{}, snapshot, err
+		}
+		var expected startIntentPayload
+		if json.Unmarshal(expectedIntent.Input, &expected) != nil || !reflect.DeepEqual(payload, expected) {
+			return domain.ServiceUnitRecord{}, snapshot, fmt.Errorf("pending service start identity changed: %w", ErrUnitInvariant)
+		}
 		record, err := s.discover(ctx, service, processSpec)
 		if err != nil {
 			return domain.ServiceUnitRecord{}, snapshot, err
@@ -320,7 +332,16 @@ func validateRecordedGroup(members []ports.ProcessStatus, record domain.ServiceU
 		if !member.Running {
 			continue
 		}
-		if member.Identity == record.Helper.Identity || member.Identity == record.Child.Identity {
+		if member.Identity == record.Helper.Identity {
+			if !matchesProcessRecord(member, record.Helper) {
+				return fmt.Errorf("recorded helper identity drift: %w", ErrUnitInvariant)
+			}
+			continue
+		}
+		if member.Identity == record.Child.Identity {
+			if !matchesProcessRecord(member, record.Child) {
+				return fmt.Errorf("recorded child identity drift: %w", ErrUnitInvariant)
+			}
 			continue
 		}
 		return fmt.Errorf("unexpected process-group member %d: %w", member.Identity.PID, ErrUnitInvariant)
@@ -349,18 +370,23 @@ func (s *ServiceSupervisor) discover(ctx context.Context, service ServiceSpec, p
 
 func (s *ServiceSupervisor) observeStarted(ctx context.Context, service ServiceSpec, processSpec ports.ProcessSpec, helperIdentity domain.ProcessIdentity) (domain.ServiceUnitRecord, error) {
 	deadline := time.Now().Add(15 * time.Second)
+	var lastErr error
 	for {
 		helper, err := s.processes.Inspect(ctx, helperIdentity)
+		lastErr = err
 		if err == nil && helper.Running {
 			if validateErr := validateHelper(processSpec, helper); validateErr == nil {
 				record, observeErr := s.observe(ctx, service, helper)
+				lastErr = observeErr
 				if observeErr == nil {
 					return record, nil
 				}
+			} else {
+				lastErr = validateErr
 			}
 		}
 		if time.Now().After(deadline) {
-			return domain.ServiceUnitRecord{}, fmt.Errorf("service did not become ready: %w", ErrUnitInvariant)
+			return domain.ServiceUnitRecord{}, fmt.Errorf("service did not become ready: %w", errors.Join(ErrUnitInvariant, lastErr))
 		}
 		select {
 		case <-ctx.Done():
@@ -458,6 +484,8 @@ func serviceStartIntent(service ServiceSpec) (ports.IntentRecord, error) {
 		EnvironmentFingerprint: service.Capability.EnvironmentFingerprint,
 		PIDPath:                service.PIDPath, LogPath: service.LogPath, PastaArgv: spec.Command.Argv,
 		ChildExecutable: service.Child.Executable, ChildArgv: service.Child.Argv,
+		LauncherArgvSHA256: argvSHA256(append([]string{spec.Command.Executable}, spec.Command.Argv...)),
+		ChildArgvSHA256:    argvSHA256(append([]string{service.Child.Executable}, service.Child.Argv...)),
 	}
 	body, err := json.Marshal(payload)
 	if err != nil {
@@ -475,7 +503,17 @@ func validateHelper(spec ports.ProcessSpec, helper ports.ProcessStatus) error {
 }
 
 func processRecord(desired string, status ports.ProcessStatus) domain.ProcessRecord {
-	return domain.ProcessRecord{Identity: status.Identity, DesiredExecutable: desired, ObservedExecutable: status.Executable, Argv: append([]string(nil), status.Argv...), ParentPID: status.ParentPID, PGID: status.PGID, SID: status.SID, NetNS: status.NetNS}
+	return domain.ProcessRecord{Identity: status.Identity, DesiredExecutable: desired, ObservedExecutable: status.Executable, Argv: append([]string(nil), status.Argv...), ArgvSHA256: argvSHA256(status.Argv), ParentPID: status.ParentPID, PGID: status.PGID, SID: status.SID, NetNS: status.NetNS}
+}
+
+func argvSHA256(argv []string) string {
+	digest := sha256.Sum256([]byte(strings.Join(argv, "\x00")))
+	return hex.EncodeToString(digest[:])
+}
+
+func matchesProcessRecord(status ports.ProcessStatus, record domain.ProcessRecord) bool {
+	return status.Identity == record.Identity && status.Executable == record.ObservedExecutable && reflect.DeepEqual(status.Argv, record.Argv) &&
+		argvSHA256(status.Argv) == record.ArgvSHA256 && status.ParentPID == record.ParentPID && status.PGID == record.PGID && status.SID == record.SID && status.NetNS == record.NetNS
 }
 
 func upsertService(snapshot domain.JournalSnapshot, record domain.ServiceUnitRecord) domain.JournalSnapshot {

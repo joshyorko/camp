@@ -271,16 +271,16 @@ func (m *ProcessManager) inspectPID(pid int) (ports.ProcessStatus, error) {
 	if fields[0] == "Z" {
 		return ports.ProcessStatus{Identity: identity, Running: false, ParentPID: parent, PGID: pgid, SID: sid}, nil
 	}
-	executable, err := os.Readlink(filepath.Join(m.procRoot, strconv.Itoa(pid), "exe"))
-	if err != nil {
-		return ports.ProcessStatus{}, err
-	}
 	cmdline, err := os.ReadFile(filepath.Join(m.procRoot, strconv.Itoa(pid), "cmdline"))
 	if err != nil {
 		return ports.ProcessStatus{}, err
 	}
 	argv := splitNUL(cmdline)
-	netns, err := os.Readlink(filepath.Join(m.procRoot, strconv.Itoa(pid), "ns", "net"))
+	executable, err := resolveObservedExecutable(filepath.Join(m.procRoot, strconv.Itoa(pid), "exe"), argv, os.Readlink)
+	if err != nil {
+		return ports.ProcessStatus{}, err
+	}
+	netns, err := resolveObservedNetNS(filepath.Join(m.procRoot, strconv.Itoa(pid), "ns", "net"), identity, os.Readlink)
 	if err != nil {
 		return ports.ProcessStatus{}, err
 	}
@@ -288,6 +288,42 @@ func (m *ProcessManager) inspectPID(pid int) (ports.ProcessStatus, error) {
 		Identity: identity, Running: true, Executable: executable, Argv: argv,
 		ParentPID: parent, PGID: pgid, SID: sid, NetNS: netns,
 	}, nil
+}
+
+func resolveObservedNetNS(path string, identity domain.ProcessIdentity, readlink func(string) (string, error)) (string, error) {
+	netns, err := readlink(path)
+	if err == nil {
+		return netns, nil
+	}
+	if !errors.Is(err, syscall.EPERM) && !errors.Is(err, syscall.EACCES) {
+		return "", err
+	}
+	if identity.BootID == "" || identity.StartTicks == 0 {
+		return "", ErrProcessIdentity
+	}
+	return "kernel-denied:" + identity.BootID + ":" + strconv.FormatUint(identity.StartTicks, 10), nil
+}
+
+func resolveObservedExecutable(exePath string, argv []string, readlink func(string) (string, error)) (string, error) {
+	executable, err := readlink(exePath)
+	if err == nil {
+		return executable, nil
+	}
+	if !errors.Is(err, syscall.EPERM) && !errors.Is(err, syscall.EACCES) {
+		return "", err
+	}
+	if len(argv) == 0 || !filepath.IsAbs(argv[0]) || filepath.Clean(argv[0]) != argv[0] {
+		return "", fmt.Errorf("kernel denied executable identity and argv[0] is unsafe: %w", ErrProcessIdentity)
+	}
+	resolved, resolveErr := filepath.EvalSymlinks(argv[0])
+	if resolveErr != nil {
+		return "", fmt.Errorf("resolve denied executable argv[0]: %w", resolveErr)
+	}
+	info, statErr := os.Stat(resolved)
+	if statErr != nil || !info.Mode().IsRegular() || info.Mode().Perm()&0o111 == 0 {
+		return "", fmt.Errorf("validate denied executable argv[0]: %w", errors.Join(statErr, ErrProcessIdentity))
+	}
+	return resolved, nil
 }
 
 func (m *ProcessManager) startedIdentity(ctx context.Context, pid int) (domain.ProcessIdentity, error) {
