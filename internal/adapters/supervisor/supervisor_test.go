@@ -15,16 +15,17 @@ import (
 )
 
 type fakeUnitProcessManager struct {
-	log        ports.Journal
-	sessionID  string
-	startCount int
-	start      domain.ProcessIdentity
-	helper     ports.ProcessStatus
-	children   []ports.ProcessStatus
-	group      []ports.ProcessStatus
-	groupErr   error
-	stopOrder  []domain.ProcessIdentity
-	inspectErr error
+	log         ports.Journal
+	sessionID   string
+	startCount  int
+	start       domain.ProcessIdentity
+	helper      ports.ProcessStatus
+	children    []ports.ProcessStatus
+	group       []ports.ProcessStatus
+	groupErr    error
+	stopOrder   []domain.ProcessIdentity
+	inspectErr  error
+	beforeStart func(context.Context) error
 }
 
 func (m *fakeUnitProcessManager) Start(ctx context.Context, _ ports.ProcessSpec) (domain.ProcessIdentity, error) {
@@ -35,6 +36,12 @@ func (m *fakeUnitProcessManager) Start(ctx context.Context, _ ports.ProcessSpec)
 	}
 	if err != nil || !foundStart {
 		return domain.ProcessIdentity{}, errors.New("start effect happened before durable intent")
+	}
+	if m.beforeStart != nil {
+		if err := m.beforeStart(ctx); err != nil {
+			return domain.ProcessIdentity{}, err
+		}
+		m.beforeStart = nil
 	}
 	m.startCount++
 	return m.start, nil
@@ -164,7 +171,7 @@ func TestServiceSupervisorJournalsBeforeStartAndDiscoversCrashBeforeFact(t *test
 	if err != nil {
 		t.Fatal(err)
 	}
-	snapshot := domain.JournalSnapshot{SchemaVersion: domain.SchemaVersion, SessionID: "session-a", State: domain.SessionOpening}
+	snapshot := domain.JournalSnapshot{SchemaVersion: domain.SchemaVersion, SessionID: "session-a", State: domain.SessionOpening, Lease: domain.LeaseRecord{Revision: "r1"}}
 	if err := log.Create(ctx, snapshot); err != nil {
 		t.Fatal(err)
 	}
@@ -175,6 +182,18 @@ func TestServiceSupervisorJournalsBeforeStartAndDiscoversCrashBeforeFact(t *test
 		log: log, sessionID: snapshot.SessionID, start: helperID,
 		helper:   ports.ProcessStatus{Identity: helperID, Running: true, Executable: "/usr/bin/pasta.avx2", PGID: 101, SID: 101, NetNS: "net:[host]"},
 		children: []ports.ProcessStatus{{Identity: childID, Running: true, Executable: "/opt/hauler", Argv: childArgv, ParentPID: 101, PGID: 101, SID: 101, NetNS: "net:[child]"}},
+	}
+	manager.beforeStart = func(ctx context.Context) error {
+		concurrent, _, err := log.Load(ctx, snapshot.SessionID)
+		if err != nil {
+			return err
+		}
+		concurrent.Lease.Revision = "r2"
+		intent := ports.IntentRecord{ID: "concurrent-lease", SessionID: snapshot.SessionID, Transition: "LeaseRenewed", Attempt: 1, Timestamp: time.Unix(10, 0).UTC()}
+		if err := log.RecordIntent(ctx, intent); err != nil {
+			return err
+		}
+		return log.RecordFact(ctx, ports.FactRecord{IntentID: intent.ID, SessionID: snapshot.SessionID, Transition: intent.Transition, Timestamp: intent.Timestamp}, concurrent)
 	}
 	inspector := &fakeUnitInspector{evidence: UnitEvidence{HostEndpoint: "127.0.0.1:5000", GuestEndpoint: "127.0.0.1:5100", ChildNetNS: "net:[child]"}}
 	controller := NewServiceSupervisor(log, manager, inspector)
@@ -197,8 +216,8 @@ func TestServiceSupervisorJournalsBeforeStartAndDiscoversCrashBeforeFact(t *test
 	if manager.startCount != 1 || record.Helper.Identity != helperID || record.Child.Identity != childID || len(next.Services) != 1 {
 		t.Fatalf("record=%#v snapshot=%#v startCount=%d", record, next, manager.startCount)
 	}
-	_, pending, err := log.Load(ctx, snapshot.SessionID)
-	if err != nil || len(pending) != 0 {
+	loaded, pending, err := log.Load(ctx, snapshot.SessionID)
+	if err != nil || len(pending) != 0 || loaded.Lease.Revision != "r2" || loaded.Services[0].Child.Identity != childID {
 		t.Fatalf("pending after ready fact = %#v, %v", pending, err)
 	}
 

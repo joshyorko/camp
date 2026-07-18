@@ -145,53 +145,55 @@ func TestStoreRejectsPointerCommittedFactWithoutCompletePointer(t *testing.T) {
 }
 
 func TestStoreComposesLeaseRenewalAndServingRefreshFromStaleSnapshots(t *testing.T) {
-	for _, order := range [][]string{{"refresh", "lease"}, {"lease", "refresh"}} {
-		t.Run(strings.Join(order, "-then-"), func(t *testing.T) {
-			ctx := context.Background()
-			store, err := NewStore(t.TempDir())
-			if err != nil {
-				t.Fatal(err)
-			}
-			now := time.Unix(100, 0).UTC()
-			oldIdentity := domain.ProcessIdentity{PID: 11, BootID: "boot", StartTicks: 11}
-			newIdentity := domain.ProcessIdentity{PID: 22, BootID: "boot", StartTicks: 22}
-			base := domain.JournalSnapshot{
-				SchemaVersion: domain.SchemaVersion, SessionID: "session-concurrent", State: domain.SessionOpen,
-				Lease:    domain.LeaseRecord{Revision: "r1"},
-				Services: []domain.ServiceUnitRecord{{Name: "registry", Child: domain.ProcessRecord{Identity: oldIdentity}}},
-			}
-			if err := store.Create(ctx, base); err != nil {
-				t.Fatal(err)
-			}
-			intents := map[string]ports.IntentRecord{
-				"refresh": {ID: "refresh", SessionID: base.SessionID, Transition: "ServingContentRefreshed", Attempt: 1, Timestamp: now},
-				"lease":   {ID: "lease", SessionID: base.SessionID, Transition: "LeaseRenewed", Attempt: 1, Timestamp: now.Add(time.Second)},
-			}
-			for _, intent := range intents {
-				if err := store.RecordIntent(ctx, intent); err != nil {
+	for _, serviceTransition := range []string{"ServingContentRefreshed", "ServiceStart", "ServiceRestart"} {
+		for _, order := range [][]string{{"service", "lease"}, {"lease", "service"}} {
+			t.Run(serviceTransition+"-"+strings.Join(order, "-then-"), func(t *testing.T) {
+				ctx := context.Background()
+				store, err := NewStore(t.TempDir())
+				if err != nil {
 					t.Fatal(err)
 				}
-			}
-			refreshCandidate := base
-			refreshCandidate.Services = []domain.ServiceUnitRecord{{Name: "registry", Child: domain.ProcessRecord{Identity: newIdentity}}}
-			leaseCandidate := base
-			leaseCandidate.Lease.Revision = "r2"
-			candidates := map[string]domain.JournalSnapshot{"refresh": refreshCandidate, "lease": leaseCandidate}
-			for _, name := range order {
-				intent := intents[name]
-				fact := ports.FactRecord{IntentID: intent.ID, SessionID: base.SessionID, Transition: intent.Transition, Timestamp: intent.Timestamp}
-				if err := store.RecordFact(ctx, fact, candidates[name]); err != nil {
-					t.Fatalf("RecordFact(%s) error = %v", name, err)
+				now := time.Unix(100, 0).UTC()
+				oldIdentity := domain.ProcessIdentity{PID: 11, BootID: "boot", StartTicks: 11}
+				newIdentity := domain.ProcessIdentity{PID: 22, BootID: "boot", StartTicks: 22}
+				base := domain.JournalSnapshot{
+					SchemaVersion: domain.SchemaVersion, SessionID: "session-concurrent", State: domain.SessionOpen,
+					Lease:    domain.LeaseRecord{Revision: "r1"},
+					Services: []domain.ServiceUnitRecord{{Name: "registry", Child: domain.ProcessRecord{Identity: oldIdentity}}},
 				}
-			}
-			loaded, pending, err := store.Load(ctx, base.SessionID)
-			if err != nil || len(pending) != 0 {
-				t.Fatalf("Load() error = %v pending=%#v", err, pending)
-			}
-			if loaded.Lease.Revision != "r2" || loaded.Services[0].Child.Identity != newIdentity {
-				t.Fatalf("composed snapshot lease=%q child=%#v", loaded.Lease.Revision, loaded.Services[0].Child.Identity)
-			}
-		})
+				if err := store.Create(ctx, base); err != nil {
+					t.Fatal(err)
+				}
+				intents := map[string]ports.IntentRecord{
+					"service": {ID: "service", SessionID: base.SessionID, Transition: serviceTransition, Attempt: 1, Timestamp: now},
+					"lease":   {ID: "lease", SessionID: base.SessionID, Transition: "LeaseRenewed", Attempt: 1, Timestamp: now.Add(time.Second)},
+				}
+				for _, intent := range intents {
+					if err := store.RecordIntent(ctx, intent); err != nil {
+						t.Fatal(err)
+					}
+				}
+				serviceCandidate := base
+				serviceCandidate.Services = []domain.ServiceUnitRecord{{Name: "registry", Child: domain.ProcessRecord{Identity: newIdentity}}}
+				leaseCandidate := base
+				leaseCandidate.Lease.Revision = "r2"
+				candidates := map[string]domain.JournalSnapshot{"service": serviceCandidate, "lease": leaseCandidate}
+				for _, name := range order {
+					intent := intents[name]
+					fact := ports.FactRecord{IntentID: intent.ID, SessionID: base.SessionID, Transition: intent.Transition, Timestamp: intent.Timestamp}
+					if err := store.RecordFact(ctx, fact, candidates[name]); err != nil {
+						t.Fatalf("RecordFact(%s) error = %v", name, err)
+					}
+				}
+				loaded, pending, err := store.Load(ctx, base.SessionID)
+				if err != nil || len(pending) != 0 {
+					t.Fatalf("Load() error = %v pending=%#v", err, pending)
+				}
+				if loaded.Lease.Revision != "r2" || loaded.Services[0].Child.Identity != newIdentity {
+					t.Fatalf("composed snapshot lease=%q child=%#v", loaded.Lease.Revision, loaded.Services[0].Child.Identity)
+				}
+			})
+		}
 	}
 }
 

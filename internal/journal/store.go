@@ -9,6 +9,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"reflect"
 	"sort"
 	"strings"
 	"syscall"
@@ -193,6 +194,11 @@ func composeFactSnapshot(current, candidate domain.JournalSnapshot, transition s
 	case "ServingContentRefreshed":
 		current.Services = candidate.Services
 		return current
+	case "ServiceStart", "ServiceRestart":
+		if !reflect.DeepEqual(current.Services, candidate.Services) {
+			current.Services = candidate.Services
+			return current
+		}
 	case "WorkspaceMirrored", "WorkspaceImagesInventoried", "RegistrySnapshotSealed", "RootSnapshotStable", "GenerationUploaded", "PointerCommitted":
 		candidate.Lease = current.Lease
 	}
