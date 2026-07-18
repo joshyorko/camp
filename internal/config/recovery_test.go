@@ -39,3 +39,16 @@ func TestDurableConfigurationExcludesHostCredentialsAndRetainsRecoveryInputs(t *
 		t.Fatalf("durable configuration = %#v", record)
 	}
 }
+
+func TestDurableBackendConfigurationPersistsOnlySanitizedS3Identity(t *testing.T) {
+	backend, err := ResolveBackend("s3://camp-bucket/team", S3Values{
+		Endpoint: "https://s3.example.test", Region: "us-east-1", PathStyle: true,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	record := DurableBackendConfiguration(Runtime{Bootstrap: Bootstrap{Capsule: "brain"}}, backend, XDGPaths{})
+	if record.BackendKind != "s3" || record.BackendURL != "s3://camp-bucket/team" || record.BackendFingerprint != backend.Fingerprint {
+		t.Fatalf("durable S3 identity = %#v", record)
+	}
+}

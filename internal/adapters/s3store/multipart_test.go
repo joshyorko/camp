@@ -23,6 +23,20 @@ type countingSource struct {
 	opens int
 }
 
+type changingSource struct {
+	bodies [][]byte
+	opens  int
+}
+
+func (s *changingSource) Open() (io.ReadCloser, error) {
+	if s.opens >= len(s.bodies) {
+		return nil, errors.New("source opened too many times")
+	}
+	body := s.bodies[s.opens]
+	s.opens++
+	return io.NopCloser(bytes.NewReader(body)), nil
+}
+
 func TestPutImmutableRejectsSourceIntegrityBeforeMultipart(t *testing.T) {
 	body := []byte("wrong bytes")
 	source := &countingSource{body: body}
@@ -144,6 +158,31 @@ func TestPutImmutableAbortsMultipartAfterUploadFailure(t *testing.T) {
 	}
 }
 
+func TestPutImmutablePreservesUploadAndAbortFailures(t *testing.T) {
+	body := []byte("archive")
+	digestBytes := sha256.Sum256(body)
+	digest := hex.EncodeToString(digestBytes[:])
+	store := newStore(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodHead:
+			http.NotFound(w, r)
+		case r.Method == http.MethodPost && r.URL.Query().Has("uploads"):
+			_, _ = io.WriteString(w, `<InitiateMultipartUploadResult><UploadId>upload-1</UploadId></InitiateMultipartUploadResult>`)
+		case r.Method == http.MethodPut:
+			http.Error(w, "part exploded", http.StatusInternalServerError)
+		case r.Method == http.MethodDelete:
+			http.Error(w, "abort exploded", http.StatusServiceUnavailable)
+		default:
+			http.Error(w, "unexpected", http.StatusBadRequest)
+		}
+	}))
+
+	_, err := store.PutImmutable(context.Background(), "capsule/generation.tar.zst", &countingSource{body: body}, digest, int64(len(body)))
+	if err == nil || !strings.Contains(err.Error(), "part exploded") || !strings.Contains(err.Error(), "abort exploded") {
+		t.Fatalf("PutImmutable error = %v, want distinct part and abort failures", err)
+	}
+}
+
 func TestPutImmutableRejectsReadbackMismatch(t *testing.T) {
 	body := []byte("archive")
 	digestBytes := sha256.Sum256(body)
@@ -174,6 +213,71 @@ func TestPutImmutableRejectsReadbackMismatch(t *testing.T) {
 	_, err := store.PutImmutable(context.Background(), "capsule/generation.tar.zst", &countingSource{body: body}, digest, int64(len(body)))
 	if !errors.Is(err, ports.ErrIntegrity) {
 		t.Fatalf("PutImmutable error = %v, want integrity error", err)
+	}
+}
+
+func TestPutImmutableRejectsWrongExpectedSizeBeforeMultipart(t *testing.T) {
+	body := []byte("archive")
+	digestBytes := sha256.Sum256(body)
+	digest := hex.EncodeToString(digestBytes[:])
+	multipartStarted := false
+	store := newStore(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodHead:
+			http.NotFound(w, r)
+		case r.Method == http.MethodPost && r.URL.Query().Has("uploads"):
+			multipartStarted = true
+			_, _ = io.WriteString(w, `<InitiateMultipartUploadResult><UploadId>upload-1</UploadId></InitiateMultipartUploadResult>`)
+		default:
+			http.Error(w, "unexpected", http.StatusBadRequest)
+		}
+	}))
+
+	_, err := store.PutImmutable(context.Background(), "capsule/generation.tar.zst", &countingSource{body: body}, digest, int64(len(body)+1))
+	if !errors.Is(err, ports.ErrIntegrity) {
+		t.Fatalf("PutImmutable error = %v, want integrity error", err)
+	}
+	if multipartStarted {
+		t.Fatal("multipart upload started before expected size verification")
+	}
+}
+
+func TestPutImmutableRejectsDifferentBytesFromSecondSourceOpen(t *testing.T) {
+	verified := []byte("verified")
+	uploaded := []byte("different")
+	digestBytes := sha256.Sum256(verified)
+	digest := hex.EncodeToString(digestBytes[:])
+	completed := false
+	aborted := false
+	store := newStore(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodHead:
+			http.NotFound(w, r)
+		case r.Method == http.MethodPost && r.URL.Query().Has("uploads"):
+			_, _ = io.WriteString(w, `<InitiateMultipartUploadResult><UploadId>upload-1</UploadId></InitiateMultipartUploadResult>`)
+		case r.Method == http.MethodPut:
+			_, _ = io.Copy(io.Discard, r.Body)
+			w.Header().Set("ETag", `"part-1"`)
+		case r.Method == http.MethodPost:
+			completed = true
+			_, _ = io.WriteString(w, `<CompleteMultipartUploadResult><ETag>"revision"</ETag></CompleteMultipartUploadResult>`)
+		case r.Method == http.MethodDelete:
+			aborted = true
+			w.WriteHeader(http.StatusNoContent)
+		default:
+			http.Error(w, "unexpected", http.StatusBadRequest)
+		}
+	}))
+
+	_, err := store.PutImmutable(context.Background(), "capsule/generation.tar.zst", &changingSource{bodies: [][]byte{verified, uploaded}}, digest, int64(len(verified)))
+	if !errors.Is(err, ports.ErrIntegrity) {
+		t.Fatalf("PutImmutable error = %v, want integrity error", err)
+	}
+	if completed {
+		t.Fatal("multipart upload completed with unverified second-open bytes")
+	}
+	if !aborted {
+		t.Fatal("multipart upload was not aborted after source changed")
 	}
 }
 

@@ -16,6 +16,7 @@ import (
 
 	devpodadapter "github.com/joshyorko/camp/internal/adapters/devpod"
 	"github.com/joshyorko/camp/internal/adapters/hydration"
+	"github.com/joshyorko/camp/internal/adapters/objectstore"
 	"github.com/joshyorko/camp/internal/capsule"
 	"github.com/joshyorko/camp/internal/config"
 	"github.com/joshyorko/camp/internal/coordination"
@@ -76,18 +77,19 @@ type OpenTargetResolver interface {
 }
 
 type OpenDependencies struct {
-	Journal     ports.Journal
-	Paths       config.XDGPaths
-	Backend     config.FileBackend
-	Ownership   *capsule.Ownership
-	Initializer OpenInitializer
-	Pointers    OpenPointerReader
-	Generations OpenGenerationReader
-	Leases      OpenLeaseManager
-	Hydrator    OpenHydrator
-	DevPod      OpenDevPod
-	Target      OpenTargetResolver
-	Clock       ports.Clock
+	Journal         ports.Journal
+	Paths           config.XDGPaths
+	Backend         config.FileBackend
+	ResolvedBackend config.Backend
+	Ownership       *capsule.Ownership
+	Initializer     OpenInitializer
+	Pointers        OpenPointerReader
+	Generations     OpenGenerationReader
+	Leases          OpenLeaseManager
+	Hydrator        OpenHydrator
+	DevPod          OpenDevPod
+	Target          OpenTargetResolver
+	Clock           ports.Clock
 }
 
 type OpenRequest struct {
@@ -108,6 +110,7 @@ type OpenRequest struct {
 	LeaseTTL        time.Duration
 	Runtime         config.Runtime
 	Backend         config.FileBackend
+	ResolvedBackend config.Backend
 }
 
 type OpenResult struct {
@@ -179,6 +182,27 @@ func NewOpen(deps OpenDependencies) *Open {
 	return &Open{deps: deps}
 }
 
+func NewOpenWithBackend(ctx context.Context, deps OpenDependencies, backend config.Backend, options objectstore.Options) (*Open, error) {
+	store, err := objectstore.NewWriter(ctx, backend, options)
+	if err != nil {
+		return nil, fmt.Errorf("compose open object store: %w", err)
+	}
+	deps.ResolvedBackend = backend
+	deps.Pointers = coordination.NewPointerRepository(store)
+	deps.Generations = coordination.NewGenerationRepository(store)
+	deps.Leases = coordination.NewLeaseRepository(store)
+	if deps.Hydrator != nil {
+		hydrator, ok := deps.Hydrator.(interface {
+			WithStore(hydration.GenerationStore) *hydration.Controller
+		})
+		if !ok {
+			return nil, errors.New("compose open hydrator: hydrator cannot bind the selected object store")
+		}
+		deps.Hydrator = hydrator.WithStore(store)
+	}
+	return NewOpen(deps), nil
+}
+
 func (o *Open) Run(ctx context.Context, request OpenRequest) (OpenResult, error) {
 	request = normalizeOpenRequest(request)
 	if err := o.validate(request); err != nil {
@@ -231,6 +255,9 @@ func (o *Open) Reconcile(ctx context.Context, sessionID string) (domain.JournalS
 	snapshot, _, err := o.deps.Journal.Load(ctx, sessionID)
 	if err != nil {
 		return domain.JournalSnapshot{}, err
+	}
+	if err := validateSnapshotBackend(snapshot, o.effectiveBackend(OpenRequest{})); err != nil {
+		return snapshot, err
 	}
 	if err := validateOpenRecoveryObjective(snapshot); err != nil {
 		return snapshot, err
@@ -533,16 +560,21 @@ func (o *Open) validate(request OpenRequest) error {
 	if _, err := request.SourceLineage.PointerKey(request.Capsule); err != nil {
 		return fmt.Errorf("open source lineage is unsafe: %w", err)
 	}
-	backend := request.Backend
-	if backend.Root == "" && backend.SanitizedURL == "" && backend.Fingerprint == "" {
-		backend = o.deps.Backend
+	backend := o.effectiveBackend(request)
+	if !validResolvedBackend(backend) {
+		return errors.New("open backend is not a strict credential-free backend descriptor")
 	}
-	if backend.Root == "" || backend.SanitizedURL == "" || backend.Fingerprint == "" {
-		return errors.New("open file backend is not a strict credential-free file URL")
+	if request.Backend.Root != "" || request.Backend.SanitizedURL != "" || request.Backend.Fingerprint != "" {
+		requested := config.Backend{Kind: config.BackendFile, SanitizedURL: request.Backend.SanitizedURL, Fingerprint: request.Backend.Fingerprint, File: &request.Backend}
+		if !sameBackendIdentity(requested, backend) {
+			return fmt.Errorf("open request file backend identity does not match the constructor backend: %w", ErrOpenSessionMismatch)
+		}
 	}
-	resolved, err := config.ResolveFileBackend(backend.SanitizedURL)
-	if err != nil || resolved.Root != backend.Root || resolved.Fingerprint != backend.Fingerprint {
-		return errors.New("open file backend is not a strict credential-free file URL")
+	if request.ResolvedBackend.Kind != "" && o.deps.ResolvedBackend.Kind == "" {
+		return fmt.Errorf("open request backend identity has no constructor-bound object store: %w", ErrOpenSessionMismatch)
+	}
+	if request.ResolvedBackend.Kind != "" && o.deps.ResolvedBackend.Kind != "" && !sameBackendIdentity(request.ResolvedBackend, o.deps.ResolvedBackend) {
+		return fmt.Errorf("open request backend identity does not match the composed object store: %w", ErrOpenSessionMismatch)
 	}
 	if request.Mode != domain.SessionReadWrite && request.Mode != domain.SessionReadOnly {
 		return fmt.Errorf("unsupported open session mode %q", request.Mode)
@@ -603,10 +635,7 @@ func (o *Open) create(ctx context.Context, request OpenRequest) (OpenResult, err
 	request.SessionID = sessionID
 	paths := o.deps.Paths
 	sessionRoot := filepath.Join(paths.SessionRoot, sessionID)
-	backend := request.Backend
-	if backend.Root == "" {
-		backend = o.deps.Backend
-	}
+	backend := o.effectiveBackend(request)
 	runtime := request.Runtime
 	runtime.Capsule = request.Capsule
 	now := o.deps.Clock.Now().UTC()
@@ -622,7 +651,7 @@ func (o *Open) create(ctx context.Context, request OpenRequest) (OpenResult, err
 		Cleanup:   domain.Cleanup{State: domain.CleanupPending},
 		Recovery: domain.RecoveryRecord{
 			Objective:     domain.RecoveryObjectiveOpen,
-			Configuration: config.DurableConfiguration(runtime, backend, paths),
+			Configuration: config.DurableBackendConfiguration(runtime, backend, paths),
 			Session:       domain.SessionArtifactPaths{Root: sessionRoot, RuntimeRoot: filepath.Join(sessionRoot, "runtime"), HaulPath: filepath.Join(sessionRoot, "generation.tar.zst"), RegistryOverlay: filepath.Join(sessionRoot, "registry")},
 			Entry:         domain.EntryRequestRecord{Mode: request.EntryMode, Target: entryTarget},
 			Cleanup:       domain.CleanupPolicy{WorkspaceAction: domain.WorkspaceCleanupDelete, RemoveSessionArtifacts: true},
@@ -727,6 +756,53 @@ func (o *Open) create(ctx context.Context, request OpenRequest) (OpenResult, err
 	return o.continueOpeningFromMaterialization(ctx, snapshot, request, journal)
 }
 
+func (o *Open) effectiveBackend(request OpenRequest) config.Backend {
+	if o.deps.ResolvedBackend.Kind != "" {
+		return o.deps.ResolvedBackend
+	}
+	file := o.deps.Backend
+	if file.Root == "" && file.SanitizedURL == "" && file.Fingerprint == "" {
+		return config.Backend{}
+	}
+	return config.Backend{Kind: config.BackendFile, SanitizedURL: file.SanitizedURL, Fingerprint: file.Fingerprint, File: &file}
+}
+
+func sameBackendIdentity(left, right config.Backend) bool {
+	return validResolvedBackend(left) && validResolvedBackend(right) && left.Kind == right.Kind && left.SanitizedURL == right.SanitizedURL && left.Fingerprint == right.Fingerprint
+}
+
+func validResolvedBackend(backend config.Backend) bool {
+	switch backend.Kind {
+	case config.BackendFile:
+		if backend.File == nil {
+			return false
+		}
+		resolved, err := config.ResolveBackend(backend.SanitizedURL, config.S3Values{})
+		return err == nil && resolved.Fingerprint == backend.Fingerprint && resolved.File != nil && *resolved.File == *backend.File
+	case config.BackendS3:
+		if backend.S3 == nil {
+			return false
+		}
+		resolved, err := config.ResolveBackend(backend.SanitizedURL, config.S3Values{
+			Endpoint: backend.S3.Endpoint, Region: backend.S3.Region, PathStyle: backend.S3.PathStyle, Insecure: backend.S3.Insecure,
+		})
+		return err == nil && resolved.Fingerprint == backend.Fingerprint && resolved.S3 != nil && *resolved.S3 == *backend.S3
+	default:
+		return false
+	}
+}
+
+func validateSnapshotBackend(snapshot domain.JournalSnapshot, backend config.Backend) error {
+	configuration := snapshot.Recovery.Configuration
+	if configuration.BackendKind == "" && configuration.BackendURL == "" && configuration.BackendFingerprint == "" {
+		return nil
+	}
+	if !validResolvedBackend(backend) || configuration.BackendKind != string(backend.Kind) || configuration.BackendURL != backend.SanitizedURL || configuration.BackendFingerprint != backend.Fingerprint {
+		return fmt.Errorf("session %q backend identity does not match the composed object store: %w", snapshot.SessionID, ErrOpenSessionMismatch)
+	}
+	return nil
+}
+
 func (o *Open) continueOpeningFromMaterialization(ctx context.Context, snapshot domain.JournalSnapshot, request OpenRequest, journal *openJournal) (OpenResult, error) {
 	journal.snapshot = &snapshot
 	root := snapshot.Materialization.CanonicalPath
@@ -777,6 +853,9 @@ func (o *Open) continueOpeningFromMaterialization(ctx context.Context, snapshot 
 }
 
 func (o *Open) reenter(ctx context.Context, snapshot domain.JournalSnapshot, request OpenRequest) (OpenResult, error) {
+	if err := validateSnapshotBackend(snapshot, o.effectiveBackend(request)); err != nil {
+		return OpenResult{}, err
+	}
 	if (request.SessionID != "" && request.SessionID != snapshot.SessionID) || request.Capsule != snapshot.Capsule || (domain.Lineage{Branch: request.Branch}) != snapshot.Lineage ||
 		(request.Mode != "" && request.Mode != snapshot.Mode) || (request.Context != "" && request.Context != snapshot.Workspace.Context) ||
 		(request.Provider != "" && request.Provider != snapshot.Workspace.Provider) {

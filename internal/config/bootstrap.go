@@ -18,6 +18,10 @@ type Overrides struct {
 	RegistryPort     *int
 	FileserverPort   *int
 	DevcontainerPath *string
+	S3Endpoint       *string
+	S3Region         *string
+	S3PathStyle      *bool
+	S3Insecure       *bool
 }
 
 type BootstrapInput struct {
@@ -27,20 +31,22 @@ type BootstrapInput struct {
 }
 
 type Bootstrap struct {
-	Capsule        string `json:"capsule" yaml:"capsule"`
-	Backend        string `json:"backend" yaml:"backend"`
-	Source         string `json:"source,omitempty" yaml:"source,omitempty"`
-	RegistryPort   int    `json:"registryPort" yaml:"registryPort"`
-	FileserverPort int    `json:"fileserverPort" yaml:"fileserverPort"`
-	AccessToken    string `json:"accessToken,omitempty" yaml:"accessToken,omitempty"`
+	Capsule        string   `json:"capsule" yaml:"capsule"`
+	Backend        string   `json:"backend" yaml:"backend"`
+	Source         string   `json:"source,omitempty" yaml:"source,omitempty"`
+	RegistryPort   int      `json:"registryPort" yaml:"registryPort"`
+	FileserverPort int      `json:"fileserverPort" yaml:"fileserverPort"`
+	AccessToken    string   `json:"accessToken,omitempty" yaml:"accessToken,omitempty"`
+	S3             S3Values `json:"s3,omitempty" yaml:"s3,omitempty"`
 }
 
 type userConfig struct {
-	DefaultCapsule string `yaml:"defaultCapsule"`
-	Backend        string `yaml:"backend"`
-	Source         string `yaml:"source"`
-	RegistryPort   int    `yaml:"registryPort"`
-	FileserverPort int    `yaml:"fileserverPort"`
+	DefaultCapsule string   `yaml:"defaultCapsule"`
+	Backend        string   `yaml:"backend"`
+	Source         string   `yaml:"source"`
+	RegistryPort   int      `yaml:"registryPort"`
+	FileserverPort int      `yaml:"fileserverPort"`
+	S3             S3Values `yaml:"s3"`
 }
 
 func ResolveBootstrap(input BootstrapInput) (Bootstrap, error) {
@@ -112,6 +118,7 @@ func applyUser(config *Bootstrap, user userConfig) {
 	if user.FileserverPort != 0 {
 		config.FileserverPort = user.FileserverPort
 	}
+	config.S3 = user.S3
 }
 
 func applyBootstrapEnvironment(config *Bootstrap, environment map[string]string) {
@@ -126,6 +133,22 @@ func applyBootstrapEnvironment(config *Bootstrap, environment map[string]string)
 	}
 	if value, ok := environmentValue(environment, "CAMP_ACCESS_TOKEN"); ok {
 		config.AccessToken = value
+	}
+	if value, ok := environmentValue(environment, "CAMP_S3_ENDPOINT"); ok {
+		config.S3.Endpoint = value
+	}
+	if value, ok := environmentValue(environment, "CAMP_S3_REGION"); ok {
+		config.S3.Region = value
+	}
+	if value, ok := environmentValue(environment, "CAMP_S3_PATH_STYLE"); ok {
+		if parsed, err := strconv.ParseBool(value); err == nil {
+			config.S3.PathStyle = parsed
+		}
+	}
+	if value, ok := environmentValue(environment, "CAMP_S3_INSECURE"); ok {
+		if parsed, err := strconv.ParseBool(value); err == nil {
+			config.S3.Insecure = parsed
+		}
 	}
 	if value, ok := environmentValue(environment, "CAMP_REGISTRY_PORT"); ok {
 		if parsed, err := strconv.Atoi(value); err == nil {
@@ -154,6 +177,18 @@ func applyBootstrapFlags(config *Bootstrap, flags Overrides) {
 	}
 	if flags.FileserverPort != nil {
 		config.FileserverPort = *flags.FileserverPort
+	}
+	if flags.S3Endpoint != nil {
+		config.S3.Endpoint = *flags.S3Endpoint
+	}
+	if flags.S3Region != nil {
+		config.S3.Region = *flags.S3Region
+	}
+	if flags.S3PathStyle != nil {
+		config.S3.PathStyle = *flags.S3PathStyle
+	}
+	if flags.S3Insecure != nil {
+		config.S3.Insecure = *flags.S3Insecure
 	}
 }
 

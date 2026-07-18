@@ -152,7 +152,7 @@ func (s *Store) PutImmutable(ctx context.Context, key string, source ports.Resta
 			}
 		}
 	}()
-	parts, err := s.uploadParts(ctx, key, uploadID, source, expectedSize)
+	parts, err := s.uploadParts(ctx, key, uploadID, source, expectedSHA256, expectedSize)
 	if err != nil {
 		return ports.ObjectMeta{}, err
 	}
@@ -274,7 +274,7 @@ type completedPart struct {
 
 const multipartPartSize int64 = 8 << 20
 
-func (s *Store) uploadParts(ctx context.Context, key, uploadID string, source ports.RestartableSource, size int64) ([]completedPart, error) {
+func (s *Store) uploadParts(ctx context.Context, key, uploadID string, source ports.RestartableSource, expectedSHA256 string, size int64) ([]completedPart, error) {
 	reader, err := source.Open()
 	if err != nil {
 		return nil, fmt.Errorf("reopen immutable source for %q: %w", key, err)
@@ -283,11 +283,13 @@ func (s *Store) uploadParts(ctx context.Context, key, uploadID string, source po
 		return nil, fmt.Errorf("reopen immutable source for %q: nil reader: %w", key, ports.ErrIntegrity)
 	}
 	defer reader.Close()
+	hash := sha256.New()
+	verifiedReader := io.TeeReader(&contextReader{ctx: ctx, reader: reader}, hash)
 	parts := make([]completedPart, 0, int(size/multipartPartSize)+1)
 	remaining := size
 	for number := 1; remaining > 0 || number == 1; number++ {
 		partSize := min(remaining, multipartPartSize)
-		request, err := s.multipartRequest(ctx, http.MethodPut, key, url.Values{"partNumber": {strconv.Itoa(number)}, "uploadId": {uploadID}}, io.LimitReader(reader, partSize))
+		request, err := s.multipartRequest(ctx, http.MethodPut, key, url.Values{"partNumber": {strconv.Itoa(number)}, "uploadId": {uploadID}}, io.LimitReader(verifiedReader, partSize))
 		if err != nil {
 			return nil, err
 		}
@@ -308,6 +310,17 @@ func (s *Store) uploadParts(ctx context.Context, key, uploadID string, source po
 		}
 		parts = append(parts, completedPart{ETag: etag, PartNumber: number})
 		remaining -= partSize
+	}
+	extra := make([]byte, 1)
+	if count, err := verifiedReader.Read(extra); err != io.EOF || count != 0 {
+		if err != nil {
+			return nil, fmt.Errorf("verify uploaded source for %q: %w", key, err)
+		}
+		return nil, fmt.Errorf("uploaded source for %q exceeds expected size: %w", key, ports.ErrIntegrity)
+	}
+	digest := hex.EncodeToString(hash.Sum(nil))
+	if digest != expectedSHA256 {
+		return nil, fmt.Errorf("uploaded source for %q has sha256 %s: %w", key, digest, ports.ErrIntegrity)
 	}
 	return parts, nil
 }

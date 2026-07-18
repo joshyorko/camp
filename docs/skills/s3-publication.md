@@ -1,10 +1,57 @@
 # S3 immutable publication
 
-Camp's S3 adapter publishes immutable objects with the existing injected HTTP
-`Signer` seam. This slice does not adopt the AWS SDK for Go v2: backend
-composition and runtime credential-chain selection remain separate work.
-Credentials must stay inside the signer and must not enter `s3store.Config`,
-object metadata, object keys, journals, or logs.
+Camp keeps the S3 adapter's narrow injected HTTP `Signer` seam and uses the AWS
+SDK for Go v2 only in `internal/adapters/objectstore`, where the backend factory
+loads the standard runtime credential chain and supplies a SigV4
+signer. This preserves focused protocol tests without reimplementing credential
+discovery. Credentials are retrieved at request time and must not enter
+`s3store.Config`, backend descriptors, object metadata, object keys, journals,
+or logs.
+
+Resolve a backend through `config.ResolveBackend`. The application composition
+seam passes that descriptor through `app.NewOpenWithBackend`, which constructs the
+`ports.ObjectStore`, binds the pointer, generation, and lease repositories to
+that same store, rebinds the hydration controller's archive reads, and carries
+the resolved identity into session recovery through
+`config.DurableBackendConfiguration`. The constructor-bound descriptor is
+authoritative: a request may repeat it but must fail closed if it supplies a
+different identity or if no backend was constructor-bound, because request
+metadata cannot select or relabel already-injected repositories. The legacy
+file-backend request field is likewise an identity assertion, not a store
+selector, and must match the constructor backend. Factory and
+application tests prove this composition seam; they are not executable wiring
+proof. Until `cmd/camp` calls this seam, describe the feature as backend
+composition rather than production CLI wiring.
+
+The `s3://` URL contains only the bucket and optional clean prefix. Endpoint,
+region, path-style addressing, and transport policy are separate bootstrap
+values. The YAML `s3` block accepts only those non-secret values; AWS credential
+source fields are not part of `userConfig`, and credentials come from the
+standard runtime chain. IP-address-shaped and other non-DNS bucket names are
+rejected. HTTPS is the default policy;
+an `http://` endpoint is rejected unless `insecure: true` (or
+`CAMP_S3_INSECURE=true`) is explicit, and `insecure: true` is rejected for an
+HTTPS endpoint. Bucket names are DNS-compatible and endpoint URLs cannot carry
+credentials, paths, queries, or fragments. Dotted bucket names require
+path-style addressing with HTTPS because wildcard certificates do not cover a
+multi-label virtual-host bucket prefix. IP-literal endpoints also require
+path-style addressing because prepending a bucket would no longer address the
+configured origin.
+
+Before an S3 store is bound to pointer, generation, lease, or hydration work,
+the writer composition must use `objectstore.NewWriter`, which runs
+`ProbeWriter` against a random disposable key. The low-level `objectstore.New`
+factory does not certify writer safety and must not be bound directly to writer
+repositories. The probe must prove create-if-absent, conditional replacement,
+stale-write rejection, exact readback, conditional delete, and cleanup. A failed
+or ambiguous probe prevents repository binding; merely constructing an HTTP
+client is not writer-safety evidence.
+
+Durable recovery records contain only backend kind, sanitized `s3://` identity,
+and its configuration fingerprint. Endpoint and addressing policy contribute
+to that fingerprint but credential-source configuration and resolved secrets do
+not. Path-style requests use `<endpoint>/<bucket>/<prefix>/<key>`; virtual-host
+requests use `<bucket>.<endpoint>/<prefix>/<key>` before SigV4 signing.
 
 `PutImmutable` first uses `HEAD` to detect an existing key. An existing object is
 accepted only when its expected size and `x-amz-meta-sha256` agree and a `GET`
@@ -14,7 +61,9 @@ never interpreted as content hashes.
 
 For a missing key, Camp opens the restartable source once to verify the exact
 size and SHA-256 before creating remote multipart state, then opens it again to
-upload deterministic, ascending parts bounded to 8 MiB. Completion carries
+upload deterministic, ascending parts bounded to 8 MiB. Every opening is
+untrusted independently: the bytes consumed by multipart upload are hashed and
+must match the expected size and SHA-256 before completion. Completion carries
 `If-None-Match: *`, preserving create-only publication.
 
 Every failure before completion attempts `AbortMultipartUpload` using an

@@ -148,6 +148,41 @@ func newStore(t *testing.T, handler http.Handler) *s3store.Store {
 	return store
 }
 
+func TestVirtualHostAddressingPlacesBucketInHost(t *testing.T) {
+	var host, requestPath string
+	wantStop := errors.New("stop after address capture")
+	store, err := s3store.New(s3store.Config{
+		Endpoint: "https://s3.example.test:9000", Bucket: "camp-bucket",
+		Signer: s3store.SignFunc(func(request *http.Request) error {
+			host, requestPath = request.URL.Host, request.URL.Path
+			return wantStop
+		}),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.Head(context.Background(), "capsule/object"); !errors.Is(err, wantStop) {
+		t.Fatalf("Head error = %v", err)
+	}
+	if host != "camp-bucket.s3.example.test:9000" || requestPath != "/capsule/object" {
+		t.Fatalf("request address = %q %q", host, requestPath)
+	}
+}
+
+func TestSigningFailureStopsRequest(t *testing.T) {
+	want := errors.New("credential chain unavailable")
+	storeWithFailure, err := s3store.New(s3store.Config{
+		Endpoint: "https://s3.example.test", Bucket: "camp-bucket", PathStyle: true,
+		Signer: s3store.SignFunc(func(*http.Request) error { return want }),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := storeWithFailure.Head(context.Background(), "object"); !errors.Is(err, want) {
+		t.Fatalf("Head error = %v, want signer failure", err)
+	}
+}
+
 func TestConditionalMutationsUseOpaqueRevisions(t *testing.T) {
 	server := newMemoryS3()
 	store := newStore(t, server)
