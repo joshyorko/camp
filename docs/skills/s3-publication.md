@@ -96,3 +96,30 @@ Run the real contract with Docker available:
 ```sh
 go test ./integration -run '^TestMinIOImmutableLifecycle$' -count=1 -v -timeout=3m
 ```
+
+## Independent-controller acceptance
+
+S3 concurrency and portability evidence must use separate OS processes with
+disjoint `XDG_CONFIG_HOME`, `XDG_DATA_HOME`, `XDG_STATE_HOME`, and
+`XDG_CACHE_HOME`. Synchronize contenders only after each process has read the
+same pointer revision and uploaded its independently named immutable archive
+and sidecar. Then release both processes to call the production pointer
+repository's compare-and-swap operation. Valid evidence has exactly one winner,
+a typed `coordination.ErrPointerChanged` loser, a readable losing archive and
+sidecar, and no active multipart uploads. A third process with a new XDG root
+must reconstruct pointer and history from MinIO and verify the downloaded
+winner digest.
+
+`TestS3TwoWriterConflict` is this repository/adapter-level process contract. It
+also proves that the retained loser can root a branch at the recorded parent.
+It does not prove a Camp lifecycle reopen: that claim requires a production
+backend factory, S3 runtime configuration and credential-chain composition,
+and lifecycle CLI/application wiring. Until those boundaries exist, do not
+replace them with an integration-only factory or describe repository-level
+download evidence as DevPod/Hauler reopen evidence.
+
+Run the process contract with Docker available:
+
+```sh
+go test ./integration -run '^TestS3TwoWriterConflict$' -count=1 -v -timeout=3m
+```
