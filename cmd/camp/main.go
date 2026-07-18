@@ -1,24 +1,16 @@
 package main
 
 import (
-	"fmt"
+	"context"
 	"os"
 
-	"github.com/spf13/cobra"
+	"github.com/joshyorko/camp/internal/cli"
 )
 
-func newRootCommand() *cobra.Command {
-	return &cobra.Command{
-		Use:           "camp",
-		Short:         "Recoverable capsule workspaces",
-		SilenceUsage:  true,
-		SilenceErrors: true,
-	}
+func run(args []string, streams cli.Streams) int {
+	return cli.Execute(context.Background(), cli.NewRoot(), args, streams)
 }
 
 func main() {
-	if err := newRootCommand().Execute(); err != nil {
-		_, _ = fmt.Fprintln(os.Stderr, err)
-		os.Exit(1)
-	}
+	os.Exit(run(os.Args[1:], cli.Streams{In: os.Stdin, Out: os.Stdout, ErrOut: os.Stderr}))
 }
