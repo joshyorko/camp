@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"strconv"
 
+	"github.com/joshyorko/camp/internal/adapters/hauler"
 	"github.com/joshyorko/camp/internal/adapters/supervisor"
 	"github.com/joshyorko/camp/internal/app"
 	"github.com/joshyorko/camp/internal/domain"
@@ -70,8 +71,14 @@ func (r *ServingRefresher) Refresh(ctx context.Context, request app.ServingRefre
 }
 
 func refreshedServiceSpec(sessionID string, record domain.ServiceUnitRecord, directory string, generation uint64) (supervisor.ServiceSpec, error) {
-	if record.Name == "" || record.Child.DesiredExecutable == "" || len(record.Child.Argv) < 2 || record.Child.Argv[0] != record.Child.DesiredExecutable || !filepath.IsAbs(directory) {
+	if record.Child.DesiredExecutable == "" || !filepath.IsAbs(record.Child.DesiredExecutable) || len(record.Child.Argv) < 6 || record.Child.Argv[0] != record.Child.DesiredExecutable || !filepath.IsAbs(directory) {
 		return supervisor.ServiceSpec{}, errors.New("recorded service identity is incomplete")
+	}
+	if record.Name != hauler.RegistryServiceName && record.Name != hauler.FileserverServiceName {
+		return supervisor.ServiceSpec{}, errors.New("recorded Hauler service is unsupported")
+	}
+	if record.Child.Argv[1] != "store" || record.Child.Argv[2] != "--store" || !filepath.IsAbs(record.Child.Argv[3]) || record.Child.Argv[4] != "serve" || record.Child.Argv[5] != record.Name {
+		return supervisor.ServiceSpec{}, errors.New("recorded Hauler executable, subcommand, and service do not match")
 	}
 	argv := append([]string(nil), record.Child.Argv[1:]...)
 	replaced := false

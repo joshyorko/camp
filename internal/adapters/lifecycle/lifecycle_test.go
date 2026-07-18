@@ -54,6 +54,22 @@ func TestCloseEffectsUseRecordedOwnershipAndChildFirstControllers(t *testing.T) 
 	}
 }
 
+func TestCloseEffectsComposeProductionServiceSupervisorChildFirst(t *testing.T) {
+	var events []string
+	processes := &fakeProcesses{events: &events}
+	services := supervisor.NewServiceSupervisor(nil, processes, &fakeUnitInspector{events: &events})
+	effects := NewCloseEffects(&fakeWorkspace{}, processes, services, &fakeLeases{}, &fakeOwnership{})
+	snapshot := lifecycleSnapshot(t.TempDir())
+
+	if err := effects.StopServices(context.Background(), snapshot); err != nil {
+		t.Fatalf("StopServices() error = %v", err)
+	}
+	want := []string{"process:12", "process:11", "absent:registry", "process:22", "process:21", "absent:fileserver"}
+	if !reflect.DeepEqual(events, want) {
+		t.Fatalf("events = %#v, want child/helper/absence order %#v", events, want)
+	}
+}
+
 func TestCloseEffectsKeepWorkspaceStopsAndAdoptedRootIsPreserved(t *testing.T) {
 	var events []string
 	effects := NewCloseEffects(&fakeWorkspace{events: &events}, &fakeProcesses{events: &events}, &fakeServices{events: &events}, &fakeLeases{events: &events}, &fakeOwnership{events: &events})
@@ -198,6 +214,31 @@ func TestServingRefresherValidatesAllRecordsBeforeStoppingAnything(t *testing.T)
 	}
 }
 
+func TestServingRefresherRejectsWrongHaulerServicePairingBeforeStoppingAnything(t *testing.T) {
+	tests := map[string]func(*domain.ServiceUnitRecord){
+		"executable": func(record *domain.ServiceUnitRecord) { record.Child.DesiredExecutable = "hauler" },
+		"subcommand": func(record *domain.ServiceUnitRecord) { record.Child.Argv[4] = "load" },
+		"service":    func(record *domain.ServiceUnitRecord) { record.Child.Argv[5] = "fileserver" },
+	}
+	for name, mutate := range tests {
+		t.Run(name, func(t *testing.T) {
+			snapshot := lifecycleSnapshot(t.TempDir())
+			mutate(&snapshot.Services[0])
+			services := &fakeServices{}
+			err := NewServingRefresher(&fakeJournal{snapshot: snapshot}, services).Refresh(context.Background(), app.ServingRefreshRequest{
+				SessionID: snapshot.SessionID, Generation: domain.GenerationRef{Generation: 8, ArchiveSHA256: "sha"},
+				HaulPath: filepath.Join(t.TempDir(), "generation.tar.zst"), RegistrySnapshotRoot: filepath.Join(t.TempDir(), "registry"),
+			})
+			if err == nil {
+				t.Fatal("Refresh() error = nil, want mismatched Hauler service rejection")
+			}
+			if len(services.stopNames) != 0 {
+				t.Fatalf("stopped services = %#v", services.stopNames)
+			}
+		})
+	}
+}
+
 func lifecycleSnapshot(root string) domain.JournalSnapshot {
 	identity := func(pid int) domain.ProcessIdentity {
 		return domain.ProcessIdentity{PID: pid, BootID: "boot", StartTicks: uint64(pid)}
@@ -294,6 +335,18 @@ type fakeServices struct {
 	observeErr   error
 	stopNames    []string
 	ensureSpecs  []supervisor.ServiceSpec
+}
+
+type fakeUnitInspector struct{ events *[]string }
+
+func (f *fakeUnitInspector) Prebind(context.Context, supervisor.PortMapping) error { return nil }
+func (f *fakeUnitInspector) Ready(context.Context, supervisor.ServiceSpec, ports.ProcessStatus, ports.ProcessStatus) (supervisor.UnitEvidence, error) {
+	return supervisor.UnitEvidence{}, nil
+}
+func (f *fakeUnitInspector) Stopped(context.Context, domain.ServiceUnitRecord) error { return nil }
+func (f *fakeUnitInspector) Absent(_ context.Context, record domain.ServiceUnitRecord) error {
+	*f.events = append(*f.events, "absent:"+record.Name)
+	return nil
 }
 
 func (f *fakeServices) Observe(_ context.Context, record domain.ServiceUnitRecord) (supervisor.UnitObservation, error) {
