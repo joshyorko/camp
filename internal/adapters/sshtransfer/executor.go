@@ -7,6 +7,8 @@ import (
 	"io"
 	"os"
 	"os/exec"
+	"sort"
+	"strings"
 
 	"github.com/joshyorko/camp/internal/ports"
 )
@@ -93,9 +95,23 @@ func joinedOutput(capture io.Writer, destination io.Writer) io.Writer {
 }
 
 func commandEnvironment(overrides map[string]string) []string {
-	environment := os.Environ()
+	values := make(map[string]string)
+	for _, entry := range os.Environ() {
+		if separator := strings.IndexByte(entry, '='); separator >= 0 {
+			values[entry[:separator]] = entry[separator+1:]
+		}
+	}
 	for key, value := range overrides {
-		environment = append(environment, key+"="+value)
+		values[key] = value
+	}
+	keys := make([]string, 0, len(values))
+	for key := range values {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+	environment := make([]string, 0, len(keys))
+	for _, key := range keys {
+		environment = append(environment, key+"="+values[key])
 	}
 	return environment
 }

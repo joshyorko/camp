@@ -145,11 +145,12 @@ func (v *fakeLeaseValidator) Revalidate(context.Context, coordination.LeaseToken
 }
 
 type fakeMirror struct {
-	calls  int
-	mode   ports.MirrorMode
-	root   string
-	result *ports.MirrorResult
-	err    error
+	calls    int
+	requests []ports.MirrorRequest
+	mode     ports.MirrorMode
+	root     string
+	result   *ports.MirrorResult
+	err      error
 }
 
 func localCheckpointTransports(transport ports.WorkspaceTransport) CheckpointTransports {
@@ -158,6 +159,7 @@ func localCheckpointTransports(transport ports.WorkspaceTransport) CheckpointTra
 
 func (m *fakeMirror) ReturnToStaging(_ context.Context, request ports.MirrorRequest) (ports.MirrorResult, error) {
 	m.calls++
+	m.requests = append(m.requests, request)
 	if m.result != nil || m.err != nil {
 		if m.result == nil {
 			return ports.MirrorResult{}, m.err
@@ -175,6 +177,7 @@ func (m *fakeMirror) ReturnToStaging(_ context.Context, request ports.MirrorRequ
 	method := "local-noop"
 	if mode != ports.MirrorLocalNoop {
 		method = "rsync"
+		return ports.MirrorResult{Mode: mode, Root: root, AttemptID: request.AttemptID + "-rsync", Method: method}, nil
 	}
 	return ports.MirrorResult{Mode: mode, Root: root, AttemptID: request.AttemptID, Method: method}, nil
 }

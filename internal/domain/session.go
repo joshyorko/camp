@@ -70,7 +70,7 @@ type WorkspaceRecord struct {
 	Target        string              `json:"target,omitempty" yaml:"target,omitempty"`
 	StagingRoot   string              `json:"stagingRoot,omitempty" yaml:"stagingRoot,omitempty"`
 	EffectiveRoot string              `json:"effectiveRoot,omitempty" yaml:"effectiveRoot,omitempty"`
-	Mirror        MirrorAttemptRecord `json:"mirror,omitempty" yaml:"mirror,omitempty"`
+	Mirror        MirrorAttemptRecord `json:"mirror" yaml:"mirror"`
 }
 
 type MirrorState string
@@ -81,12 +81,13 @@ const (
 )
 
 type MirrorAttemptRecord struct {
-	AttemptID  string      `json:"attemptId,omitempty" yaml:"attemptId,omitempty"`
-	State      MirrorState `json:"state,omitempty" yaml:"state,omitempty"`
-	Root       string      `json:"root,omitempty" yaml:"root,omitempty"`
-	RemoteRoot string      `json:"remoteRoot,omitempty" yaml:"remoteRoot,omitempty"`
-	Method     string      `json:"method,omitempty" yaml:"method,omitempty"`
-	Exclusions []string    `json:"exclusions,omitempty" yaml:"exclusions,omitempty"`
+	LogicalAttempt uint64      `json:"logicalAttempt,omitempty" yaml:"logicalAttempt,omitempty"`
+	AttemptID      string      `json:"attemptId,omitempty" yaml:"attemptId,omitempty"`
+	State          MirrorState `json:"state,omitempty" yaml:"state,omitempty"`
+	Root           string      `json:"root,omitempty" yaml:"root,omitempty"`
+	RemoteRoot     string      `json:"remoteRoot,omitempty" yaml:"remoteRoot,omitempty"`
+	Method         string      `json:"method,omitempty" yaml:"method,omitempty"`
+	Exclusions     []string    `json:"exclusions,omitempty" yaml:"exclusions,omitempty"`
 }
 
 type EndpointRecord struct {

@@ -116,6 +116,21 @@ func TestDurableJSONDocumentsRoundTrip(t *testing.T) {
 	}
 }
 
+func TestWorkspaceMirrorValueHasTruthfulRequiredSerializationTag(t *testing.T) {
+	t.Parallel()
+	field, ok := reflect.TypeOf(WorkspaceRecord{}).FieldByName("Mirror")
+	if !ok {
+		t.Fatal("WorkspaceRecord.Mirror is missing")
+	}
+	if got := field.Tag.Get("json"); got != "mirror" {
+		t.Fatalf("Mirror JSON tag = %q, want required value field", got)
+	}
+	encoded, err := json.Marshal(WorkspaceRecord{})
+	if err != nil || !strings.Contains(string(encoded), `"mirror":{}`) {
+		t.Fatalf("empty workspace JSON = %s, %v", encoded, err)
+	}
+}
+
 func TestDurableYAMLDocumentsRoundTrip(t *testing.T) {
 	now := time.Date(2026, 7, 14, 12, 30, 0, 0, time.UTC)
 	tests := []struct {

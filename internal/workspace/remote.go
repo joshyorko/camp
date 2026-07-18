@@ -11,6 +11,7 @@ import (
 const MirrorDevPodSSH ports.MirrorMode = "devPodSSHMirror"
 
 var ErrNotRemoteMirror = errors.New("workspace is not a remote DevPod mirror")
+var ErrRemoteIdentityMismatch = errors.New("persisted remote workspace identity does not match transport composition")
 
 type RemoteConfig struct {
 	WorkspaceID     string
@@ -35,9 +36,17 @@ type MirrorOutcomeUnknown struct {
 }
 
 func (e *MirrorOutcomeUnknown) Error() string {
+	if e == nil || e.Err == nil {
+		return "workspace mirror outcome is unknown"
+	}
 	return "workspace mirror outcome is unknown: " + e.Err.Error()
 }
-func (e *MirrorOutcomeUnknown) Unwrap() error { return e.Err }
+func (e *MirrorOutcomeUnknown) Unwrap() error {
+	if e == nil {
+		return nil
+	}
+	return e.Err
+}
 
 type RsyncExecutor interface {
 	RunRsync(context.Context, ports.Command) sshtransfer.TransferAttempt
@@ -63,10 +72,13 @@ func (r *Remote) ReturnToStaging(ctx context.Context, request ports.MirrorReques
 	if err := ctx.Err(); err != nil {
 		return ports.MirrorResult{}, err
 	}
-	if request.LocalProvider || request.Provider == "" || request.StagingRoot == "" || request.AttemptID == "" || r == nil || r.resolver == nil || r.staging == nil || r.rsync == nil {
+	if request.LocalProvider || request.Provider == "" || request.StagingRoot == "" || request.AttemptID == "" || request.WorkspaceID == "" || r == nil || r.resolver == nil || r.staging == nil || r.rsync == nil {
 		return ports.MirrorResult{}, ErrNotRemoteMirror
 	}
-	remoteRoot, err := r.resolver.ResolveWorkspaceFolderInContext(ctx, r.config.Context, r.config.WorkspaceID)
+	if request.WorkspaceID != r.config.WorkspaceID || request.Context != r.config.Context {
+		return ports.MirrorResult{}, ErrRemoteIdentityMismatch
+	}
+	remoteRoot, err := r.resolver.ResolveWorkspaceFolderInContext(ctx, request.Context, request.WorkspaceID)
 	if err != nil {
 		return ports.MirrorResult{}, err
 	}
@@ -76,7 +88,7 @@ func (r *Remote) ReturnToStaging(ctx context.Context, request ports.MirrorReques
 		return ports.MirrorResult{}, err
 	}
 	command, err := sshtransfer.BuildRsyncMirror(sshtransfer.RsyncMirrorSpec{
-		Executable: r.config.RsyncExecutable, WorkspaceID: r.config.WorkspaceID,
+		Executable: r.config.RsyncExecutable, WorkspaceID: request.WorkspaceID,
 		RemoteRoot: remoteRoot, LocalRoot: destination,
 	})
 	if err != nil {
@@ -96,7 +108,7 @@ func (r *Remote) ReturnToStaging(ctx context.Context, request ports.MirrorReques
 			return ports.MirrorResult{}, errors.Join(err, discardErr)
 		}
 		if r.tar == nil {
-			return ports.MirrorResult{}, errors.Join(err, ErrNotRemoteMirror)
+			return ports.MirrorResult{}, errors.Join(err, ErrTransportUnavailable)
 		}
 		tarAttemptID := request.AttemptID + "-tar"
 		destination, freshErr := r.staging.Fresh(ctx, request.StagingRoot, tarAttemptID)
@@ -105,7 +117,7 @@ func (r *Remote) ReturnToStaging(ctx context.Context, request ports.MirrorReques
 		}
 		pipeline, buildErr := sshtransfer.BuildTarPipe(sshtransfer.TarPipeSpec{
 			SSHExecutable: r.config.SSHExecutable, TarExecutable: r.config.TarExecutable,
-			WorkspaceID: r.config.WorkspaceID, RemoteRoot: remoteRoot, LocalRoot: destination,
+			WorkspaceID: request.WorkspaceID, RemoteRoot: remoteRoot, LocalRoot: destination,
 		})
 		if buildErr != nil {
 			return ports.MirrorResult{}, errors.Join(buildErr, r.staging.Discard(context.WithoutCancel(ctx), destination))
