@@ -91,6 +91,13 @@ uploaded contender against an existing key: MinIO returns HTTP 412 when
 `CompleteMultipartUpload` carries `If-None-Match: *`, verifying the conditional
 completion requirement rather than assuming it from synthetic HTTP tests.
 
+MinIO's `/minio/health/ready` can return HTTP 200 before bucket APIs finish
+initializing. Real fixtures therefore treat successful bucket creation as the
+strong setup boundary: retry transient HTTP 503 responses within a bounded
+deadline, close every response body, and fail immediately on other statuses.
+`TestCreateMinIOBucketRetriesUntilServerAPIsInitialize` fixes the observed
+`XMinioServerNotInitialized` startup race without hiding unrelated failures.
+
 Run the real contract with Docker available:
 
 ```sh
