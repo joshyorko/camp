@@ -18,7 +18,7 @@ func TestReconcileRequiresExplicitObserverAndRecordsObservedFact(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	snapshot := domain.JournalSnapshot{SchemaVersion: domain.SchemaVersion, SessionID: "session-a", State: domain.SessionOpening}
+	snapshot := domain.JournalSnapshot{SchemaVersion: domain.SchemaVersion, SessionID: "session-a", State: domain.SessionOpening, Lease: domain.LeaseRecord{Revision: "r1"}}
 	if err := store.Create(ctx, snapshot); err != nil {
 		t.Fatal(err)
 	}
@@ -32,8 +32,21 @@ func TestReconcileRequiresExplicitObserverAndRecordsObservedFact(t *testing.T) {
 	}
 	called := 0
 	reconciled, err := Reconcile(ctx, store, snapshot.SessionID, map[string]Observer{
-		"ServiceStart": func(_ context.Context, current domain.JournalSnapshot, pending ports.IntentRecord) (ports.FactRecord, domain.JournalSnapshot, error) {
+		"ServiceStart": func(ctx context.Context, current domain.JournalSnapshot, pending ports.IntentRecord) (ports.FactRecord, domain.JournalSnapshot, error) {
 			called++
+			concurrent, _, err := store.Load(ctx, snapshot.SessionID)
+			if err != nil {
+				return ports.FactRecord{}, current, err
+			}
+			concurrent.Lease.Revision = "r2"
+			leaseIntent := ports.IntentRecord{ID: "lease-renew", SessionID: snapshot.SessionID, Transition: "LeaseRenewed", Attempt: 1, Timestamp: time.Unix(10, 0).UTC()}
+			if err := store.RecordIntent(ctx, leaseIntent); err != nil {
+				return ports.FactRecord{}, current, err
+			}
+			leaseFact := ports.FactRecord{IntentID: leaseIntent.ID, SessionID: snapshot.SessionID, Transition: leaseIntent.Transition, Timestamp: leaseIntent.Timestamp}
+			if err := store.RecordFact(ctx, leaseFact, concurrent); err != nil {
+				return ports.FactRecord{}, current, err
+			}
 			current.State = domain.SessionOpen
 			return ports.FactRecord{IntentID: pending.ID, SessionID: pending.SessionID, Transition: pending.Transition, Timestamp: time.Unix(11, 0).UTC()}, current, nil
 		},
@@ -41,7 +54,7 @@ func TestReconcileRequiresExplicitObserverAndRecordsObservedFact(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Reconcile() error = %v", err)
 	}
-	if called != 1 || reconciled.State != domain.SessionOpen {
+	if called != 1 || reconciled.State != domain.SessionOpen || reconciled.Lease.Revision != "r2" {
 		t.Fatalf("called=%d snapshot=%#v", called, reconciled)
 	}
 	_, pending, err := store.Load(ctx, snapshot.SessionID)

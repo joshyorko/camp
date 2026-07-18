@@ -32,6 +32,11 @@ type ServiceSpec struct {
 	Child       ports.Command
 }
 
+func (s ServiceSpec) Validate() error {
+	_, err := s.processSpec()
+	return err
+}
+
 type UnitEvidence struct {
 	HostEndpoint  string
 	GuestEndpoint string

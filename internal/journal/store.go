@@ -9,8 +9,10 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"reflect"
 	"sort"
 	"strings"
+	"syscall"
 
 	"github.com/joshyorko/camp/internal/domain"
 	"github.com/joshyorko/camp/internal/ports"
@@ -160,7 +162,21 @@ func (s *Store) RecordFact(ctx context.Context, fact ports.FactRecord, snapshot 
 	if err := validateFact(fact, snapshot.SessionID); err != nil {
 		return err
 	}
-	reduced, err := reduceFact(snapshot, fact)
+	guard, err := os.OpenFile(filepath.Join(s.sessionDirectory(fact.SessionID), journalFilename), os.O_RDWR, 0o600)
+	if err != nil {
+		return fmt.Errorf("open journal fact lock: %w", err)
+	}
+	defer guard.Close()
+	if err := syscall.Flock(int(guard.Fd()), syscall.LOCK_EX); err != nil {
+		return fmt.Errorf("lock journal fact: %w", err)
+	}
+	defer syscall.Flock(int(guard.Fd()), syscall.LOCK_UN)
+	current, _, err := s.Load(ctx, fact.SessionID)
+	if err != nil {
+		return err
+	}
+	composed := composeFactSnapshot(current, snapshot, fact.Transition)
+	reduced, err := reduceFact(composed, fact)
 	if err != nil {
 		return err
 	}
@@ -168,6 +184,26 @@ func (s *Store) RecordFact(ctx context.Context, fact ports.FactRecord, snapshot 
 		return err
 	}
 	return s.writeSnapshot(s.sessionDirectory(fact.SessionID), reduced, true)
+}
+
+func composeFactSnapshot(current, candidate domain.JournalSnapshot, transition string) domain.JournalSnapshot {
+	switch transition {
+	case "LeaseRenewed":
+		current.Lease = candidate.Lease
+		return current
+	case "ServingContentRefreshed":
+		current.Services = candidate.Services
+		return current
+	case "ServiceStart", "ServiceRestart":
+		if !reflect.DeepEqual(current.Services, candidate.Services) {
+			current.Services = candidate.Services
+			return current
+		}
+		candidate.Lease = current.Lease
+	case "WorkspaceMirrored", "WorkspaceImagesInventoried", "RegistrySnapshotSealed", "RootSnapshotStable", "GenerationUploaded", "PointerCommitted":
+		candidate.Lease = current.Lease
+	}
+	return candidate
 }
 
 func (s *Store) Load(ctx context.Context, sessionID string) (domain.JournalSnapshot, []ports.PendingIntent, error) {

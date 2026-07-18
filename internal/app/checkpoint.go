@@ -287,6 +287,16 @@ func (p *CheckpointPublisher) Publish(ctx context.Context, operation ports.Opera
 		result.RefreshError = err.Error()
 		return result, nil
 	}
+	refreshed, pending, err := p.journal.Load(context.WithoutCancel(ctx), sessionID)
+	if err != nil {
+		result.RefreshError = err.Error()
+		return result, nil
+	}
+	if !containsPendingIntent(pending, refreshIntent.ID) {
+		result.RefreshError = "serving refresh left unexpected pending reconciliation work"
+		return result, nil
+	}
+	snapshot = refreshed
 	if err := p.journal.RecordFact(context.WithoutCancel(ctx), checkpointFact(refreshIntent, now), snapshot); err != nil {
 		result.RefreshError = err.Error()
 		return result, nil

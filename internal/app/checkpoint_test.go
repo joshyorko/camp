@@ -85,12 +85,16 @@ func (s *fakeRegistrySealer) Seal(_ context.Context, request registryadapter.Sna
 type fakeServingRefresher struct {
 	calls   int
 	request ServingRefreshRequest
+	after   func(context.Context, ServingRefreshRequest) error
 	err     error
 }
 
-func (r *fakeServingRefresher) Refresh(_ context.Context, request ServingRefreshRequest) error {
+func (r *fakeServingRefresher) Refresh(ctx context.Context, request ServingRefreshRequest) error {
 	r.calls++
 	r.request = request
+	if r.after != nil {
+		return r.after(ctx, request)
+	}
 	return r.err
 }
 
@@ -208,6 +212,19 @@ func TestCheckpointPublisherUploadsCASesAndAdvancesBaselineOnlyThroughFact(t *te
 	fakes.seal.result = registryadapter.Snapshot{Root: filepath.Join(root, ".camp", "build", "registry-cut-43"), References: []ports.RegistryReference{{
 		Repository: "manual/tool", Tag: "latest", ManifestDigest: "sha256:eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
 	}}}
+	refreshedChild := domain.ProcessIdentity{PID: 902, BootID: "boot-refreshed", StartTicks: 92}
+	fakes.refresh.after = func(ctx context.Context, request ServingRefreshRequest) error {
+		refreshed, _, err := log.Load(ctx, request.SessionID)
+		if err != nil {
+			return err
+		}
+		refreshed.Services[0].Child.Identity = refreshedChild
+		intent := checkpointIntent(request.SessionID, "ServiceRestart", 8, now, nil)
+		if err := log.RecordIntent(ctx, intent); err != nil {
+			return err
+		}
+		return log.RecordFact(ctx, checkpointFact(intent, now), refreshed)
+	}
 	publisher := NewCheckpointPublisher(log, lockValidator, leaseValidator, mirror, fakes.pipeline(), builder, generations, pointers, fixedAppClock{now: now})
 	token := ports.OperationToken{ID: "lock", Owner: ports.OperationOwner{SessionID: snapshot.SessionID, Operation: "sync"}}
 	result, err := publisher.Publish(ctx, token, snapshot.SessionID)
@@ -238,6 +255,9 @@ func TestCheckpointPublisherUploadsCASesAndAdvancesBaselineOnlyThroughFact(t *te
 	loaded, pending, err := log.Load(ctx, snapshot.SessionID)
 	if err != nil || len(pending) != 0 || loaded.OpenedGeneration == nil || *loaded.OpenedGeneration != opened || loaded.CurrentBase == nil || *loaded.CurrentBase != result.Generation || loaded.CurrentPointer == nil || loaded.CurrentPointer.Generation != result.Generation {
 		t.Fatalf("loaded baseline = %#v pending=%#v error=%v", loaded, pending, err)
+	}
+	if loaded.Services[0].Child.Identity != refreshedChild {
+		t.Fatalf("loaded service child = %#v, want refreshed identity %#v", loaded.Services[0].Child.Identity, refreshedChild)
 	}
 }
 
