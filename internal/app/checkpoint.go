@@ -67,6 +67,11 @@ type CheckpointPublisher struct {
 	clock       ports.Clock
 }
 
+type CheckpointTransports struct {
+	Local  ports.WorkspaceTransport
+	Remote ports.WorkspaceTransport
+}
+
 type CheckpointDisposition string
 
 const (
@@ -83,8 +88,8 @@ type CheckpointResult struct {
 	RecoveryCommand string                     `json:"recoveryCommand,omitempty"`
 }
 
-func NewCheckpointPublisher(journal ports.Journal, locks ports.OperationTokenValidator, leases checkpointLeaseValidator, mirror ports.WorkspaceTransport, pipeline CheckpointPipeline, builder checkpointBuilder, generations *coordination.GenerationRepository, pointers *coordination.PointerRepository, clock ports.Clock) *CheckpointPublisher {
-	return &CheckpointPublisher{journal: journal, locks: locks, leases: leases, mirror: mirror, pipeline: pipeline, builder: builder, generations: generations, pointers: pointers, clock: clock}
+func NewCheckpointPublisher(journal ports.Journal, locks ports.OperationTokenValidator, leases checkpointLeaseValidator, transports CheckpointTransports, pipeline CheckpointPipeline, builder checkpointBuilder, generations *coordination.GenerationRepository, pointers *coordination.PointerRepository, clock ports.Clock) *CheckpointPublisher {
+	return &CheckpointPublisher{journal: journal, locks: locks, leases: leases, mirror: workspace.NewSelector(transports.Local, transports.Remote), pipeline: pipeline, builder: builder, generations: generations, pointers: pointers, clock: clock}
 }
 
 func (p *CheckpointPublisher) Publish(ctx context.Context, operation ports.OperationToken, sessionID string) (CheckpointResult, error) {

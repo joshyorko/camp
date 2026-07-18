@@ -6,7 +6,7 @@ The application packages contain typed open, checkpoint, sync, close, attach, an
 
 Local workspace return is accepted only when the provider is marked local and the canonical staging root equals the canonical workspace-local folder. `internal/workspace/local.go` returns `MirrorLocalNoop`; it does not copy data. For a non-local provider, the checkpoint publisher accepts only `MirrorDevPodSSH`, builds from the returned nonempty staging root, and revalidates the writer lease after the mirror before recording the fact.
 
-Compose checkpoint publication with `workspace.NewSelector(local, remote)`. The selector uses the persisted `WorkspaceRecord.LocalProvider` value carried in `MirrorRequest`; it never probes or guesses locality. A missing matching transport fails closed. The public CLI still has no lifecycle composition, so selector package tests prove the routing boundary but not an executable remote checkpoint lifecycle.
+`app.NewCheckpointPublisher` accepts separate local and remote transports and always composes them through `workspace.NewSelector`. The selector uses the persisted `WorkspaceRecord.LocalProvider` value carried in `MirrorRequest`; it never probes or guesses locality. A missing matching transport fails closed. The public CLI still has no lifecycle commands, so application and close-path tests prove publication composition but not an executable CLI lifecycle.
 
 ## Recovery rules
 

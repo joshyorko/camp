@@ -130,7 +130,7 @@ func TestCloseComposesWithRealCheckpointPublisherWithoutSelfCreatedPendingIntent
 	}
 	fakes := newCheckpointFakes(now)
 	publisher := NewCheckpointPublisher(
-		log, &fakeLockValidator{}, &fakeLeaseValidator{}, &fakeMirror{}, fakes.pipeline(), &fakeCheckpointBuilder{},
+		log, &fakeLockValidator{}, &fakeLeaseValidator{}, localCheckpointTransports(&fakeMirror{}), fakes.pipeline(), &fakeCheckpointBuilder{},
 		coordination.NewGenerationRepository(backend), coordination.NewPointerRepository(backend), fixedAppClock{now: now},
 	)
 	events := []string{}
@@ -204,7 +204,7 @@ func TestBranchSessionAdvancesFromSourceThroughTwoSyncsAndClose(t *testing.T) {
 	}
 	fakes := newCheckpointFakes(now)
 	publisher := NewCheckpointPublisher(
-		log, &fakeLockValidator{}, leases, &fakeMirror{}, fakes.pipeline(), &fakeCheckpointBuilder{},
+		log, &fakeLockValidator{}, leases, localCheckpointTransports(&fakeMirror{}), fakes.pipeline(), &fakeCheckpointBuilder{},
 		coordination.NewGenerationRepository(backend), pointers, fixedAppClock{now: now},
 	)
 	events := []string{}

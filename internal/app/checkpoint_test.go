@@ -150,6 +150,10 @@ type fakeMirror struct {
 	root  string
 }
 
+func localCheckpointTransports(transport ports.WorkspaceTransport) CheckpointTransports {
+	return CheckpointTransports{Local: transport}
+}
+
 func (m *fakeMirror) ReturnToStaging(_ context.Context, request ports.MirrorRequest) (ports.MirrorResult, error) {
 	m.calls++
 	mode := m.mode
@@ -225,7 +229,7 @@ func TestCheckpointPublisherUploadsCASesAndAdvancesBaselineOnlyThroughFact(t *te
 		}
 		return log.RecordFact(ctx, checkpointFact(intent, now), refreshed)
 	}
-	publisher := NewCheckpointPublisher(log, lockValidator, leaseValidator, mirror, fakes.pipeline(), builder, generations, pointers, fixedAppClock{now: now})
+	publisher := NewCheckpointPublisher(log, lockValidator, leaseValidator, localCheckpointTransports(mirror), fakes.pipeline(), builder, generations, pointers, fixedAppClock{now: now})
 	token := ports.OperationToken{ID: "lock", Owner: ports.OperationOwner{SessionID: snapshot.SessionID, Operation: "sync"}}
 	result, err := publisher.Publish(ctx, token, snapshot.SessionID)
 	if err != nil {
@@ -295,7 +299,7 @@ func TestCheckpointPublisherCreatesFirstMainPointerAtGenerationOne(t *testing.T)
 	pointers := coordination.NewPointerRepository(store)
 	fakes := newCheckpointFakes(now)
 	fakes.refresh.err = errors.New("serving refresh unavailable")
-	publisher := NewCheckpointPublisher(log, &fakeLockValidator{}, &fakeLeaseValidator{}, &fakeMirror{}, fakes.pipeline(), &fakeCheckpointBuilder{}, coordination.NewGenerationRepository(store), pointers, fixedAppClock{now: now})
+	publisher := NewCheckpointPublisher(log, &fakeLockValidator{}, &fakeLeaseValidator{}, localCheckpointTransports(&fakeMirror{}), fakes.pipeline(), &fakeCheckpointBuilder{}, coordination.NewGenerationRepository(store), pointers, fixedAppClock{now: now})
 	token := ports.OperationToken{ID: "lock", Owner: ports.OperationOwner{SessionID: snapshot.SessionID, Operation: "sync"}}
 	result, err := publisher.Publish(ctx, token, snapshot.SessionID)
 	if err != nil {
@@ -347,7 +351,7 @@ func TestCheckpointPublisherRejectsMismatchedLeaseBeforeExternalEffects(t *testi
 	}
 	leaseValidator := &fakeLeaseValidator{}
 	mirror := &fakeMirror{}
-	publisher := NewCheckpointPublisher(log, &fakeLockValidator{}, leaseValidator, mirror, newCheckpointFakes(now).pipeline(), &fakeCheckpointBuilder{}, coordination.NewGenerationRepository(store), coordination.NewPointerRepository(store), fixedAppClock{now: now})
+	publisher := NewCheckpointPublisher(log, &fakeLockValidator{}, leaseValidator, localCheckpointTransports(mirror), newCheckpointFakes(now).pipeline(), &fakeCheckpointBuilder{}, coordination.NewGenerationRepository(store), coordination.NewPointerRepository(store), fixedAppClock{now: now})
 	token := ports.OperationToken{ID: "lock", Owner: ports.OperationOwner{SessionID: snapshot.SessionID, Operation: "sync"}}
 	if _, err := publisher.Publish(ctx, token, snapshot.SessionID); err == nil {
 		t.Fatal("Publish() accepted a lease owned by another session")
@@ -388,7 +392,7 @@ func TestCheckpointPublisherRejectsUnexpectedLocalMirrorModeBeforeBuild(t *testi
 		t.Fatal(err)
 	}
 	builder := &fakeCheckpointBuilder{}
-	publisher := NewCheckpointPublisher(log, &fakeLockValidator{}, &fakeLeaseValidator{}, &fakeMirror{mode: "remote"}, newCheckpointFakes(now).pipeline(), builder, coordination.NewGenerationRepository(store), coordination.NewPointerRepository(store), fixedAppClock{now: now})
+	publisher := NewCheckpointPublisher(log, &fakeLockValidator{}, &fakeLeaseValidator{}, localCheckpointTransports(&fakeMirror{mode: "remote"}), newCheckpointFakes(now).pipeline(), builder, coordination.NewGenerationRepository(store), coordination.NewPointerRepository(store), fixedAppClock{now: now})
 	token := ports.OperationToken{ID: "lock", Owner: ports.OperationOwner{SessionID: snapshot.SessionID, Operation: "sync"}}
 	if _, err := publisher.Publish(ctx, token, snapshot.SessionID); err == nil {
 		t.Fatal("Publish() accepted a non-local mirror result for a local workspace")
@@ -436,7 +440,10 @@ func TestCheckpointPublisherBuildsFromReturnedRemoteMirrorRoot(t *testing.T) {
 	builder := &fakeCheckpointBuilder{}
 	publisher := NewCheckpointPublisher(
 		log, &fakeLockValidator{}, &fakeLeaseValidator{},
-		&fakeMirror{mode: workspace.MirrorDevPodSSH, root: remoteCut},
+		CheckpointTransports{
+			Local:  &fakeMirror{mode: "wrong-local-mode"},
+			Remote: &fakeMirror{mode: workspace.MirrorDevPodSSH, root: remoteCut},
+		},
 		newCheckpointFakes(now).pipeline(), builder,
 		coordination.NewGenerationRepository(store), coordination.NewPointerRepository(store), fixedAppClock{now: now},
 	)
@@ -500,7 +507,7 @@ func TestCheckpointPublisherPreservesUploadedGenerationAndBaselineOnCASConflict(
 	}); err != nil {
 		t.Fatal(err)
 	}
-	publisher := NewCheckpointPublisher(log, &fakeLockValidator{}, &fakeLeaseValidator{}, &fakeMirror{}, newCheckpointFakes(now).pipeline(), &fakeCheckpointBuilder{}, generations, pointers, fixedAppClock{now: now})
+	publisher := NewCheckpointPublisher(log, &fakeLockValidator{}, &fakeLeaseValidator{}, localCheckpointTransports(&fakeMirror{}), newCheckpointFakes(now).pipeline(), &fakeCheckpointBuilder{}, generations, pointers, fixedAppClock{now: now})
 	token := ports.OperationToken{ID: "lock", Owner: ports.OperationOwner{SessionID: snapshot.SessionID, Operation: "sync"}}
 	result, err := publisher.Publish(ctx, token, snapshot.SessionID)
 	if !errors.Is(err, coordination.ErrPointerChanged) {
@@ -554,7 +561,7 @@ func TestCheckpointPublisherSnapshotFailureCannotBuildUploadOrMovePointer(t *tes
 	fakes.seal.err = sealFailure
 	builder := &fakeCheckpointBuilder{}
 	pointers := coordination.NewPointerRepository(store)
-	publisher := NewCheckpointPublisher(log, &fakeLockValidator{}, &fakeLeaseValidator{}, &fakeMirror{}, fakes.pipeline(), builder, coordination.NewGenerationRepository(store), pointers, fixedAppClock{now: now})
+	publisher := NewCheckpointPublisher(log, &fakeLockValidator{}, &fakeLeaseValidator{}, localCheckpointTransports(&fakeMirror{}), fakes.pipeline(), builder, coordination.NewGenerationRepository(store), pointers, fixedAppClock{now: now})
 	token := ports.OperationToken{ID: "lock", Owner: ports.OperationOwner{SessionID: snapshot.SessionID, Operation: "sync"}}
 	_, err = publisher.Publish(ctx, token, snapshot.SessionID)
 	if !errors.Is(err, sealFailure) {
