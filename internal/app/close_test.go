@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"strings"
 	"testing"
 	"time"
 
@@ -254,6 +255,43 @@ func TestClosePreservesPublicationWhenCleanupFailsAndLeavesCleanupOnlyRecovery(t
 	loaded, pending, loadErr := log.Load(context.Background(), snapshot.SessionID)
 	if loadErr != nil || !loaded.Checkpoint.PublicationSucceeded || loaded.Cleanup.State != domain.CleanupFailed || len(pending) != 1 || pending[0].Intent.Transition != "ServicesStopped" {
 		t.Fatalf("failed cleanup snapshot = %#v pending=%#v error=%v", loaded, pending, loadErr)
+	}
+}
+
+func TestCloseRemoteRetainsProviderAndStagingWhenPublicationConflicts(t *testing.T) {
+	t.Parallel()
+	log, snapshot := newCloseJournal(t, domain.SessionReadWrite, domain.Materialization{Mode: domain.MaterializationCreated, CleanupPermitted: true})
+	events := []string{}
+	result, err := NewClose(log,
+		&fakeOperationLocker{events: &events, token: ports.OperationToken{ID: "lock"}},
+		&fakeCheckpointPublisher{events: &events, err: coordination.ErrPointerChanged},
+		&fakeCloseEffects{events: &events}, fixedAppClock{now: time.Unix(200, 0)},
+	).Run(context.Background(), CloseRequest{SessionID: snapshot.SessionID})
+	if !errors.Is(err, coordination.ErrPointerChanged) || result.PublicationSucceeded || result.CleanupSucceeded {
+		t.Fatalf("Run() = %#v, %v", result, err)
+	}
+	want := []string{"lock:close", "publish:session-close:close", "unlock:close"}
+	if !reflect.DeepEqual(events, want) {
+		t.Fatalf("events = %#v, want publication failure before provider/staging cleanup %#v", events, want)
+	}
+}
+
+func TestCloseRemotePublishesBeforeDevPodStopAndCleansStagingLast(t *testing.T) {
+	t.Parallel()
+	log, snapshot := newCloseJournal(t, domain.SessionReadWrite, domain.Materialization{Mode: domain.MaterializationCreated, CleanupPermitted: true})
+	events := []string{}
+	generation := domain.GenerationRef{Generation: 43, ArchiveSHA256: strings.Repeat("a", 64)}
+	_, err := NewClose(log,
+		&fakeOperationLocker{events: &events, token: ports.OperationToken{ID: "lock"}},
+		&fakeCheckpointPublisher{events: &events, result: CheckpointResult{Published: true, Generation: generation}},
+		&fakeCloseEffects{events: &events}, fixedAppClock{now: time.Unix(200, 0)},
+	).Run(context.Background(), CloseRequest{SessionID: snapshot.SessionID})
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := []string{"lock:close", "publish:session-close:close", "workspace", "forwarders", "services", "supervisor", "lease", "materialization", "unlock:close"}
+	if !reflect.DeepEqual(events, want) {
+		t.Fatalf("events = %#v, want publication -> DevPod stop/delete -> lease -> staging cleanup %#v", events, want)
 	}
 }
 

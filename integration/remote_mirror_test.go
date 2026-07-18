@@ -32,7 +32,7 @@ func TestRemoteCheckpointLifecycleTransfersRealFilesystemSemantics(t *testing.T)
 			WorkspaceID: "fixture", RsyncExecutable: "/usr/bin/rsync", SSHExecutable: ssh, TarExecutable: "/usr/bin/tar",
 		}, staticRootResolver(source), &fixedStaging{roots: []string{destination}}, executor, executor)
 
-		result, err := transport.ReturnToStaging(context.Background(), ports.MirrorRequest{Provider: "ssh", StagingRoot: sandbox})
+		result, err := transport.ReturnToStaging(context.Background(), ports.MirrorRequest{Provider: "ssh", StagingRoot: sandbox, AttemptID: "integration-rsync"})
 		if err != nil {
 			t.Fatalf("ReturnToStaging() error = %v", err)
 		}
@@ -53,7 +53,7 @@ func TestRemoteCheckpointLifecycleTransfersRealFilesystemSemantics(t *testing.T)
 			WorkspaceID: "fixture", RsyncExecutable: filepath.Join(sandbox, "missing-rsync"), SSHExecutable: ssh, TarExecutable: "/usr/bin/tar",
 		}, staticRootResolver(source), staging, executor, executor)
 
-		result, err := transport.ReturnToStaging(context.Background(), ports.MirrorRequest{Provider: "ssh", StagingRoot: sandbox})
+		result, err := transport.ReturnToStaging(context.Background(), ports.MirrorRequest{Provider: "ssh", StagingRoot: sandbox, AttemptID: "integration-tar"})
 		if err != nil {
 			t.Fatalf("ReturnToStaging() error = %v", err)
 		}
@@ -78,7 +78,7 @@ type fixedStaging struct {
 	discarded []string
 }
 
-func (s *fixedStaging) Fresh(_ context.Context, _ string) (string, error) {
+func (s *fixedStaging) Fresh(_ context.Context, _, _ string) (string, error) {
 	if len(s.roots) == 0 {
 		return "", errors.New("no staging root")
 	}

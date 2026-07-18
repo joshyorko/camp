@@ -25,7 +25,7 @@ func TestRemoteMirrorQueriesEffectiveRootAndUsesFreshRsyncStaging(t *testing.T) 
 	}, resolver, staging, rsync, tar)
 
 	result, err := transport.ReturnToStaging(context.Background(), ports.MirrorRequest{
-		Provider: "ssh", StagingRoot: "/var/lib/camp/materialized/Second Brain",
+		Provider: "ssh", StagingRoot: "/var/lib/camp/materialized/Second Brain", AttemptID: "mirror-1",
 	})
 	if err != nil {
 		t.Fatalf("ReturnToStaging() error = %v", err)
@@ -71,7 +71,7 @@ func TestRemoteMirrorFallsBackOnlyForUnavailableBeforeStartAndUsesSecondFreshDes
 	}, resolver, staging, rsync, tar)
 
 	result, err := transport.ReturnToStaging(context.Background(), ports.MirrorRequest{
-		Provider: "ssh", StagingRoot: "/materialized/brain",
+		Provider: "ssh", StagingRoot: "/materialized/brain", AttemptID: "mirror-2",
 	})
 	if err != nil {
 		t.Fatalf("ReturnToStaging() error = %v", err)
@@ -99,6 +99,46 @@ func TestRemoteMirrorFallsBackOnlyForUnavailableBeforeStartAndUsesSecondFreshDes
 	}
 }
 
+func TestRemoteMirrorRetainsPartialRsyncDestinationForObservation(t *testing.T) {
+	t.Parallel()
+
+	staging := &fakeRemoteStaging{fresh: []string{"/stage/attempt-1"}}
+	transport := NewRemote(RemoteConfig{WorkspaceID: "camp-brain", RsyncExecutable: "rsync"},
+		&fakeRemoteRootResolver{root: "/workspace/effective"}, staging,
+		&fakeRsyncExecutor{attempt: sshtransfer.TransferAttempt{Method: sshtransfer.MethodRsync, ProducerStarted: true, Err: errors.New("connection lost")}}, nil)
+
+	_, err := transport.ReturnToStaging(context.Background(), ports.MirrorRequest{Provider: "ssh", StagingRoot: "/controller", AttemptID: "mirror-intent-1"})
+	var unknown *MirrorOutcomeUnknown
+	if !errors.As(err, &unknown) {
+		t.Fatalf("ReturnToStaging() error = %v, want MirrorOutcomeUnknown", err)
+	}
+	if unknown.Result.AttemptID != "mirror-intent-1-rsync" || unknown.Result.Root != "/stage/attempt-1" || unknown.Result.Method != string(sshtransfer.MethodRsync) {
+		t.Fatalf("unknown result = %#v", unknown.Result)
+	}
+	if len(staging.discarded) != 0 {
+		t.Fatalf("partial destination discarded = %#v", staging.discarded)
+	}
+}
+
+func TestRemoteMirrorRetainsPartialTarDestinationAfterSafeRsyncDiscard(t *testing.T) {
+	t.Parallel()
+
+	staging := &fakeRemoteStaging{fresh: []string{"/stage/rsync", "/stage/tar"}}
+	transport := NewRemote(RemoteConfig{WorkspaceID: "camp-brain", RsyncExecutable: "rsync", SSHExecutable: "ssh", TarExecutable: "tar"},
+		&fakeRemoteRootResolver{root: "/workspace/effective"}, staging,
+		&fakeRsyncExecutor{attempt: sshtransfer.TransferAttempt{Method: sshtransfer.MethodRsync, Unavailable: true, Err: errors.New("missing")}},
+		&fakeTarPipelineExecutor{attempt: sshtransfer.TransferAttempt{Method: sshtransfer.MethodTarPipe, ProducerStarted: true, ConsumerStarted: true, Err: errors.New("connection lost")}})
+
+	_, err := transport.ReturnToStaging(context.Background(), ports.MirrorRequest{Provider: "ssh", StagingRoot: "/controller", AttemptID: "mirror-intent-2"})
+	var unknown *MirrorOutcomeUnknown
+	if !errors.As(err, &unknown) || unknown.Result.Root != "/stage/tar" || unknown.Result.Method != string(sshtransfer.MethodTarPipe) {
+		t.Fatalf("ReturnToStaging() error = %#v, unknown=%#v", err, unknown)
+	}
+	if !reflect.DeepEqual(staging.discarded, []string{"/stage/rsync"}) {
+		t.Fatalf("discarded = %#v", staging.discarded)
+	}
+}
+
 type fakeRemoteRootResolver struct {
 	root        string
 	err         error
@@ -119,7 +159,7 @@ type fakeRemoteStaging struct {
 	discardErr error
 }
 
-func (f *fakeRemoteStaging) Fresh(_ context.Context, requestedRoot string) (string, error) {
+func (f *fakeRemoteStaging) Fresh(_ context.Context, requestedRoot, _ string) (string, error) {
 	f.freshFor = append(f.freshFor, requestedRoot)
 	if len(f.fresh) == 0 {
 		return "", errors.New("no fresh staging fixture")

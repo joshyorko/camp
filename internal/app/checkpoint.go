@@ -129,30 +129,41 @@ func (p *CheckpointPublisher) Publish(ctx context.Context, operation ports.Opera
 		return CheckpointResult{}, fmt.Errorf("validate checkpoint writer lease: %w", err)
 	}
 
-	mirrorIntent := checkpointIntent(sessionID, "WorkspaceMirrored", 1, now, ports.MirrorRequest{
+	mirrorRequest := ports.MirrorRequest{
 		Provider: snapshot.Workspace.Provider, LocalProvider: snapshot.Workspace.LocalProvider,
 		StagingRoot: snapshot.Workspace.StagingRoot, WorkspaceLocalFolder: snapshot.Workspace.LocalFolder,
-	})
+		WorkspaceID: snapshot.Workspace.ID, Context: snapshot.Workspace.Context,
+		AttemptID: sessionID + "-checkpoint-1",
+	}
+	mirrorIntent := checkpointIntent(sessionID, "WorkspaceMirrored", 1, now, mirrorRequest)
 	if err := p.journal.RecordIntent(ctx, mirrorIntent); err != nil {
 		return CheckpointResult{}, err
 	}
-	mirrored, err := p.mirror.ReturnToStaging(ctx, ports.MirrorRequest{
-		Provider: snapshot.Workspace.Provider, LocalProvider: snapshot.Workspace.LocalProvider,
-		StagingRoot: snapshot.Workspace.StagingRoot, WorkspaceLocalFolder: snapshot.Workspace.LocalFolder,
-	})
+	mirrored, err := p.mirror.ReturnToStaging(ctx, mirrorRequest)
 	if err != nil {
+		var unknown *workspace.MirrorOutcomeUnknown
+		if errors.As(err, &unknown) {
+			if !validRemoteMirrorResult(unknown.Result, mirrorRequest.AttemptID) {
+				return CheckpointResult{}, errors.Join(err, errors.New("ambiguous workspace mirror returned an invalid attempt identity"))
+			}
+			snapshot.Workspace.Mirror = mirrorAttemptRecord(unknown.Result, domain.MirrorAmbiguous)
+			if factErr := p.journal.RecordFact(context.WithoutCancel(ctx), checkpointFact(mirrorIntent, now), snapshot); factErr != nil {
+				return CheckpointResult{}, errors.Join(err, factErr)
+			}
+		}
 		return CheckpointResult{}, err
 	}
 	if mirrored.Root == "" {
 		return CheckpointResult{}, errors.New("workspace mirror returned an empty staging root")
 	}
 	if snapshot.Workspace.LocalProvider {
-		if mirrored.Mode != ports.MirrorLocalNoop || mirrored.Root != snapshot.Workspace.StagingRoot {
+		if mirrored.Mode != ports.MirrorLocalNoop || mirrored.Root != snapshot.Workspace.StagingRoot || mirrored.AttemptID != mirrorRequest.AttemptID {
 			return CheckpointResult{}, errors.New("local workspace mirror did not preserve the staging root")
 		}
-	} else if mirrored.Mode != workspace.MirrorDevPodSSH {
+	} else if !validRemoteMirrorResult(mirrored, mirrorRequest.AttemptID) {
 		return CheckpointResult{}, errors.New("remote workspace mirror did not return a DevPod SSH staging root")
 	}
+	snapshot.Workspace.Mirror = mirrorAttemptRecord(mirrored, domain.MirrorCompleted)
 	if err := p.leases.Revalidate(ctx, lease, now); err != nil {
 		return CheckpointResult{}, fmt.Errorf("revalidate checkpoint writer lease after workspace mirror: %w", err)
 	}
@@ -326,7 +337,22 @@ func cloneGeneration(reference *domain.GenerationRef) *domain.GenerationRef {
 	return &copy
 }
 
+func mirrorAttemptRecord(result ports.MirrorResult, state domain.MirrorState) domain.MirrorAttemptRecord {
+	return domain.MirrorAttemptRecord{
+		AttemptID: result.AttemptID, State: state, Root: result.Root, RemoteRoot: result.RemoteRoot,
+		Method: result.Method, Exclusions: append([]string(nil), result.Exclusions...),
+	}
+}
+
+func validRemoteMirrorResult(result ports.MirrorResult, attemptID string) bool {
+	return result.Mode == workspace.MirrorDevPodSSH && result.Root != "" &&
+		(result.AttemptID == attemptID+"-rsync" || result.AttemptID == attemptID+"-tar")
+}
+
 func validateCheckpointSnapshot(snapshot domain.JournalSnapshot) error {
+	if snapshot.Workspace.Mirror.State == domain.MirrorAmbiguous {
+		return errors.New("checkpoint requires recovery of an ambiguous workspace mirror")
+	}
 	lease := snapshot.Lease.Lease
 	if snapshot.SchemaVersion != domain.SchemaVersion || snapshot.SessionID == "" || snapshot.Capsule == "" || snapshot.Lineage.Branch == "" {
 		return errors.New("checkpoint snapshot identity is incomplete")

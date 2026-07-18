@@ -11,11 +11,18 @@ type MirrorRequest struct {
 	LocalProvider        bool
 	StagingRoot          string
 	WorkspaceLocalFolder string
+	WorkspaceID          string
+	Context              string
+	AttemptID            string
 }
 
 type MirrorResult struct {
-	Mode MirrorMode
-	Root string
+	Mode       MirrorMode
+	Root       string
+	AttemptID  string
+	Method     string
+	RemoteRoot string
+	Exclusions []string
 }
 
 type WorkspaceTransport interface {

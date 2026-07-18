@@ -145,9 +145,11 @@ func (v *fakeLeaseValidator) Revalidate(context.Context, coordination.LeaseToken
 }
 
 type fakeMirror struct {
-	calls int
-	mode  ports.MirrorMode
-	root  string
+	calls  int
+	mode   ports.MirrorMode
+	root   string
+	result *ports.MirrorResult
+	err    error
 }
 
 func localCheckpointTransports(transport ports.WorkspaceTransport) CheckpointTransports {
@@ -156,6 +158,12 @@ func localCheckpointTransports(transport ports.WorkspaceTransport) CheckpointTra
 
 func (m *fakeMirror) ReturnToStaging(_ context.Context, request ports.MirrorRequest) (ports.MirrorResult, error) {
 	m.calls++
+	if m.result != nil || m.err != nil {
+		if m.result == nil {
+			return ports.MirrorResult{}, m.err
+		}
+		return *m.result, m.err
+	}
 	mode := m.mode
 	if mode == "" {
 		mode = ports.MirrorLocalNoop
@@ -164,7 +172,11 @@ func (m *fakeMirror) ReturnToStaging(_ context.Context, request ports.MirrorRequ
 	if root == "" {
 		root = request.StagingRoot
 	}
-	return ports.MirrorResult{Mode: mode, Root: root}, nil
+	method := "local-noop"
+	if mode != ports.MirrorLocalNoop {
+		method = "rsync"
+	}
+	return ports.MirrorResult{Mode: mode, Root: root, AttemptID: request.AttemptID, Method: method}, nil
 }
 
 func TestCheckpointPublisherUploadsCASesAndAdvancesBaselineOnlyThroughFact(t *testing.T) {
@@ -441,8 +453,11 @@ func TestCheckpointPublisherBuildsFromReturnedRemoteMirrorRoot(t *testing.T) {
 	publisher := NewCheckpointPublisher(
 		log, &fakeLockValidator{}, &fakeLeaseValidator{},
 		CheckpointTransports{
-			Local:  &fakeMirror{mode: "wrong-local-mode"},
-			Remote: &fakeMirror{mode: workspace.MirrorDevPodSSH, root: remoteCut},
+			Local: &fakeMirror{mode: "wrong-local-mode"},
+			Remote: &fakeMirror{result: &ports.MirrorResult{
+				Mode: workspace.MirrorDevPodSSH, Root: remoteCut, AttemptID: "session-remote-checkpoint-1-rsync",
+				Method: "rsync", RemoteRoot: "/workspaces/brain", Exclusions: []string{"/.camp/build/***", "/.camp/runtime/***"},
+			}},
 		},
 		newCheckpointFakes(now).pipeline(), builder,
 		coordination.NewGenerationRepository(store), coordination.NewPointerRepository(store), fixedAppClock{now: now},
@@ -454,6 +469,71 @@ func TestCheckpointPublisherBuildsFromReturnedRemoteMirrorRoot(t *testing.T) {
 	}
 	if !result.Published || builder.root != remoteCut {
 		t.Fatalf("result=%#v builder root=%q, want returned remote root %q", result, builder.root, remoteCut)
+	}
+	loaded, pending, err := log.Load(ctx, snapshot.SessionID)
+	if err != nil || len(pending) != 0 || loaded.Workspace.Mirror.State != domain.MirrorCompleted || loaded.Workspace.Mirror.Root != remoteCut || loaded.Workspace.Mirror.Method != "rsync" {
+		t.Fatalf("durable mirror = %#v pending=%#v error=%v", loaded.Workspace.Mirror, pending, err)
+	}
+}
+
+func TestCheckpointPublisherRecordsAmbiguousMirrorAndBlocksBlindRetry(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	sandbox := t.TempDir()
+	store, err := filebackend.New(filepath.Join(sandbox, "backend"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := time.Unix(100, 0).UTC()
+	lease := domain.WriterLease{SchemaVersion: domain.SchemaVersion, SessionID: "session-ambiguous", Capsule: "brain", Lineage: domain.Lineage{Branch: "main"}, Machine: "machine", CreatedAt: now, HeartbeatAt: now, ExpiresAt: now.Add(time.Hour)}
+	snapshot := domain.JournalSnapshot{SchemaVersion: domain.SchemaVersion, SessionID: lease.SessionID, Capsule: lease.Capsule, Lineage: lease.Lineage, Mode: domain.SessionReadWrite, Lease: domain.LeaseRecord{Lease: &lease, Revision: "lease-r1"}, Workspace: domain.WorkspaceRecord{ID: "camp-brain", Context: "default", Provider: "ssh", StagingRoot: sandbox}, State: domain.SessionOpen}
+	prepareCheckpointRuntime(t, &snapshot, sandbox)
+	log, err := journal.NewStore(filepath.Join(sandbox, "journal"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := log.Create(ctx, snapshot); err != nil {
+		t.Fatal(err)
+	}
+	unknown := &workspace.MirrorOutcomeUnknown{Result: ports.MirrorResult{Mode: workspace.MirrorDevPodSSH, Root: filepath.Join(sandbox, "attempt"), AttemptID: "session-ambiguous-checkpoint-1-rsync", Method: "rsync", RemoteRoot: "/workspaces/brain"}, Err: errors.New("connection lost")}
+	mirror := &fakeMirror{err: unknown}
+	publisher := NewCheckpointPublisher(log, &fakeLockValidator{}, &fakeLeaseValidator{}, CheckpointTransports{Remote: mirror}, newCheckpointFakes(now).pipeline(), &fakeCheckpointBuilder{}, coordination.NewGenerationRepository(store), coordination.NewPointerRepository(store), fixedAppClock{now: now})
+	token := ports.OperationToken{ID: "lock", Owner: ports.OperationOwner{SessionID: snapshot.SessionID, Operation: "sync"}}
+
+	if _, err := publisher.Publish(ctx, token, snapshot.SessionID); !errors.Is(err, unknown) {
+		t.Fatalf("first Publish() error = %v", err)
+	}
+	loaded, pending, err := log.Load(ctx, snapshot.SessionID)
+	if err != nil || len(pending) != 0 || loaded.Workspace.Mirror.State != domain.MirrorAmbiguous || loaded.Workspace.Mirror.Root != unknown.Result.Root {
+		t.Fatalf("ambiguous mirror = %#v pending=%#v error=%v", loaded.Workspace.Mirror, pending, err)
+	}
+	if _, err := publisher.Publish(ctx, token, snapshot.SessionID); err == nil || mirror.calls != 1 {
+		t.Fatalf("blind retry error=%v mirror calls=%d", err, mirror.calls)
+	}
+}
+
+func TestCheckpointPublisherProcessDeathAfterMirrorIntentDoesNotStartAnotherTransfer(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	log, snapshot := newCloseJournal(t, domain.SessionReadWrite, domain.Materialization{Mode: domain.MaterializationCreated, CleanupPermitted: true})
+	intent := checkpointIntent(snapshot.SessionID, "WorkspaceMirrored", 1, time.Unix(200, 0).UTC(), ports.MirrorRequest{Provider: "ssh", WorkspaceID: "camp-brain", Context: "default", StagingRoot: "/controller", AttemptID: snapshot.SessionID + "-checkpoint-1"})
+	if err := log.RecordIntent(ctx, intent); err != nil {
+		t.Fatal(err)
+	}
+	backend, err := filebackend.New(filepath.Join(t.TempDir(), "backend"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	mirror := &fakeMirror{}
+	publisher := NewCheckpointPublisher(log, &fakeLockValidator{}, &fakeLeaseValidator{}, CheckpointTransports{Remote: mirror}, newCheckpointFakes(time.Unix(200, 0).UTC()).pipeline(), &fakeCheckpointBuilder{}, coordination.NewGenerationRepository(backend), coordination.NewPointerRepository(backend), fixedAppClock{now: time.Unix(200, 0).UTC()})
+	token := ports.OperationToken{ID: "lock", Owner: ports.OperationOwner{SessionID: snapshot.SessionID, Operation: "sync"}}
+
+	if _, err := publisher.Publish(ctx, token, snapshot.SessionID); err == nil || mirror.calls != 0 {
+		t.Fatalf("Publish() error=%v mirror calls=%d, want pending recovery without transfer", err, mirror.calls)
+	}
+	_, pending, err := log.Load(ctx, snapshot.SessionID)
+	if err != nil || len(pending) != 1 || pending[0].Intent.ID != intent.ID {
+		t.Fatalf("pending mirror = %#v error=%v", pending, err)
 	}
 }
 

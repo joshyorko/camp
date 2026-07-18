@@ -25,9 +25,19 @@ type RemoteRootResolver interface {
 }
 
 type RemoteStaging interface {
-	Fresh(context.Context, string) (string, error)
+	Fresh(context.Context, string, string) (string, error)
 	Discard(context.Context, string) error
 }
+
+type MirrorOutcomeUnknown struct {
+	Result ports.MirrorResult
+	Err    error
+}
+
+func (e *MirrorOutcomeUnknown) Error() string {
+	return "workspace mirror outcome is unknown: " + e.Err.Error()
+}
+func (e *MirrorOutcomeUnknown) Unwrap() error { return e.Err }
 
 type RsyncExecutor interface {
 	RunRsync(context.Context, ports.Command) sshtransfer.TransferAttempt
@@ -53,14 +63,15 @@ func (r *Remote) ReturnToStaging(ctx context.Context, request ports.MirrorReques
 	if err := ctx.Err(); err != nil {
 		return ports.MirrorResult{}, err
 	}
-	if request.LocalProvider || request.Provider == "" || request.StagingRoot == "" || r == nil || r.resolver == nil || r.staging == nil || r.rsync == nil {
+	if request.LocalProvider || request.Provider == "" || request.StagingRoot == "" || request.AttemptID == "" || r == nil || r.resolver == nil || r.staging == nil || r.rsync == nil {
 		return ports.MirrorResult{}, ErrNotRemoteMirror
 	}
 	remoteRoot, err := r.resolver.ResolveWorkspaceFolderInContext(ctx, r.config.Context, r.config.WorkspaceID)
 	if err != nil {
 		return ports.MirrorResult{}, err
 	}
-	destination, err := r.staging.Fresh(ctx, request.StagingRoot)
+	rsyncAttemptID := request.AttemptID + "-rsync"
+	destination, err := r.staging.Fresh(ctx, request.StagingRoot, rsyncAttemptID)
 	if err != nil {
 		return ports.MirrorResult{}, err
 	}
@@ -72,14 +83,23 @@ func (r *Remote) ReturnToStaging(ctx context.Context, request ports.MirrorReques
 		return ports.MirrorResult{}, errors.Join(err, r.staging.Discard(context.WithoutCancel(ctx), destination))
 	}
 	if _, err := sshtransfer.ClassifyTransfer(r.rsync.RunRsync(ctx, command)); err != nil {
+		result := remoteMirrorResult(destination, rsyncAttemptID, sshtransfer.MethodRsync, remoteRoot)
+		if !sshtransfer.TarFallbackAllowed(err) {
+			var failure *sshtransfer.TransferFailure
+			if errors.As(err, &failure) && failure.Kind == sshtransfer.FailurePartial {
+				return ports.MirrorResult{}, &MirrorOutcomeUnknown{Result: result, Err: err}
+			}
+			return ports.MirrorResult{}, errors.Join(err, r.staging.Discard(context.WithoutCancel(ctx), destination))
+		}
 		discardErr := r.staging.Discard(context.WithoutCancel(ctx), destination)
-		if !sshtransfer.TarFallbackAllowed(err) || discardErr != nil {
+		if discardErr != nil {
 			return ports.MirrorResult{}, errors.Join(err, discardErr)
 		}
 		if r.tar == nil {
 			return ports.MirrorResult{}, errors.Join(err, ErrNotRemoteMirror)
 		}
-		destination, freshErr := r.staging.Fresh(ctx, request.StagingRoot)
+		tarAttemptID := request.AttemptID + "-tar"
+		destination, freshErr := r.staging.Fresh(ctx, request.StagingRoot, tarAttemptID)
 		if freshErr != nil {
 			return ports.MirrorResult{}, errors.Join(err, freshErr)
 		}
@@ -91,11 +111,22 @@ func (r *Remote) ReturnToStaging(ctx context.Context, request ports.MirrorReques
 			return ports.MirrorResult{}, errors.Join(buildErr, r.staging.Discard(context.WithoutCancel(ctx), destination))
 		}
 		if _, pipelineErr := sshtransfer.ClassifyTransfer(r.tar.RunTarPipeline(ctx, pipeline)); pipelineErr != nil {
+			var failure *sshtransfer.TransferFailure
+			if errors.As(pipelineErr, &failure) && failure.Kind == sshtransfer.FailurePartial {
+				return ports.MirrorResult{}, &MirrorOutcomeUnknown{Result: remoteMirrorResult(destination, tarAttemptID, sshtransfer.MethodTarPipe, remoteRoot), Err: pipelineErr}
+			}
 			return ports.MirrorResult{}, errors.Join(pipelineErr, r.staging.Discard(context.WithoutCancel(ctx), destination))
 		}
-		return ports.MirrorResult{Mode: MirrorDevPodSSH, Root: destination}, nil
+		return remoteMirrorResult(destination, tarAttemptID, sshtransfer.MethodTarPipe, remoteRoot), nil
 	}
-	return ports.MirrorResult{Mode: MirrorDevPodSSH, Root: destination}, nil
+	return remoteMirrorResult(destination, rsyncAttemptID, sshtransfer.MethodRsync, remoteRoot), nil
+}
+
+func remoteMirrorResult(root, attemptID string, method sshtransfer.Method, remoteRoot string) ports.MirrorResult {
+	return ports.MirrorResult{
+		Mode: MirrorDevPodSSH, Root: root, AttemptID: attemptID, Method: string(method), RemoteRoot: remoteRoot,
+		Exclusions: []string{"/.camp/build/***", "/.camp/runtime/***"},
+	}
 }
 
 var _ ports.WorkspaceTransport = (*Remote)(nil)

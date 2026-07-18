@@ -11,6 +11,8 @@ Local workspace return is accepted only when the provider is marked local and th
 ## Recovery rules
 
 - Treat a pending journal intent as reconciliation work, not permission to repeat a side effect.
+- A pending or ambiguous `WorkspaceMirrored` attempt blocks another checkpoint. Partial remote staging is evidence, not disposable scratch: preserve the returned attempt ID/root for observation. Do not stop/delete the provider workspace or remove controller staging when mirroring or pointer CAS fails.
+- Remote close order is final publication, provider stop/delete, forwarders/services/supervisor, conditional lease release, then owned staging/materialization cleanup. `--keep-workspace` changes the provider action but does not make controller staging user-owned.
 - Do not clean up adopted content. Camp-created materializations require matching canonical path, ownership marker, device, and inode evidence.
 - After a successful checkpoint build, the application recovery command is `camp recover <session-id>`; that command is not yet wired into the public CLI.
 - Ownership-marker tests that exercise the named temporary-file substitution path must inject `createNamedOwnershipMarkerTemporary`. Linux filesystems may allow the production `O_TMPFILE` path and therefore produce no temporary filename.

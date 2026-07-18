@@ -39,7 +39,7 @@ func (Local) ReturnToStaging(ctx context.Context, request ports.MirrorRequest) (
 	if staging != workspace {
 		return ports.MirrorResult{}, ErrNotLocalNoop
 	}
-	return ports.MirrorResult{Mode: ports.MirrorLocalNoop, Root: staging}, nil
+	return ports.MirrorResult{Mode: ports.MirrorLocalNoop, Root: staging, AttemptID: request.AttemptID, Method: "local-noop"}, nil
 }
 
 func MapTarget(stagingRoot, effectiveRoot, relative string) (string, error) {
