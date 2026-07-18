@@ -555,6 +555,9 @@ func (o *Open) validate(request OpenRequest) error {
 	if !validResolvedBackend(backend) {
 		return errors.New("open backend is not a strict credential-free backend descriptor")
 	}
+	if request.ResolvedBackend.Kind != "" && o.deps.ResolvedBackend.Kind != "" && !sameBackendIdentity(request.ResolvedBackend, o.deps.ResolvedBackend) {
+		return fmt.Errorf("open request backend identity does not match the composed object store: %w", ErrOpenSessionMismatch)
+	}
 	if request.Mode != domain.SessionReadWrite && request.Mode != domain.SessionReadOnly {
 		return fmt.Errorf("unsupported open session mode %q", request.Mode)
 	}
@@ -736,11 +739,11 @@ func (o *Open) create(ctx context.Context, request OpenRequest) (OpenResult, err
 }
 
 func (o *Open) effectiveBackend(request OpenRequest) config.Backend {
-	if request.ResolvedBackend.Kind != "" {
-		return request.ResolvedBackend
-	}
 	if o.deps.ResolvedBackend.Kind != "" {
 		return o.deps.ResolvedBackend
+	}
+	if request.ResolvedBackend.Kind != "" {
+		return request.ResolvedBackend
 	}
 	file := request.Backend
 	if file.Root == "" && file.SanitizedURL == "" && file.Fingerprint == "" {
@@ -750,6 +753,10 @@ func (o *Open) effectiveBackend(request OpenRequest) config.Backend {
 		return config.Backend{}
 	}
 	return config.Backend{Kind: config.BackendFile, SanitizedURL: file.SanitizedURL, Fingerprint: file.Fingerprint, File: &file}
+}
+
+func sameBackendIdentity(left, right config.Backend) bool {
+	return validResolvedBackend(left) && validResolvedBackend(right) && left.Kind == right.Kind && left.SanitizedURL == right.SanitizedURL && left.Fingerprint == right.Fingerprint
 }
 
 func validResolvedBackend(backend config.Backend) bool {

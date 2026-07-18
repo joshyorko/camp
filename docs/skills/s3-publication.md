@@ -1,25 +1,30 @@
 # S3 immutable publication
 
 Camp keeps the S3 adapter's narrow injected HTTP `Signer` seam and uses the AWS
-SDK for Go v2 only in `internal/adapters/objectstore`, where the production
-factory loads the standard runtime credential chain and supplies a SigV4
+SDK for Go v2 only in `internal/adapters/objectstore`, where the backend factory
+loads the standard runtime credential chain and supplies a SigV4
 signer. This preserves focused protocol tests without reimplementing credential
 discovery. Credentials are retrieved at request time and must not enter
 `s3store.Config`, backend descriptors, object metadata, object keys, journals,
 or logs.
 
-Resolve a backend through `config.ResolveBackend`. Application composition must
-then pass that descriptor through `app.NewOpenWithBackend`, which constructs the
+Resolve a backend through `config.ResolveBackend`. The application composition
+seam passes that descriptor through `app.NewOpenWithBackend`, which constructs the
 `ports.ObjectStore`, binds the pointer, generation, and lease repositories to
 that same store, and carries the resolved identity into session recovery through
-`config.DurableBackendConfiguration`. A standalone factory test is not
-production wiring proof; application tests must show both `s3://` acceptance and
-unchanged `file://` session creation with the expected durable identity.
+`config.DurableBackendConfiguration`. The constructor-bound descriptor is
+authoritative: a request may repeat it but must fail closed if it supplies a
+different identity, because request metadata cannot relabel the already-composed
+store. Factory and application tests prove this composition seam; they are not
+executable wiring proof. Until `cmd/camp` calls this seam, describe the feature
+as backend composition rather than production CLI wiring.
 
 The `s3://` URL contains only the bucket and optional clean prefix. Endpoint,
 region, path-style addressing, and transport policy are separate bootstrap
-values. IP-address-shaped and other non-DNS bucket names are rejected. HTTPS is
-the default policy;
+values. The YAML `s3` block accepts only those non-secret values; AWS credential
+source fields are not part of `userConfig`, and credentials come from the
+standard runtime chain. IP-address-shaped and other non-DNS bucket names are
+rejected. HTTPS is the default policy;
 an `http://` endpoint is rejected unless `insecure: true` (or
 `CAMP_S3_INSECURE=true`) is explicit, and `insecure: true` is rejected for an
 HTTPS endpoint. Bucket names are DNS-compatible and endpoint URLs cannot carry
@@ -39,7 +44,9 @@ never interpreted as content hashes.
 
 For a missing key, Camp opens the restartable source once to verify the exact
 size and SHA-256 before creating remote multipart state, then opens it again to
-upload deterministic, ascending parts bounded to 8 MiB. Completion carries
+upload deterministic, ascending parts bounded to 8 MiB. Every opening is
+untrusted independently: the bytes consumed by multipart upload are hashed and
+must match the expected size and SHA-256 before completion. Completion carries
 `If-None-Match: *`, preserving create-only publication.
 
 Every failure before completion attempts `AbortMultipartUpload` using an

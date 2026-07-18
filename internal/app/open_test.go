@@ -87,6 +87,40 @@ func TestOpenResolvedFileBackendRemainsSupported(t *testing.T) {
 	}
 }
 
+func TestOpenRejectsRequestBackendThatDiffersFromComposedStore(t *testing.T) {
+	environment := newOpenTestEnvironment(t)
+	composed, err := config.ResolveBackend(environment.backend.SanitizedURL, config.S3Values{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	opener, err := NewOpenWithBackend(context.Background(), environment.open.deps, composed, objectstore.Options{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { http.NotFound(w, r) }))
+	defer server.Close()
+	requested, err := config.ResolveBackend("s3://other-store/team", config.S3Values{
+		Endpoint: server.URL, Region: "us-east-1", PathStyle: true, Insecure: true,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	root := filepath.Join(t.TempDir(), "source")
+	if err := os.MkdirAll(root, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	_, err = opener.Run(context.Background(), OpenRequest{
+		SessionID: "backend-mismatch", Capsule: "brain", Branch: "main", ExplicitRoot: root,
+		Runtime: environment.runtime, ResolvedBackend: requested,
+	})
+	if !errors.Is(err, ErrOpenSessionMismatch) {
+		t.Fatalf("Open() error = %v, want backend mismatch", err)
+	}
+	if _, _, loadErr := environment.open.deps.Journal.Load(context.Background(), "backend-mismatch"); !errors.Is(loadErr, os.ErrNotExist) {
+		t.Fatalf("journal load error = %v, want no session side effect", loadErr)
+	}
+}
+
 func TestOpenAdoptsRootPreservesOwnershipAndResolvesTargetAfterCommit(t *testing.T) {
 	t.Parallel()
 	environment := newOpenTestEnvironment(t)
