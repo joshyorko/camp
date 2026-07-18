@@ -1018,8 +1018,9 @@ func TestOwnershipMarkerPublishRejectsSubstitutedTemporaryName(t *testing.T) {
 	replacement := []byte("unexplained replacement")
 	replacedName := ".ownership-unexplained.tmp"
 	operations := ownershipMarkerOperations{
-		write: writeOwnershipMarker,
-		sync:  (*os.File).Sync,
+		createTemporary: createNamedOwnershipMarkerTemporary,
+		write:           writeOwnershipMarker,
+		sync:            (*os.File).Sync,
 		beforePublish: func(directoryFD int, temporaryName string) error {
 			if temporaryName == "" {
 				return errors.New("test requires named fallback temporary")
