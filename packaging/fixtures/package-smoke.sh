@@ -23,7 +23,14 @@ run_fixture() {
   local uninstall=$7
   local state
   state=$(mktemp -d "${TMPDIR:-/tmp}/camp-$name-state.XXXXXXXX")
-  trap 'rm -rf -- "$state"' RETURN
+  cleanup_state() {
+    if ! rm -rf -- "$state" 2>/dev/null; then
+      "$engine" run --rm -v "$state:/state:z" "$image" \
+        sh -c 'rm -rf /state/home /state/config /state/data /state/cache'
+      rmdir "$state"
+    fi
+  }
+  trap cleanup_state RETURN
 
   mkdir -p "$state/home" "$state/config" "$state/data" "$state/cache"
   printf 'operator-owned\n' >"$state/config/operator-state"
