@@ -117,6 +117,26 @@ func TestRunManagedToolSetupReportsLockedIdentityAndPATH(t *testing.T) {
 	}
 }
 
+func TestRunManagedToolSetupEmitsOnlyCompletedToolEvents(t *testing.T) {
+	ensurer := &recordingToolEnsurer{resolutions: map[string]tooladapter.Resolution{
+		"devpod": {Version: "v0.26.1"},
+		"hauler": {Version: "v2.0.2"},
+	}}
+	var events []string
+	if err := runManagedToolSetupWithEvents(context.Background(), ModeHuman, &bytes.Buffer{}, ensurer, "linux", "amd64", func(name string, resolution tooladapter.Resolution) error {
+		events = append(events, name+" "+resolution.Version)
+		if len(events) != len(ensurer.calls) {
+			t.Fatalf("event emitted before Ensure completed: events=%v calls=%v", events, ensurer.calls)
+		}
+		return nil
+	}); err != nil {
+		t.Fatalf("runManagedToolSetupWithEvents: %v", err)
+	}
+	if got := strings.Join(events, ","); got != "devpod v0.26.1,hauler v2.0.2" {
+		t.Fatalf("events = %q", got)
+	}
+}
+
 func TestRunManagedToolSetupJSONUsesStableIdentityFields(t *testing.T) {
 	ensurer := &recordingToolEnsurer{resolutions: map[string]tooladapter.Resolution{
 		"devpod": {Path: "/usr/bin/devpod", Repository: "skevetter/devpod", Version: "v0.26.1", AssetSHA256: strings.Repeat("a", 64), BinarySHA256: strings.Repeat("a", 64)},

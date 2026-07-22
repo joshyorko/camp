@@ -1,0 +1,6 @@
+TOOLCHAIN  DevPod v0.26.1 · Hauler v2.0.2
+RUNTIME    ror · remote DevPod · context work
+CAPSULE    brain · /home/josh/brain
+STORAGE    s3 backend · s3://camp/brain · generation 42
+CAMP IS READY
+> camp open /home/josh/brain
