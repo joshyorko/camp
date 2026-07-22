@@ -1,12 +1,32 @@
 package hauler
 
 import (
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/joshyorko/camp/internal/domain"
 )
+
+func TestRenderedManifestContainsOnlyFilesAndImagesDocuments(t *testing.T) {
+	t.Parallel()
+	digest := "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+	body, err := RenderManifest("second-brain", domain.ImageInventory{SchemaVersion: domain.SchemaVersion, Images: []domain.Image{{
+		CapturedReference: "127.0.0.1:5000/camp/z:v1", CapturedManifestDigest: digest, Source: domain.ImageSourceRegistry,
+	}}})
+	if err != nil {
+		t.Fatalf("RenderManifest() error = %v", err)
+	}
+	path := filepath.Join(t.TempDir(), "hauler-manifest.yaml")
+	if err := os.WriteFile(path, body, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := readGenerationExpectations(path); err != nil {
+		t.Fatalf("rendered manifest cannot be consumed by generation assembly: %v\n%s", err, body)
+	}
+}
 
 func TestManifestIsDeterministicAndLocalOnlyForDaemonSources(t *testing.T) {
 	t.Parallel()

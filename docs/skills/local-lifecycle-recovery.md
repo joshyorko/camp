@@ -25,6 +25,7 @@ Local workspace return is accepted only when the provider is marked local and th
 - Image list output is derived from the selected session's persisted inventory and carries the session, capsule, branch, and checkpoint-base generation/digest; image and tag arrays are sorted before presentation.
 - Image capture and restore hold the session operation lock, reject unrelated pending work, revalidate ownership/session/lease state, and prove the recorded registry service live immediately before engine or registry effects. If the selected session identity changes after lock acquisition, the operation releases the lock and returns the canonical `ErrRecoveryIdentityChanged` before guard, engine, or registry effects. Capture persists only a schema-valid inventory whose entries have captured references and verified manifest digests. Restore accepts only that selected session inventory, never caller-supplied lineage.
 - A retry may reconcile one exact pending `ImagesCaptured` intent. If the deterministic captured reference already exists without a journal fact, capture adopts it only when the current workspace engine proves the same local image ID exposes the registry's resolved repository digest; otherwise it remains a collision and fails closed. Restore is digest-verified and idempotent for already-correct original tags.
+- Generate the Hauler `Files` and `Images` documents with one YAML encoder. The encoder inserts the inter-document `---` marker; adding another marker creates an empty document that the generation assembler correctly rejects as an unsupported manifest kind. Keep that rejection strict and fix separators at the producer.
 
 ## Evidence
 
@@ -37,3 +38,4 @@ Local workspace return is accepted only when the provider is marked local and th
 - `internal/app/serve.go` and `internal/app/serve_test.go`
 - `internal/images/capture.go`, `restore.go`, and their focused tests
 - `internal/app/images.go` and `internal/app/images_test.go`
+- `internal/adapters/hauler/manifest.go`, `manifest_test.go`, and `generation.go`

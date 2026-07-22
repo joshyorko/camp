@@ -112,9 +112,6 @@ func RenderManifest(capsule string, inventory domain.ImageInventory) ([]byte, er
 	if err := encoder.Encode(files); err != nil {
 		return nil, err
 	}
-	if _, err := output.WriteString("---\n"); err != nil {
-		return nil, err
-	}
 	if err := encoder.Encode(imageDocument); err != nil {
 		return nil, err
 	}
