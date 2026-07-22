@@ -27,6 +27,23 @@ type setupResult struct {
 	PATHExport string                   `json:"pathExport,omitempty"`
 }
 
+type managedToolPaths struct {
+	devpod string
+	hauler string
+}
+
+func resolveManagedToolPaths(ctx context.Context, ensurer toolEnsurer, goos, arch string) (managedToolPaths, error) {
+	devpodResolution, err := ensurer.Ensure(ctx, "devpod", goos, arch)
+	if err != nil {
+		return managedToolPaths{}, fmt.Errorf("prepare devpod: %w", err)
+	}
+	haulerResolution, err := ensurer.Ensure(ctx, "hauler", goos, arch)
+	if err != nil {
+		return managedToolPaths{}, fmt.Errorf("prepare hauler: %w", err)
+	}
+	return managedToolPaths{devpod: devpodResolution.Path, hauler: haulerResolution.Path}, nil
+}
+
 func (p *ProductionLifecycle) Setup(ctx context.Context, mode OutputMode, out io.Writer) error {
 	return runProductionToolSetup(ctx, mode, out, campcontract.DistributionToolLock(), "", environmentMap(os.Environ()), runtime.GOOS, runtime.GOARCH)
 }

@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -10,10 +11,12 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	runtimepkg "runtime"
 	"strings"
 	"time"
 
 	awsconfig "github.com/aws/aws-sdk-go-v2/config"
+	campcontract "github.com/joshyorko/camp"
 	"github.com/joshyorko/camp/internal/adapters/archive"
 	"github.com/joshyorko/camp/internal/adapters/devpod"
 	"github.com/joshyorko/camp/internal/adapters/hauler"
@@ -24,6 +27,7 @@ import (
 	"github.com/joshyorko/camp/internal/adapters/sshtransfer"
 	"github.com/joshyorko/camp/internal/adapters/subprocess"
 	"github.com/joshyorko/camp/internal/adapters/supervisor"
+	tooladapter "github.com/joshyorko/camp/internal/adapters/tools"
 	"github.com/joshyorko/camp/internal/app"
 	"github.com/joshyorko/camp/internal/capsule"
 	"github.com/joshyorko/camp/internal/checkpoint"
@@ -398,13 +402,17 @@ type productionComposition struct {
 	clock            *host.Clock
 	devpod           *devpod.Client
 	devpodExecutable string
+	haulerExecutable string
 	hauler           *hauler.Client
 }
 
 type productionSettings struct {
-	paths   config.XDGPaths
-	runtime config.Runtime
-	backend config.Backend
+	paths       config.XDGPaths
+	runtime     config.Runtime
+	backend     config.Backend
+	toolEnsurer toolEnsurer
+	goos        string
+	arch        string
 }
 
 type serviceBundle struct {
@@ -467,18 +475,7 @@ func waitForSupervisorClaim(ctx context.Context, journal ports.Journal, sessionI
 }
 
 func composeServiceBundle(composition productionComposition) (serviceBundle, error) {
-	haulerPath, err := exec.LookPath("hauler")
-	if err != nil {
-		return serviceBundle{}, fmt.Errorf("resolve locked Hauler executable: %w", err)
-	}
-	haulerPath, err = filepath.Abs(haulerPath)
-	if err != nil {
-		return serviceBundle{}, err
-	}
-	haulerPath, err = filepath.EvalSymlinks(haulerPath)
-	if err != nil {
-		return serviceBundle{}, fmt.Errorf("resolve locked Hauler executable target: %w", err)
-	}
+	haulerPath := composition.haulerExecutable
 	processes, err := supervisor.NewProcessManager()
 	if err != nil {
 		return serviceBundle{}, err
@@ -522,6 +519,28 @@ func resolveProductionSettings() (productionSettings, error) {
 
 func composeProductionWithSettings(ctx context.Context, settings productionSettings) (productionComposition, error) {
 	paths, runtime, backend := settings.paths, settings.runtime, settings.backend
+	ensurer := settings.toolEnsurer
+	if ensurer == nil {
+		lock, err := tooladapter.ParseLock(bytes.NewReader(campcontract.DistributionToolLock()))
+		if err != nil {
+			return productionComposition{}, err
+		}
+		ensurer, err = tooladapter.NewInstaller(lock, paths.DataRoot)
+		if err != nil {
+			return productionComposition{}, err
+		}
+	}
+	goos, arch := settings.goos, settings.arch
+	if goos == "" {
+		goos = runtimepkg.GOOS
+	}
+	if arch == "" {
+		arch = runtimepkg.GOARCH
+	}
+	toolPaths, err := resolveManagedToolPaths(ctx, ensurer, goos, arch)
+	if err != nil {
+		return productionComposition{}, err
+	}
 	journal, err := journalstore.NewStore(paths.DataRoot)
 	if err != nil {
 		return productionComposition{}, err
@@ -532,22 +551,13 @@ func composeProductionWithSettings(ctx context.Context, settings productionSetti
 	}
 	runner := subprocess.NewRunner()
 	clock := host.NewClock()
-	devpodPath, err := exec.LookPath("devpod")
-	if err != nil {
-		return productionComposition{}, fmt.Errorf("resolve DevPod executable: %w", err)
-	}
-	devpodPath, err = filepath.Abs(devpodPath)
-	if err != nil {
-		return productionComposition{}, err
-	}
-	devpodPath, err = filepath.EvalSymlinks(devpodPath)
-	if err != nil {
-		return productionComposition{}, fmt.Errorf("resolve DevPod executable target: %w", err)
-	}
+	devpodPath := toolPaths.devpod
+	haulerPath := toolPaths.hauler
 	return productionComposition{
 		paths: paths, runtime: runtime, backend: backend, journal: journal, ownership: ownership,
 		initializer: capsule.NewInitializer(clock, capsule.NewCommandDigestResolver("docker", runner)),
-		runner:      runner, clock: clock, devpod: devpod.NewClient(devpodPath, runner), devpodExecutable: devpodPath, hauler: hauler.NewClient("hauler", runner),
+		runner:      runner, clock: clock, devpod: devpod.NewClient(devpodPath, runner), devpodExecutable: devpodPath,
+		haulerExecutable: haulerPath, hauler: hauler.NewClient(haulerPath, runner),
 	}, nil
 }
 

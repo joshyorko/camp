@@ -16,6 +16,7 @@ import (
 	"testing"
 
 	tooladapter "github.com/joshyorko/camp/internal/adapters/tools"
+	"github.com/joshyorko/camp/internal/config"
 )
 
 func TestRunProductionToolSetupInstallsLockedFixturesUnderXDGData(t *testing.T) {
@@ -134,6 +135,45 @@ func TestRunManagedToolSetupJSONUsesStableIdentityFields(t *testing.T) {
 	}
 	if strings.Contains(output.String(), `"AssetSHA256"`) {
 		t.Fatalf("output = %q, want stable lower-camel fields", output.String())
+	}
+}
+
+func TestResolveManagedToolPathsReturnsVerifiedExecutablesWithoutPATHMutation(t *testing.T) {
+	ensurer := &recordingToolEnsurer{resolutions: map[string]tooladapter.Resolution{
+		"devpod": {Path: "/managed/devpod", Managed: true},
+		"hauler": {Path: "/managed/hauler", Managed: true},
+	}}
+
+	got, err := resolveManagedToolPaths(context.Background(), ensurer, "linux", "amd64")
+	if err != nil {
+		t.Fatalf("resolveManagedToolPaths: %v", err)
+	}
+	if got.devpod != "/managed/devpod" || got.hauler != "/managed/hauler" {
+		t.Fatalf("managed paths = %+v", got)
+	}
+	if gotEnvironment := strings.Join(ensurer.calls, ","); gotEnvironment != "devpod:linux:amd64,hauler:linux:amd64" {
+		t.Fatalf("Ensure calls = %q", gotEnvironment)
+	}
+}
+
+func TestComposeProductionBootstrapsAndWiresManagedToolPaths(t *testing.T) {
+	ensurer := &recordingToolEnsurer{resolutions: map[string]tooladapter.Resolution{
+		"devpod": {Path: "/managed/devpod", Managed: true},
+		"hauler": {Path: "/managed/hauler", Managed: true},
+	}}
+	dataRoot := filepath.Join(t.TempDir(), "data")
+
+	composition, err := composeProductionWithSettings(context.Background(), productionSettings{
+		paths:       config.XDGPaths{DataRoot: dataRoot},
+		toolEnsurer: ensurer,
+		goos:        "linux",
+		arch:        "amd64",
+	})
+	if err != nil {
+		t.Fatalf("composeProductionWithSettings: %v", err)
+	}
+	if composition.devpodExecutable != "/managed/devpod" || composition.haulerExecutable != "/managed/hauler" {
+		t.Fatalf("composition tool paths = devpod %q hauler %q", composition.devpodExecutable, composition.haulerExecutable)
 	}
 }
 
