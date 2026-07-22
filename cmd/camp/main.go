@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"strconv"
 
 	"github.com/joshyorko/camp/internal/cli"
 )
@@ -16,6 +17,16 @@ var (
 )
 
 func run(args []string, streams cli.Streams) int {
+	if len(args) == 3 && args[0] == "__doctor-listener" {
+		port, err := strconv.Atoi(args[1])
+		if err != nil {
+			return int(cli.ExitUsage)
+		}
+		if err := cli.RunDoctorProbeListener(context.Background(), port, args[2]); err != nil {
+			return int(cli.ExitFailure)
+		}
+		return int(cli.ExitSuccess)
+	}
 	root := cli.NewRoot()
 	root.Version = fmt.Sprintf("%s (commit %s, built %s, dirty %s)", version, commit, buildDate, dirty)
 	return cli.Execute(context.Background(), root, args, streams)

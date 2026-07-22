@@ -55,13 +55,36 @@ func (p *ProductionLifecycle) Doctor(ctx context.Context, mode OutputMode, out i
 	}
 	runner := subprocess.NewRunner()
 	confinement := supervisor.NewConfinementResolver(runner, exec.LookPath, func() string { return "host" })
-	report := (doctor.Runner{Timeout: 5 * time.Second, Probes: []doctor.Probe{
-		doctor.ToolProbe{Name: "devpod", Arguments: []string{"version"}},
-		doctor.ToolProbe{Name: "hauler", Arguments: []string{"version"}},
-		doctor.ConfinementProbe{Resolver: confinement},
+	pastaRuntime, err := newProductionPastaRuntime(confinement, paths.DataRoot)
+	if err != nil {
+		return err
+	}
+	managedTools, err := newDoctorManagedToolResolver(campcontract.DistributionToolLock(), paths.DataRoot)
+	if err != nil {
+		return err
+	}
+	bootstrap, err := config.ResolveBootstrap(config.BootstrapInput{ConfigPath: paths.ConfigPath, Environment: environment})
+	if err != nil {
+		return err
+	}
+	doctorJournal, err := journalstore.NewStore(paths.DataRoot)
+	if err != nil {
+		return err
+	}
+	sessions, err := doctorJournal.List(ctx)
+	if err != nil {
+		return err
+	}
+	probes := []doctor.Probe{
+		doctor.ManagedToolProbe{Name: "devpod", Resolver: managedTools},
+		doctor.ManagedToolProbe{Name: "hauler", Resolver: managedTools},
+		doctor.PastaProbe{Runtime: pastaRuntime},
 		doctor.BackendProbe{
 			ConfigPath: paths.ConfigPath, Environment: environment,
 			DefaultBackend: "file://" + filepath.Join(paths.DataRoot, "backend"),
+			OpenStore: func(ctx context.Context, backend config.Backend) (ports.ObjectStore, error) {
+				return objectstore.New(ctx, backend, objectstore.Options{})
+			},
 			CheckCredentials: func(ctx context.Context, backend config.Backend) error {
 				awsRuntime, err := awsconfig.LoadDefaultConfig(ctx, awsconfig.WithRegion(backend.S3.Region))
 				if err != nil {
@@ -71,7 +94,10 @@ func (p *ProductionLifecycle) Doctor(ctx context.Context, mode OutputMode, out i
 				return err
 			},
 		},
-	}}).Run(ctx)
+	}
+	probes = append(probes, doctor.LinuxHostProbes()...)
+	probes = append(probes, productionReachabilityProbes(bootstrap, sessions, managedTools)...)
+	report := (doctor.Runner{Timeout: 5 * time.Second, Probes: probes}).Run(ctx)
 	if mode == ModeJSON {
 		err = doctor.RenderJSON(out, report)
 	} else {

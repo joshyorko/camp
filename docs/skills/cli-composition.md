@@ -4,9 +4,11 @@
 
 The executable delegates process I/O and exit status to `internal/cli`. The production tree exposes `setup`, `init`, `open`, `sync`, `close`, `reopen`, `recover`, and the read-only `doctor` command through concrete application and adapter composition, alongside deterministic help, global `--json`, and completion generation. `setup` composes the locked installer but does not execute a lifecycle; no command is real-tool lifecycle proof until the pinned tools complete it without skips.
 
-`camp doctor` emits one versioned capability model in deterministic human or JSON form. Its stable statuses are `healthy`, `degraded`, `blocked`, and `skipped-not-configured`; `blocked` dominates the overall result, followed by `degraded`. A blocked aggregate is rendered exactly once and exits nonzero; it is not followed by a second generic failure envelope. Each probe is bounded independently. The initial issue #11 slice hashes the resolved DevPod and Hauler executables and executes their identity commands, but reports them degraded because issue #10 still owns lock-backed managed resolution. Pasta option-surface and file-backend syntax evidence also remain degraded until functional probes exist. For S3, doctor proves that the host AWS credential chain resolves while explicitly leaving backend I/O health unproved. Probe causes and credential values are never result evidence; credential-bearing identity output is redacted before its 256-byte display bound is applied.
+`camp doctor` emits one versioned capability model in deterministic human or JSON form. Its stable statuses are `healthy`, `degraded`, `blocked`, and `skipped-not-configured`; `blocked` dominates the overall result, followed by `degraded`. A blocked aggregate is rendered exactly once and exits nonzero; it is not followed by a second generic failure envelope. Each probe is bounded independently. DevPod and Hauler are healthy only when the read-only managed-tool inspector proves the installed executable against the compiled lock; doctor never downloads or repairs them. Kernel evidence removes control bytes before its 256-byte display bound, and probe causes or credentials are never result evidence.
 
-Do not treat this initial doctor surface as proof of backend CAS/readback/cleanup, namespace/listener confinement, forwarding, workspace, service, T3, Codex, DevPod, Kubernetes, or Hauler service lifecycles. Those require later functional probes and unique identity-safe resources. A doctor report is capability evidence, not installation, lifecycle, release, or deployment evidence.
+The functional backend probe creates one random `camp-doctor/` object, proves exact readback, conditional replacement, duplicate and stale-revision conflicts, and conditional cleanup, then verifies absence. Cleanup uses the recorded opaque revision; an identity conflict or cleanup failure blocks health. The functional pasta probe starts the Camp binary's private token listener behind a unique pasta loopback mapping, records exact helper and child process identities, requires a child network namespace distinct from `/proc/self/ns/net`, reaches the token through the host listener, stops only the recorded identities, proves listener/process absence, and removes the temporary directory only when its device and inode still match. `/proc/self/fd`, `/dev/net/tun`, user namespace creation, LSM context, and host/container boundary are independent results. Provider, workspace, forwarding, and service probes are `skipped-not-configured` when no corresponding configuration or live journal record exists; configured checks use read-only provider listing, exact workspace status, durable forwarder/process plus in-workspace HTTP evidence, and service process/namespace/listener/HTTP observation.
+
+A doctor report is capability evidence, not installation, full DevPod/Room-of-Requirement lifecycle, checkpoint publication, Kubernetes, release, or deployment evidence. A `skipped-not-configured` result is intentionally not proof of the configured path.
 
 When adding commands, compose existing application use cases and adapters instead of moving lifecycle logic into Cobra handlers. Preserve exact argument arrays through typed ports; do not rebuild shell command strings.
 
@@ -53,6 +55,17 @@ go run ./cmd/camp --help
 go run ./cmd/camp completion bash
 go run ./cmd/camp doctor --json
 go test ./cmd/camp ./internal/cli -count=1
+```
+
+To isolate the functional file-backend and pasta probes from user configuration, build Camp and run doctor with temporary XDG roots. This still reports managed tools blocked unless their locked identities are installed on the supplied PATH:
+
+```bash
+go build -o /tmp/camp-doctor ./cmd/camp
+HOME=/tmp/camp-doctor-home \
+XDG_CONFIG_HOME=/tmp/camp-doctor-config \
+XDG_DATA_HOME=/tmp/camp-doctor-data \
+XDG_CACHE_HOME=/tmp/camp-doctor-cache \
+/tmp/camp-doctor doctor --json
 ```
 
 A command is usable only when its handler is wired to production dependencies and a focused test proves its output/error contract. A help entry alone is not lifecycle proof.

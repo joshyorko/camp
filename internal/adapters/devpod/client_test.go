@@ -250,6 +250,29 @@ func TestEnsureProviderAcceptsExistingInitializedNamedProviderWithoutMutation(t 
 	}
 }
 
+func TestProbeProviderVerifiesConfiguredIdentityWithoutMutation(t *testing.T) {
+	t.Parallel()
+	runner := &providerSequenceRunner{results: []ports.Result{{Stdout: []byte(`{"room-of-requirement":{"state":{"initialized":true}}}`)}}}
+	if err := NewClient("/opt/devpod", runner).ProbeProvider(context.Background(), "default", "room-of-requirement"); err != nil {
+		t.Fatal(err)
+	}
+	want := [][]string{{"provider", "list", "--context", "default", "--output", "json"}}
+	if !reflect.DeepEqual(runner.argv, want) {
+		t.Fatalf("provider argv = %#v, want read-only %#v", runner.argv, want)
+	}
+}
+
+func TestProbeProviderNeverAddsMissingDocker(t *testing.T) {
+	t.Parallel()
+	runner := &providerSequenceRunner{results: []ports.Result{{Stdout: []byte(`{}`)}}}
+	if err := NewClient("/opt/devpod", runner).ProbeProvider(context.Background(), "default", "docker"); err == nil {
+		t.Fatal("ProbeProvider accepted missing docker")
+	}
+	if len(runner.argv) != 1 || runner.argv[0][0] != "provider" || runner.argv[0][1] != "list" {
+		t.Fatalf("provider argv = %#v, want one list", runner.argv)
+	}
+}
+
 type providerSequenceRunner struct {
 	results []ports.Result
 	argv    [][]string

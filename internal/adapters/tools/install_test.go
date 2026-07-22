@@ -105,6 +105,51 @@ func TestInstallerAcceptsOnlyDigestMatchingPATHBinary(t *testing.T) {
 	}
 }
 
+func TestInstallerInspectNeverDownloadsAndReturnsOnlyVerifiedIdentity(t *testing.T) {
+	body := []byte("locked-devpod")
+	serverCalls := 0
+	server := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) { serverCalls++ }))
+	defer server.Close()
+	executable := filepath.Join(t.TempDir(), "devpod")
+	if err := os.WriteFile(executable, body, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	installer, err := NewInstaller(testToolLock("devpod", server.URL, digest(body)), t.TempDir(),
+		WithAllowedHosts(strings.TrimPrefix(server.URL, "http://")),
+		WithLookPath(func(string) (string, error) { return executable, nil }),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resolution, err := installer.Inspect(context.Background(), "devpod", "linux", "amd64")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resolution.Path != executable || resolution.BinarySHA256 != digest(body) || resolution.Version == "" || serverCalls != 0 {
+		t.Fatalf("resolution = %#v, server calls = %d", resolution, serverCalls)
+	}
+}
+
+func TestInstallerInspectRejectsUnverifiedPathWithoutDownloading(t *testing.T) {
+	serverCalls := 0
+	server := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) { serverCalls++ }))
+	defer server.Close()
+	executable := filepath.Join(t.TempDir(), "devpod")
+	if err := os.WriteFile(executable, []byte("wrong"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	installer, err := NewInstaller(testToolLock("devpod", server.URL, digest([]byte("locked"))), t.TempDir(),
+		WithAllowedHosts(strings.TrimPrefix(server.URL, "http://")),
+		WithLookPath(func(string) (string, error) { return executable, nil }),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := installer.Inspect(context.Background(), "devpod", "linux", "amd64"); err == nil || serverCalls != 0 {
+		t.Fatalf("Inspect error = %v, server calls = %d", err, serverCalls)
+	}
+}
+
 func TestPastaProbeClassifiesExternalCapabilityAndRequiresFunctionalSurface(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "pasta")
 	if err := os.WriteFile(path, []byte("pasta fixture"), 0o755); err != nil {
