@@ -50,10 +50,14 @@ func TestReleaseWorkflowVerifiesDownloadsBeforeProtectedPublication(t *testing.T
 		"download-artifact",
 		"sha256sum --check checksums.txt",
 		"build-release-evidence.sh verify",
+		"github.event_name == 'push' || inputs.publish == true",
 		"retention-days:",
 	)
 	if strings.Contains(workflow, "pull_request:") {
 		t.Fatal("release.yml must not run on pull requests")
+	}
+	if strings.Count(workflow, "github.event_name == 'push' || inputs.publish == true") != 2 {
+		t.Fatal("manual dry runs must gate both attestation and publication")
 	}
 	assertActionsPinned(t, workflow)
 }

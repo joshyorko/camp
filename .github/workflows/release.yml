@@ -86,6 +86,7 @@ jobs:
 
   attest:
     needs: verify
+    if: github.event_name == 'push' || inputs.publish == true
     permissions:
       contents: read
       id-token: write

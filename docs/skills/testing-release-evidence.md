@@ -126,6 +126,13 @@ bind final archive digests to the workflow identity; protected tag/manual
 publication remains downstream of downloaded-artifact verification and
 attestation.
 
+A manual release workflow with `publish=false` is the safe hosted validation
+lane: it builds, uploads, downloads, checksum-verifies, and natively exercises
+both architectures, but skips attestation and publication. Attestation is a
+public provenance side effect, so it runs only for a tag or an explicitly
+approved manual publication. A dry-run artifact proves candidate mechanics; it
+does not prove attestation or a published release.
+
 Before closing issue #13, link the successful mandatory CI run, both native
 verification jobs, uploaded GitHub artifact digest, archive checksums, exact
 SBOM digest bindings, attestations, protected provider evidence for every
