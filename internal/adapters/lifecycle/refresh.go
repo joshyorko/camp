@@ -66,8 +66,10 @@ func (r *ServingRefresher) Refresh(ctx context.Context, request app.ServingRefre
 		specs = append(specs, spec)
 	}
 	for index, record := range records {
-		if err := r.services.Stop(ctx, record); err != nil {
-			return fmt.Errorf("stop serving refresh service %q: %w", record.Name, err)
+		if !hasPendingServiceStart(pending, specs[index]) {
+			if err := r.services.Stop(ctx, record); err != nil {
+				return fmt.Errorf("stop serving refresh service %q: %w", record.Name, err)
+			}
 		}
 		_, next, err := r.services.Ensure(ctx, snapshot, specs[index])
 		if err != nil {
@@ -76,6 +78,15 @@ func (r *ServingRefresher) Refresh(ctx context.Context, request app.ServingRefre
 		snapshot = next
 	}
 	return nil
+}
+
+func hasPendingServiceStart(pending []ports.PendingIntent, spec supervisor.ServiceSpec) bool {
+	for _, item := range pending {
+		if item.Intent.SessionID == spec.SessionID && item.Intent.Transition == "ServiceStart" && item.Intent.ID == spec.Name+"-"+spec.LaunchToken {
+			return true
+		}
+	}
+	return false
 }
 
 func recordedServingDirectory(argv []string) string {
@@ -127,9 +138,17 @@ func refreshedServiceSpec(sessionID string, record domain.ServiceUnitRecord, dir
 	if !replaced {
 		return supervisor.ServiceSpec{}, errors.New("recorded service command has no serving directory")
 	}
+	var childContextPrefix []string
+	if len(record.Helper.Argv) != 0 {
+		var err error
+		childContextPrefix, err = supervisor.RecordedChildContextPrefix(record)
+		if err != nil {
+			return supervisor.ServiceSpec{}, err
+		}
+	}
 	return supervisor.ServiceSpec{
 		SessionID: sessionID, Name: record.Name, LaunchToken: sessionID + "-generation-" + strconv.FormatUint(generation, 10) + "-" + record.Name,
-		Capability: supervisor.ConfinementCapability{Executable: record.Confinement.Executable, Version: record.Confinement.Version, EnvironmentFingerprint: record.Confinement.EnvironmentFingerprint, Boundary: record.Confinement.Boundary},
+		Capability: supervisor.ConfinementCapability{Executable: record.Confinement.Executable, Version: record.Confinement.Version, EnvironmentFingerprint: record.Confinement.EnvironmentFingerprint, Boundary: record.Confinement.Boundary, ChildContextPrefix: childContextPrefix},
 		Mapping:    supervisor.PortMapping{HostAddress: record.Mapping.HostAddress, HostPort: record.Mapping.HostPort, GuestPort: record.Mapping.GuestPort},
 		LogPath:    record.LogPath, PIDPath: record.PIDPath,
 		Child: ports.Command{Executable: record.Child.DesiredExecutable, Argv: argv},

@@ -24,7 +24,7 @@ const (
 	roomVersion    = "v1.18.0"
 	roomCommit     = "0aabf18ad291c590498bd8e904a7d09f66378b85"
 	devpodVersion  = "v0.26.1"
-	haulerVersion  = "v2.0.1"
+	haulerVersion  = "v2.0.2"
 )
 
 var digestPattern = regexp.MustCompile(`^sha256:[0-9a-f]{64}$`)

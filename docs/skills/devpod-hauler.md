@@ -2,7 +2,9 @@
 
 ## Locked tools
 
-`tools.lock.yaml` is authoritative for supported assets and digests. The current contracts are `skevetter/devpod` v0.26.1 and `hauler-dev/hauler` v2.0.1.
+`tools.lock.yaml` is authoritative for supported assets and digests. The current contracts are `skevetter/devpod` v0.26.1 and `hauler-dev/hauler` v2.0.2. Hauler v2.0.1 must not be accepted: a real save/load probe dropped digest-addressed image descriptors from the loaded store, while v2.0.2 preserved the same named-image descriptors and digests; v2.0.2 includes the upstream digest-artifact copy fixes.
+
+Do not use Hauler v2.0.2's live `_catalog` response as proof that all direct registry pushes were inventoried. The server rejects positive `n` pagination values and may return an empty unpaginated repository list while tag endpoints and the distribution storage tree contain pushed content. Camp inventories tagged direct pushes from the immutable registry cut instead.
 
 ## Implemented adapter behavior
 

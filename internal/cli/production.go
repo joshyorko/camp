@@ -11,6 +11,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"github.com/joshyorko/camp/internal/adapters/archive"
 	"github.com/joshyorko/camp/internal/adapters/devpod"
@@ -29,6 +30,7 @@ import (
 	"github.com/joshyorko/camp/internal/domain"
 	"github.com/joshyorko/camp/internal/images"
 	journalstore "github.com/joshyorko/camp/internal/journal"
+	"github.com/joshyorko/camp/internal/ports"
 	"github.com/joshyorko/camp/internal/registry"
 	"github.com/joshyorko/camp/internal/target"
 	"github.com/joshyorko/camp/internal/workspace"
@@ -92,7 +94,27 @@ func (p *ProductionLifecycle) Open(ctx context.Context, value string, mode Outpu
 	if err != nil {
 		return err
 	}
+	if result.Snapshot.Mode == domain.SessionReadWrite {
+		if err := startSessionSupervisor(ctx, composition, services.processes, result.Snapshot.SessionID); err != nil {
+			return err
+		}
+	}
 	return writeSuccess(out, mode, "open", result, fmt.Sprintf("Opened %s (%s)\n", result.Snapshot.Capsule, result.Snapshot.SessionID))
+}
+
+func (p *ProductionLifecycle) Supervise(ctx context.Context, sessionID string, mode OutputMode, out io.Writer) error {
+	c, err := composeLifecycle(ctx)
+	if err != nil {
+		return err
+	}
+	snapshot, err := app.SelectActiveSession(ctx, c.base.journal, app.SessionSelector{Capsule: c.base.runtime.Capsule, Branch: "main", SessionID: sessionID})
+	if err != nil {
+		return err
+	}
+	if err := app.NewSupervise(c.base.journal, c.leases, c.locks, c.base.clock, time.Minute, host.NewIdentity()).Run(ctx, snapshot.SessionID); err != nil {
+		return err
+	}
+	return nil
 }
 
 func productionMachineID(ctx context.Context) (string, error) {
@@ -174,17 +196,18 @@ func (p *ProductionLifecycle) Recover(ctx context.Context, value string, mode Ou
 type lifecycleComposition struct {
 	base      productionComposition
 	locks     *journalstore.OperationLocker
+	leases    *coordination.LeaseRepository
 	publisher *app.CheckpointPublisher
 	close     *app.Close
 	recover   *app.Recover
 }
 
 type cleanupReconciler struct {
-	journal *journalstore.Store
+	journal ports.Journal
 	close   *app.Close
 }
 
-func newCleanupReconciler(journal *journalstore.Store, close *app.Close) *cleanupReconciler {
+func newCleanupReconciler(journal ports.Journal, close *app.Close) *cleanupReconciler {
 	return &cleanupReconciler{journal: journal, close: close}
 }
 func (r *cleanupReconciler) Reconcile(ctx context.Context, sessionID string) (domain.JournalSnapshot, error) {
@@ -217,7 +240,7 @@ func composeLifecycle(ctx context.Context) (lifecycleComposition, error) {
 	pointers := coordination.NewPointerRepository(store)
 	catalog := registry.NewCatalog(http.DefaultClient, 100)
 	barrier := lifecycleadapter.NewRegistryBarrier(base.journal, services.units)
-	pipeline := app.CheckpointPipeline{Capturer: images.NewCapturer(base.devpod, catalog, base.clock), Sealer: registry.NewSnapshotter(catalog, barrier), Refresher: lifecycleadapter.NewServingRefresher(base.journal, services.units)}
+	pipeline := app.CheckpointPipeline{Capturer: images.NewCapturer(base.devpod, catalog, base.clock), Sealer: registry.NewSnapshotter(barrier), Refresher: lifecycleadapter.NewServingRefresher(base.journal, services.units)}
 	builder := checkpoint.NewBuilder(archive.NewTarZstd(), hauler.NewGenerationAssembler(base.hauler))
 	publisher := app.NewCheckpointPublisher(base.journal, locks, leases, app.CheckpointTransports{Local: workspace.Local{}}, pipeline, builder, generations, pointers, base.clock)
 	effects := lifecycleadapter.NewCloseEffects(base.devpod, services.processes, services.units, leases, base.ownership)
@@ -229,14 +252,14 @@ func composeLifecycle(ctx context.Context) (lifecycleComposition, error) {
 		return lifecycleComposition{}, err
 	}
 	recover := app.NewRecover(base.journal, observer, guard, openUsecase, newCleanupReconciler(base.journal, closeUsecase))
-	return lifecycleComposition{base: base, locks: locks, publisher: publisher, close: closeUsecase, recover: recover}, nil
+	return lifecycleComposition{base: base, locks: locks, leases: leases, publisher: publisher, close: closeUsecase, recover: recover}, nil
 }
 
 type productionComposition struct {
 	paths       config.XDGPaths
 	runtime     config.Runtime
 	backend     config.Backend
-	journal     *journalstore.Store
+	journal     ports.Journal
 	ownership   *capsule.Ownership
 	initializer *capsule.Initializer
 	runner      *subprocess.Runner
@@ -248,7 +271,60 @@ type productionComposition struct {
 type serviceBundle struct {
 	starter   app.OpenServiceStarter
 	units     *supervisor.ServiceSupervisor
-	processes *supervisor.ProcessManager
+	processes ports.ProcessManager
+}
+
+func startSessionSupervisor(ctx context.Context, composition productionComposition, processes ports.ProcessManager, sessionID string) error {
+	campBinary, err := os.Executable()
+	if err != nil {
+		return err
+	}
+	campBinary, err = filepath.Abs(campBinary)
+	if err != nil {
+		return err
+	}
+	campBinary, err = filepath.EvalSymlinks(campBinary)
+	if err != nil {
+		return err
+	}
+	logPath := filepath.Join(composition.paths.DataRoot, "supervisors", sessionID+".log")
+	identity, err := processes.Start(ctx, ports.ProcessSpec{
+		Command: ports.Command{
+			Executable: campBinary,
+			Argv:       []string{"supervise", sessionID},
+		},
+		NewSession: true,
+		LogPath:    logPath,
+	})
+	if err != nil {
+		return err
+	}
+	if err := waitForSupervisorClaim(ctx, composition.journal, sessionID, identity); err != nil {
+		_ = processes.Stop(context.WithoutCancel(ctx), identity, 5*time.Second)
+		return err
+	}
+	return nil
+}
+
+func waitForSupervisorClaim(ctx context.Context, journal ports.Journal, sessionID string, identity domain.ProcessIdentity) error {
+	deadline := time.Now().Add(15 * time.Second)
+	for {
+		snapshot, _, err := journal.Load(ctx, sessionID)
+		if err != nil {
+			return err
+		}
+		if snapshot.Supervisor.Identity == identity && snapshot.Supervisor.Desired == domain.RuntimeDesiredRunning && snapshot.Supervisor.Observed == domain.RuntimeObservedReady {
+			return nil
+		}
+		if time.Now().After(deadline) {
+			return fmt.Errorf("session supervisor claim was not recorded for %s", sessionID)
+		}
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(25 * time.Millisecond):
+		}
+	}
 }
 
 func composeServiceBundle(composition productionComposition) (serviceBundle, error) {

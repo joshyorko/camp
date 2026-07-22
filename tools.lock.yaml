@@ -14,16 +14,16 @@ tools:
           sha256: 268621da428ca6d470d1812d63c9e41a1681b681861fc984648a57c5725478ee
   hauler:
     repository: hauler-dev/hauler
-    version: v2.0.1
-    commit: 4f47155d6f8ccec22ba6f609f2f1f4919b02fce1
+    version: v2.0.2
+    commit: 4ece589a5c763fff15e253735263bd13a889d3cc
     assets:
       linux:
         amd64:
-          url: https://github.com/hauler-dev/hauler/releases/download/v2.0.1/hauler_2.0.1_linux_amd64.tar.gz
-          sha256: c8b65ea57f10a03f02104ebbecbf1249c41f499bc85771488824b70f6ccfc76c
+          url: https://github.com/hauler-dev/hauler/releases/download/v2.0.2/hauler_2.0.2_linux_amd64.tar.gz
+          sha256: d96ac67cac3c9e4fc2d24c8347fba956b2a165a2237318cc2564e44bbaabc4c3
         arm64:
-          url: https://github.com/hauler-dev/hauler/releases/download/v2.0.1/hauler_2.0.1_linux_arm64.tar.gz
-          sha256: ffe9811bbb77f844200f0644b98a08b65ee2d5ffcc0e2b49b1df31719a0a052f
+          url: https://github.com/hauler-dev/hauler/releases/download/v2.0.2/hauler_2.0.2_linux_arm64.tar.gz
+          sha256: e77a7d2b707ba2ffbb5a69e1f6cacbf046065333cd9b1abe51ed8f9f099c2870
 fixtures:
   room:
     repository: joshyorko/room-of-requirement

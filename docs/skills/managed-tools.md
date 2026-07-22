@@ -14,7 +14,7 @@ Use this note when changing `tools.lock.yaml` or `internal/adapters/tools`.
 
 For a DevPod or Hauler update, review the upstream repository, tag, and commit together; update both Linux amd64 and arm64 assets; independently calculate each asset SHA-256; and rerun the focused and race tests plus real binaries on both architectures. Review raw-versus-archive shape before changing the installer. A checksum committed beside a mutable release source proves that retrieved bytes match the reviewed pin; it is not publisher-authenticity evidence by itself. A skipped real-binary or architecture gate is not proof.
 
-The locked Hauler v2.0.1 amd64 and arm64 tarballs both list, in order, `LICENSE` (mode 0644), `README.md` (mode 0644), and `hauler` (mode 0755). Verify a future pin directly rather than assuming this shape:
+The locked Hauler v2.0.2 amd64 and arm64 tarballs both list, in order, `LICENSE` (mode 0644), `README.md` (mode 0644), and `hauler` (mode 0755). Verify a future pin directly rather than assuming this shape:
 
 ```text
 curl -fsSL -o hauler.tar.gz <locked-url>

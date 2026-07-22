@@ -55,6 +55,21 @@ func TestCloseEffectsUseRecordedOwnershipAndChildFirstControllers(t *testing.T) 
 	}
 }
 
+func TestCloseWorkspaceDeletesRecordedLocalProviderWorkspace(t *testing.T) {
+	var events []string
+	effects := NewCloseEffects(&fakeWorkspace{events: &events}, &fakeProcesses{events: &events}, &fakeServices{events: &events}, &fakeLeases{events: &events}, &fakeOwnership{events: &events})
+	snapshot := lifecycleSnapshot(t.TempDir())
+	snapshot.Workspace.LocalProvider = true
+
+	if err := effects.CloseWorkspace(context.Background(), snapshot, false); err != nil {
+		t.Fatalf("CloseWorkspace() error = %v", err)
+	}
+	want := []string{"workspace:delete:default:camp-session"}
+	if !reflect.DeepEqual(events, want) {
+		t.Fatalf("events = %#v, want %#v", events, want)
+	}
+}
+
 func TestCloseEffectsComposeProductionServiceSupervisorChildFirst(t *testing.T) {
 	var events []string
 	processes := &fakeProcesses{events: &events}
@@ -200,6 +215,7 @@ func TestSessionObserverClosedHistoryDoesNotInspectReusedPorts(t *testing.T) {
 
 func TestServingRefresherRotatesBothRecordedServices(t *testing.T) {
 	snapshot := lifecycleSnapshot(t.TempDir())
+	snapshot.Services[0].Helper.Argv = append([]string{"/usr/bin/pasta", "--", "/usr/bin/runcon", "-t", "unconfined_t"}, snapshot.Services[0].Child.Argv...)
 	journal := &fakeJournal{snapshot: snapshot}
 	services := &fakeServices{}
 	request := app.ServingRefreshRequest{
@@ -225,6 +241,9 @@ func TestServingRefresherRotatesBothRecordedServices(t *testing.T) {
 			t.Fatalf("launch token = %q", spec.LaunchToken)
 		}
 	}
+	if !reflect.DeepEqual(services.ensureSpecs[0].Capability.ChildContextPrefix, []string{"/usr/bin/runcon", "-t", "unconfined_t"}) {
+		t.Fatalf("registry child context prefix = %#v", services.ensureSpecs[0].Capability.ChildContextPrefix)
+	}
 }
 
 func TestServingRefresherAcceptsMatchingPendingCheckpointRefresh(t *testing.T) {
@@ -240,7 +259,7 @@ func TestServingRefresherAcceptsMatchingPendingCheckpointRefresh(t *testing.T) {
 	}
 	journal := &fakeJournal{snapshot: snapshot, pending: []ports.PendingIntent{
 		{Intent: ports.IntentRecord{ID: snapshot.SessionID + "-checkpoint-7", SessionID: snapshot.SessionID, Transition: "ServingContentRefreshed", Attempt: 1, Input: input}},
-		{Intent: ports.IntentRecord{ID: snapshot.SessionID + "-lease-renew", SessionID: snapshot.SessionID, Transition: "LeaseRenewed", Attempt: 1}},
+		{Intent: ports.IntentRecord{ID: "registry-" + snapshot.SessionID + "-generation-8-registry", SessionID: snapshot.SessionID, Transition: "ServiceStart", Attempt: 1}},
 	}}
 
 	if err := NewServingRefresher(journal, services).Refresh(context.Background(), request); err != nil {
@@ -248,6 +267,9 @@ func TestServingRefresherAcceptsMatchingPendingCheckpointRefresh(t *testing.T) {
 	}
 	if len(services.ensureSpecs) != 2 {
 		t.Fatalf("Ensure() calls = %d", len(services.ensureSpecs))
+	}
+	if !reflect.DeepEqual(services.stopNames, []string{"fileserver"}) {
+		t.Fatalf("stop order after pending registry start = %#v", services.stopNames)
 	}
 }
 

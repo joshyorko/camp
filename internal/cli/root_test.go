@@ -55,6 +55,7 @@ func TestLifecycleCommandsDelegateWithStrictArgumentsAndInheritedMode(t *testing
 		{name: "close", args: []string{"close"}, want: "close::human"},
 		{name: "reopen", args: []string{"reopen", "memoryd"}, want: "reopen:memoryd:human"},
 		{name: "recover", args: []string{"recover", "session-1"}, want: "recover:session-1:human"},
+		{name: "supervise", args: []string{"supervise", "session-1"}, want: "supervise:session-1:human"},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			root := NewRootWithLifecycle(lifecycle)
@@ -68,7 +69,7 @@ func TestLifecycleCommandsDelegateWithStrictArgumentsAndInheritedMode(t *testing
 		})
 	}
 
-	for _, args := range [][]string{{"init", "a", "b"}, {"open", "a", "b"}, {"sync", "x"}, {"close", "x"}, {"reopen", "a", "b"}, {"recover", "a", "b"}} {
+	for _, args := range [][]string{{"init", "a", "b"}, {"open", "a", "b"}, {"sync", "x"}, {"close", "x"}, {"reopen", "a", "b"}, {"recover", "a", "b"}, {"supervise", "a", "b"}} {
 		var stderr bytes.Buffer
 		if code := Execute(context.Background(), NewRootWithLifecycle(lifecycle), args, Streams{ErrOut: &stderr}); code != int(ExitUsage) {
 			t.Fatalf("Execute(%q) = %d, want usage; stderr=%q", args, code, stderr.String())
@@ -100,6 +101,10 @@ func (r *recordingLifecycle) Reopen(_ context.Context, value string, mode Output
 }
 func (r *recordingLifecycle) Recover(_ context.Context, value string, mode OutputMode, _ io.Writer) error {
 	r.calls = append(r.calls, "recover:"+value+":"+string(mode))
+	return nil
+}
+func (r *recordingLifecycle) Supervise(_ context.Context, value string, mode OutputMode, _ io.Writer) error {
+	r.calls = append(r.calls, "supervise:"+value+":"+string(mode))
 	return nil
 }
 
@@ -453,6 +458,36 @@ func TestRootHelpIsDeterministic(t *testing.T) {
 	want := "Recoverable capsule workspaces\n\nUsage:\n  camp [flags]\n  camp [command]\n\nAvailable Commands:\n  close       Publish a checkpoint and close\n  completion  Generate shell completion\n  help        Help about any command\n  init        Initialize a capsule root\n  open        Open a capsule workspace\n  recover     Recover an interrupted lifecycle\n  reopen      Reopen a closed capsule workspace\n  sync        Publish a checkpoint and remain open\n\nFlags:\n  -h, --help   help for camp\n      --json   emit stable JSON output\n\nUse \"camp [command] --help\" for more information about a command.\n"
 	if first != want {
 		t.Fatalf("help:\n%s\nwant:\n%s", first, want)
+	}
+}
+
+func TestHiddenSupervisorCommandIsPresentButNotVisible(t *testing.T) {
+	t.Parallel()
+
+	root := NewRoot()
+	cmd, _, err := root.Find([]string{"supervise"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cmd == nil || !cmd.Hidden {
+		t.Fatalf("supervise command = %#v, want hidden", cmd)
+	}
+	if help := renderHelp(t); strings.Contains(help, "supervise") {
+		t.Fatalf("help unexpectedly mentioned supervise:\n%s", help)
+	}
+
+	lifecycle := &recordingLifecycle{}
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	exitCode := Execute(context.Background(), NewRootWithLifecycle(lifecycle), []string{"supervise", "session-1"}, Streams{Out: &stdout, ErrOut: &stderr})
+	if exitCode != int(ExitSuccess) {
+		t.Fatalf("Execute(supervise) exit code = %d, want %d; stderr=%q", exitCode, ExitSuccess, stderr.String())
+	}
+	if got := lifecycle.calls[len(lifecycle.calls)-1]; got != "supervise:session-1:human" {
+		t.Fatalf("call = %q, want supervise:session-1:human", got)
+	}
+	if stdout.Len() != 0 || stderr.Len() != 0 {
+		t.Fatalf("stdout=%q stderr=%q, want empty", stdout.String(), stderr.String())
 	}
 }
 

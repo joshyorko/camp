@@ -129,6 +129,17 @@ func (s *ServiceSupervisor) Observe(ctx context.Context, record domain.ServiceUn
 }
 
 func (s *ServiceSupervisor) Restart(ctx context.Context, sessionID, serviceName, launchToken string) (domain.ServiceUnitRecord, domain.JournalSnapshot, error) {
+	return s.restartWithin(ctx, sessionID, serviceName, launchToken, "")
+}
+
+func (s *ServiceSupervisor) RestartWithin(ctx context.Context, sessionID, serviceName, launchToken, parentIntentID string) (domain.ServiceUnitRecord, domain.JournalSnapshot, error) {
+	if parentIntentID == "" {
+		return domain.ServiceUnitRecord{}, domain.JournalSnapshot{}, errors.New("service restart parent intent is empty")
+	}
+	return s.restartWithin(ctx, sessionID, serviceName, launchToken, parentIntentID)
+}
+
+func (s *ServiceSupervisor) restartWithin(ctx context.Context, sessionID, serviceName, launchToken, parentIntentID string) (domain.ServiceUnitRecord, domain.JournalSnapshot, error) {
 	if s == nil || s.journal == nil || s.processes == nil || s.inspector == nil || sessionID == "" || serviceName == "" || launchToken == "" {
 		return domain.ServiceUnitRecord{}, domain.JournalSnapshot{}, errors.New("service restart dependencies or identity are incomplete")
 	}
@@ -142,22 +153,35 @@ func (s *ServiceSupervisor) Restart(ctx context.Context, sessionID, serviceName,
 	}
 	intent := ports.IntentRecord{ID: serviceName + "-" + launchToken + "-restart", SessionID: sessionID, Transition: "ServiceRestart", Attempt: 1, Timestamp: time.Now().UTC()}
 	restartPending := false
+	parentPending := false
 	for _, item := range pending {
 		if item.Intent.ID == intent.ID && item.Intent.Transition == intent.Transition {
 			restartPending = true
 			continue
 		}
+		if parentIntentID != "" && item.Intent.ID == parentIntentID {
+			parentPending = true
+			continue
+		}
+		if item.Intent.Transition == "ServiceStart" && item.Intent.ID == serviceName+"-"+launchToken {
+			continue
+		}
 		return domain.ServiceUnitRecord{}, snapshot, fmt.Errorf("service restart requires recovery of pending transition %q", item.Intent.Transition)
+	}
+	if parentIntentID != "" && !parentPending {
+		return domain.ServiceUnitRecord{}, snapshot, errors.New("service restart parent intent is not pending")
 	}
 	if restartPending && record.LaunchToken == launchToken {
 		observation, err := s.Observe(ctx, record)
-		if err != nil || observation.State != UnitLive {
-			return domain.ServiceUnitRecord{}, snapshot, errors.Join(err, ErrUnitInvariant)
-		}
-		if err := s.journal.RecordFact(context.WithoutCancel(ctx), ports.FactRecord{IntentID: intent.ID, SessionID: sessionID, Transition: intent.Transition, Timestamp: time.Now().UTC()}, snapshot); err != nil {
+		if err != nil {
 			return domain.ServiceUnitRecord{}, snapshot, err
 		}
-		return record, snapshot, nil
+		if observation.State == UnitLive {
+			if err := s.journal.RecordFact(context.WithoutCancel(ctx), ports.FactRecord{IntentID: intent.ID, SessionID: sessionID, Transition: intent.Transition, Timestamp: time.Now().UTC()}, snapshot); err != nil {
+				return domain.ServiceUnitRecord{}, snapshot, err
+			}
+			return record, snapshot, nil
+		}
 	}
 	if !restartPending {
 		if err := s.journal.RecordIntent(ctx, intent); err != nil {
@@ -172,6 +196,8 @@ func (s *ServiceSupervisor) Restart(ctx context.Context, sessionID, serviceName,
 		if err := s.Stop(ctx, record); err != nil {
 			return domain.ServiceUnitRecord{}, snapshot, err
 		}
+	} else if err := s.inspector.Absent(ctx, record); err != nil {
+		return domain.ServiceUnitRecord{}, snapshot, err
 	}
 	spec, err := serviceSpecFromRecord(record)
 	if err != nil {
@@ -194,7 +220,7 @@ func serviceSpecFromRecord(record domain.ServiceUnitRecord) (ServiceSpec, error)
 	if record.Name == "" || record.LaunchToken == "" || record.Child.DesiredExecutable == "" || len(record.Child.Argv) < 2 || record.Child.Argv[0] != record.Child.DesiredExecutable || record.Helper.DesiredExecutable != record.Confinement.Executable {
 		return ServiceSpec{}, fmt.Errorf("recorded service identity is incomplete: %w", ErrUnitInvariant)
 	}
-	childContextPrefix, err := recordedChildContextPrefix(record)
+	childContextPrefix, err := RecordedChildContextPrefix(record)
 	if err != nil {
 		return ServiceSpec{}, err
 	}
@@ -207,7 +233,7 @@ func serviceSpecFromRecord(record domain.ServiceUnitRecord) (ServiceSpec, error)
 	}, nil
 }
 
-func recordedChildContextPrefix(record domain.ServiceUnitRecord) ([]string, error) {
+func RecordedChildContextPrefix(record domain.ServiceUnitRecord) ([]string, error) {
 	separator := -1
 	for index, argument := range record.Helper.Argv {
 		if argument != "--" {
@@ -269,11 +295,24 @@ func (s *ServiceSupervisor) Ensure(ctx context.Context, snapshot domain.JournalS
 			return domain.ServiceUnitRecord{}, snapshot, err
 		}
 		var expected startIntentPayload
-		if json.Unmarshal(expectedIntent.Input, &expected) != nil || !reflect.DeepEqual(payload, expected) {
+		if json.Unmarshal(expectedIntent.Input, &expected) != nil || !pendingStartPayloadMatches(snapshot, payload, expected, service) {
 			return domain.ServiceUnitRecord{}, snapshot, fmt.Errorf("pending service start identity changed: %w", ErrUnitInvariant)
 		}
 		record, err := s.discover(ctx, service, processSpec)
-		if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			if err := s.inspector.Prebind(ctx, service.Mapping); err != nil {
+				return domain.ServiceUnitRecord{}, snapshot, err
+			}
+			helperIdentity, startErr := s.processes.Start(ctx, processSpec)
+			if startErr != nil {
+				return domain.ServiceUnitRecord{}, snapshot, startErr
+			}
+			record, err = s.observeStarted(ctx, service, processSpec, helperIdentity)
+			if err != nil {
+				_ = s.cleanupPartial(ctx, service, helperIdentity)
+				return domain.ServiceUnitRecord{}, snapshot, err
+			}
+		} else if err != nil {
 			return domain.ServiceUnitRecord{}, snapshot, err
 		}
 		next := upsertService(snapshot, record)
@@ -323,6 +362,28 @@ func (s *ServiceSupervisor) Ensure(ctx context.Context, snapshot domain.JournalS
 	return record, next, nil
 }
 
+func pendingStartPayloadMatches(snapshot domain.JournalSnapshot, payload, expected startIntentPayload, service ServiceSpec) bool {
+	if reflect.DeepEqual(payload, expected) {
+		return true
+	}
+	record, ok := recordedService(snapshot, service.Name)
+	if !ok || len(service.Capability.ChildContextPrefix) == 0 {
+		return false
+	}
+	recordedPrefix, err := RecordedChildContextPrefix(record)
+	if err != nil || !reflect.DeepEqual(recordedPrefix, service.Capability.ChildContextPrefix) {
+		return false
+	}
+	legacy := service
+	legacy.Capability.ChildContextPrefix = nil
+	legacyIntent, err := serviceStartIntent(legacy)
+	if err != nil {
+		return false
+	}
+	var legacyPayload startIntentPayload
+	return json.Unmarshal(legacyIntent.Input, &legacyPayload) == nil && reflect.DeepEqual(payload, legacyPayload)
+}
+
 func (s *ServiceSupervisor) Stop(ctx context.Context, record domain.ServiceUnitRecord) error {
 	if record.Helper.PGID > 0 {
 		members, err := s.processes.Group(ctx, record.Helper.PGID)
@@ -352,7 +413,22 @@ func (s *ServiceSupervisor) Stop(ctx context.Context, record domain.ServiceUnitR
 			return fmt.Errorf("service group still contains %d processes: %w", len(members), ErrUnitInvariant)
 		}
 	}
-	return s.inspector.Absent(ctx, record)
+	return waitForServiceAbsent(ctx, func() error { return s.inspector.Absent(ctx, record) }, time.Second, 10*time.Millisecond)
+}
+
+func waitForServiceAbsent(ctx context.Context, absent func() error, timeout, interval time.Duration) error {
+	deadline := time.Now().Add(timeout)
+	for {
+		err := absent()
+		if err == nil || !errors.Is(err, ErrUnitInvariant) || !time.Now().Before(deadline) {
+			return err
+		}
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(interval):
+		}
+	}
 }
 
 func validateRecordedGroup(members []ports.ProcessStatus, record domain.ServiceUnitRecord) error {

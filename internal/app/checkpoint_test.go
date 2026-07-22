@@ -7,6 +7,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -69,15 +70,21 @@ type fakeRegistrySealer struct {
 	calls   int
 	request registryadapter.SnapshotRequest
 	result  registryadapter.Snapshot
+	after   func(context.Context, registryadapter.SnapshotRequest) error
 	err     error
 }
 
-func (s *fakeRegistrySealer) Seal(_ context.Context, request registryadapter.SnapshotRequest) (registryadapter.Snapshot, error) {
+func (s *fakeRegistrySealer) Seal(ctx context.Context, request registryadapter.SnapshotRequest) (registryadapter.Snapshot, error) {
 	s.calls++
 	s.request = request
 	result := s.result
 	if result.Root == "" {
 		result.Root = request.SnapshotRoot
+	}
+	if s.err == nil && s.after != nil {
+		if err := s.after(ctx, request); err != nil {
+			return result, err
+		}
 	}
 	return result, s.err
 }
@@ -124,7 +131,7 @@ func prepareCheckpointRuntime(t *testing.T, snapshot *domain.JournalSnapshot, sa
 	snapshot.Workspace.Context = "default"
 	snapshot.Workspace.ID = "camp-" + snapshot.SessionID
 	snapshot.Services = []domain.ServiceUnitRecord{{
-		Name: "registry", Mapping: domain.EndpointMapping{HostAddress: "127.0.0.1", HostPort: 45001, GuestPort: 5000},
+		Name: "registry", LaunchToken: "registry-initial", Mapping: domain.EndpointMapping{HostAddress: "127.0.0.1", HostPort: 45001, GuestPort: 5000},
 		Child:        domain.ProcessRecord{Argv: []string{"/opt/hauler", "store", "--store", filepath.Join(sandbox, "store"), "serve", "registry", "--directory", overlay, "--port", "5000", "--readonly=false"}},
 		DesiredState: domain.RuntimeDesiredRunning, ObservedState: domain.RuntimeObservedReady,
 	}}
@@ -330,6 +337,18 @@ func TestCheckpointPublisherCreatesFirstMainPointerAtGenerationOne(t *testing.T)
 	_, pending, err := log.Load(ctx, snapshot.SessionID)
 	if err != nil || len(pending) != 1 || pending[0].Intent.Transition != "ServingContentRefreshed" {
 		t.Fatalf("refresh recovery state pending=%#v error=%v", pending, err)
+	}
+	fakes.refresh.err = nil
+	recovered, err := publisher.Publish(ctx, token, snapshot.SessionID)
+	if err != nil || !recovered.Published || recovered.Generation != result.Generation {
+		t.Fatalf("resume pending serving refresh result=%#v error=%v", recovered, err)
+	}
+	if fakes.capture.calls != 1 || fakes.seal.calls != 1 || fakes.refresh.calls != 2 {
+		t.Fatalf("resume repeated checkpoint effects capture=%d seal=%d refresh=%d", fakes.capture.calls, fakes.seal.calls, fakes.refresh.calls)
+	}
+	_, pending, err = log.Load(ctx, snapshot.SessionID)
+	if err != nil || len(pending) != 0 {
+		t.Fatalf("refresh recovery remained pending=%#v error=%v", pending, err)
 	}
 }
 
@@ -746,6 +765,122 @@ func TestCheckpointPublisherSnapshotFailureCannotBuildUploadOrMovePointer(t *tes
 	_, pending, err := log.Load(ctx, snapshot.SessionID)
 	if err != nil || len(pending) != 1 || pending[0].Intent.Transition != "RegistrySnapshotSealed" {
 		t.Fatalf("failed-cut recovery state pending=%#v error=%v", pending, err)
+	}
+	fakes.seal.err = nil
+	fakes.seal.after = func(ctx context.Context, _ registryadapter.SnapshotRequest) error {
+		current, _, err := log.Load(ctx, snapshot.SessionID)
+		if err != nil {
+			return err
+		}
+		current.Services[0].Helper.Identity = domain.ProcessIdentity{PID: 202, BootID: "boot", StartTicks: 2}
+		current.Services[0].Child.Identity = domain.ProcessIdentity{PID: 303, BootID: "boot-child", StartTicks: 3}
+		nested := ports.IntentRecord{ID: "registry-seal-restart", SessionID: snapshot.SessionID, Transition: "ServiceRestart", Attempt: 1, Timestamp: now}
+		if err := log.RecordIntent(ctx, nested); err != nil {
+			return err
+		}
+		return log.RecordFact(ctx, checkpointFact(nested, now), current)
+	}
+	result, err := publisher.Publish(ctx, token, snapshot.SessionID)
+	if err != nil || !result.Published {
+		t.Fatalf("resume pending registry seal result=%#v error=%v", result, err)
+	}
+	if fakes.capture.calls != 1 || fakes.seal.calls != 2 {
+		t.Fatalf("resume effects capture=%d seal=%d, want image capture once and exact seal retry", fakes.capture.calls, fakes.seal.calls)
+	}
+	loaded, _, err := log.Load(ctx, snapshot.SessionID)
+	if err != nil || loaded.Services[0].Helper.Identity != (domain.ProcessIdentity{PID: 202, BootID: "boot", StartTicks: 2}) || loaded.Services[0].Child.Identity != (domain.ProcessIdentity{PID: 303, BootID: "boot-child", StartTicks: 3}) {
+		t.Fatalf("registry seal replay lost nested restart identities: services=%#v error=%v", loaded.Services, err)
+	}
+}
+
+func TestCheckpointPublisherResumesExactPendingRootSnapshotWithoutRepeatingEarlierEffects(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	sandbox := t.TempDir()
+	root := filepath.Join(sandbox, "root")
+	if err := os.MkdirAll(filepath.Join(root, ".camp", "build"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	backend, err := filebackend.New(filepath.Join(sandbox, "backend"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := time.Unix(100, 0).UTC()
+	lease := domain.WriterLease{
+		SchemaVersion: domain.SchemaVersion, SessionID: "session-build-retry", Capsule: "brain", Lineage: domain.Lineage{Branch: "main"},
+		Machine: "machine-a", CreatedAt: now.Add(-time.Minute), HeartbeatAt: now, ExpiresAt: now.Add(time.Minute),
+	}
+	attemptID := lease.SessionID + "-checkpoint-1"
+	snapshot := domain.JournalSnapshot{
+		SchemaVersion: domain.SchemaVersion, SessionID: lease.SessionID, Capsule: lease.Capsule, Lineage: lease.Lineage, Mode: domain.SessionReadWrite, State: domain.SessionOpen,
+		Lease: domain.LeaseRecord{Lease: &lease, Revision: "lease-r1"},
+		Workspace: domain.WorkspaceRecord{
+			ID: "camp-brain", Context: "default", Provider: "docker", LocalProvider: true, LocalFolder: root, StagingRoot: root,
+			Mirror: domain.MirrorAttemptRecord{LogicalAttempt: 1, AttemptID: attemptID, State: domain.MirrorCompleted, Root: root, Method: "local-noop"},
+		},
+		Images: domain.ImageInventory{SchemaVersion: domain.SchemaVersion, GeneratedAt: now, Images: []domain.Image{
+			{CapturedReference: "127.0.0.1:45001/hauler/camp-session-seed:latest", CapturedManifestDigest: "sha256:" + strings.Repeat("a", 64), Source: domain.ImageSourceRegistry},
+			{CapturedReference: "127.0.0.1:45001/manual/direct:v1", CapturedManifestDigest: "sha256:" + strings.Repeat("b", 64), Source: domain.ImageSourceRegistry},
+		}},
+		RegistryCutRoot: filepath.Join(root, ".camp", "build", "registry-cut-1"),
+	}
+	prepareCheckpointRuntime(t, &snapshot, sandbox)
+	log, err := journal.NewStore(filepath.Join(sandbox, "journal"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := log.Create(ctx, snapshot); err != nil {
+		t.Fatal(err)
+	}
+	buildIntent := checkpointAttemptIntent(snapshot.SessionID, attemptID, "RootSnapshotStable", 4, now, struct {
+		Root       string `json:"root"`
+		Generation uint64 `json:"generation"`
+	}{Root: root, Generation: 1})
+	if err := log.RecordIntent(ctx, buildIntent); err != nil {
+		t.Fatal(err)
+	}
+	mirror := &fakeMirror{}
+	fakes := newCheckpointFakes(now)
+	builder := &fakeCheckpointBuilder{}
+	publisher := NewCheckpointPublisher(log, &fakeLockValidator{}, &fakeLeaseValidator{}, localCheckpointTransports(mirror), fakes.pipeline(), builder, coordination.NewGenerationRepository(backend), coordination.NewPointerRepository(backend), fixedAppClock{now: now})
+	token := ports.OperationToken{ID: "lock", Owner: ports.OperationOwner{SessionID: snapshot.SessionID, Operation: "sync"}}
+
+	result, err := publisher.Publish(ctx, token, snapshot.SessionID)
+	if err != nil || !result.Published {
+		t.Fatalf("resume pending root snapshot result=%#v error=%v", result, err)
+	}
+	if mirror.calls != 0 || fakes.capture.calls != 0 || fakes.seal.calls != 0 {
+		t.Fatalf("earlier effects repeated: mirror=%d capture=%d seal=%d", mirror.calls, fakes.capture.calls, fakes.seal.calls)
+	}
+	if len(builder.inventory.Images) != 1 || builder.inventory.Images[0].CapturedReference != "127.0.0.1:45001/manual/direct:v1" {
+		t.Fatalf("resumed build inventory = %#v", builder.inventory)
+	}
+}
+
+func TestPrepareRegistrySealAllowsOnlyItsExactPendingRestartChild(t *testing.T) {
+	t.Parallel()
+	sandbox := t.TempDir()
+	now := time.Unix(100, 0).UTC()
+	lease := domain.WriterLease{SchemaVersion: domain.SchemaVersion, SessionID: "session-seal-restart", Capsule: "brain", Lineage: domain.Lineage{Branch: "main"}, Machine: "machine", CreatedAt: now, HeartbeatAt: now, ExpiresAt: now.Add(time.Hour)}
+	root := filepath.Join(sandbox, "root")
+	snapshot := domain.JournalSnapshot{
+		SchemaVersion: domain.SchemaVersion, SessionID: lease.SessionID, Capsule: lease.Capsule, Lineage: lease.Lineage,
+		Workspace: domain.WorkspaceRecord{Context: "default", ID: "camp-brain", Mirror: domain.MirrorAttemptRecord{LogicalAttempt: 1, AttemptID: lease.SessionID + "-checkpoint-1", State: domain.MirrorCompleted, Root: root}},
+	}
+	prepareCheckpointRuntime(t, &snapshot, sandbox)
+	runtime, err := checkpointRegistryRuntime(snapshot)
+	if err != nil {
+		t.Fatal(err)
+	}
+	request := registryadapter.SnapshotRequest{SessionID: snapshot.SessionID, OverlayRoot: runtime.overlay, SnapshotRoot: filepath.Join(root, ".camp", "build", "registry-cut-1"), CatalogEndpoint: runtime.endpoint, RegistryLaunchToken: runtime.launchToken}
+	seal := checkpointAttemptIntent(snapshot.SessionID, snapshot.Workspace.Mirror.AttemptID, "RegistrySnapshotSealed", 3, now, request)
+	restart := ports.IntentRecord{ID: "registry-" + runtime.launchToken + "-restart", SessionID: snapshot.SessionID, Transition: "ServiceRestart"}
+	start := ports.IntentRecord{ID: "registry-" + runtime.launchToken, SessionID: snapshot.SessionID, Transition: "ServiceStart"}
+	pending := []ports.PendingIntent{{Intent: seal}, {Intent: restart}, {Intent: start}}
+
+	prepared, err := (&CheckpointPublisher{}).prepareRegistrySeal(context.Background(), snapshot, pending, coordination.LeaseToken{Lease: lease}, 1, now)
+	if err != nil || prepared.intent.ID != seal.ID {
+		t.Fatalf("prepareRegistrySeal() prepared=%#v error=%v", prepared, err)
 	}
 }
 

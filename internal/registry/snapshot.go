@@ -22,10 +22,11 @@ type Barrier interface {
 }
 
 type SnapshotRequest struct {
-	OverlayRoot     string
-	SnapshotRoot    string
-	CatalogEndpoint string
-	SessionID       string
+	OverlayRoot         string
+	SnapshotRoot        string
+	CatalogEndpoint     string
+	SessionID           string
+	RegistryLaunchToken string
 }
 
 type Snapshot struct {
@@ -34,16 +35,17 @@ type Snapshot struct {
 }
 
 type Snapshotter struct {
-	catalog ports.RegistryCatalog
 	barrier Barrier
 }
 
-func NewSnapshotter(catalog ports.RegistryCatalog, barrier Barrier) *Snapshotter {
-	return &Snapshotter{catalog: catalog, barrier: barrier}
+const sessionSeedReferenceSuffix = "/hauler/camp-session-seed:latest"
+
+func NewSnapshotter(barrier Barrier) *Snapshotter {
+	return &Snapshotter{barrier: barrier}
 }
 
 func (s *Snapshotter) Seal(ctx context.Context, request SnapshotRequest) (Snapshot, error) {
-	if s == nil || s.catalog == nil || s.barrier == nil || request.CatalogEndpoint == "" {
+	if s == nil || s.barrier == nil || request.CatalogEndpoint == "" {
 		return Snapshot{}, errors.New("registry snapshot dependencies or request are incomplete")
 	}
 	overlay, err := secureDirectory(request.OverlayRoot)
@@ -77,12 +79,13 @@ func (s *Snapshotter) Seal(ctx context.Context, request SnapshotRequest) (Snapsh
 		}
 	}()
 	var references []ports.RegistryReference
-	references, err = s.catalog.List(ctx, request.CatalogEndpoint)
-	if err != nil {
-		return Snapshot{}, err
-	}
 	err = s.barrier.WithCut(ctx, request, func() error {
 		if err := copyRegistryTree(overlay, temporary); err != nil {
+			return err
+		}
+		var err error
+		references, err = registrySnapshotReferences(temporary)
+		if err != nil {
 			return err
 		}
 		return syncDirectory(temporary)
@@ -98,6 +101,80 @@ func (s *Snapshotter) Seal(ctx context.Context, request SnapshotRequest) (Snapsh
 		return Snapshot{}, err
 	}
 	return Snapshot{Root: destination, References: references}, nil
+}
+
+func registrySnapshotReferences(root string) ([]ports.RegistryReference, error) {
+	repositories := filepath.Join(root, "docker", "registry", "v2", "repositories")
+	if _, err := os.Lstat(repositories); errors.Is(err, os.ErrNotExist) {
+		return []ports.RegistryReference{}, nil
+	} else if err != nil {
+		return nil, err
+	}
+	seen := make(map[string]string)
+	err := filepath.WalkDir(repositories, func(path string, entry os.DirEntry, walkErr error) error {
+		if walkErr != nil {
+			return walkErr
+		}
+		if entry.IsDir() || entry.Name() != "link" {
+			return nil
+		}
+		relative, err := filepath.Rel(repositories, path)
+		if err != nil {
+			return err
+		}
+		parts := strings.Split(filepath.ToSlash(relative), "/")
+		marker := -1
+		for index, part := range parts {
+			if part == "_manifests" {
+				marker = index
+				break
+			}
+		}
+		if marker < 1 || len(parts) != marker+5 || parts[marker+1] != "tags" || parts[marker+3] != "current" || parts[marker+4] != "link" {
+			return nil
+		}
+		repository := strings.Join(parts[:marker], "/")
+		tag := parts[marker+2]
+		if !repositoryPattern.MatchString(repository) || !tagPattern.MatchString(tag) {
+			return errors.New("sealed registry contains an invalid tagged reference")
+		}
+		if repository == "hauler/camp-session-seed" && tag == "latest" {
+			return nil
+		}
+		info, err := entry.Info()
+		if err != nil || !info.Mode().IsRegular() || info.Size() > 128 {
+			return errors.New("sealed registry tag link is not a small regular file")
+		}
+		body, err := os.ReadFile(path)
+		if err != nil {
+			return err
+		}
+		digest := strings.TrimSpace(string(body))
+		if !digestPattern.MatchString(digest) {
+			return errors.New("sealed registry tag link has an invalid digest")
+		}
+		key := repository + "\x00" + tag
+		if prior, exists := seen[key]; exists && prior != digest {
+			return fmt.Errorf("sealed registry tag %q has conflicting digests: %w", repository+":"+tag, ErrRegistryDigestMismatch)
+		}
+		seen[key] = digest
+		return nil
+	})
+	if err != nil {
+		return nil, err
+	}
+	references := make([]ports.RegistryReference, 0, len(seen))
+	for key, digest := range seen {
+		parts := strings.SplitN(key, "\x00", 2)
+		references = append(references, ports.RegistryReference{Repository: parts[0], Tag: parts[1], ManifestDigest: digest})
+	}
+	sort.Slice(references, func(i, j int) bool {
+		if references[i].Repository == references[j].Repository {
+			return references[i].Tag < references[j].Tag
+		}
+		return references[i].Repository < references[j].Repository
+	})
+	return references, nil
 }
 
 func MergeCatalog(inventory domain.ImageInventory, authority string, references []ports.RegistryReference, generatedAt time.Time) (domain.ImageInventory, error) {
@@ -142,6 +219,18 @@ func MergeCatalog(inventory domain.ImageInventory, authority string, references 
 		return result.Images[i].CapturedReference < result.Images[j].CapturedReference
 	})
 	return result, nil
+}
+
+func ExcludeInternalArtifacts(inventory domain.ImageInventory) domain.ImageInventory {
+	result := inventory
+	result.Images = make([]domain.Image, 0, len(inventory.Images))
+	for _, image := range inventory.Images {
+		if image.Source == domain.ImageSourceRegistry && strings.HasSuffix(image.CapturedReference, sessionSeedReferenceSuffix) {
+			continue
+		}
+		result.Images = append(result.Images, image)
+	}
+	return result
 }
 
 func validateAuthority(authority string) error {
