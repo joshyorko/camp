@@ -15,13 +15,21 @@ func NewRoot() *cobra.Command {
 }
 
 type Lifecycle interface {
-	Init(context.Context, string, OutputMode, io.Writer) error
+	Init(context.Context, InitRequest, OutputMode, io.Writer) error
 	Open(context.Context, string, OutputMode, io.Writer) error
 	Sync(context.Context, OutputMode, io.Writer) error
 	Close(context.Context, OutputMode, io.Writer) error
 	Reopen(context.Context, string, OutputMode, io.Writer) error
 	Recover(context.Context, string, OutputMode, io.Writer) error
 	Supervise(context.Context, string, OutputMode, io.Writer) error
+}
+
+type InitRequest struct {
+	Root           string
+	Source         string
+	Backend        string
+	Capsule        string
+	DevPodProvider string
 }
 
 func NewRootWithLifecycle(lifecycle Lifecycle) *cobra.Command {
@@ -45,7 +53,7 @@ func NewRootWithLifecycle(lifecycle Lifecycle) *cobra.Command {
 	root.DisableAutoGenTag = true
 	root.AddCommand(newCompletionCommand(root))
 	root.AddCommand(
-		optionalArgumentCommand("init", "Initialize a capsule root", lifecycle.Init),
+		newInitCommand(lifecycle.Init),
 		optionalArgumentCommand("open", "Open a capsule workspace", lifecycle.Open),
 		noArgumentCommand("sync", "Publish a checkpoint and remain open", lifecycle.Sync),
 		noArgumentCommand("close", "Publish a checkpoint and close", lifecycle.Close),
@@ -54,6 +62,33 @@ func NewRootWithLifecycle(lifecycle Lifecycle) *cobra.Command {
 		hiddenRequiredArgumentCommand("supervise", lifecycle.Supervise),
 	)
 	return root
+}
+
+func newInitCommand(run func(context.Context, InitRequest, OutputMode, io.Writer) error) *cobra.Command {
+	request := InitRequest{}
+	command := &cobra.Command{
+		Use: "init [root]", Short: "Initialize a capsule root", Args: usageArgs(cobra.MaximumNArgs(1)),
+		RunE: func(command *cobra.Command, args []string) error {
+			if len(args) == 1 {
+				request.Root = args[0]
+			}
+			configured := 0
+			for _, name := range []string{"source", "backend", "capsule", "devpod-provider"} {
+				if command.Flags().Changed(name) {
+					configured++
+				}
+			}
+			if configured != 0 && configured != 4 {
+				return UsageError(fmt.Errorf("--source, --backend, --capsule, and --devpod-provider must be provided together"))
+			}
+			return run(command.Context(), request, OutputModeFrom(command), command.OutOrStdout())
+		},
+	}
+	command.Flags().StringVar(&request.Source, "source", "", "persist the default source path")
+	command.Flags().StringVar(&request.Backend, "backend", "", "persist the default backend URL")
+	command.Flags().StringVar(&request.Capsule, "capsule", "", "persist the default capsule name")
+	command.Flags().StringVar(&request.DevPodProvider, "devpod-provider", "", "persist the default DevPod provider")
+	return command
 }
 
 func optionalArgumentCommand(use, short string, run func(context.Context, string, OutputMode, io.Writer) error) *cobra.Command {

@@ -41,10 +41,14 @@ type ProductionLifecycle struct{}
 
 func NewProductionLifecycle() *ProductionLifecycle { return &ProductionLifecycle{} }
 
-func (p *ProductionLifecycle) Init(ctx context.Context, root string, mode OutputMode, out io.Writer) error {
+func (p *ProductionLifecycle) Init(ctx context.Context, request InitRequest, mode OutputMode, out io.Writer) error {
 	composition, err := composeProduction(ctx)
 	if err != nil {
 		return err
+	}
+	root := request.Root
+	if request.Source != "" {
+		root = request.Source
 	}
 	if root == "" {
 		root = composition.runtime.Source
@@ -52,11 +56,59 @@ func (p *ProductionLifecycle) Init(ctx context.Context, root string, mode Output
 	if root == "" {
 		return UsageError(errors.New("init requires a root or CAMP_SOURCE"))
 	}
-	result, err := composition.initializer.Initialize(ctx, root, composition.runtime.Capsule)
+	capsuleID := composition.runtime.Capsule
+	if request.Capsule != "" {
+		capsuleID = request.Capsule
+	}
+	result, err := composition.initializer.Initialize(ctx, root, capsuleID)
 	if err != nil {
 		return err
 	}
+	if request.Source != "" {
+		written, err := persistInitConfiguration(composition.paths.ConfigPath, request)
+		if err != nil {
+			return err
+		}
+		return writeConfiguredInitSuccess(out, mode, configuredInitResult{
+			ConfigPath: composition.paths.ConfigPath, Source: written.Source, Backend: written.Backend,
+			Capsule: written.DefaultCapsule, DevPodProvider: written.DevPodProvider,
+		})
+	}
 	return writeSuccess(out, mode, "init", result, fmt.Sprintf("Initialized %s at %s\n", result.Metadata.ID, root))
+}
+
+type configuredInitResult struct {
+	ConfigPath     string `json:"configPath"`
+	Source         string `json:"source"`
+	Backend        string `json:"backend"`
+	Capsule        string `json:"capsule"`
+	DevPodProvider string `json:"devpodProvider"`
+}
+
+func persistInitConfiguration(path string, request InitRequest) (config.Persistent, error) {
+	value := config.Persistent{
+		DefaultCapsule: request.Capsule, Backend: request.Backend, Source: request.Source,
+		DevPodProvider: request.DevPodProvider,
+	}
+	store := config.NewStore(path)
+	if existing, err := store.Read(); err == nil {
+		value.RegistryPort = existing.RegistryPort
+		value.FileserverPort = existing.FileserverPort
+	} else if !errors.Is(err, os.ErrNotExist) {
+		return config.Persistent{}, err
+	}
+	if err := store.Update(value); err != nil {
+		return config.Persistent{}, err
+	}
+	return value, nil
+}
+
+func writeConfiguredInitSuccess(out io.Writer, mode OutputMode, result configuredInitResult) error {
+	if mode == ModeHuman {
+		_, err := fmt.Fprintf(out, "Wrote %s: source=%s backend=%s capsule=%s devpod-provider=%s\n", result.ConfigPath, result.Source, result.Backend, result.Capsule, result.DevPodProvider)
+		return err
+	}
+	return writeSuccess(out, mode, "init", result, "")
 }
 
 func (p *ProductionLifecycle) Open(ctx context.Context, value string, mode OutputMode, out io.Writer) error {
@@ -81,7 +133,7 @@ func (p *ProductionLifecycle) Open(ctx context.Context, value string, mode Outpu
 	if explicitRoot == "" {
 		explicitRoot = composition.runtime.Source
 	}
-	provider, localProvider, err := resolveProductionProvider()
+	provider, localProvider, err := resolveProductionProvider(composition.runtime.DevPodProvider)
 	if err != nil {
 		return err
 	}
@@ -107,8 +159,8 @@ func (p *ProductionLifecycle) Open(ctx context.Context, value string, mode Outpu
 	return writeSuccess(out, mode, "open", result, fmt.Sprintf("Opened %s (%s)\n", result.Snapshot.Capsule, result.Snapshot.SessionID))
 }
 
-func resolveProductionProvider() (string, bool, error) {
-	provider := strings.TrimSpace(os.Getenv("CAMP_DEVPOD_PROVIDER"))
+func resolveProductionProvider(provider string) (string, bool, error) {
+	provider = strings.TrimSpace(provider)
 	if provider == "" {
 		return "", true, nil
 	}

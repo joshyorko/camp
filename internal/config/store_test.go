@@ -12,7 +12,7 @@ func TestStoreUpdatePersistsOnlyAllowedNonSecretFields(t *testing.T) {
 	t.Parallel()
 	path := filepath.Join(t.TempDir(), "camp", "config.yaml")
 	store := NewStore(path)
-	want := Persistent{DefaultCapsule: "brain", Backend: "file:///srv/camp", Source: "/srv/brain", RegistryPort: 5001, FileserverPort: 8081}
+	want := Persistent{DefaultCapsule: "brain", Backend: "file:///srv/camp", Source: "/srv/brain", DevPodProvider: "docker", RegistryPort: 5001, FileserverPort: 8081}
 	if err := store.Update(want); err != nil {
 		t.Fatal(err)
 	}

@@ -18,6 +18,7 @@ type Persistent struct {
 	DefaultCapsule string `yaml:"defaultCapsule,omitempty" json:"defaultCapsule,omitempty"`
 	Backend        string `yaml:"backend,omitempty" json:"backend,omitempty"`
 	Source         string `yaml:"source,omitempty" json:"source,omitempty"`
+	DevPodProvider string `yaml:"devpodProvider,omitempty" json:"devpodProvider,omitempty"`
 	RegistryPort   int    `yaml:"registryPort,omitempty" json:"registryPort,omitempty"`
 	FileserverPort int    `yaml:"fileserverPort,omitempty" json:"fileserverPort,omitempty"`
 }
@@ -94,6 +95,9 @@ func (s *Store) Update(value Persistent) error {
 }
 
 func validatePersistent(value Persistent) error {
+	if err := ValidateDevPodProvider(value.DevPodProvider); err != nil {
+		return err
+	}
 	for _, candidate := range []string{value.Backend, value.Source} {
 		parsed, err := url.Parse(candidate)
 		if err != nil {
@@ -117,6 +121,16 @@ func validatePersistent(value Persistent) error {
 		if err := validatePort(value.FileserverPort); err != nil {
 			return err
 		}
+	}
+	return nil
+}
+
+func ValidateDevPodProvider(provider string) error {
+	if provider == "" {
+		return nil
+	}
+	if strings.TrimSpace(provider) != provider || provider == "." || provider == ".." || strings.ContainsAny(provider, "/\\\t\r\n ") {
+		return errors.New("DevPod provider is invalid")
 	}
 	return nil
 }

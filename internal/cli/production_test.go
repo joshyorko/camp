@@ -1,9 +1,12 @@
 package cli
 
 import (
+	"bytes"
 	"context"
 	"errors"
+	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -11,6 +14,47 @@ import (
 	"github.com/joshyorko/camp/internal/domain"
 	"github.com/joshyorko/camp/internal/ports"
 )
+
+func TestPersistInitConfigurationWritesOnlyRequestedFirstRunValues(t *testing.T) {
+	t.Parallel()
+	path := filepath.Join(t.TempDir(), "config", "camp", "config.yaml")
+	request := InitRequest{Source: "/srv/brain", Backend: "file:///srv/camp", Capsule: "brain", DevPodProvider: "docker"}
+	written, err := persistInitConfiguration(path, request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := config.Persistent{DefaultCapsule: "brain", Backend: "file:///srv/camp", Source: "/srv/brain", DevPodProvider: "docker"}
+	if written != want {
+		t.Fatalf("written = %#v, want %#v", written, want)
+	}
+	got, err := config.NewStore(path).Read()
+	if err != nil || got != want {
+		t.Fatalf("persisted = %#v, error = %v", got, err)
+	}
+}
+
+func TestWriteConfiguredInitSuccessStatesExactlyWhatWasWritten(t *testing.T) {
+	t.Parallel()
+	result := configuredInitResult{ConfigPath: "/home/josh/.config/camp/config.yaml", Source: "/srv/brain", Backend: "file:///srv/camp", Capsule: "brain", DevPodProvider: "docker"}
+	var human bytes.Buffer
+	if err := writeConfiguredInitSuccess(&human, ModeHuman, result); err != nil {
+		t.Fatal(err)
+	}
+	for _, value := range []string{result.ConfigPath, "source=/srv/brain", "backend=file:///srv/camp", "capsule=brain", "devpod-provider=docker"} {
+		if !strings.Contains(human.String(), value) {
+			t.Fatalf("human output %q does not state %q", human.String(), value)
+		}
+	}
+	var machine bytes.Buffer
+	if err := writeConfiguredInitSuccess(&machine, ModeJSON, result); err != nil {
+		t.Fatal(err)
+	}
+	for _, value := range []string{`"kind":"init"`, `"configPath":"/home/josh/.config/camp/config.yaml"`, `"devpodProvider":"docker"`} {
+		if !strings.Contains(machine.String(), value) {
+			t.Fatalf("JSON output %q does not state %q", machine.String(), value)
+		}
+	}
+}
 
 func TestMachineIdentityFallbackIsStableAndFailsClosed(t *testing.T) {
 	t.Parallel()
@@ -31,7 +75,7 @@ func TestMachineIdentityFallbackIsStableAndFailsClosed(t *testing.T) {
 
 func TestResolveProductionProviderSelectsConfiguredRemoteProvider(t *testing.T) {
 	t.Setenv("CAMP_DEVPOD_PROVIDER", "room-of-requirement")
-	provider, local, err := resolveProductionProvider()
+	provider, local, err := resolveProductionProvider(os.Getenv("CAMP_DEVPOD_PROVIDER"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -42,7 +86,7 @@ func TestResolveProductionProviderSelectsConfiguredRemoteProvider(t *testing.T) 
 
 func TestResolveProductionProviderKeepsDockerDefaultLocal(t *testing.T) {
 	t.Setenv("CAMP_DEVPOD_PROVIDER", "")
-	provider, local, err := resolveProductionProvider()
+	provider, local, err := resolveProductionProvider(os.Getenv("CAMP_DEVPOD_PROVIDER"))
 	if err != nil {
 		t.Fatal(err)
 	}

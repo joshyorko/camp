@@ -34,6 +34,7 @@ type Bootstrap struct {
 	Capsule        string   `json:"capsule" yaml:"capsule"`
 	Backend        string   `json:"backend" yaml:"backend"`
 	Source         string   `json:"source,omitempty" yaml:"source,omitempty"`
+	DevPodProvider string   `json:"devpodProvider,omitempty" yaml:"devpodProvider,omitempty"`
 	RegistryPort   int      `json:"registryPort" yaml:"registryPort"`
 	FileserverPort int      `json:"fileserverPort" yaml:"fileserverPort"`
 	AccessToken    string   `json:"accessToken,omitempty" yaml:"accessToken,omitempty"`
@@ -44,6 +45,7 @@ type userConfig struct {
 	DefaultCapsule string   `yaml:"defaultCapsule"`
 	Backend        string   `yaml:"backend"`
 	Source         string   `yaml:"source"`
+	DevPodProvider string   `yaml:"devpodProvider"`
 	RegistryPort   int      `yaml:"registryPort"`
 	FileserverPort int      `yaml:"fileserverPort"`
 	S3             S3Values `yaml:"s3"`
@@ -70,6 +72,9 @@ func ResolveBootstrap(input BootstrapInput) (Bootstrap, error) {
 	applyBootstrapFlags(&config, input.Flags)
 	if config.Capsule == "" {
 		return Bootstrap{}, errors.New("effective capsule is empty")
+	}
+	if err := ValidateDevPodProvider(config.DevPodProvider); err != nil {
+		return Bootstrap{}, err
 	}
 	if err := validatePort(config.RegistryPort); err != nil {
 		return Bootstrap{}, fmt.Errorf("registry port: %w", err)
@@ -112,6 +117,9 @@ func applyUser(config *Bootstrap, user userConfig) {
 	if user.Source != "" {
 		config.Source = user.Source
 	}
+	if user.DevPodProvider != "" {
+		config.DevPodProvider = user.DevPodProvider
+	}
 	if user.RegistryPort != 0 {
 		config.RegistryPort = user.RegistryPort
 	}
@@ -130,6 +138,9 @@ func applyBootstrapEnvironment(config *Bootstrap, environment map[string]string)
 	}
 	if value, ok := environmentValue(environment, "CAMP_SOURCE"); ok {
 		config.Source = value
+	}
+	if value, ok := environmentValue(environment, "CAMP_DEVPOD_PROVIDER"); ok {
+		config.DevPodProvider = value
 	}
 	if value, ok := environmentValue(environment, "CAMP_ACCESS_TOKEN"); ok {
 		config.AccessToken = value

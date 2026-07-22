@@ -50,6 +50,7 @@ func TestLifecycleCommandsDelegateWithStrictArgumentsAndInheritedMode(t *testing
 		want string
 	}{
 		{name: "init", args: []string{"--json", "init", "/brain"}, want: "init:/brain:json"},
+		{name: "configured init", args: []string{"init", "--source", "/brain", "--backend", "file:///srv/camp", "--capsule", "brain", "--devpod-provider", "docker"}, want: "init:/brain:file:///srv/camp:brain:docker:human"},
 		{name: "open", args: []string{"open", "memoryd"}, want: "open:memoryd:human"},
 		{name: "sync", args: []string{"sync"}, want: "sync::human"},
 		{name: "close", args: []string{"close"}, want: "close::human"},
@@ -79,9 +80,27 @@ func TestLifecycleCommandsDelegateWithStrictArgumentsAndInheritedMode(t *testing
 
 type recordingLifecycle struct{ calls []string }
 
-func (r *recordingLifecycle) Init(_ context.Context, value string, mode OutputMode, _ io.Writer) error {
-	r.calls = append(r.calls, "init:"+value+":"+string(mode))
+func (r *recordingLifecycle) Init(_ context.Context, request InitRequest, mode OutputMode, _ io.Writer) error {
+	if request.Source == "" && request.Backend == "" && request.Capsule == "" && request.DevPodProvider == "" {
+		r.calls = append(r.calls, "init:"+request.Root+":"+string(mode))
+		return nil
+	}
+	r.calls = append(r.calls, "init:"+request.Source+":"+request.Backend+":"+request.Capsule+":"+request.DevPodProvider+":"+string(mode))
 	return nil
+}
+
+func TestInitPersistentFlagsAreAllRequiredTogether(t *testing.T) {
+	t.Parallel()
+	for _, args := range [][]string{
+		{"init", "--source", "/brain"},
+		{"init", "--source", "/brain", "--backend", "file:///srv/camp", "--capsule", "brain"},
+	} {
+		var stderr bytes.Buffer
+		code := Execute(context.Background(), NewRootWithLifecycle(&recordingLifecycle{}), args, Streams{ErrOut: &stderr})
+		if code != int(ExitUsage) || !strings.Contains(stderr.String(), "must be provided together") {
+			t.Fatalf("Execute(%q) code=%d stderr=%q, want grouped persistent flag usage failure", args, code, stderr.String())
+		}
+	}
 }
 func (r *recordingLifecycle) Open(_ context.Context, value string, mode OutputMode, _ io.Writer) error {
 	r.calls = append(r.calls, "open:"+value+":"+string(mode))
