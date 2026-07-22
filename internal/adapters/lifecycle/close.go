@@ -45,9 +45,6 @@ func (e *CloseEffects) CloseWorkspace(ctx context.Context, snapshot domain.Journ
 	if e == nil || e.workspaces == nil {
 		return errors.New("workspace close dependency is incomplete")
 	}
-	if snapshot.Workspace.LocalProvider {
-		return nil
-	}
 	if snapshot.Workspace.ID == "" || snapshot.Workspace.Context == "" {
 		return errors.New("recorded workspace identity is incomplete")
 	}

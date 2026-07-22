@@ -55,6 +55,21 @@ func TestCloseEffectsUseRecordedOwnershipAndChildFirstControllers(t *testing.T) 
 	}
 }
 
+func TestCloseWorkspaceDeletesRecordedLocalProviderWorkspace(t *testing.T) {
+	var events []string
+	effects := NewCloseEffects(&fakeWorkspace{events: &events}, &fakeProcesses{events: &events}, &fakeServices{events: &events}, &fakeLeases{events: &events}, &fakeOwnership{events: &events})
+	snapshot := lifecycleSnapshot(t.TempDir())
+	snapshot.Workspace.LocalProvider = true
+
+	if err := effects.CloseWorkspace(context.Background(), snapshot, false); err != nil {
+		t.Fatalf("CloseWorkspace() error = %v", err)
+	}
+	want := []string{"workspace:delete:default:camp-session"}
+	if !reflect.DeepEqual(events, want) {
+		t.Fatalf("events = %#v, want %#v", events, want)
+	}
+}
+
 func TestCloseEffectsComposeProductionServiceSupervisorChildFirst(t *testing.T) {
 	var events []string
 	processes := &fakeProcesses{events: &events}
