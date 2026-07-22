@@ -44,6 +44,11 @@ reproducible-package jobs are mandatory. The MinIO and real-tool jobs name and
 run their exact acceptance tests so an absent match or an unset opt-in cannot
 turn a skip into release evidence.
 
+Every hosted job selects its Go toolchain from the full patch version in
+`go.mod`. Keep that patch at or above the newest standard-library fix required
+by `govulncheck`; a language-version-only pin can make otherwise current source
+ship reachable vulnerabilities from the runner's selected toolchain.
+
 Credentialed provider runs are separate from credential-free CI. A protected
 `release-providers` environment and an explicit named profile are required
 before a provider can be claimed. Until such a profile and successful hosted
