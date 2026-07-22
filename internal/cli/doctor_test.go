@@ -24,11 +24,11 @@ func TestProductionDoctorRendersReadOnlyCapabilityReport(t *testing.T) {
 	t.Setenv("CAMP_ACCESS_TOKEN", "doctor-secret")
 
 	var output bytes.Buffer
-	if err := NewProductionLifecycle().Doctor(context.Background(), ModeJSON, &output); err != nil {
-		t.Fatal(err)
+	if err := NewProductionLifecycle().Doctor(context.Background(), ModeJSON, &output); err == nil {
+		t.Fatal("Doctor succeeded with unlocked test executables")
 	}
 	body := output.String()
-	for _, expected := range []string{`"kind": "doctor"`, `"capability": "backend"`, `"capability": "devpod"`, `"capability": "hauler"`, `"capability": "pasta"`, `"code": "file_backend_configuration_valid_io_unprobed"`, `"code": "tool_identity_observed"`, `"code": "pasta_option_surface_available_runtime_unprobed"`} {
+	for _, expected := range []string{`"kind": "doctor"`, `"capability": "backend"`, `"capability": "devpod"`, `"capability": "hauler"`, `"capability": "pasta"`, `"capability": "proc-self-fd"`, `"capability": "tun"`, `"capability": "user-namespace"`, `"capability": "lsm"`, `"capability": "container-boundary"`, `"code": "file_backend_configuration_valid_io_unprobed"`, `"code": "managed_tool_identity_unverified"`, `"code": "pasta_option_surface_available_runtime_unprobed"`} {
 		if !strings.Contains(body, expected) {
 			t.Fatalf("output missing %s:\n%s", expected, body)
 		}

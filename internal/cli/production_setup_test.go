@@ -137,6 +137,28 @@ func TestRunManagedToolSetupJSONUsesStableIdentityFields(t *testing.T) {
 	}
 }
 
+type staticToolInspector struct {
+	resolution tooladapter.Resolution
+	err        error
+}
+
+func (i staticToolInspector) Inspect(context.Context, string, string, string) (tooladapter.Resolution, error) {
+	return i.resolution, i.err
+}
+
+func TestDoctorManagedToolResolverMapsLockedIdentity(t *testing.T) {
+	resolver := doctorManagedToolResolver{inspector: staticToolInspector{resolution: tooladapter.Resolution{
+		Path: "/camp/devpod", Repository: "loft-sh/devpod", Version: "v0.26.1", BinarySHA256: strings.Repeat("a", 64), Managed: true,
+	}}, goos: "linux", arch: "amd64"}
+	identity, err := resolver.Inspect(context.Background(), "devpod")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if identity.Path != "/camp/devpod" || identity.Repository != "loft-sh/devpod" || !identity.Managed {
+		t.Fatalf("identity = %#v", identity)
+	}
+}
+
 type recordingToolEnsurer struct {
 	resolutions map[string]tooladapter.Resolution
 	calls       []string

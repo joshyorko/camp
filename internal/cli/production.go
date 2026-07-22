@@ -14,6 +14,7 @@ import (
 	"time"
 
 	awsconfig "github.com/aws/aws-sdk-go-v2/config"
+	campcontract "github.com/joshyorko/camp"
 	"github.com/joshyorko/camp/internal/adapters/archive"
 	"github.com/joshyorko/camp/internal/adapters/devpod"
 	"github.com/joshyorko/camp/internal/adapters/hauler"
@@ -51,9 +52,13 @@ func (p *ProductionLifecycle) Doctor(ctx context.Context, mode OutputMode, out i
 	}
 	runner := subprocess.NewRunner()
 	confinement := supervisor.NewConfinementResolver(runner, exec.LookPath, func() string { return "host" })
-	report := (doctor.Runner{Timeout: 5 * time.Second, Probes: []doctor.Probe{
-		doctor.ToolProbe{Name: "devpod", Arguments: []string{"version"}},
-		doctor.ToolProbe{Name: "hauler", Arguments: []string{"version"}},
+	managedTools, err := newDoctorManagedToolResolver(campcontract.DistributionToolLock(), paths.DataRoot)
+	if err != nil {
+		return err
+	}
+	probes := []doctor.Probe{
+		doctor.ManagedToolProbe{Name: "devpod", Resolver: managedTools},
+		doctor.ManagedToolProbe{Name: "hauler", Resolver: managedTools},
 		doctor.ConfinementProbe{Resolver: confinement},
 		doctor.BackendProbe{
 			ConfigPath: paths.ConfigPath, Environment: environment,
@@ -67,7 +72,9 @@ func (p *ProductionLifecycle) Doctor(ctx context.Context, mode OutputMode, out i
 				return err
 			},
 		},
-	}}).Run(ctx)
+	}
+	probes = append(probes, doctor.LinuxHostProbes()...)
+	report := (doctor.Runner{Timeout: 5 * time.Second, Probes: probes}).Run(ctx)
 	if mode == ModeJSON {
 		err = doctor.RenderJSON(out, report)
 	} else {
