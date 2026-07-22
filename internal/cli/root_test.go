@@ -79,7 +79,10 @@ func TestLifecycleCommandsDelegateWithStrictArgumentsAndInheritedMode(t *testing
 	}
 }
 
-type recordingLifecycle struct{ calls []string }
+type recordingLifecycle struct {
+	calls          []string
+	attachRequests []AttachRequest
+}
 
 func (r *recordingLifecycle) Init(_ context.Context, request InitRequest, mode OutputMode, _ io.Writer) error {
 	if request.Source == "" && request.Backend == "" && request.Capsule == "" && request.DevPodProvider == "" {
@@ -124,6 +127,11 @@ func (r *recordingLifecycle) Setup(_ context.Context, mode OutputMode, _ io.Writ
 }
 func (r *recordingLifecycle) Open(_ context.Context, value string, mode OutputMode, _ io.Writer) error {
 	r.calls = append(r.calls, "open:"+value+":"+string(mode))
+	return nil
+}
+func (r *recordingLifecycle) Attach(_ context.Context, request AttachRequest, mode OutputMode, _ io.Writer) error {
+	r.attachRequests = append(r.attachRequests, request)
+	r.calls = append(r.calls, "attach:"+request.Target+":"+string(mode))
 	return nil
 }
 func (r *recordingLifecycle) Sync(_ context.Context, mode OutputMode, _ io.Writer) error {
@@ -516,9 +524,44 @@ func TestRootHelpIsDeterministic(t *testing.T) {
 	if first != second {
 		t.Fatalf("help changed between identical roots:\nfirst:\n%s\nsecond:\n%s", first, second)
 	}
-	want := "Recoverable capsule workspaces\n\nUsage:\n  camp [flags]\n  camp [command]\n\nAvailable Commands:\n  close       Publish a checkpoint and close\n  completion  Generate shell completion\n  doctor      Diagnose required host capabilities\n  help        Help about any command\n  init        Initialize a capsule root\n  open        Open a capsule workspace\n  recover     Recover an interrupted lifecycle\n  reopen      Reopen a closed capsule workspace\n  setup       Install or reuse pinned DevPod and Hauler tools\n  sync        Publish a checkpoint and remain open\n\nFlags:\n  -h, --help   help for camp\n      --json   emit stable JSON output\n\nUse \"camp [command] --help\" for more information about a command.\n"
+	want := "Recoverable capsule workspaces\n\nUsage:\n  camp [flags]\n  camp [command]\n\nAvailable Commands:\n  attach      Attach to an open capsule workspace\n  close       Publish a checkpoint and close\n  completion  Generate shell completion\n  doctor      Diagnose required host capabilities\n  help        Help about any command\n  init        Initialize a capsule root\n  open        Open a capsule workspace\n  recover     Recover an interrupted lifecycle\n  reopen      Reopen a closed capsule workspace\n  setup       Install or reuse pinned DevPod and Hauler tools\n  sync        Publish a checkpoint and remain open\n\nFlags:\n  -h, --help   help for camp\n      --json   emit stable JSON output\n\nUse \"camp [command] --help\" for more information about a command.\n"
 	if first != want {
 		t.Fatalf("help:\n%s\nwant:\n%s", first, want)
+	}
+}
+
+func TestAttachMapsTypedSSHFlagsAliasAndRawArguments(t *testing.T) {
+	t.Parallel()
+	lifecycle := &recordingLifecycle{}
+	args := []string{
+		"attach", "Memory D", "--insiders", "--user", "coder",
+		"-L", "127.0.0.1:3000:127.0.0.1:3000", "-R", "127.0.0.1:5000:127.0.0.1:5000",
+		"--send-env", "TERM", "--set-env", "CAMP_CHECKPOINT=42", "--agent-forwarding=false",
+		"--gpg-agent-forwarding=true", "--term-mode", "strict", "--devpod-arg=--log-output", "--", "plain",
+	}
+	code := Execute(context.Background(), NewRootWithLifecycle(lifecycle), args, Streams{})
+	if code != int(ExitSuccess) {
+		t.Fatalf("Execute(attach) code = %d, want %d", code, ExitSuccess)
+	}
+	if len(lifecycle.attachRequests) != 1 {
+		t.Fatalf("attach requests = %#v", lifecycle.attachRequests)
+	}
+	got := lifecycle.attachRequests[0]
+	if got.Target != "Memory D" || got.IDE != "vscode-insiders" || got.User != "coder" || got.AgentForwarding == nil || *got.AgentForwarding || got.GPGAgentForwarding == nil || !*got.GPGAgentForwarding || got.TermMode != "strict" {
+		t.Fatalf("attach request = %#v", got)
+	}
+	if strings.Join(got.DevPodArgs, ",") != "--log-output,plain" {
+		t.Fatalf("DevPod args = %#v", got.DevPodArgs)
+	}
+}
+
+func TestAttachRejectsInsidersAndDifferentIDEWithoutEffects(t *testing.T) {
+	t.Parallel()
+	lifecycle := &recordingLifecycle{}
+	var stderr bytes.Buffer
+	code := Execute(context.Background(), NewRootWithLifecycle(lifecycle), []string{"attach", "--insiders", "--ide", "vscode"}, Streams{ErrOut: &stderr})
+	if code != int(ExitUsage) || len(lifecycle.attachRequests) != 0 || !strings.Contains(stderr.String(), "--insiders") {
+		t.Fatalf("code=%d requests=%#v stderr=%q", code, lifecycle.attachRequests, stderr.String())
 	}
 }
 

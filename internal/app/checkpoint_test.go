@@ -30,11 +30,13 @@ func sha256Bytes(body []byte) string {
 }
 
 type fakeCheckpointBuilder struct {
+	calls     int
 	root      string
 	inventory domain.ImageInventory
 }
 
 func (b *fakeCheckpointBuilder) Build(_ context.Context, request checkpoint.BuildRequest) (checkpoint.BuildResult, error) {
+	b.calls++
 	b.root = request.Root
 	b.inventory = request.Inventory
 	path := filepath.Join(request.Root, ".camp", "build", "generation.tar.zst")
@@ -150,6 +152,20 @@ type fakeLeaseValidator struct{ calls int }
 func (v *fakeLeaseValidator) Revalidate(context.Context, coordination.LeaseToken, time.Time) error {
 	v.calls++
 	return nil
+}
+
+type crashBeforeCheckpointFactJournal struct {
+	ports.Journal
+	transition string
+	crashed    bool
+}
+
+func (j *crashBeforeCheckpointFactJournal) RecordFact(ctx context.Context, fact ports.FactRecord, snapshot domain.JournalSnapshot) error {
+	if !j.crashed && fact.Transition == j.transition {
+		j.crashed = true
+		return errors.New("simulated process death before checkpoint fact")
+	}
+	return j.Journal.RecordFact(ctx, fact, snapshot)
 }
 
 type fakeMirror struct {
@@ -645,6 +661,313 @@ func TestCheckpointPublisherProcessDeathAfterMirrorIntentDoesNotStartAnotherTran
 	_, pending, err := log.Load(ctx, snapshot.SessionID)
 	if err != nil || len(pending) != 1 || pending[0].Intent.ID != intent.ID {
 		t.Fatalf("pending mirror = %#v error=%v", pending, err)
+	}
+}
+
+func TestCheckpointPublisherSimulatedProcessDeathMatrix(t *testing.T) {
+	t.Parallel()
+	for _, test := range []struct {
+		transition   string
+		mirrorCalls  int
+		captureCalls int
+		sealCalls    int
+		buildCalls   int
+		refreshCalls int
+	}{
+		{transition: "WorkspaceImagesInventoried", mirrorCalls: 1, captureCalls: 2, sealCalls: 1, buildCalls: 1, refreshCalls: 1},
+		{transition: "RegistrySnapshotSealed", mirrorCalls: 1, captureCalls: 1, sealCalls: 2, buildCalls: 1, refreshCalls: 1},
+		{transition: "RootSnapshotStable", mirrorCalls: 1, captureCalls: 1, sealCalls: 1, buildCalls: 2, refreshCalls: 1},
+		{transition: "GenerationUploaded", mirrorCalls: 1, captureCalls: 1, sealCalls: 1, buildCalls: 1, refreshCalls: 1},
+		{transition: "PointerCommitted", mirrorCalls: 1, captureCalls: 1, sealCalls: 1, buildCalls: 1, refreshCalls: 1},
+		{transition: "ServingContentRefreshed", mirrorCalls: 1, captureCalls: 1, sealCalls: 1, buildCalls: 1, refreshCalls: 2},
+	} {
+		test := test
+		t.Run(test.transition, func(t *testing.T) {
+			t.Parallel()
+			ctx := context.Background()
+			sandbox := t.TempDir()
+			root := filepath.Join(sandbox, "root")
+			if err := os.MkdirAll(filepath.Join(root, ".camp", "build"), 0o700); err != nil {
+				t.Fatal(err)
+			}
+			backend, err := filebackend.New(filepath.Join(sandbox, "backend"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			now := time.Unix(100, 0).UTC()
+			lease := domain.WriterLease{SchemaVersion: domain.SchemaVersion, SessionID: "session-crash-" + test.transition, Capsule: "brain", Lineage: domain.Lineage{Branch: "main"}, Machine: "machine", CreatedAt: now, HeartbeatAt: now, ExpiresAt: now.Add(time.Hour)}
+			snapshot := domain.JournalSnapshot{SchemaVersion: domain.SchemaVersion, SessionID: lease.SessionID, Capsule: lease.Capsule, Lineage: lease.Lineage, Mode: domain.SessionReadWrite, State: domain.SessionOpen, Lease: domain.LeaseRecord{Lease: &lease, Revision: "lease-r1"}, Workspace: domain.WorkspaceRecord{ID: "camp-brain", Context: "default", Provider: "docker", LocalProvider: true, LocalFolder: root, StagingRoot: root}}
+			prepareCheckpointRuntime(t, &snapshot, sandbox)
+			store, err := journal.NewStore(filepath.Join(sandbox, "journal"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := store.Create(ctx, snapshot); err != nil {
+				t.Fatal(err)
+			}
+			crashing := &crashBeforeCheckpointFactJournal{Journal: store, transition: test.transition}
+			mirror := &fakeMirror{}
+			fakes := newCheckpointFakes(now)
+			builder := &fakeCheckpointBuilder{}
+			publisher := NewCheckpointPublisher(crashing, &fakeLockValidator{}, &fakeLeaseValidator{}, localCheckpointTransports(mirror), fakes.pipeline(), builder, coordination.NewGenerationRepository(backend), coordination.NewPointerRepository(backend), fixedAppClock{now: now})
+			token := ports.OperationToken{ID: "lock", Owner: ports.OperationOwner{SessionID: snapshot.SessionID, Operation: "sync"}}
+
+			first, firstErr := publisher.Publish(ctx, token, snapshot.SessionID)
+			if test.transition == "ServingContentRefreshed" {
+				if firstErr != nil || !first.Published || first.RefreshError == "" {
+					t.Fatalf("first Publish() result=%#v error=%v, want published result with refresh recovery", first, firstErr)
+				}
+			} else if firstErr == nil {
+				t.Fatalf("first Publish() result=%#v, want simulated process death", first)
+			}
+			result, err := publisher.Publish(ctx, token, snapshot.SessionID)
+			if err != nil || !result.Published || result.RefreshError != "" {
+				t.Fatalf("retry Publish() result=%#v error=%v", result, err)
+			}
+			if mirror.calls != test.mirrorCalls || fakes.capture.calls != test.captureCalls || fakes.seal.calls != test.sealCalls || builder.calls != test.buildCalls || fakes.refresh.calls != test.refreshCalls {
+				t.Fatalf("effects mirror=%d capture=%d seal=%d build=%d refresh=%d", mirror.calls, fakes.capture.calls, fakes.seal.calls, builder.calls, fakes.refresh.calls)
+			}
+			loaded, pending, err := store.Load(ctx, snapshot.SessionID)
+			if err != nil || len(pending) != 0 || loaded.CurrentBase == nil || *loaded.CurrentBase != result.Generation {
+				t.Fatalf("recovered checkpoint=%#v pending=%#v error=%v", loaded.Checkpoint, pending, err)
+			}
+		})
+	}
+}
+
+func TestCheckpointPublisherAdoptsExactPendingImageCaptureWithoutRepeatingMirror(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	sandbox := t.TempDir()
+	root := filepath.Join(sandbox, "root")
+	if err := os.MkdirAll(filepath.Join(root, ".camp", "build"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	backend, err := filebackend.New(filepath.Join(sandbox, "backend"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := time.Unix(100, 0).UTC()
+	lease := domain.WriterLease{SchemaVersion: domain.SchemaVersion, SessionID: "session-image-cut", Capsule: "brain", Lineage: domain.Lineage{Branch: "main"}, Machine: "machine", CreatedAt: now, HeartbeatAt: now, ExpiresAt: now.Add(time.Hour)}
+	attemptID := lease.SessionID + "-checkpoint-1"
+	snapshot := domain.JournalSnapshot{
+		SchemaVersion: domain.SchemaVersion, SessionID: lease.SessionID, Capsule: lease.Capsule, Lineage: lease.Lineage, Mode: domain.SessionReadWrite, State: domain.SessionOpen,
+		Lease:     domain.LeaseRecord{Lease: &lease, Revision: "lease-r1"},
+		Workspace: domain.WorkspaceRecord{ID: "camp-brain", Context: "default", Provider: "docker", LocalProvider: true, LocalFolder: root, StagingRoot: root, Mirror: domain.MirrorAttemptRecord{LogicalAttempt: 1, AttemptID: attemptID, State: domain.MirrorCompleted, Root: root, Method: "local-noop"}},
+	}
+	prepareCheckpointRuntime(t, &snapshot, sandbox)
+	log, err := journal.NewStore(filepath.Join(sandbox, "journal"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := log.Create(ctx, snapshot); err != nil {
+		t.Fatal(err)
+	}
+	runtime, err := checkpointRegistryRuntime(snapshot)
+	if err != nil {
+		t.Fatal(err)
+	}
+	request := images.CaptureRequest{Scope: images.EngineScope{Context: snapshot.Workspace.Context, WorkspaceID: snapshot.Workspace.ID}, Capsule: snapshot.Capsule, RegistryAuthority: runtime.authority, RegistryEndpoint: runtime.endpoint, Previous: registryadapter.ExcludeInternalArtifacts(snapshot.Images)}
+	intent := checkpointAttemptIntent(snapshot.SessionID, attemptID, "WorkspaceImagesInventoried", 2, now, request)
+	if err := log.RecordIntent(ctx, intent); err != nil {
+		t.Fatal(err)
+	}
+	mirror := &fakeMirror{}
+	fakes := newCheckpointFakes(now)
+	publisher := NewCheckpointPublisher(log, &fakeLockValidator{}, &fakeLeaseValidator{}, localCheckpointTransports(mirror), fakes.pipeline(), &fakeCheckpointBuilder{}, coordination.NewGenerationRepository(backend), coordination.NewPointerRepository(backend), fixedAppClock{now: now})
+	token := ports.OperationToken{ID: "lock", Owner: ports.OperationOwner{SessionID: snapshot.SessionID, Operation: "sync"}}
+
+	result, err := publisher.Publish(ctx, token, snapshot.SessionID)
+	if err != nil || !result.Published {
+		t.Fatalf("resume pending image capture result=%#v error=%v", result, err)
+	}
+	if mirror.calls != 0 || fakes.capture.calls != 1 || fakes.seal.calls != 1 {
+		t.Fatalf("resume effects mirror=%d capture=%d seal=%d", mirror.calls, fakes.capture.calls, fakes.seal.calls)
+	}
+	_, pending, err := log.Load(ctx, snapshot.SessionID)
+	if err != nil || len(pending) != 0 {
+		t.Fatalf("pending after image recovery=%#v error=%v", pending, err)
+	}
+}
+
+func TestCheckpointPublisherAdoptsExactPendingImmutableUploadWithoutRebuilding(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	sandbox := t.TempDir()
+	root := filepath.Join(sandbox, "root")
+	if err := os.MkdirAll(filepath.Join(root, ".camp", "build"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	backend, err := filebackend.New(filepath.Join(sandbox, "backend"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := time.Unix(100, 0).UTC()
+	lease := domain.WriterLease{SchemaVersion: domain.SchemaVersion, SessionID: "session-upload-cut", Capsule: "brain", Lineage: domain.Lineage{Branch: "main"}, Machine: "machine", CreatedAt: now, HeartbeatAt: now, ExpiresAt: now.Add(time.Hour)}
+	snapshot := domain.JournalSnapshot{SchemaVersion: domain.SchemaVersion, SessionID: lease.SessionID, Capsule: lease.Capsule, Lineage: lease.Lineage, Mode: domain.SessionReadWrite, State: domain.SessionOpen, Lease: domain.LeaseRecord{Lease: &lease, Revision: "lease-r1"}, Workspace: domain.WorkspaceRecord{ID: "camp-brain", Context: "default", Provider: "docker", LocalProvider: true, LocalFolder: root, StagingRoot: root, Mirror: domain.MirrorAttemptRecord{LogicalAttempt: 1, AttemptID: lease.SessionID + "-checkpoint-1", State: domain.MirrorCompleted, Root: root, Method: "local-noop"}}, RegistryCutRoot: filepath.Join(root, ".camp", "build", "registry-cut-1")}
+	prepareCheckpointRuntime(t, &snapshot, sandbox)
+	seedBuilder := &fakeCheckpointBuilder{}
+	built, err := seedBuilder.Build(ctx, checkpoint.BuildRequest{Capsule: snapshot.Capsule, Root: root, Lineage: snapshot.Lineage, Generation: 1, SessionID: snapshot.SessionID, CreatedAt: now})
+	if err != nil {
+		t.Fatal(err)
+	}
+	snapshot.Checkpoint = domain.Checkpoint{State: domain.CheckpointVerified, Generation: &built.Metadata.Generation, LocalHaulPath: built.Artifact.Path, ObjectKey: built.Metadata.ObjectKey}
+	if _, err := coordination.NewGenerationRepository(backend).PutAndVerify(ctx, built.Metadata, restartableFile(built.Artifact.Path)); err != nil {
+		t.Fatal(err)
+	}
+	log, err := journal.NewStore(filepath.Join(sandbox, "journal"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := log.Create(ctx, snapshot); err != nil {
+		t.Fatal(err)
+	}
+	intent := checkpointAttemptIntent(snapshot.SessionID, snapshot.Workspace.Mirror.AttemptID, "GenerationUploaded", 5, now, struct {
+		ObjectKey string `json:"objectKey"`
+		SHA256    string `json:"sha256"`
+		Size      int64  `json:"size"`
+	}{ObjectKey: built.Metadata.ObjectKey, SHA256: built.Artifact.SHA256, Size: built.Artifact.Size})
+	if err := log.RecordIntent(ctx, intent); err != nil {
+		t.Fatal(err)
+	}
+	mirror := &fakeMirror{}
+	fakes := newCheckpointFakes(now)
+	builder := &fakeCheckpointBuilder{}
+	publisher := NewCheckpointPublisher(log, &fakeLockValidator{}, &fakeLeaseValidator{}, localCheckpointTransports(mirror), fakes.pipeline(), builder, coordination.NewGenerationRepository(backend), coordination.NewPointerRepository(backend), fixedAppClock{now: now})
+	token := ports.OperationToken{ID: "lock", Owner: ports.OperationOwner{SessionID: snapshot.SessionID, Operation: "sync"}}
+
+	result, err := publisher.Publish(ctx, token, snapshot.SessionID)
+	if err != nil || !result.Published {
+		t.Fatalf("resume pending upload result=%#v error=%v", result, err)
+	}
+	if mirror.calls != 0 || fakes.capture.calls != 0 || fakes.seal.calls != 0 || builder.calls != 0 {
+		t.Fatalf("earlier effects repeated mirror=%d capture=%d seal=%d build=%d", mirror.calls, fakes.capture.calls, fakes.seal.calls, builder.calls)
+	}
+	metadata, _, err := coordination.NewGenerationRepository(backend).ReadMetadata(ctx, snapshot.Capsule, snapshot.Lineage, built.Metadata.Generation)
+	if err != nil || !metadata.Verified.RemoteBytesVerified {
+		t.Fatalf("recovered generation metadata=%#v error=%v", metadata, err)
+	}
+}
+
+func TestCheckpointPublisherAdoptsExactCommittedPointerAndAdvancesBaseline(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	sandbox := t.TempDir()
+	root := filepath.Join(sandbox, "root")
+	if err := os.MkdirAll(filepath.Join(root, ".camp", "build"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	backend, err := filebackend.New(filepath.Join(sandbox, "backend"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := time.Unix(100, 0).UTC()
+	lease := domain.WriterLease{SchemaVersion: domain.SchemaVersion, SessionID: "session-pointer-cut", Capsule: "brain", Lineage: domain.Lineage{Branch: "main"}, Machine: "machine", CreatedAt: now, HeartbeatAt: now, ExpiresAt: now.Add(time.Hour)}
+	snapshot := domain.JournalSnapshot{SchemaVersion: domain.SchemaVersion, SessionID: lease.SessionID, Capsule: lease.Capsule, Lineage: lease.Lineage, Mode: domain.SessionReadWrite, State: domain.SessionOpen, Lease: domain.LeaseRecord{Lease: &lease, Revision: "lease-r1"}, Workspace: domain.WorkspaceRecord{ID: "camp-brain", Context: "default", Provider: "docker", LocalProvider: true, LocalFolder: root, StagingRoot: root, Mirror: domain.MirrorAttemptRecord{LogicalAttempt: 1, AttemptID: lease.SessionID + "-checkpoint-1", State: domain.MirrorCompleted, Root: root, Method: "local-noop"}}, RegistryCutRoot: filepath.Join(root, ".camp", "build", "registry-cut-1")}
+	prepareCheckpointRuntime(t, &snapshot, sandbox)
+	builder := &fakeCheckpointBuilder{}
+	built, err := builder.Build(ctx, checkpoint.BuildRequest{Capsule: snapshot.Capsule, Root: root, Lineage: snapshot.Lineage, Generation: 1, SessionID: snapshot.SessionID, CreatedAt: now})
+	if err != nil {
+		t.Fatal(err)
+	}
+	generations := coordination.NewGenerationRepository(backend)
+	if _, err := generations.PutAndVerify(ctx, built.Metadata, restartableFile(built.Artifact.Path)); err != nil {
+		t.Fatal(err)
+	}
+	snapshot.Checkpoint = domain.Checkpoint{State: domain.CheckpointUploaded, Generation: &built.Metadata.Generation, LocalHaulPath: built.Artifact.Path, ObjectKey: built.Metadata.ObjectKey}
+	log, err := journal.NewStore(filepath.Join(sandbox, "journal"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := log.Create(ctx, snapshot); err != nil {
+		t.Fatal(err)
+	}
+	next := domain.LatestPointer{SchemaVersion: domain.SchemaVersion, Capsule: snapshot.Capsule, Lineage: snapshot.Lineage, Generation: built.Metadata.Generation, ObjectKey: built.Metadata.ObjectKey, Size: built.Metadata.Size, CreatedAt: built.Metadata.CreatedAt, SessionID: snapshot.SessionID}
+	intent := checkpointAttemptIntent(snapshot.SessionID, snapshot.Workspace.Mirror.AttemptID, "PointerCommitted", 6, now, next)
+	if err := log.RecordIntent(ctx, intent); err != nil {
+		t.Fatal(err)
+	}
+	pointers := coordination.NewPointerRepository(backend)
+	committed, err := pointers.Create(ctx, next)
+	if err != nil {
+		t.Fatal(err)
+	}
+	mirror := &fakeMirror{}
+	fakes := newCheckpointFakes(now)
+	rebuild := &fakeCheckpointBuilder{}
+	publisher := NewCheckpointPublisher(log, &fakeLockValidator{}, &fakeLeaseValidator{}, localCheckpointTransports(mirror), fakes.pipeline(), rebuild, generations, pointers, fixedAppClock{now: now})
+	token := ports.OperationToken{ID: "lock", Owner: ports.OperationOwner{SessionID: snapshot.SessionID, Operation: "sync"}}
+
+	result, err := publisher.Publish(ctx, token, snapshot.SessionID)
+	if err != nil || !result.Published || result.Pointer.Revision != committed.Revision {
+		t.Fatalf("resume committed pointer result=%#v error=%v", result, err)
+	}
+	if mirror.calls != 0 || fakes.capture.calls != 0 || fakes.seal.calls != 0 || rebuild.calls != 0 {
+		t.Fatalf("earlier effects repeated mirror=%d capture=%d seal=%d build=%d", mirror.calls, fakes.capture.calls, fakes.seal.calls, rebuild.calls)
+	}
+	loaded, pending, err := log.Load(ctx, snapshot.SessionID)
+	if err != nil || len(pending) != 0 || loaded.CurrentBase == nil || *loaded.CurrentBase != built.Metadata.Generation || loaded.ExpectedPointerRevision != string(committed.Revision) {
+		t.Fatalf("recovered pointer baseline=%#v pending=%#v error=%v", loaded, pending, err)
+	}
+}
+
+func TestCheckpointPublisherRejectsPendingPointerDriftFromVerifiedGeneration(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	sandbox := t.TempDir()
+	root := filepath.Join(sandbox, "root")
+	if err := os.MkdirAll(filepath.Join(root, ".camp", "build"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	backend, err := filebackend.New(filepath.Join(sandbox, "backend"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := time.Unix(100, 0).UTC()
+	lease := domain.WriterLease{SchemaVersion: domain.SchemaVersion, SessionID: "session-pointer-drift", Capsule: "brain", Lineage: domain.Lineage{Branch: "main"}, Machine: "machine", CreatedAt: now, HeartbeatAt: now, ExpiresAt: now.Add(time.Hour)}
+	snapshot := domain.JournalSnapshot{SchemaVersion: domain.SchemaVersion, SessionID: lease.SessionID, Capsule: lease.Capsule, Lineage: lease.Lineage, Mode: domain.SessionReadWrite, State: domain.SessionOpen, Lease: domain.LeaseRecord{Lease: &lease, Revision: "lease-r1"}, Workspace: domain.WorkspaceRecord{ID: "camp-brain", Context: "default", Provider: "docker", LocalProvider: true, LocalFolder: root, StagingRoot: root, Mirror: domain.MirrorAttemptRecord{LogicalAttempt: 1, AttemptID: lease.SessionID + "-checkpoint-1", State: domain.MirrorCompleted, Root: root, Method: "local-noop"}}, RegistryCutRoot: filepath.Join(root, ".camp", "build", "registry-cut-1")}
+	prepareCheckpointRuntime(t, &snapshot, sandbox)
+	builder := &fakeCheckpointBuilder{}
+	built, err := builder.Build(ctx, checkpoint.BuildRequest{Capsule: snapshot.Capsule, Root: root, Lineage: snapshot.Lineage, Generation: 1, SessionID: snapshot.SessionID, CreatedAt: now})
+	if err != nil {
+		t.Fatal(err)
+	}
+	generations := coordination.NewGenerationRepository(backend)
+	if _, err := generations.PutAndVerify(ctx, built.Metadata, restartableFile(built.Artifact.Path)); err != nil {
+		t.Fatal(err)
+	}
+	snapshot.Checkpoint = domain.Checkpoint{State: domain.CheckpointUploaded, Generation: &built.Metadata.Generation, LocalHaulPath: built.Artifact.Path, ObjectKey: built.Metadata.ObjectKey}
+	log, err := journal.NewStore(filepath.Join(sandbox, "journal"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := log.Create(ctx, snapshot); err != nil {
+		t.Fatal(err)
+	}
+	drifted := domain.LatestPointer{SchemaVersion: domain.SchemaVersion, Capsule: snapshot.Capsule, Lineage: snapshot.Lineage, Generation: built.Metadata.Generation, ObjectKey: built.Metadata.ObjectKey, Size: built.Metadata.Size + 1, CreatedAt: built.Metadata.CreatedAt, Tools: built.Metadata.Tools, SessionID: snapshot.SessionID}
+	intent := checkpointAttemptIntent(snapshot.SessionID, snapshot.Workspace.Mirror.AttemptID, "PointerCommitted", 6, now, drifted)
+	if err := log.RecordIntent(ctx, intent); err != nil {
+		t.Fatal(err)
+	}
+	pointers := coordination.NewPointerRepository(backend)
+	mirror := &fakeMirror{}
+	fakes := newCheckpointFakes(now)
+	rebuild := &fakeCheckpointBuilder{}
+	publisher := NewCheckpointPublisher(log, &fakeLockValidator{}, &fakeLeaseValidator{}, localCheckpointTransports(mirror), fakes.pipeline(), rebuild, generations, pointers, fixedAppClock{now: now})
+	token := ports.OperationToken{ID: "lock", Owner: ports.OperationOwner{SessionID: snapshot.SessionID, Operation: "sync"}}
+
+	if _, err := publisher.Publish(ctx, token, snapshot.SessionID); err == nil || !strings.Contains(err.Error(), "drifted from the verified generation") {
+		t.Fatalf("Publish() error = %v, want verified-generation drift rejection", err)
+	}
+	if mirror.calls != 0 || fakes.capture.calls != 0 || fakes.seal.calls != 0 || rebuild.calls != 0 {
+		t.Fatalf("earlier effects repeated mirror=%d capture=%d seal=%d build=%d", mirror.calls, fakes.capture.calls, fakes.seal.calls, rebuild.calls)
+	}
+	if _, err := pointers.Read(ctx, snapshot.Capsule, snapshot.Lineage); !errors.Is(err, ports.ErrNotFound) {
+		t.Fatalf("pointer moved after drifted recovery: %v", err)
+	}
+	_, pending, err := log.Load(ctx, snapshot.SessionID)
+	if err != nil || len(pending) != 1 || pending[0].Intent.ID != intent.ID {
+		t.Fatalf("pending pointer = %#v error=%v", pending, err)
 	}
 }
 

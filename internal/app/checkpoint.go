@@ -130,6 +130,12 @@ func (p *CheckpointPublisher) Publish(ctx context.Context, operation ports.Opera
 	if hasPendingTransition(pending, "ServingContentRefreshed") {
 		return p.resumeServingRefresh(ctx, snapshot, pending, now)
 	}
+	if len(pending) == 1 && pending[0].Intent.Transition == "GenerationUploaded" {
+		return p.resumePendingUpload(ctx, snapshot, pending[0].Intent, generation, now)
+	}
+	if len(pending) == 1 && pending[0].Intent.Transition == "PointerCommitted" {
+		return p.resumePendingPointer(ctx, snapshot, pending[0].Intent, generation, now)
+	}
 	attemptID := ""
 	root := ""
 	inventory := registryadapter.ExcludeInternalArtifacts(snapshot.Images)
@@ -142,7 +148,12 @@ func (p *CheckpointPublisher) Publish(ctx context.Context, operation ports.Opera
 			return CheckpointResult{}, err
 		}
 	} else {
-		prepared, err := p.prepareRegistrySeal(ctx, snapshot, pending, lease, generation, now)
+		var prepared preparedRegistrySeal
+		if len(pending) == 1 && pending[0].Intent.Transition == "WorkspaceImagesInventoried" {
+			prepared, err = p.resumePendingImageCapture(ctx, snapshot, pending[0].Intent, generation, now)
+		} else {
+			prepared, err = p.prepareRegistrySeal(ctx, snapshot, pending, lease, generation, now)
+		}
 		if err != nil {
 			return CheckpointResult{}, err
 		}
@@ -237,8 +248,80 @@ func (p *CheckpointPublisher) Publish(ctx context.Context, operation ports.Opera
 	if err := p.journal.RecordIntent(ctx, pointerIntent); err != nil {
 		return result, err
 	}
+	return p.commitPointerAndRefresh(ctx, snapshot, result, next, pointerIntent, cutRoot, built.Artifact.Path, now, nil)
+}
+
+func (p *CheckpointPublisher) resumePendingUpload(ctx context.Context, snapshot domain.JournalSnapshot, intent ports.IntentRecord, generation uint64, now time.Time) (CheckpointResult, error) {
+	if snapshot.Checkpoint.State != domain.CheckpointVerified || snapshot.Checkpoint.Generation == nil || snapshot.Checkpoint.Generation.Generation != generation || snapshot.Checkpoint.LocalHaulPath == "" || snapshot.Checkpoint.ObjectKey == "" || intent.ID != snapshot.Workspace.Mirror.AttemptID+"-5" || intent.SessionID != snapshot.SessionID {
+		return CheckpointResult{}, errors.New("pending generation upload does not match the durable checkpoint attempt")
+	}
+	var request struct {
+		ObjectKey string `json:"objectKey"`
+		SHA256    string `json:"sha256"`
+		Size      int64  `json:"size"`
+	}
+	if err := json.Unmarshal(intent.Input, &request); err != nil || request.ObjectKey != snapshot.Checkpoint.ObjectKey || request.SHA256 != snapshot.Checkpoint.Generation.ArchiveSHA256 || request.Size < 0 {
+		return CheckpointResult{}, errors.New("pending generation upload request drifted from durable checkpoint")
+	}
+	metadataKey, err := coordination.GenerationMetadataKey(snapshot.Capsule, snapshot.Lineage, *snapshot.Checkpoint.Generation)
+	if err != nil {
+		return CheckpointResult{}, err
+	}
+	metadata := domain.GenerationMetadata{
+		SchemaVersion: domain.SchemaVersion, Capsule: snapshot.Capsule, Lineage: snapshot.Lineage, Generation: *snapshot.Checkpoint.Generation,
+		Parent: cloneGeneration(snapshot.CurrentBase), ObjectKey: request.ObjectKey, MetadataKey: metadataKey, Size: request.Size,
+		CreatedAt: intent.Timestamp.UTC(), Tools: snapshot.Tools, SessionID: snapshot.SessionID, Verified: domain.Verification{LocalHaulLoadable: true},
+	}
+	if _, err := p.generations.PutAndVerify(ctx, metadata, restartableFile(snapshot.Checkpoint.LocalHaulPath)); err != nil {
+		return CheckpointResult{Generation: metadata.Generation, RecoveryCommand: "camp recover " + snapshot.SessionID}, err
+	}
+	snapshot.Checkpoint.State = domain.CheckpointUploaded
+	if err := p.journal.RecordFact(context.WithoutCancel(ctx), checkpointFact(intent, now), snapshot); err != nil {
+		return CheckpointResult{Generation: metadata.Generation, RecoveryCommand: "camp recover " + snapshot.SessionID}, err
+	}
+	next := domain.LatestPointer{SchemaVersion: domain.SchemaVersion, Capsule: snapshot.Capsule, Lineage: snapshot.Lineage, Generation: metadata.Generation, Parent: cloneGeneration(snapshot.CurrentBase), ObjectKey: metadata.ObjectKey, Size: metadata.Size, CreatedAt: metadata.CreatedAt, Tools: metadata.Tools, SessionID: snapshot.SessionID}
+	pointerIntent := checkpointAttemptIntent(snapshot.SessionID, snapshot.Workspace.Mirror.AttemptID, "PointerCommitted", 6, now, next)
+	if err := p.journal.RecordIntent(ctx, pointerIntent); err != nil {
+		return CheckpointResult{Generation: metadata.Generation, RecoveryCommand: "camp recover " + snapshot.SessionID}, err
+	}
+	result := CheckpointResult{Generation: metadata.Generation, RecoveryCommand: "camp recover " + snapshot.SessionID}
+	return p.commitPointerAndRefresh(ctx, snapshot, result, next, pointerIntent, snapshot.RegistryCutRoot, snapshot.Checkpoint.LocalHaulPath, now, nil)
+}
+
+func (p *CheckpointPublisher) resumePendingPointer(ctx context.Context, snapshot domain.JournalSnapshot, intent ports.IntentRecord, generation uint64, now time.Time) (CheckpointResult, error) {
+	if snapshot.Checkpoint.State != domain.CheckpointUploaded || snapshot.Checkpoint.Generation == nil || snapshot.Checkpoint.Generation.Generation != generation || snapshot.Checkpoint.LocalHaulPath == "" || snapshot.Checkpoint.ObjectKey == "" || intent.ID != snapshot.Workspace.Mirror.AttemptID+"-6" || intent.SessionID != snapshot.SessionID {
+		return CheckpointResult{}, errors.New("pending pointer commit does not match the durable checkpoint attempt")
+	}
+	var next domain.LatestPointer
+	if err := json.Unmarshal(intent.Input, &next); err != nil || next.SchemaVersion != domain.SchemaVersion || next.Capsule != snapshot.Capsule || next.Lineage != snapshot.Lineage || next.Generation != *snapshot.Checkpoint.Generation || next.ObjectKey != snapshot.Checkpoint.ObjectKey || next.SessionID != snapshot.SessionID || !sameGeneration(next.Parent, snapshot.CurrentBase) {
+		return CheckpointResult{}, errors.New("pending pointer commit drifted from the uploaded checkpoint")
+	}
+	metadata, _, err := p.generations.ReadMetadata(ctx, snapshot.Capsule, snapshot.Lineage, *snapshot.Checkpoint.Generation)
+	if err != nil {
+		return CheckpointResult{}, fmt.Errorf("verify pending pointer generation: %w", err)
+	}
+	expected := domain.LatestPointer{
+		SchemaVersion: domain.SchemaVersion, Capsule: metadata.Capsule, Lineage: metadata.Lineage,
+		Generation: metadata.Generation, Parent: cloneGeneration(metadata.Parent), ObjectKey: metadata.ObjectKey,
+		Size: metadata.Size, CreatedAt: metadata.CreatedAt, Tools: metadata.Tools, SessionID: metadata.SessionID,
+	}
+	if !reflect.DeepEqual(next, expected) {
+		return CheckpointResult{}, errors.New("pending pointer commit drifted from the verified generation")
+	}
+	var adopted *coordination.PointerRecord
+	if current, err := p.pointers.Read(ctx, snapshot.Capsule, snapshot.Lineage); err == nil && reflect.DeepEqual(current.Pointer, next) {
+		adopted = &current
+	}
+	result := CheckpointResult{Generation: next.Generation, RecoveryCommand: "camp recover " + snapshot.SessionID}
+	return p.commitPointerAndRefresh(ctx, snapshot, result, next, intent, snapshot.RegistryCutRoot, snapshot.Checkpoint.LocalHaulPath, now, adopted)
+}
+
+func (p *CheckpointPublisher) commitPointerAndRefresh(ctx context.Context, snapshot domain.JournalSnapshot, result CheckpointResult, next domain.LatestPointer, pointerIntent ports.IntentRecord, cutRoot, haulPath string, now time.Time, adopted *coordination.PointerRecord) (CheckpointResult, error) {
 	var published coordination.PointerRecord
-	if snapshot.CurrentPointer == nil {
+	var err error
+	if adopted != nil {
+		published = *adopted
+	} else if snapshot.CurrentPointer == nil {
 		published, err = p.pointers.Create(ctx, next)
 	} else {
 		published, err = p.pointers.CompareAndSwap(ctx, coordination.PointerRecord{Pointer: *snapshot.CurrentPointer, Revision: ports.Revision(snapshot.ExpectedPointerRevision)}, next)
@@ -263,10 +346,10 @@ func (p *CheckpointPublisher) Publish(ctx context.Context, operation ports.Opera
 	snapshot.CurrentPointer = &committedPointer
 	snapshot.ExpectedPointerRevision = string(published.Revision)
 	refreshRequest := ServingRefreshRequest{
-		SessionID: sessionID, Generation: result.Generation, HaulPath: built.Artifact.Path,
+		SessionID: snapshot.SessionID, Generation: result.Generation, HaulPath: haulPath,
 		RegistrySnapshotRoot: cutRoot,
 	}
-	refreshIntent := checkpointAttemptIntent(sessionID, attemptID, "ServingContentRefreshed", 7, now, refreshRequest)
+	refreshIntent := checkpointAttemptIntent(snapshot.SessionID, snapshot.Workspace.Mirror.AttemptID, "ServingContentRefreshed", 7, now, refreshRequest)
 	if err := p.journal.RecordIntent(context.WithoutCancel(ctx), refreshIntent); err != nil {
 		result.RefreshError = err.Error()
 		return result, nil
@@ -275,7 +358,7 @@ func (p *CheckpointPublisher) Publish(ctx context.Context, operation ports.Opera
 		result.RefreshError = err.Error()
 		return result, nil
 	}
-	refreshed, pending, err := p.journal.Load(context.WithoutCancel(ctx), sessionID)
+	refreshed, pending, err := p.journal.Load(context.WithoutCancel(ctx), snapshot.SessionID)
 	if err != nil {
 		result.RefreshError = err.Error()
 		return result, nil
@@ -290,6 +373,44 @@ func (p *CheckpointPublisher) Publish(ctx context.Context, operation ports.Opera
 		return result, nil
 	}
 	return result, nil
+}
+
+func (p *CheckpointPublisher) resumePendingImageCapture(ctx context.Context, snapshot domain.JournalSnapshot, intent ports.IntentRecord, generation uint64, now time.Time) (preparedRegistrySeal, error) {
+	attemptID := snapshot.Workspace.Mirror.AttemptID
+	root := snapshot.Workspace.Mirror.Root
+	if attemptID == "" || snapshot.Workspace.Mirror.State != domain.MirrorCompleted || root == "" || intent.ID != attemptID+"-2" || intent.SessionID != snapshot.SessionID {
+		return preparedRegistrySeal{}, errors.New("pending image capture does not match the durable checkpoint attempt")
+	}
+	runtime, err := checkpointRegistryRuntime(snapshot)
+	if err != nil {
+		return preparedRegistrySeal{}, err
+	}
+	expected := images.CaptureRequest{
+		Scope: images.EngineScope{Context: snapshot.Workspace.Context, WorkspaceID: snapshot.Workspace.ID}, Capsule: snapshot.Capsule,
+		RegistryAuthority: runtime.authority, RegistryEndpoint: runtime.endpoint, Previous: snapshot.Images,
+	}
+	var request images.CaptureRequest
+	if err := json.Unmarshal(intent.Input, &request); err != nil || !reflect.DeepEqual(request, expected) {
+		return preparedRegistrySeal{}, errors.New("pending image capture request drifted from durable session state")
+	}
+	inventory, err := p.pipeline.Capturer.Capture(ctx, request)
+	if err != nil {
+		return preparedRegistrySeal{}, err
+	}
+	snapshot.Images = inventory
+	if err := p.journal.RecordFact(context.WithoutCancel(ctx), checkpointFact(intent, now), snapshot); err != nil {
+		return preparedRegistrySeal{}, err
+	}
+	sealRequest := registryadapter.SnapshotRequest{
+		SessionID: snapshot.SessionID, OverlayRoot: runtime.overlay,
+		SnapshotRoot:    filepath.Join(root, ".camp", "build", "registry-cut-"+strconv.FormatUint(generation, 10)),
+		CatalogEndpoint: runtime.endpoint, RegistryLaunchToken: runtime.launchToken,
+	}
+	sealIntent := checkpointAttemptIntent(snapshot.SessionID, attemptID, "RegistrySnapshotSealed", 3, now, sealRequest)
+	if err := p.journal.RecordIntent(ctx, sealIntent); err != nil {
+		return preparedRegistrySeal{}, err
+	}
+	return preparedRegistrySeal{snapshot: snapshot, attemptID: attemptID, root: root, inventory: inventory, runtime: runtime, request: sealRequest, intent: sealIntent}, nil
 }
 
 func imageInventorySummary(inventory domain.ImageInventory) string {

@@ -703,6 +703,12 @@ func TestHydrateRejectsReplacedStageIdentityDuringRecovery(t *testing.T) {
 	}
 }
 
+func TestSameDirectoryIdentityRejectsReusedInodeWithDifferentBirthTime(t *testing.T) {
+	if sameDirectoryIdentity(7, 11, 13, 7, 11, 17) {
+		t.Fatal("directory identity accepted a reused device and inode with a different birth time")
+	}
+}
+
 func TestRenameNoReplacePreservesExistingDestination(t *testing.T) {
 	t.Parallel()
 	root := t.TempDir()

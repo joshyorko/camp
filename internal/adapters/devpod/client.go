@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"strconv"
 	"strings"
 
@@ -106,6 +107,9 @@ type SSHOptions struct {
 	InstallTerminfo      *bool
 	StartServices        bool
 	ForwardedArgv        []string
+	Stdin                io.Reader
+	Stdout               io.Writer
+	Stderr               io.Writer
 }
 
 type WorkspaceCommand = ports.WorkspaceCommand
@@ -379,7 +383,7 @@ func (c *Client) SSHCommand(options SSHOptions) (ports.Command, error) {
 	argv = append(argv, options.ForwardedArgv...)
 	argv = append(argv, "--start-services="+strconv.FormatBool(options.StartServices))
 	argv = append(argv, options.WorkspaceID)
-	return ports.Command{Executable: c.executable, Argv: argv}, nil
+	return ports.Command{Executable: c.executable, Argv: argv, Stdin: options.Stdin, Stdout: options.Stdout, Stderr: options.Stderr}, nil
 }
 
 func (c *Client) Execute(ctx context.Context, command WorkspaceCommand) (ports.Result, error) {

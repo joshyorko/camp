@@ -15,5 +15,6 @@ type Materialization struct {
 	Mode             MaterializationMode `json:"mode" yaml:"mode"`
 	Device           uint64              `json:"device,omitempty" yaml:"device,omitempty"`
 	Inode            uint64              `json:"inode,omitempty" yaml:"inode,omitempty"`
+	BirthTimeNS      int64               `json:"birthTimeNs,omitempty" yaml:"birthTimeNs,omitempty"`
 	CleanupPermitted bool                `json:"cleanupPermitted" yaml:"cleanupPermitted"`
 }

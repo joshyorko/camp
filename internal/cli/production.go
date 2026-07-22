@@ -122,35 +122,33 @@ func (p *ProductionLifecycle) Init(ctx context.Context, request InitRequest, mod
 			return UsageError(err)
 		}
 	}
-	composition, err := composeProductionWithSettings(ctx, settings)
-	if err != nil {
-		return err
-	}
+	runner := subprocess.NewRunner()
+	initializer := capsule.NewInitializer(host.NewClock(), capsule.NewCommandDigestResolver("docker", runner))
 	root := request.Root
 	if request.Source != "" {
 		root = request.Source
 	}
 	if root == "" {
-		root = composition.runtime.Source
+		root = settings.runtime.Source
 	}
 	if root == "" {
 		return UsageError(errors.New("init requires a root or CAMP_SOURCE"))
 	}
-	capsuleID := composition.runtime.Capsule
+	capsuleID := settings.runtime.Capsule
 	if request.Capsule != "" {
 		capsuleID = request.Capsule
 	}
-	result, err := composition.initializer.Initialize(ctx, root, capsuleID)
+	result, err := initializer.Initialize(ctx, root, capsuleID)
 	if err != nil {
 		return err
 	}
 	if request.Source != "" {
-		written, err := persistInitConfiguration(composition.paths.ConfigPath, request, composition.runtime.S3)
+		written, err := persistInitConfiguration(settings.paths.ConfigPath, request, settings.runtime.S3)
 		if err != nil {
 			return err
 		}
 		return writeConfiguredInitSuccess(out, mode, configuredInitResult{
-			ConfigPath: composition.paths.ConfigPath, Source: written.Source, Backend: written.Backend,
+			ConfigPath: settings.paths.ConfigPath, Source: written.Source, Backend: written.Backend,
 			Capsule: written.DefaultCapsule, DevPodProvider: written.DevPodProvider, DevPodContext: written.DevPodContext,
 		})
 	}
@@ -244,6 +242,36 @@ func (p *ProductionLifecycle) Open(ctx context.Context, value string, mode Outpu
 		return writeHumanLifecycleResult(out, mode, "open", openTerminalEvents(result.Snapshot.Capsule, result.Snapshot.SessionID), "")
 	}
 	return writeSuccess(out, mode, "open", result, fmt.Sprintf("Opened %s (%s)\n", result.Snapshot.Capsule, result.Snapshot.SessionID))
+}
+
+func (p *ProductionLifecycle) Attach(ctx context.Context, request AttachRequest, mode OutputMode, out io.Writer) error {
+	composition, err := composeProduction(ctx)
+	if err != nil {
+		return err
+	}
+	usecase := app.NewAttach(app.AttachDependencies{
+		Sessions: composition.journal, Ownership: composition.ownership,
+		Target: target.Resolver{Zoxide: target.NewCommandZoxide("zoxide", composition.runner)}, DevPod: composition.devpod,
+	})
+	result, err := usecase.Run(ctx, app.AttachRequest{
+		Selector: app.SessionSelector{Capsule: composition.runtime.Capsule, Branch: "main"},
+		Target:   request.Target, Entry: devpod.IDEEntry{IDE: devpod.IDE(request.IDE)},
+		SSH: devpod.SSHOptions{
+			User: request.User, ForwardPorts: request.ForwardPorts, ReverseForwards: request.ReverseForwardPorts,
+			SendEnv: request.SendEnv, SetEnv: request.SetEnv, ForwardPortsTimeout: request.ForwardPortsTimeout,
+			AgentForwarding: request.AgentForwarding, GPGAgentForwarding: request.GPGAgentForwarding, Stdio: request.Stdio,
+			SSHKeepAliveInterval: request.SSHKeepAliveInterval, GitSSHSigningKey: request.GitSSHSigningKey,
+			TermMode: request.TermMode, InstallTerminfo: request.InstallTerminfo, ForwardedArgv: request.DevPodArgs,
+			Stdin: os.Stdin, Stdout: os.Stdout, Stderr: os.Stderr,
+		},
+	})
+	if err != nil {
+		return err
+	}
+	if mode == ModeJSON {
+		return writeSuccess(out, mode, "attach", result, "")
+	}
+	return nil
 }
 
 func resolveProductionProvider(provider string) (string, bool, error) {

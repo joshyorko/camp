@@ -52,7 +52,7 @@ type Devcontainer struct {
 }
 
 func ResolveDevcontainer(root, explicit string, lock domain.CapsuleLock) (Devcontainer, error) {
-	canonicalRoot, _, _, _, err := inspectRoot(root)
+	canonicalRoot, _, _, _, _, err := inspectRoot(root)
 	if err != nil {
 		return Devcontainer{}, err
 	}
