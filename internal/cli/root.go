@@ -24,6 +24,10 @@ type Lifecycle interface {
 	Supervise(context.Context, string, OutputMode, io.Writer) error
 }
 
+type doctorLifecycle interface {
+	Doctor(context.Context, OutputMode, io.Writer) error
+}
+
 func NewRootWithLifecycle(lifecycle Lifecycle) *cobra.Command {
 	root := &cobra.Command{
 		Use:           "camp",
@@ -44,6 +48,9 @@ func NewRootWithLifecycle(lifecycle Lifecycle) *cobra.Command {
 	})
 	root.DisableAutoGenTag = true
 	root.AddCommand(newCompletionCommand(root))
+	if diagnostics, ok := lifecycle.(doctorLifecycle); ok {
+		root.AddCommand(noArgumentCommand("doctor", "Diagnose required host capabilities", diagnostics.Doctor))
+	}
 	root.AddCommand(
 		optionalArgumentCommand("init", "Initialize a capsule root", lifecycle.Init),
 		optionalArgumentCommand("open", "Open a capsule workspace", lifecycle.Open),
