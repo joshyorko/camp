@@ -70,7 +70,7 @@ func TestLifecycleCommandsDelegateWithStrictArgumentsAndInheritedMode(t *testing
 		})
 	}
 
-	for _, args := range [][]string{{"init", "a", "b"}, {"open", "a", "b"}, {"sync", "x"}, {"close", "x"}, {"reopen", "a", "b"}, {"recover", "a", "b"}, {"supervise", "a", "b"}} {
+	for _, args := range [][]string{{"init", "a", "b"}, {"open", "a", "b"}, {"sync", "x"}, {"close", "x"}, {"reopen", "a", "b"}, {"recover", "a", "b"}, {"doctor", "x"}, {"supervise", "a", "b"}} {
 		var stderr bytes.Buffer
 		if code := Execute(context.Background(), NewRootWithLifecycle(lifecycle), args, Streams{ErrOut: &stderr}); code != int(ExitUsage) {
 			t.Fatalf("Execute(%q) = %d, want usage; stderr=%q", args, code, stderr.String())
@@ -111,6 +111,28 @@ func (r *recordingLifecycle) Recover(_ context.Context, value string, mode Outpu
 func (r *recordingLifecycle) Supervise(_ context.Context, value string, mode OutputMode, _ io.Writer) error {
 	r.calls = append(r.calls, "supervise:"+value+":"+string(mode))
 	return nil
+}
+
+func (r *recordingLifecycle) Doctor(_ context.Context, mode OutputMode, output io.Writer) error {
+	r.calls = append(r.calls, "doctor:"+string(mode))
+	_, _ = io.WriteString(output, "doctor output\n")
+	return nil
+}
+
+func TestDoctorCommandUsesInheritedOutputModeAndRejectsArguments(t *testing.T) {
+	lifecycle := &recordingLifecycle{}
+	var stdout, stderr bytes.Buffer
+	if code := Execute(context.Background(), NewRootWithLifecycle(lifecycle), []string{"doctor", "--json"}, Streams{Out: &stdout, ErrOut: &stderr}); code != int(ExitSuccess) {
+		t.Fatalf("exit = %d, stderr = %q", code, stderr.String())
+	}
+	if got := strings.Join(lifecycle.calls, ","); got != "doctor:json" || stdout.String() != "doctor output\n" {
+		t.Fatalf("calls = %q, stdout = %q", got, stdout.String())
+	}
+	stdout.Reset()
+	stderr.Reset()
+	if code := Execute(context.Background(), NewRootWithLifecycle(lifecycle), []string{"doctor", "extra"}, Streams{Out: &stdout, ErrOut: &stderr}); code != int(ExitUsage) {
+		t.Fatalf("argument exit = %d, stdout = %q, stderr = %q", code, stdout.String(), stderr.String())
+	}
 }
 
 func TestExecuteRejectsInvalidCompletionArguments(t *testing.T) {
@@ -460,7 +482,7 @@ func TestRootHelpIsDeterministic(t *testing.T) {
 	if first != second {
 		t.Fatalf("help changed between identical roots:\nfirst:\n%s\nsecond:\n%s", first, second)
 	}
-	want := "Recoverable capsule workspaces\n\nUsage:\n  camp [flags]\n  camp [command]\n\nAvailable Commands:\n  close       Publish a checkpoint and close\n  completion  Generate shell completion\n  help        Help about any command\n  init        Initialize a capsule root\n  open        Open a capsule workspace\n  recover     Recover an interrupted lifecycle\n  reopen      Reopen a closed capsule workspace\n  setup       Install or reuse pinned DevPod and Hauler tools\n  sync        Publish a checkpoint and remain open\n\nFlags:\n  -h, --help   help for camp\n      --json   emit stable JSON output\n\nUse \"camp [command] --help\" for more information about a command.\n"
+	want := "Recoverable capsule workspaces\n\nUsage:\n  camp [flags]\n  camp [command]\n\nAvailable Commands:\n  close       Publish a checkpoint and close\n  completion  Generate shell completion\n  doctor      Diagnose required host capabilities\n  help        Help about any command\n  init        Initialize a capsule root\n  open        Open a capsule workspace\n  recover     Recover an interrupted lifecycle\n  reopen      Reopen a closed capsule workspace\n  setup       Install or reuse pinned DevPod and Hauler tools\n  sync        Publish a checkpoint and remain open\n\nFlags:\n  -h, --help   help for camp\n      --json   emit stable JSON output\n\nUse \"camp [command] --help\" for more information about a command.\n"
 	if first != want {
 		t.Fatalf("help:\n%s\nwant:\n%s", first, want)
 	}
