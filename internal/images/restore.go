@@ -57,11 +57,11 @@ func (r *Restorer) Restore(ctx context.Context, request RestoreRequest) (Restore
 		if err != nil {
 			return result, err
 		}
-		repository, tag, err := splitCapturedTag(rewritten)
+		repository, _, err := splitCapturedTag(rewritten)
 		if err != nil {
 			return result, err
 		}
-		resolved, err := r.catalog.Resolve(ctx, request.RegistryEndpoint, repository, tag)
+		resolved, err := r.catalog.Resolve(ctx, request.RegistryEndpoint, repository, image.CapturedManifestDigest)
 		if err != nil {
 			return result, err
 		}

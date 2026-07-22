@@ -2,7 +2,10 @@ package lifecycle
 
 import (
 	"context"
+	"os"
 	"path/filepath"
+	"reflect"
+	"strings"
 	"testing"
 
 	"github.com/joshyorko/camp/internal/adapters/supervisor"
@@ -53,6 +56,27 @@ func TestServiceStarterPreservesCommittedEndpointsAcrossJournalReloads(t *testin
 	}
 }
 
+func TestServiceStarterLoadsOpenedGenerationBeforeServingRegistry(t *testing.T) {
+	t.Parallel()
+	root := t.TempDir()
+	haul := filepath.Join(root, "generation.tar.zst")
+	if err := os.WriteFile(haul, []byte("haul"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	snapshot := domain.JournalSnapshot{SchemaVersion: domain.SchemaVersion, SessionID: "session-generation", OpenedGeneration: &domain.GenerationRef{Generation: 7, ArchiveSHA256: strings.Repeat("a", 64)}, Recovery: domain.RecoveryRecord{
+		Configuration: domain.ConfigurationRecord{RegistryPort: 5000, FileserverPort: 8080},
+		Session:       domain.SessionArtifactPaths{Root: root, RuntimeRoot: filepath.Join(root, "runtime"), RegistryOverlay: filepath.Join(root, "registry"), HaulPath: haul},
+	}}
+	store := &recordingStore{}
+	if _, err := NewServiceStarter(staticConfinement{}, staticPorts{}, &recordingEnsurer{}, "/opt/hauler", store).Start(context.Background(), snapshot); err != nil {
+		t.Fatal(err)
+	}
+	wantStore := filepath.Join(root, "store")
+	if !reflect.DeepEqual(store.events, []string{"load:" + wantStore + ":" + haul, "add:" + wantStore}) {
+		t.Fatalf("store events = %#v", store.events)
+	}
+}
+
 type staticConfinement struct{}
 
 func (staticConfinement) Resolve(context.Context) (ports.ConfinementCapability, error) {
@@ -67,7 +91,23 @@ func (staticPorts) Candidates(_ context.Context, preferred, _ int) ([]int, error
 
 type staticStore struct{}
 
+func (staticStore) Load(context.Context, string, []string) (ports.Result, error) {
+	return ports.Result{}, nil
+}
+
 func (staticStore) AddFile(context.Context, string, string, string) (ports.Result, error) {
+	return ports.Result{}, nil
+}
+
+type recordingStore struct{ events []string }
+
+func (s *recordingStore) Load(_ context.Context, store string, paths []string) (ports.Result, error) {
+	s.events = append(s.events, "load:"+store+":"+paths[0])
+	return ports.Result{}, nil
+}
+
+func (s *recordingStore) AddFile(_ context.Context, store, _, _ string) (ports.Result, error) {
+	s.events = append(s.events, "add:"+store)
 	return ports.Result{}, nil
 }
 

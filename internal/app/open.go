@@ -21,6 +21,7 @@ import (
 	"github.com/joshyorko/camp/internal/config"
 	"github.com/joshyorko/camp/internal/coordination"
 	"github.com/joshyorko/camp/internal/domain"
+	imageops "github.com/joshyorko/camp/internal/images"
 	journalstore "github.com/joshyorko/camp/internal/journal"
 	"github.com/joshyorko/camp/internal/ports"
 	"github.com/joshyorko/camp/internal/target"
@@ -89,6 +90,14 @@ type OpenForwarderManager interface {
 	Stop(context.Context, domain.ForwardingRecord) error
 }
 
+type OpenHardlinkRestorer interface {
+	Restore(context.Context, workspace.HardlinkRestoreRequest) error
+}
+
+type OpenImageRestorer interface {
+	Restore(context.Context, imageops.RestoreRequest) (imageops.RestoreResult, error)
+}
+
 type OpenDependencies struct {
 	Journal         ports.Journal
 	Paths           config.XDGPaths
@@ -105,6 +114,8 @@ type OpenDependencies struct {
 	Target          OpenTargetResolver
 	Services        OpenServiceStarter
 	Forwarders      OpenForwarderManager
+	Hardlinks       OpenHardlinkRestorer
+	Images          OpenImageRestorer
 	Clock           ports.Clock
 }
 
@@ -279,12 +290,14 @@ func (o *Open) Reconcile(ctx context.Context, sessionID string) (domain.JournalS
 		return snapshot, err
 	}
 	reconciled, err := journalstore.Reconcile(ctx, o.deps.Journal, sessionID, map[string]journalstore.Observer{
-		"LocalLeaseAcquisition":   withOpenRecoveryObjective(o.observeRemoteLeaseAcquisition),
-		"RemoteLeaseAcquisition":  withOpenRecoveryObjective(o.observeRemoteLeaseAcquisition),
-		"WorkspaceUp":             withOpenRecoveryObjective(o.observeWorkspaceUp),
-		"WorkspaceRootResolved":   withOpenRecoveryObjective(o.observeWorkspaceRootResolved),
-		"SessionOpened":           withOpenRecoveryObjective(o.observeSessionOpened),
-		"TerminalEntryDispatched": withOpenRecoveryObjective(o.observeTerminalEntryDispatched),
+		"LocalLeaseAcquisition":      withOpenRecoveryObjective(o.observeRemoteLeaseAcquisition),
+		"RemoteLeaseAcquisition":     withOpenRecoveryObjective(o.observeRemoteLeaseAcquisition),
+		"WorkspaceUp":                withOpenRecoveryObjective(o.observeWorkspaceUp),
+		"WorkspaceRootResolved":      withOpenRecoveryObjective(o.observeWorkspaceRootResolved),
+		"WorkspaceHardlinksRestored": withOpenRecoveryObjective(o.observeWorkspaceHardlinksRestored),
+		"WorkspaceImagesRestored":    withOpenRecoveryObjective(o.observeWorkspaceImagesRestored),
+		"SessionOpened":              withOpenRecoveryObjective(o.observeSessionOpened),
+		"TerminalEntryDispatched":    withOpenRecoveryObjective(o.observeTerminalEntryDispatched),
 	})
 	if err != nil {
 		return reconciled, err
@@ -430,6 +443,68 @@ func (o *Open) observeWorkspaceRootResolved(ctx context.Context, snapshot domain
 		return ports.FactRecord{}, snapshot, errors.New("open reconciliation clock returned zero time")
 	}
 	return ports.FactRecord{IntentID: intent.ID, SessionID: intent.SessionID, Transition: intent.Transition, Timestamp: now, Output: safeJSON(next.Workspace.EffectiveRoot)}, next, nil
+}
+
+func (o *Open) observeWorkspaceHardlinksRestored(ctx context.Context, snapshot domain.JournalSnapshot, intent ports.IntentRecord) (ports.FactRecord, domain.JournalSnapshot, error) {
+	if o.deps.Hardlinks == nil || snapshot.Workspace.LocalProvider {
+		return ports.FactRecord{}, snapshot, errors.New("remote hardlink recovery dependencies are incomplete")
+	}
+	var request workspace.HardlinkRestoreRequest
+	if err := json.Unmarshal(intent.Input, &request); err != nil {
+		return ports.FactRecord{}, snapshot, fmt.Errorf("decode hardlink restore intent: %w", err)
+	}
+	if request.WorkspaceID != snapshot.Workspace.ID || request.Context != snapshot.Workspace.Context || request.LocalRoot != snapshot.Materialization.CanonicalPath || request.RemoteRoot != snapshot.Workspace.EffectiveRoot {
+		return ports.FactRecord{}, snapshot, errors.New("hardlink restore intent does not match the pending workspace")
+	}
+	if err := o.deps.Hardlinks.Restore(ctx, request); err != nil {
+		return ports.FactRecord{}, snapshot, err
+	}
+	next := snapshot
+	next.Workspace.HardlinksRestored = true
+	now := o.deps.Clock.Now().UTC()
+	if now.IsZero() {
+		return ports.FactRecord{}, snapshot, errors.New("open reconciliation clock returned zero time")
+	}
+	return ports.FactRecord{IntentID: intent.ID, SessionID: intent.SessionID, Transition: intent.Transition, Timestamp: now}, next, nil
+}
+
+func (o *Open) observeWorkspaceImagesRestored(ctx context.Context, snapshot domain.JournalSnapshot, intent ports.IntentRecord) (ports.FactRecord, domain.JournalSnapshot, error) {
+	if o.deps.Images == nil {
+		return ports.FactRecord{}, snapshot, errors.New("workspace image recovery dependencies are incomplete")
+	}
+	var request imageops.RestoreRequest
+	if err := json.Unmarshal(intent.Input, &request); err != nil {
+		return ports.FactRecord{}, snapshot, fmt.Errorf("decode workspace image restore intent: %w", err)
+	}
+	if request.Scope.WorkspaceID != snapshot.Workspace.ID || request.Scope.Context != snapshot.Workspace.Context {
+		return ports.FactRecord{}, snapshot, errors.New("workspace image restore intent does not match the pending workspace")
+	}
+	registry, err := checkpointRegistryRuntime(snapshot)
+	if err != nil {
+		return ports.FactRecord{}, snapshot, err
+	}
+	if request.RegistryAuthority != registry.authority || request.RegistryEndpoint != registry.endpoint {
+		return ports.FactRecord{}, snapshot, errors.New("workspace image restore intent does not match the committed registry")
+	}
+	inventory, err := loadOpenImageInventory(snapshot.Materialization.CanonicalPath)
+	if err != nil {
+		return ports.FactRecord{}, snapshot, err
+	}
+	if string(safeJSON(request.Inventory)) != string(safeJSON(inventory)) {
+		return ports.FactRecord{}, snapshot, errors.New("workspace image restore intent does not match the hydrated inventory")
+	}
+	restored, err := o.deps.Images.Restore(ctx, request)
+	if err != nil {
+		return ports.FactRecord{}, snapshot, err
+	}
+	next := snapshot
+	next.Images = inventory
+	next.Workspace.ImagesRestored = true
+	now := o.deps.Clock.Now().UTC()
+	if now.IsZero() {
+		return ports.FactRecord{}, snapshot, errors.New("open reconciliation clock returned zero time")
+	}
+	return ports.FactRecord{IntentID: intent.ID, SessionID: intent.SessionID, Transition: intent.Transition, Timestamp: now, Output: safeJSON(restored)}, next, nil
 }
 
 func (o *Open) observeSessionOpened(_ context.Context, snapshot domain.JournalSnapshot, intent ports.IntentRecord) (ports.FactRecord, domain.JournalSnapshot, error) {
@@ -1174,6 +1249,23 @@ func (o *Open) completeWorkspaceOpen(ctx context.Context, snapshot domain.Journa
 			return OpenResult{}, err
 		}
 	}
+	if !filepath.IsAbs(effectiveRoot) || filepath.Clean(effectiveRoot) == string(filepath.Separator) {
+		return OpenResult{}, errors.New("observed DevPod workspace root is unsafe")
+	}
+	effectiveRoot = filepath.Clean(effectiveRoot)
+	snapshot.Workspace.EffectiveRoot = effectiveRoot
+	if !snapshot.Workspace.LocalProvider && !snapshot.Workspace.HardlinksRestored && o.deps.Hardlinks != nil {
+		restore := workspace.HardlinkRestoreRequest{WorkspaceID: snapshot.Workspace.ID, Context: snapshot.Workspace.Context, LocalRoot: root, RemoteRoot: effectiveRoot}
+		if err := journal.phase(ctx, "WorkspaceHardlinksRestored", restore, nil, func() error {
+			if err := o.deps.Hardlinks.Restore(ctx, restore); err != nil {
+				return err
+			}
+			snapshot.Workspace.HardlinksRestored = true
+			return nil
+		}); err != nil {
+			return OpenResult{}, fmt.Errorf("restore remote workspace hardlinks: %w", err)
+		}
+	}
 	mapped, err := workspace.MapTarget(root, effectiveRoot, targetResult.Relative)
 	if err != nil {
 		return OpenResult{}, err
@@ -1212,6 +1304,34 @@ func (o *Open) completeWorkspaceOpen(ctx context.Context, snapshot domain.Journa
 			}
 		}
 	}
+	if !snapshot.Workspace.ImagesRestored && o.deps.Images != nil {
+		inventory, err := loadOpenImageInventory(root)
+		if err != nil {
+			return OpenResult{}, err
+		}
+		snapshot.Images = inventory
+		if len(inventory.Images) > 0 {
+			registry, err := checkpointRegistryRuntime(snapshot)
+			if err != nil {
+				return OpenResult{}, err
+			}
+			restore := imageops.RestoreRequest{
+				Scope:             imageops.EngineScope{Context: snapshot.Workspace.Context, WorkspaceID: snapshot.Workspace.ID},
+				RegistryAuthority: registry.authority, RegistryEndpoint: registry.endpoint, Inventory: inventory,
+			}
+			var restored imageops.RestoreResult
+			if err := journal.phase(ctx, "WorkspaceImagesRestored", restore, &restored, func() error {
+				var err error
+				restored, err = o.deps.Images.Restore(ctx, restore)
+				if err == nil {
+					snapshot.Workspace.ImagesRestored = true
+				}
+				return err
+			}); err != nil {
+				return OpenResult{}, fmt.Errorf("restore workspace images: %w", err)
+			}
+		}
+	}
 	snapshot.State = domain.SessionOpen
 	snapshot.Recovery.Entry.Mode = request.EntryMode
 	if err := journal.phase(ctx, "SessionOpened", safeJSON(openSessionOpenedInput{ID: snapshot.Workspace.ID}), nil, func() error { return nil }); err != nil {
@@ -1239,6 +1359,21 @@ func (o *Open) completeWorkspaceOpen(ctx context.Context, snapshot domain.Journa
 		}
 	}
 	return OpenResult{Snapshot: snapshot, Target: targetResult, MappedTarget: mapped, DevPodResult: entryResult, WorkspaceID: snapshot.Workspace.ID, RecoveryCommand: "camp recover " + snapshot.SessionID}, nil
+}
+
+func loadOpenImageInventory(root string) (domain.ImageInventory, error) {
+	body, err := os.ReadFile(filepath.Join(root, ".camp", "images.json"))
+	if err != nil {
+		return domain.ImageInventory{}, fmt.Errorf("read hydrated image inventory: %w", err)
+	}
+	var inventory domain.ImageInventory
+	if err := json.Unmarshal(body, &inventory); err != nil {
+		return domain.ImageInventory{}, fmt.Errorf("decode hydrated image inventory: %w", err)
+	}
+	if err := validateCapturedInventory(inventory); err != nil {
+		return domain.ImageInventory{}, fmt.Errorf("validate hydrated image inventory: %w", err)
+	}
+	return inventory, nil
 }
 
 func (o *Open) settleFailedTerminalEntry(ctx context.Context, intent ports.IntentRecord, now time.Time, started bool) error {

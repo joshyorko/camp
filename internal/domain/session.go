@@ -63,15 +63,17 @@ type LeaseRecord struct {
 }
 
 type WorkspaceRecord struct {
-	ID            string              `json:"id,omitempty" yaml:"id,omitempty"`
-	Context       string              `json:"context,omitempty" yaml:"context,omitempty"`
-	Provider      string              `json:"provider,omitempty" yaml:"provider,omitempty"`
-	LocalProvider bool                `json:"localProvider,omitempty" yaml:"localProvider,omitempty"`
-	LocalFolder   string              `json:"localFolder,omitempty" yaml:"localFolder,omitempty"`
-	Target        string              `json:"target,omitempty" yaml:"target,omitempty"`
-	StagingRoot   string              `json:"stagingRoot,omitempty" yaml:"stagingRoot,omitempty"`
-	EffectiveRoot string              `json:"effectiveRoot,omitempty" yaml:"effectiveRoot,omitempty"`
-	Mirror        MirrorAttemptRecord `json:"mirror" yaml:"mirror"`
+	ID                string              `json:"id,omitempty" yaml:"id,omitempty"`
+	Context           string              `json:"context,omitempty" yaml:"context,omitempty"`
+	Provider          string              `json:"provider,omitempty" yaml:"provider,omitempty"`
+	LocalProvider     bool                `json:"localProvider,omitempty" yaml:"localProvider,omitempty"`
+	LocalFolder       string              `json:"localFolder,omitempty" yaml:"localFolder,omitempty"`
+	Target            string              `json:"target,omitempty" yaml:"target,omitempty"`
+	StagingRoot       string              `json:"stagingRoot,omitempty" yaml:"stagingRoot,omitempty"`
+	EffectiveRoot     string              `json:"effectiveRoot,omitempty" yaml:"effectiveRoot,omitempty"`
+	HardlinksRestored bool                `json:"hardlinksRestored,omitempty" yaml:"hardlinksRestored,omitempty"`
+	ImagesRestored    bool                `json:"imagesRestored,omitempty" yaml:"imagesRestored,omitempty"`
+	Mirror            MirrorAttemptRecord `json:"mirror" yaml:"mirror"`
 }
 
 type MirrorState string

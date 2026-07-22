@@ -22,6 +22,7 @@ type serviceEnsurer interface {
 	Ensure(context.Context, domain.JournalSnapshot, supervisor.ServiceSpec) (domain.ServiceUnitRecord, domain.JournalSnapshot, error)
 }
 type haulerStoreInitializer interface {
+	Load(context.Context, string, []string) (ports.Result, error)
 	AddFile(context.Context, string, string, string) (ports.Result, error)
 }
 
@@ -53,6 +54,15 @@ func (s *ServiceStarter) Start(ctx context.Context, snapshot domain.JournalSnaps
 		}
 		if err := os.MkdirAll(directory, 0o700); err != nil {
 			return snapshot, err
+		}
+	}
+	if snapshot.OpenedGeneration != nil {
+		info, err := os.Lstat(snapshot.Recovery.Session.HaulPath)
+		if err != nil || !info.Mode().IsRegular() {
+			return snapshot, errors.Join(err, errors.New("opened generation haul is not a regular file"))
+		}
+		if result, err := s.stores.Load(ctx, store, []string{snapshot.Recovery.Session.HaulPath}); err != nil || result.ExitCode != 0 {
+			return snapshot, errors.Join(err, errors.New("load opened generation into live Hauler store"))
 		}
 	}
 	seed := filepath.Join(snapshot.Recovery.Session.RuntimeRoot, "store-seed")

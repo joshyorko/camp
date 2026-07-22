@@ -154,8 +154,10 @@ func composeOpen(ctx context.Context, composition productionComposition, service
 		Journal: composition.journal, Paths: composition.paths, ResolvedBackend: composition.backend,
 		Ownership: composition.ownership, Initializer: composition.initializer,
 		Services: services.starter, Forwarders: lifecycleadapter.NewForwarderManager(composition.devpod, services.processes),
-		Hydrator: hydration.NewController(nil, composition.hauler, archive.NewTarZstd(), composition.ownership, hydration.Hooks{}),
-		DevPod:   composition.devpod, Providers: composition.devpod,
+		Hardlinks: workspace.NewHardlinkRestorer(composition.devpod),
+		Images:    images.NewRestorer(composition.devpod, registry.NewCatalog(http.DefaultClient, 100)),
+		Hydrator:  hydration.NewController(nil, composition.hauler, archive.NewTarZstd(), composition.ownership, hydration.Hooks{}),
+		DevPod:    composition.devpod, Providers: composition.devpod,
 		Target: target.Resolver{Zoxide: target.NewCommandZoxide("zoxide", composition.runner)}, Clock: composition.clock,
 	}, composition.backend, objectstore.Options{})
 }

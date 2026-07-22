@@ -189,11 +189,17 @@ func MergeCatalog(inventory domain.ImageInventory, authority string, references 
 	}
 	result := domain.ImageInventory{SchemaVersion: domain.SchemaVersion, GeneratedAt: generatedAt.UTC(), Images: append([]domain.Image(nil), inventory.Images...)}
 	seen := make(map[string]string, len(result.Images))
-	for _, image := range result.Images {
+	byDigest := make(map[string]int, len(result.Images))
+	for index, image := range result.Images {
 		if prior, exists := seen[image.CapturedReference]; exists && prior != image.CapturedManifestDigest {
 			return domain.ImageInventory{}, fmt.Errorf("inventory contains digest drift for %q: %w", image.CapturedReference, ErrRegistryDigestMismatch)
 		}
 		seen[image.CapturedReference] = image.CapturedManifestDigest
+		if image.CapturedManifestDigest != "" {
+			if _, exists := byDigest[image.CapturedManifestDigest]; !exists {
+				byDigest[image.CapturedManifestDigest] = index
+			}
+		}
 	}
 	for _, reference := range references {
 		if !repositoryPattern.MatchString(reference.Repository) || !tagPattern.MatchString(reference.Tag) || !digestPattern.MatchString(reference.ManifestDigest) {
@@ -206,11 +212,18 @@ func MergeCatalog(inventory domain.ImageInventory, authority string, references 
 			}
 			continue
 		}
+		if index, exists := byDigest[reference.ManifestDigest]; exists {
+			result.Images[index].OriginalTags = append(result.Images[index].OriginalTags, captured)
+			result.Images[index].OriginalTags = sortedUniqueStrings(result.Images[index].OriginalTags)
+			seen[captured] = reference.ManifestDigest
+			continue
+		}
 		seen[captured] = reference.ManifestDigest
 		result.Images = append(result.Images, domain.Image{
-			CapturedReference: captured, CapturedManifestDigest: reference.ManifestDigest,
+			OriginalTags: []string{captured}, CapturedReference: captured, CapturedManifestDigest: reference.ManifestDigest,
 			Source: domain.ImageSourceRegistry, CreatedAt: generatedAt.UTC(),
 		})
+		byDigest[reference.ManifestDigest] = len(result.Images) - 1
 	}
 	sort.Slice(result.Images, func(i, j int) bool {
 		if result.Images[i].CapturedReference == result.Images[j].CapturedReference {
@@ -221,16 +234,44 @@ func MergeCatalog(inventory domain.ImageInventory, authority string, references 
 	return result, nil
 }
 
+func sortedUniqueStrings(values []string) []string {
+	seen := make(map[string]struct{}, len(values))
+	result := make([]string, 0, len(values))
+	for _, value := range values {
+		if _, exists := seen[value]; exists {
+			continue
+		}
+		seen[value] = struct{}{}
+		result = append(result, value)
+	}
+	sort.Strings(result)
+	return result
+}
+
 func ExcludeInternalArtifacts(inventory domain.ImageInventory) domain.ImageInventory {
 	result := inventory
 	result.Images = make([]domain.Image, 0, len(inventory.Images))
 	for _, image := range inventory.Images {
-		if image.Source == domain.ImageSourceRegistry && strings.HasSuffix(image.CapturedReference, sessionSeedReferenceSuffix) {
+		if image.Source == domain.ImageSourceRegistry && (strings.HasSuffix(image.CapturedReference, sessionSeedReferenceSuffix) || isHaulerFileProjection(image.CapturedReference)) {
 			continue
 		}
 		result.Images = append(result.Images, image)
 	}
 	return result
+}
+
+func isHaulerFileProjection(reference string) bool {
+	separator := strings.IndexByte(reference, '/')
+	if separator < 1 || separator == len(reference)-1 {
+		return false
+	}
+	path := reference[separator+1:]
+	tag := strings.LastIndexByte(path, ':')
+	if tag < 1 {
+		return false
+	}
+	repository := path[:tag]
+	return strings.HasPrefix(repository, "hauler/") && strings.HasSuffix(repository, ".tar.zst")
 }
 
 func validateAuthority(authority string) error {

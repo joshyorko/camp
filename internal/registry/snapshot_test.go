@@ -206,12 +206,29 @@ func TestMergeCatalogRetainsDirectPushesWithoutDuplicatingCapturedImages(t *test
 	}}}
 	merged, err := MergeCatalog(inventory, "127.0.0.1:5000", []ports.RegistryReference{
 		{Repository: "camp/app", Tag: "captured", ManifestDigest: digestA},
+		{Repository: "camp-acceptance", Tag: "named", ManifestDigest: digestA},
 		{Repository: "manual/tool", Tag: "latest", ManifestDigest: digestB},
 	}, time.Unix(100, 0).UTC())
 	if err != nil {
 		t.Fatalf("MergeCatalog() error = %v", err)
 	}
-	if len(merged.Images) != 2 || merged.Images[1].CapturedReference != "127.0.0.1:5000/manual/tool:latest" || merged.Images[1].CapturedManifestDigest != digestB || merged.Images[1].Source != domain.ImageSourceRegistry {
+	if len(merged.Images) != 2 || !reflect.DeepEqual(merged.Images[0].OriginalTags, []string{"127.0.0.1:5000/camp-acceptance:named", "example.test/app:v1"}) {
+		t.Fatalf("merged aliases = %#v", merged.Images)
+	}
+	if merged.Images[1].CapturedReference != "127.0.0.1:5000/manual/tool:latest" || !reflect.DeepEqual(merged.Images[1].OriginalTags, []string{"127.0.0.1:5000/manual/tool:latest"}) || merged.Images[1].CapturedManifestDigest != digestB || merged.Images[1].Source != domain.ImageSourceRegistry {
 		t.Fatalf("merged inventory = %#v", merged)
+	}
+}
+
+func TestExcludeInternalArtifactsRemovesSeedAndHaulerFileProjection(t *testing.T) {
+	t.Parallel()
+	inventory := domain.ImageInventory{SchemaVersion: domain.SchemaVersion, Images: []domain.Image{
+		{CapturedReference: "127.0.0.1:5000/hauler/camp-session-seed:latest", Source: domain.ImageSourceRegistry},
+		{CapturedReference: "127.0.0.1:5000/hauler/default.tar.zst:sha256-deadbeef", Source: domain.ImageSourceRegistry},
+		{CapturedReference: "127.0.0.1:5000/camp/user:latest", Source: domain.ImageSourceRegistry},
+	}}
+	filtered := ExcludeInternalArtifacts(inventory)
+	if len(filtered.Images) != 1 || filtered.Images[0].CapturedReference != "127.0.0.1:5000/camp/user:latest" {
+		t.Fatalf("filtered inventory = %#v", filtered.Images)
 	}
 }

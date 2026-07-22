@@ -180,13 +180,16 @@ func validateGenerationInfo(expected generationExpectations, entries []generatio
 	for _, image := range expected.Images {
 		found := false
 		for _, entry := range entries {
-			if entry.Type == "image" && entry.Digest == image.Digest && (image.Platform == "" || entry.Platform == image.Platform || entry.Platform == "-") {
+			platformMatches := image.Platform == "" || entry.Platform == image.Platform || entry.Platform == "-"
+			digestMatches := entry.Digest == image.Digest || strings.HasSuffix(entry.Reference, "@"+image.Digest)
+			if entry.Type == "image" && digestMatches && platformMatches {
 				found = true
 				break
 			}
 		}
 		if !found {
-			return fmt.Errorf("Hauler validation is missing expected image digest %s", image.Digest)
+			observed, _ := json.Marshal(entries)
+			return fmt.Errorf("Hauler validation is missing expected image digest %s; observed entries: %s", image.Digest, observed)
 		}
 	}
 	return nil

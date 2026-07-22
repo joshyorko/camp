@@ -166,17 +166,20 @@ func (p *CheckpointPublisher) Publish(ctx context.Context, operation ports.Opera
 		if len(remaining) != 1 || remaining[0].Intent.ID != prepared.intent.ID || remaining[0].Intent.Transition != prepared.intent.Transition {
 			return CheckpointResult{}, errors.New("registry seal left unexpected pending reconciliation work")
 		}
-		stable := current
-		stable.Services = snapshot.Services
-		stable.UpdatedAt = snapshot.UpdatedAt
+		stable := normalizeRegistrySealSnapshot(current, snapshot)
 		if !reflect.DeepEqual(stable, snapshot) {
-			return CheckpointResult{}, errors.New("registry seal changed unrelated durable session state")
+			fields := changedJournalSnapshotFields(snapshot, stable)
+			if len(fields) == 1 && fields[0] == "Images" {
+				return CheckpointResult{}, fmt.Errorf("registry seal changed unrelated durable session state: Images expected=%s durable=%s", imageInventorySummary(snapshot.Images), imageInventorySummary(stable.Images))
+			}
+			return CheckpointResult{}, fmt.Errorf("registry seal changed unrelated durable session state: %s", strings.Join(fields, ", "))
 		}
 		snapshot = current
 		inventory, err = registryadapter.MergeCatalog(inventory, runtime.authority, sealed.References, now)
 		if err != nil {
 			return CheckpointResult{}, err
 		}
+		inventory = registryadapter.ExcludeInternalArtifacts(inventory)
 		snapshot.Images = inventory
 		snapshot.RegistryCutRoot = sealed.Root
 		if err := p.journal.RecordFact(context.WithoutCancel(ctx), checkpointFact(prepared.intent, now), snapshot); err != nil {
@@ -287,6 +290,36 @@ func (p *CheckpointPublisher) Publish(ctx context.Context, operation ports.Opera
 		return result, nil
 	}
 	return result, nil
+}
+
+func imageInventorySummary(inventory domain.ImageInventory) string {
+	body, err := json.Marshal(inventory)
+	if err != nil {
+		return "<unavailable>"
+	}
+	return string(body)
+}
+
+func normalizeRegistrySealSnapshot(durable, expected domain.JournalSnapshot) domain.JournalSnapshot {
+	durable.Services = expected.Services
+	durable.UpdatedAt = expected.UpdatedAt
+	if imageInventorySummary(durable.Images) == imageInventorySummary(expected.Images) {
+		durable.Images = expected.Images
+	}
+	return durable
+}
+
+func changedJournalSnapshotFields(left, right domain.JournalSnapshot) []string {
+	typ := reflect.TypeOf(left)
+	leftValue := reflect.ValueOf(left)
+	rightValue := reflect.ValueOf(right)
+	changed := make([]string, 0)
+	for index := 0; index < typ.NumField(); index++ {
+		if !reflect.DeepEqual(leftValue.Field(index).Interface(), rightValue.Field(index).Interface()) {
+			changed = append(changed, typ.Field(index).Name)
+		}
+	}
+	return changed
 }
 
 func (p *CheckpointPublisher) resumeServingRefresh(ctx context.Context, snapshot domain.JournalSnapshot, pending []ports.PendingIntent, now time.Time) (CheckpointResult, error) {

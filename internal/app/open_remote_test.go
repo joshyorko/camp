@@ -10,6 +10,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -20,6 +21,7 @@ import (
 	"github.com/joshyorko/camp/internal/config"
 	"github.com/joshyorko/camp/internal/coordination"
 	"github.com/joshyorko/camp/internal/domain"
+	imageops "github.com/joshyorko/camp/internal/images"
 	"github.com/joshyorko/camp/internal/journal"
 	"github.com/joshyorko/camp/internal/ports"
 )
@@ -65,6 +67,96 @@ func TestOpenRemoteBranchUsesSourceGenerationAndReentryDoesNotRehydrate(t *testi
 	}
 	if second.Snapshot.SessionID != first.Snapshot.SessionID || environment.hydrator.calls != 1 || environment.leases.branchCalls != 1 || environment.leases.acquireCalls != 0 || len(environment.devpod.ups) != 1 {
 		t.Fatalf("re-entry repeated lifecycle: snapshot=%#v hydrate=%d leases=%#v ups=%d", second.Snapshot, environment.hydrator.calls, environment.leases, len(environment.devpod.ups))
+	}
+}
+
+func TestOpenRemoteRestoresHydratedNamedImagesBeforeEntry(t *testing.T) {
+	t.Parallel()
+	environment := newRemoteOpenTestEnvironment(t)
+	inventory := domain.ImageInventory{SchemaVersion: domain.SchemaVersion, GeneratedAt: time.Unix(42, 0).UTC(), Images: []domain.Image{{
+		OriginalTags: []string{"127.0.0.1:5000/camp-acceptance:named"}, CapturedReference: "127.0.0.1:5000/camp/acceptance:captured",
+		CapturedManifestDigest: "sha256:" + strings.Repeat("b", 64),
+	}}}
+	environment.hydrator.inventory = &inventory
+	restorer := &recordingOpenImageRestorer{events: environment.hydrator.events}
+	environment.open.deps.Images = restorer
+	environment.open.deps.Services = &openServices{events: environment.hydrator.events, registry: true}
+	environment.open.deps.Forwarders = &openForwarders{events: environment.hydrator.events}
+
+	result, err := environment.open.Run(context.Background(), OpenRequest{
+		SessionID: "image-restore", Capsule: "brain", Branch: "main", Mode: domain.SessionReadWrite,
+		EntryMode: domain.EntryTerminal, Context: "default", Provider: "room-of-requirement",
+		Runtime: environment.runtime, Backend: environment.backend, RemoteAvailable: true,
+	})
+	if err != nil {
+		t.Fatalf("Open() error = %v", err)
+	}
+	if restorer.calls != 1 {
+		t.Fatalf("image restore calls = %d, want 1", restorer.calls)
+	}
+	if !reflect.DeepEqual(restorer.request.Inventory, inventory) {
+		t.Fatalf("image restore inventory = %#v, want %#v", restorer.request.Inventory, inventory)
+	}
+	if restorer.request.Scope.WorkspaceID != result.WorkspaceID || restorer.request.Scope.Context != "default" {
+		t.Fatalf("image restore scope = %#v", restorer.request.Scope)
+	}
+	if restorer.request.RegistryAuthority != "127.0.0.1:5000" || restorer.request.RegistryEndpoint != "http://127.0.0.1:5000" {
+		t.Fatalf("image restore registry = %#v", restorer.request)
+	}
+	if !result.Snapshot.Workspace.ImagesRestored {
+		t.Fatal("open snapshot did not durably record restored workspace images")
+	}
+	if got := strings.Join(*environment.hydrator.events, ","); !strings.Contains(got, "forward:fileserver,images,ssh") {
+		t.Fatalf("events = %q, want image restore after forwarders and before entry", got)
+	}
+	if _, err := environment.open.Run(context.Background(), OpenRequest{
+		Capsule: "brain", Branch: "main", Mode: domain.SessionReadWrite, EntryMode: domain.EntryTerminal,
+		Context: "default", Provider: "room-of-requirement", Runtime: environment.runtime, Backend: environment.backend,
+	}); err != nil {
+		t.Fatalf("reentry Open() error = %v", err)
+	}
+	if restorer.calls != 1 {
+		t.Fatalf("image restore calls after reentry = %d, want 1", restorer.calls)
+	}
+}
+
+func TestOpenReplaysPendingWorkspaceImageRestoreAgainstExactWorkspace(t *testing.T) {
+	t.Parallel()
+	events := []string{}
+	restorer := &recordingOpenImageRestorer{events: &events}
+	open := NewOpen(OpenDependencies{Images: restorer, Clock: fixedAppClock{now: time.Unix(100, 0).UTC()}})
+	inventory := domain.ImageInventory{SchemaVersion: domain.SchemaVersion, Images: []domain.Image{{
+		CapturedReference: "127.0.0.1:5000/camp/app:captured", CapturedManifestDigest: "sha256:" + strings.Repeat("c", 64),
+	}}}
+	request := imageops.RestoreRequest{
+		Scope:             imageops.EngineScope{Context: "default", WorkspaceID: "brain-main"},
+		RegistryAuthority: "127.0.0.1:5000", RegistryEndpoint: "http://127.0.0.1:5000", Inventory: inventory,
+	}
+	root := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(root, ".camp"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	body, _ := json.Marshal(inventory)
+	if err := os.WriteFile(filepath.Join(root, ".camp", "images.json"), body, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	snapshot := domain.JournalSnapshot{
+		SessionID: "image-replay", Materialization: domain.Materialization{CanonicalPath: root},
+		Workspace: domain.WorkspaceRecord{ID: "brain-main", Context: "default"}, Images: inventory,
+		Services: []domain.ServiceUnitRecord{{
+			Name: "registry", DesiredState: domain.RuntimeDesiredRunning, ObservedState: domain.RuntimeObservedReady,
+			Mapping: domain.EndpointMapping{HostAddress: "127.0.0.1", HostPort: 5000},
+			Child:   domain.ProcessRecord{Argv: []string{"hauler", "--directory", "/tmp/camp-registry"}},
+		}},
+	}
+	intent := ports.IntentRecord{ID: "image-replay-intent", SessionID: snapshot.SessionID, Transition: "WorkspaceImagesRestored", Timestamp: time.Unix(99, 0).UTC(), Input: safeJSON(request)}
+
+	fact, reconciled, err := open.observeWorkspaceImagesRestored(context.Background(), snapshot, intent)
+	if err != nil {
+		t.Fatalf("observeWorkspaceImagesRestored() error = %v", err)
+	}
+	if restorer.calls != 1 || !reconciled.Workspace.ImagesRestored || fact.IntentID != intent.ID {
+		t.Fatalf("replay calls=%d workspace=%#v fact=%#v", restorer.calls, reconciled.Workspace, fact)
 	}
 }
 
@@ -1102,6 +1194,20 @@ type recordingOpenHydrator struct {
 	events    *[]string
 	request   hydration.Request
 	calls     int
+	inventory *domain.ImageInventory
+}
+
+type recordingOpenImageRestorer struct {
+	events  *[]string
+	request imageops.RestoreRequest
+	calls   int
+}
+
+func (r *recordingOpenImageRestorer) Restore(_ context.Context, request imageops.RestoreRequest) (imageops.RestoreResult, error) {
+	r.calls++
+	r.request = request
+	*r.events = append(*r.events, "images")
+	return imageops.RestoreResult{Restored: len(request.Inventory.Images)}, nil
 }
 
 type recoveryInspectingOpenHydrator struct {
@@ -1167,6 +1273,18 @@ func (r *recordingOpenHydrator) Hydrate(_ context.Context, request hydration.Req
 	*r.events = append(*r.events, "hydrate")
 	if err := os.MkdirAll(request.FinalRoot, 0o700); err != nil {
 		return hydration.Result{}, err
+	}
+	if r.inventory != nil {
+		body, err := json.Marshal(r.inventory)
+		if err != nil {
+			return hydration.Result{}, err
+		}
+		if err := os.MkdirAll(filepath.Join(request.FinalRoot, ".camp"), 0o700); err != nil {
+			return hydration.Result{}, err
+		}
+		if err := os.WriteFile(filepath.Join(request.FinalRoot, ".camp", "images.json"), body, 0o600); err != nil {
+			return hydration.Result{}, err
+		}
 	}
 	materialization, err := r.ownership.MarkCreatedWithToken(request.FinalRoot, request.Token)
 	if err != nil {
