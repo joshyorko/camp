@@ -126,7 +126,7 @@ func TestSuperviseReloadsDurableSnapshotUnderOperationLock(t *testing.T) {
 	keeper := &fakeLeaseKeeper{renewed: make(chan coordination.LeaseToken, 2), next: coordination.LeaseToken{Lease: domain.WriterLease{SessionID: "session-a", HeartbeatAt: time.Unix(120, 0), ExpiresAt: time.Unix(180, 0)}, Revision: "r2"}, events: events}
 	ticker := &controlledTicker{channel: make(chan time.Time, 2)}
 	clock := &controlledClock{now: time.Unix(120, 0).UTC(), ticker: ticker}
-	locker := &recordingOperationLocker{events: events}
+	locker := &recordingOperationLocker{events: events, released: make(chan struct{}, 2)}
 	supervisor := NewSupervise(log, keeper, locker, clock, time.Minute)
 
 	done := make(chan error, 1)
@@ -137,6 +137,14 @@ func TestSuperviseReloadsDurableSnapshotUnderOperationLock(t *testing.T) {
 	case <-keeper.renewed:
 	case <-time.After(time.Second):
 		t.Fatal("first heartbeat did not renew")
+	}
+	releaseDeadline := time.After(time.Second)
+	for range 2 {
+		select {
+		case <-locker.released:
+		case <-releaseDeadline:
+			t.Fatal("first heartbeat did not release its operation lock")
+		}
 	}
 	if got := events.snapshot(); !containsAllInOrder(got, []string{"acquire", "load", "acquire", "load", "renew", "fact", "release"}) {
 		t.Fatalf("events after first heartbeat = %#v", got)
@@ -269,7 +277,8 @@ func countEvent(values []string, want string) int {
 }
 
 type recordingOperationLocker struct {
-	events *heartbeatEventLog
+	events   *heartbeatEventLog
+	released chan struct{}
 }
 
 func (l *recordingOperationLocker) Acquire(_ context.Context, owner ports.OperationOwner) (ports.OperationToken, error) {
@@ -283,13 +292,16 @@ func (l *recordingOperationLocker) Release(_ context.Context, _ ports.OperationT
 	if l.events != nil {
 		l.events.append("release")
 	}
+	if l.released != nil {
+		l.released <- struct{}{}
+	}
 	return nil
 }
 
 type strictOperationLocker struct {
-	mu     sync.Mutex
-	held   bool
-	log    heartbeatEventLog
+	mu   sync.Mutex
+	held bool
+	log  heartbeatEventLog
 }
 
 func (l *strictOperationLocker) Acquire(_ context.Context, _ ports.OperationOwner) (ports.OperationToken, error) {
