@@ -153,7 +153,7 @@ func TestCloseComposesWithRealCheckpointPublisherWithoutSelfCreatedPendingIntent
 	if err != nil {
 		t.Fatalf("Run() error = %v", err)
 	}
-	if !result.PublicationSucceeded || !result.CleanupSucceeded || result.Generation.Generation != 2 {
+	if !result.PublicationSucceeded || !result.CleanupSucceeded || result.Generation.Generation != 1 {
 		t.Fatalf("Run() result = %#v", result)
 	}
 	loaded, pending, err := log.Load(ctx, snapshot.SessionID)
@@ -324,4 +324,201 @@ func TestCloseReadonlyNeverPublishesOrReleasesLeaseButStillPreservesAdoptedRoot(
 	if !reflect.DeepEqual(events, want) {
 		t.Fatalf("events = %#v, want %#v", events, want)
 	}
+}
+
+func TestCloseResumesSinglePendingCleanupWithoutRepublishingOrReplayingEarlierEffects(t *testing.T) {
+	t.Parallel()
+	snapshot := domain.JournalSnapshot{
+		SchemaVersion: domain.SchemaVersion,
+		SessionID:     "session-resume",
+		Capsule:       "brain",
+		Lineage:       domain.Lineage{Branch: "main"},
+		Mode:          domain.SessionReadWrite,
+		State:         domain.SessionOpen,
+		Lease: domain.LeaseRecord{
+			Lease: &domain.WriterLease{
+				SchemaVersion: domain.SchemaVersion,
+				SessionID:     "session-resume",
+				Capsule:       "brain",
+				Lineage:       domain.Lineage{Branch: "main"},
+				Machine:       "machine",
+				CreatedAt:     time.Unix(100, 0).UTC(),
+				HeartbeatAt:   time.Unix(100, 0).UTC(),
+				ExpiresAt:     time.Unix(200, 0).UTC(),
+			},
+			Revision: "lease-r1",
+		},
+		Materialization: domain.Materialization{Mode: domain.MaterializationCreated, CleanupPermitted: true},
+		Recovery: domain.RecoveryRecord{
+			Cleanup: domain.CleanupPolicy{WorkspaceAction: domain.WorkspaceCleanupDelete},
+			Forwarding: []domain.ForwardingRecord{{
+				Name:    "registry",
+				Process: domain.ProcessRecord{Identity: domain.ProcessIdentity{PID: 101, BootID: "boot", StartTicks: 1}},
+			}},
+		},
+		Services:   []domain.ServiceUnitRecord{{Name: "registry"}},
+		Cleanup:    domain.Cleanup{State: domain.CleanupFailed, LastErr: "services failed"},
+		Checkpoint: domain.Checkpoint{PublicationSucceeded: true, State: domain.CheckpointPublished, Generation: &domain.GenerationRef{Generation: 1, ArchiveSHA256: strings.Repeat("a", 64)}},
+	}
+	journal := &fakePendingCloseJournal{
+		snapshot: snapshot,
+		pending: []ports.PendingIntent{{
+			Intent: ports.IntentRecord{ID: "session-resume-close-3-ServicesStopped", SessionID: snapshot.SessionID, Transition: "ServicesStopped", Attempt: 1, Timestamp: time.Unix(150, 0).UTC()},
+		}},
+	}
+	events := []string{}
+	result, err := NewClose(
+		journal,
+		&fakeOperationLocker{events: &events, token: ports.OperationToken{ID: "lock"}},
+		&fakeCheckpointPublisher{events: &events},
+		&fakeCloseEffects{events: &events},
+		fixedAppClock{now: time.Unix(200, 0)},
+	).Run(context.Background(), CloseRequest{SessionID: snapshot.SessionID})
+	if err != nil {
+		t.Fatalf("Run() error = %v", err)
+	}
+	if !result.PublicationSucceeded || !result.CleanupSucceeded {
+		t.Fatalf("Run() = %#v", result)
+	}
+	want := []string{"lock:close", "services", "supervisor", "lease", "materialization", "unlock:close"}
+	if !reflect.DeepEqual(events, want) {
+		t.Fatalf("events = %#v, want %#v", events, want)
+	}
+	if journal.intentCalls != 4 {
+		t.Fatalf("RecordIntent calls = %d, want 4", journal.intentCalls)
+	}
+	if len(journal.factIDs) != 5 || journal.factIDs[0] != "session-resume-close-3-ServicesStopped" {
+		t.Fatalf("fact IDs = %#v", journal.factIDs)
+	}
+}
+
+func TestCloseRejectsUnsupportedOrAmbiguousPendingCleanup(t *testing.T) {
+	t.Parallel()
+	base := domain.JournalSnapshot{
+		SchemaVersion: domain.SchemaVersion,
+		SessionID:     "session-reject",
+		Capsule:       "brain",
+		Lineage:       domain.Lineage{Branch: "main"},
+		Mode:          domain.SessionReadWrite,
+		State:         domain.SessionOpen,
+		Lease: domain.LeaseRecord{
+			Lease: &domain.WriterLease{
+				SchemaVersion: domain.SchemaVersion,
+				SessionID:     "session-reject",
+				Capsule:       "brain",
+				Lineage:       domain.Lineage{Branch: "main"},
+				Machine:       "machine",
+				CreatedAt:     time.Unix(100, 0).UTC(),
+				HeartbeatAt:   time.Unix(100, 0).UTC(),
+				ExpiresAt:     time.Unix(200, 0).UTC(),
+			},
+			Revision: "lease-r1",
+		},
+		Materialization: domain.Materialization{Mode: domain.MaterializationCreated, CleanupPermitted: true},
+		Recovery:        domain.RecoveryRecord{Cleanup: domain.CleanupPolicy{WorkspaceAction: domain.WorkspaceCleanupDelete}},
+		Checkpoint:      domain.Checkpoint{PublicationSucceeded: true, State: domain.CheckpointPublished, Generation: &domain.GenerationRef{Generation: 1, ArchiveSHA256: strings.Repeat("a", 64)}},
+		Cleanup:         domain.Cleanup{State: domain.CleanupFailed, LastErr: "cleanup failed"},
+	}
+	testCases := []struct {
+		name    string
+		pending []ports.PendingIntent
+		wantErr string
+	}{
+		{
+			name:    "unsupported lease release",
+			pending: []ports.PendingIntent{{Intent: ports.IntentRecord{ID: "lease", SessionID: base.SessionID, Transition: "LeaseReleased", Attempt: 1, Timestamp: time.Unix(150, 0).UTC()}}},
+			wantErr: "unsupported pending cleanup transition",
+		},
+		{
+			name: "multiple pending",
+			pending: []ports.PendingIntent{
+				{Intent: ports.IntentRecord{ID: "services", SessionID: base.SessionID, Transition: "ServicesStopped", Attempt: 1, Timestamp: time.Unix(150, 0).UTC()}},
+				{Intent: ports.IntentRecord{ID: "supervisor", SessionID: base.SessionID, Transition: "SupervisorStopped", Attempt: 1, Timestamp: time.Unix(151, 0).UTC()}},
+			},
+			wantErr: "close recovery requires exactly one pending cleanup intent",
+		},
+	}
+	for _, tc := range testCases {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			journal := &fakePendingCloseJournal{snapshot: base, pending: tc.pending}
+			_, err := NewClose(
+				journal,
+				&fakeOperationLocker{events: &[]string{}, token: ports.OperationToken{ID: "lock"}},
+				&fakeCheckpointPublisher{events: &[]string{}},
+				&fakeCloseEffects{events: &[]string{}},
+				fixedAppClock{now: time.Unix(200, 0)},
+			).Run(context.Background(), CloseRequest{SessionID: base.SessionID})
+			if err == nil || !strings.Contains(err.Error(), tc.wantErr) {
+				t.Fatalf("Run() error = %v, want %q", err, tc.wantErr)
+			}
+		})
+	}
+}
+
+func TestCloseRejectsPendingCleanupWhenCleanupHasNotFailedOrStarted(t *testing.T) {
+	t.Parallel()
+	snapshot := domain.JournalSnapshot{
+		SchemaVersion: domain.SchemaVersion,
+		SessionID:     "session-pending-ignored",
+		Capsule:       "brain",
+		Lineage:       domain.Lineage{Branch: "main"},
+		Mode:          domain.SessionReadWrite,
+		State:         domain.SessionOpen,
+		Lease: domain.LeaseRecord{
+			Lease: &domain.WriterLease{
+				SchemaVersion: domain.SchemaVersion,
+				SessionID:     "session-pending-ignored",
+				Capsule:       "brain",
+				Lineage:       domain.Lineage{Branch: "main"},
+				Machine:       "machine",
+				CreatedAt:     time.Unix(100, 0).UTC(),
+				HeartbeatAt:   time.Unix(100, 0).UTC(),
+				ExpiresAt:     time.Unix(200, 0).UTC(),
+			},
+			Revision: "lease-r1",
+		},
+		Materialization: domain.Materialization{Mode: domain.MaterializationCreated, CleanupPermitted: true},
+		Recovery:        domain.RecoveryRecord{Cleanup: domain.CleanupPolicy{WorkspaceAction: domain.WorkspaceCleanupDelete}},
+		Checkpoint:      domain.Checkpoint{PublicationSucceeded: true, State: domain.CheckpointPublished, Generation: &domain.GenerationRef{Generation: 1, ArchiveSHA256: strings.Repeat("a", 64)}},
+		Cleanup:         domain.Cleanup{State: domain.CleanupPending},
+	}
+	journal := &fakePendingCloseJournal{
+		snapshot: snapshot,
+		pending:  []ports.PendingIntent{{Intent: ports.IntentRecord{ID: "session-pending-ignored-close-4-LeaseReleased", SessionID: snapshot.SessionID, Transition: "LeaseReleased", Attempt: 1, Timestamp: time.Unix(150, 0).UTC()}}},
+	}
+	_, err := NewClose(
+		journal,
+		&fakeOperationLocker{events: &[]string{}, token: ports.OperationToken{ID: "lock"}},
+		&fakeCheckpointPublisher{events: &[]string{}},
+		&fakeCloseEffects{events: &[]string{}},
+		fixedAppClock{now: time.Unix(200, 0)},
+	).Run(context.Background(), CloseRequest{SessionID: snapshot.SessionID})
+	if err == nil || !strings.Contains(err.Error(), "unsupported pending cleanup state") {
+		t.Fatalf("Run() error = %v, want unsupported pending cleanup state", err)
+	}
+}
+
+type fakePendingCloseJournal struct {
+	snapshot    domain.JournalSnapshot
+	pending     []ports.PendingIntent
+	intentCalls int
+	factIDs     []string
+}
+
+func (f *fakePendingCloseJournal) Create(context.Context, domain.JournalSnapshot) error { return nil }
+func (f *fakePendingCloseJournal) RecordIntent(context.Context, ports.IntentRecord) error {
+	f.intentCalls++
+	return nil
+}
+func (f *fakePendingCloseJournal) RecordFact(_ context.Context, fact ports.FactRecord, _ domain.JournalSnapshot) error {
+	f.factIDs = append(f.factIDs, fact.IntentID)
+	return nil
+}
+func (f *fakePendingCloseJournal) Load(context.Context, string) (domain.JournalSnapshot, []ports.PendingIntent, error) {
+	return f.snapshot, f.pending, nil
+}
+func (f *fakePendingCloseJournal) List(context.Context) ([]domain.JournalSnapshot, error) {
+	return []domain.JournalSnapshot{f.snapshot}, nil
 }
