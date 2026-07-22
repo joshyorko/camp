@@ -2,7 +2,11 @@
 
 ## Current boundary
 
-The executable delegates process I/O and exit status to `internal/cli`. The production tree exposes `setup`, `init`, `open`, `sync`, `close`, `reopen`, and `recover` through concrete application and adapter composition, alongside deterministic help, global `--json`, and completion generation. `setup` composes the locked installer but does not execute a lifecycle; lifecycle commands are not real-tool proof until the pinned tools complete them without skips.
+The executable delegates process I/O and exit status to `internal/cli`. The production tree exposes `setup`, `init`, `open`, `sync`, `close`, `reopen`, `recover`, and the read-only `doctor` command through concrete application and adapter composition, alongside deterministic help, global `--json`, and completion generation. `setup` composes the locked installer but does not execute a lifecycle; no command is real-tool lifecycle proof until the pinned tools complete it without skips.
+
+`camp doctor` emits one versioned capability model in deterministic human or JSON form. Its stable statuses are `healthy`, `degraded`, `blocked`, and `skipped-not-configured`; `blocked` dominates the overall result, followed by `degraded`. A blocked aggregate is rendered exactly once and exits nonzero; it is not followed by a second generic failure envelope. Each probe is bounded independently. The initial issue #11 slice hashes the resolved DevPod and Hauler executables and executes their identity commands, but reports them degraded because issue #10 still owns lock-backed managed resolution. Pasta option-surface and file-backend syntax evidence also remain degraded until functional probes exist. For S3, doctor proves that the host AWS credential chain resolves while explicitly leaving backend I/O health unproved. Probe causes and credential values are never result evidence; credential-bearing identity output is redacted before its 256-byte display bound is applied.
+
+Do not treat this initial doctor surface as proof of backend CAS/readback/cleanup, namespace/listener confinement, forwarding, workspace, service, T3, Codex, DevPod, Kubernetes, or Hauler service lifecycles. Those require later functional probes and unique identity-safe resources. A doctor report is capability evidence, not installation, lifecycle, release, or deployment evidence.
 
 When adding commands, compose existing application use cases and adapters instead of moving lifecycle logic into Cobra handlers. Preserve exact argument arrays through typed ports; do not rebuild shell command strings.
 
@@ -47,6 +51,7 @@ Before recording `WorkspaceUp`, production open lists providers in the requested
 go build ./cmd/camp
 go run ./cmd/camp --help
 go run ./cmd/camp completion bash
+go run ./cmd/camp doctor --json
 go test ./cmd/camp ./internal/cli -count=1
 ```
 

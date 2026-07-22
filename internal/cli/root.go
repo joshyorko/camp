@@ -33,6 +33,10 @@ type InitRequest struct {
 	DevPodContext  string
 }
 
+type doctorLifecycle interface {
+	Doctor(context.Context, OutputMode, io.Writer) error
+}
+
 type Setup interface {
 	Setup(context.Context, OutputMode, io.Writer) error
 }
@@ -57,6 +61,9 @@ func NewRootWithLifecycle(lifecycle Lifecycle) *cobra.Command {
 	})
 	root.DisableAutoGenTag = true
 	root.AddCommand(newCompletionCommand(root))
+	if diagnostics, ok := lifecycle.(doctorLifecycle); ok {
+		root.AddCommand(noArgumentCommand("doctor", "Diagnose required host capabilities", diagnostics.Doctor))
+	}
 	if setup, ok := lifecycle.(Setup); ok {
 		root.AddCommand(noArgumentCommand("setup", "Install or reuse pinned DevPod and Hauler tools", setup.Setup))
 	}
