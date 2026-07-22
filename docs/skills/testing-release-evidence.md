@@ -81,12 +81,20 @@ verifies operator configuration survives. Run it with GNU tar first on `PATH`;
 BusyBox tar cannot build the reproducible input archives because it lacks
 `--sort=name` and the other normalization flags.
 
+The native package lifecycle fixture defaults to Podman and also supports
+`CONTAINER_ENGINE=docker`. Managed-tool bootstrap runs as root inside Docker,
+so its fallback cleanup removes root-owned fixture state through the same
+container engine when the invoking host user cannot remove it directly. A
+cleanup permission error after otherwise successful DEB/RPM/APK assertions is
+still a failed gate; it must not be reported as package lifecycle evidence.
+
 ## Evidence
 
 - `AGENTS.md`
 - `cmd/camp/main.go`
 - `packaging/build-archives.sh`, `archive_smoke_test.go`, `homebrew_metadata_test.go`, and `homebrew_lifecycle_test.go`
 - `packaging/fixtures/homebrew-smoke.sh` (observed against Homebrew 5.0.13)
+- `packaging/fixtures/package-smoke.sh` (Podman default and Docker override)
 - `packaging/homebrew/metadata.json` and `camp.rb.tmpl`
 - `integration/contracts_test.go`
 - `internal/capsule/ownership.go` and `internal/capsule/ownership_test.go`
