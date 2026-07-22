@@ -28,7 +28,11 @@ type setupResult struct {
 }
 
 func (p *ProductionLifecycle) Setup(ctx context.Context, mode OutputMode, out io.Writer) error {
-	return runProductionToolSetup(ctx, mode, out, campcontract.DistributionToolLock(), "", environmentMap(os.Environ()), runtime.GOOS, runtime.GOARCH)
+	lockBytes := campcontract.DistributionToolLock()
+	if err := runProductionToolSetup(ctx, mode, out, lockBytes, "", environmentMap(os.Environ()), runtime.GOOS, runtime.GOARCH); err != nil || mode == ModeJSON {
+		return err
+	}
+	return renderProductionSetupCampsite(ctx, out, lockBytes)
 }
 
 func runProductionToolSetup(ctx context.Context, mode OutputMode, out io.Writer, lockBytes []byte, home string, environment map[string]string, goos, arch string, options ...tooladapter.InstallerOption) error {
