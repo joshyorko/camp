@@ -9,6 +9,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/joshyorko/camp/internal/adapters/filebackend"
 	"github.com/joshyorko/camp/internal/config"
 	"github.com/joshyorko/camp/internal/ports"
 )
@@ -59,6 +60,7 @@ func TestSafeSingleLineRedactsCommonCredentialFormsBeforeTruncation(t *testing.T
 		"Authorization: Bearer bearer-secret",
 		"https://user:pass@example.test/path",
 		"https://example.test/path?token=query-secret&safe=yes",
+		"unconfined_u:unconfined_r:unconfined_t:s0\x00",
 		strings.Repeat("x", 240) + " CAMP_PASSWORD=" + strings.Repeat("s", 300),
 	}
 	for _, input := range tests {
@@ -70,6 +72,9 @@ func TestSafeSingleLineRedactsCommonCredentialFormsBeforeTruncation(t *testing.T
 		}
 		if len(got) > 256 {
 			t.Fatalf("safeSingleLine length = %d, want <= 256", len(got))
+		}
+		if strings.ContainsRune(got, '\x00') {
+			t.Fatalf("safeSingleLine retained NUL from %q: %q", input, got)
 		}
 	}
 }
@@ -136,6 +141,22 @@ func TestBackendProbeDistinguishesConfigurationFromHealth(t *testing.T) {
 				t.Fatalf("configuration probe claimed backend health: %#v", result)
 			}
 		})
+	}
+}
+
+func TestBackendProbeReportsHealthyOnlyAfterFunctionalTransaction(t *testing.T) {
+	store, err := filebackend.New(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	probe := BackendProbe{
+		ConfigPath: filepath.Join(t.TempDir(), "missing"), DefaultBackend: "file:///tmp/camp-backend",
+		OpenStore: func(context.Context, config.Backend) (ports.ObjectStore, error) { return store, nil },
+		NewSuffix: func() (string, error) { return "unique", nil },
+	}
+	result := probe.Probe(context.Background())
+	if result.Status != StatusHealthy || result.Code != "backend_transaction_verified" || result.Evidence["kind"] != "file" {
+		t.Fatalf("result = %#v", result)
 	}
 }
 

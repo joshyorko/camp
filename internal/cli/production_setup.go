@@ -15,11 +15,45 @@ import (
 	campcontract "github.com/joshyorko/camp"
 	tooladapter "github.com/joshyorko/camp/internal/adapters/tools"
 	"github.com/joshyorko/camp/internal/config"
+	"github.com/joshyorko/camp/internal/doctor"
 	"github.com/joshyorko/camp/internal/presentation"
 )
 
 type toolEnsurer interface {
 	Ensure(context.Context, string, string, string) (tooladapter.Resolution, error)
+}
+
+type toolInspector interface {
+	Inspect(context.Context, string, string, string) (tooladapter.Resolution, error)
+}
+
+type doctorManagedToolResolver struct {
+	inspector toolInspector
+	goos      string
+	arch      string
+}
+
+func (r doctorManagedToolResolver) Inspect(ctx context.Context, name string) (doctor.ManagedToolIdentity, error) {
+	resolution, err := r.inspector.Inspect(ctx, name, r.goos, r.arch)
+	if err != nil {
+		return doctor.ManagedToolIdentity{}, err
+	}
+	return doctor.ManagedToolIdentity{
+		Path: resolution.Path, Repository: resolution.Repository, Version: resolution.Version,
+		BinarySHA256: resolution.BinarySHA256, Managed: resolution.Managed,
+	}, nil
+}
+
+func newDoctorManagedToolResolver(lockBytes []byte, dataRoot string) (doctorManagedToolResolver, error) {
+	lock, err := tooladapter.ParseLock(bytes.NewReader(lockBytes))
+	if err != nil {
+		return doctorManagedToolResolver{}, err
+	}
+	installer, err := tooladapter.NewInstaller(lock, dataRoot)
+	if err != nil {
+		return doctorManagedToolResolver{}, err
+	}
+	return doctorManagedToolResolver{inspector: installer, goos: runtime.GOOS, arch: runtime.GOARCH}, nil
 }
 
 type setupResult struct {
