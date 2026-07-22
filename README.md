@@ -32,25 +32,13 @@ The current executable exposes setup and lifecycle commands, but the complete re
 
 These are package-level foundations, not proof that the user-facing lifecycle is complete. Today the file backend is the only backend, workspace return is limited to a proven local-provider no-op, IDE entry is rejected, and installed-tool integration tests may skip when their real binaries are unavailable.
 
-## Target experience
+## Command and operator documentation
 
-```console
-$ camp open memoryd
-Making camp from second-brain@42…
-✓ Hydrated and verified
-✓ DevPod ready
-Entering MemoryD…
-
-$ camp sync
-✓ Checkpoint 43 published; camp remains open
-
-$ camp close
-Breaking camp…
-✓ Checkpoint 44 verified and published
-✓ Workspace returned and Camp-owned materialization removed
-```
-
-`camp open memoryd` opens the whole Second Brain and uses `MemoryD` only as the landing directory. Camp never turns child repositories into separate capsules.
+The [operator documentation](docs/README.md) contains the generated command
+reference, deterministic syntax transcripts, backend and recovery contracts,
+and the current release limitations. It intentionally omits aspirational
+terminal output. `camp open memoryd` selects `MemoryD` only as the landing
+directory; it does not turn a child repository into a separate capsule.
 
 ## Design
 
@@ -92,7 +80,9 @@ Install or reuse the pinned DevPod and Hauler binaries without running them:
 $ camp setup
 ```
 
-When a locked binary is not already on PATH, setup prints the exact shell-local PATH export for its verified managed location. It does not edit shell startup files or install `pasta`; `pasta` remains an external host capability tracked separately in issue #11.
+When a locked binary is not already on PATH, setup reports its verified managed
+location. It does not edit shell startup files or install `pasta`; `pasta`
+remains an external host capability tracked separately in issue #11.
 
 ## Development
 

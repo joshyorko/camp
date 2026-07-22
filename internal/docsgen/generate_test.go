@@ -2,12 +2,39 @@ package docsgen
 
 import (
 	"bytes"
+	"context"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/joshyorko/camp/internal/cli"
 )
+
+func TestDocumentedInvocationsCoverEveryVisibleCommand(t *testing.T) {
+	want := make(map[string]bool)
+	for _, command := range visibleCommands(cli.NewRoot()) {
+		want[command.CommandPath()] = true
+	}
+	for _, invocation := range DocumentedInvocations() {
+		delete(want, invocation.CommandPath)
+	}
+	if len(want) != 0 {
+		t.Fatalf("visible commands lack deterministic transcript coverage: %v", want)
+	}
+}
+
+func TestDocumentedInvocationsExecute(t *testing.T) {
+	for _, invocation := range DocumentedInvocations() {
+		t.Run(strings.ReplaceAll(invocation.CommandPath, " ", "_"), func(t *testing.T) {
+			var stdout, stderr bytes.Buffer
+			code := cli.Execute(context.Background(), transcriptRoot(), invocation.Args, cli.Streams{Out: &stdout, ErrOut: &stderr})
+			if code != 0 {
+				t.Fatalf("%v exited %d\nstdout:\n%s\nstderr:\n%s", invocation.Args, code, stdout.String(), stderr.String())
+			}
+		})
+	}
+}
 
 func TestGeneratedFilesMatchRepository(t *testing.T) {
 	repository := filepath.Join("..", "..")
@@ -39,5 +66,16 @@ func TestGeneratedReferenceExcludesHiddenCommands(t *testing.T) {
 		if !bytes.Contains(reference, []byte("`"+command)) {
 			t.Errorf("command reference does not contain %q", command)
 		}
+	}
+}
+
+func TestGeneratedPresentationExamplesAreVersioned(t *testing.T) {
+	generated, err := Generate(cli.NewRoot())
+	if err != nil {
+		t.Fatal(err)
+	}
+	examples := generated["docs/generated/presentation.md"]
+	if !bytes.Contains(examples, []byte(`"schemaVersion": 1`)) || !bytes.Contains(examples, []byte("BLOCKED  pasta  pasta_missing")) {
+		t.Fatal("generated presentation examples do not contain the versioned JSON and human doctor goldens")
 	}
 }
