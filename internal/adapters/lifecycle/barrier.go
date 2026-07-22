@@ -20,7 +20,7 @@ type barrierJournalReader interface {
 type barrierController interface {
 	Observe(context.Context, domain.ServiceUnitRecord) (supervisor.UnitObservation, error)
 	Stop(context.Context, domain.ServiceUnitRecord) error
-	Restart(context.Context, string, string, string) (domain.ServiceUnitRecord, domain.JournalSnapshot, error)
+	RestartWithin(context.Context, string, string, string, string) (domain.ServiceUnitRecord, domain.JournalSnapshot, error)
 }
 
 type RegistryBarrier struct {
@@ -40,7 +40,7 @@ func (b *RegistryBarrier) WithCut(ctx context.Context, request registry.Snapshot
 	if err != nil {
 		return err
 	}
-	if len(pending) > 1 || len(pending) == 1 && !matchesRegistrySealIntent(pending[0].Intent, request) {
+	if len(pending) != 1 || !matchesRegistrySealIntent(pending[0].Intent, request) {
 		return errors.New("registry seal barrier requires a reconciled session")
 	}
 	var record domain.ServiceUnitRecord
@@ -69,7 +69,7 @@ func (b *RegistryBarrier) WithCut(ctx context.Context, request registry.Snapshot
 		return err
 	}
 	defer func() {
-		_, _, restartErr := b.services.Restart(context.WithoutCancel(ctx), snapshot.SessionID, hauler.RegistryServiceName, "seal-"+hex.EncodeToString(tokenBytes))
+		_, _, restartErr := b.services.RestartWithin(context.WithoutCancel(ctx), snapshot.SessionID, hauler.RegistryServiceName, "seal-"+hex.EncodeToString(tokenBytes), pending[0].Intent.ID)
 		resultErr = errors.Join(resultErr, restartErr)
 	}()
 	return cut()

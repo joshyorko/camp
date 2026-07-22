@@ -197,6 +197,19 @@ func TestStoreComposesLeaseRenewalAndServingRefreshFromStaleSnapshots(t *testing
 	}
 }
 
+func TestRegistrySealFactPreservesNestedServiceRestart(t *testing.T) {
+	t.Parallel()
+	oldIdentity := domain.ProcessIdentity{PID: 11, BootID: "boot", StartTicks: 11}
+	newIdentity := domain.ProcessIdentity{PID: 22, BootID: "boot", StartTicks: 22}
+	current := domain.JournalSnapshot{Services: []domain.ServiceUnitRecord{{Name: "registry", Child: domain.ProcessRecord{Identity: newIdentity}}}}
+	sealCandidate := domain.JournalSnapshot{Services: []domain.ServiceUnitRecord{{Name: "registry", Child: domain.ProcessRecord{Identity: oldIdentity}}}}
+
+	composed := composeFactSnapshot(current, sealCandidate, "RegistrySnapshotSealed")
+	if got := composed.Services[0].Child.Identity; got != newIdentity {
+		t.Fatalf("registry service identity after seal = %#v, want nested restart %#v", got, newIdentity)
+	}
+}
+
 func TestStoreCreateIsCrashSafeAndIdempotentAtEveryDurableCut(t *testing.T) {
 	t.Parallel()
 	for _, cut := range []CreateStep{CreateAfterJournalSync, CreateAfterSnapshotSync, CreateAfterCommitSync} {

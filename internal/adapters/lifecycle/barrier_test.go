@@ -15,10 +15,18 @@ import (
 func TestRegistryBarrierStopsForCutAndRestartsBeforeReturn(t *testing.T) {
 	t.Parallel()
 	record := domain.ServiceUnitRecord{Name: "registry", LaunchToken: "old"}
-	journal := barrierJournal{snapshot: domain.JournalSnapshot{SessionID: "session-a", Services: []domain.ServiceUnitRecord{record}}}
+	request := registry.SnapshotRequest{SessionID: "session-a", RegistryLaunchToken: "old"}
+	input, err := json.Marshal(request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	journal := barrierJournal{
+		snapshot: domain.JournalSnapshot{SessionID: "session-a", Services: []domain.ServiceUnitRecord{record}},
+		pending:  []ports.PendingIntent{{Intent: ports.IntentRecord{ID: "checkpoint-1-3", SessionID: "session-a", Transition: "RegistrySnapshotSealed", Input: input}}},
+	}
 	controller := &recordingBarrierController{}
 	barrier := NewRegistryBarrier(journal, controller)
-	err := barrier.WithCut(context.Background(), registry.SnapshotRequest{SessionID: "session-a", RegistryLaunchToken: "old"}, func() error {
+	err = barrier.WithCut(context.Background(), request, func() error {
 		controller.events = append(controller.events, "cut")
 		return nil
 	})
@@ -27,6 +35,9 @@ func TestRegistryBarrierStopsForCutAndRestartsBeforeReturn(t *testing.T) {
 	}
 	if !reflect.DeepEqual(controller.events, []string{"observe", "stop", "cut", "restart"}) {
 		t.Fatalf("events=%#v", controller.events)
+	}
+	if controller.parentIntentID != "checkpoint-1-3" {
+		t.Fatalf("restart parent intent = %q", controller.parentIntentID)
 	}
 }
 
@@ -67,7 +78,10 @@ func (j barrierJournal) Load(context.Context, string) (domain.JournalSnapshot, [
 	return j.snapshot, j.pending, nil
 }
 
-type recordingBarrierController struct{ events []string }
+type recordingBarrierController struct {
+	events         []string
+	parentIntentID string
+}
 
 func (c *recordingBarrierController) Observe(context.Context, domain.ServiceUnitRecord) (supervisor.UnitObservation, error) {
 	c.events = append(c.events, "observe")
@@ -77,7 +91,8 @@ func (c *recordingBarrierController) Stop(context.Context, domain.ServiceUnitRec
 	c.events = append(c.events, "stop")
 	return nil
 }
-func (c *recordingBarrierController) Restart(_ context.Context, _ string, _ string, _ string) (domain.ServiceUnitRecord, domain.JournalSnapshot, error) {
+func (c *recordingBarrierController) RestartWithin(_ context.Context, _ string, _ string, _ string, parentIntentID string) (domain.ServiceUnitRecord, domain.JournalSnapshot, error) {
 	c.events = append(c.events, "restart")
+	c.parentIntentID = parentIntentID
 	return domain.ServiceUnitRecord{}, domain.JournalSnapshot{}, nil
 }

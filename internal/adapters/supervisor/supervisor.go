@@ -129,6 +129,17 @@ func (s *ServiceSupervisor) Observe(ctx context.Context, record domain.ServiceUn
 }
 
 func (s *ServiceSupervisor) Restart(ctx context.Context, sessionID, serviceName, launchToken string) (domain.ServiceUnitRecord, domain.JournalSnapshot, error) {
+	return s.restartWithin(ctx, sessionID, serviceName, launchToken, "")
+}
+
+func (s *ServiceSupervisor) RestartWithin(ctx context.Context, sessionID, serviceName, launchToken, parentIntentID string) (domain.ServiceUnitRecord, domain.JournalSnapshot, error) {
+	if parentIntentID == "" {
+		return domain.ServiceUnitRecord{}, domain.JournalSnapshot{}, errors.New("service restart parent intent is empty")
+	}
+	return s.restartWithin(ctx, sessionID, serviceName, launchToken, parentIntentID)
+}
+
+func (s *ServiceSupervisor) restartWithin(ctx context.Context, sessionID, serviceName, launchToken, parentIntentID string) (domain.ServiceUnitRecord, domain.JournalSnapshot, error) {
 	if s == nil || s.journal == nil || s.processes == nil || s.inspector == nil || sessionID == "" || serviceName == "" || launchToken == "" {
 		return domain.ServiceUnitRecord{}, domain.JournalSnapshot{}, errors.New("service restart dependencies or identity are incomplete")
 	}
@@ -142,12 +153,20 @@ func (s *ServiceSupervisor) Restart(ctx context.Context, sessionID, serviceName,
 	}
 	intent := ports.IntentRecord{ID: serviceName + "-" + launchToken + "-restart", SessionID: sessionID, Transition: "ServiceRestart", Attempt: 1, Timestamp: time.Now().UTC()}
 	restartPending := false
+	parentPending := false
 	for _, item := range pending {
 		if item.Intent.ID == intent.ID && item.Intent.Transition == intent.Transition {
 			restartPending = true
 			continue
 		}
+		if parentIntentID != "" && item.Intent.ID == parentIntentID {
+			parentPending = true
+			continue
+		}
 		return domain.ServiceUnitRecord{}, snapshot, fmt.Errorf("service restart requires recovery of pending transition %q", item.Intent.Transition)
+	}
+	if parentIntentID != "" && !parentPending {
+		return domain.ServiceUnitRecord{}, snapshot, errors.New("service restart parent intent is not pending")
 	}
 	if restartPending && record.LaunchToken == launchToken {
 		observation, err := s.Observe(ctx, record)

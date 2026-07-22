@@ -162,6 +162,37 @@ func TestServiceSupervisorRestartJournalsBeforeStopAndReusesRecordedCommand(t *t
 	}
 }
 
+func TestServiceSupervisorRestartWithinAuthorizedParentIntent(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	record, _, helper, child := observedServiceFixture(t)
+	log, err := journal.NewStore(filepath.Join(t.TempDir(), "journal"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	snapshot := domain.JournalSnapshot{SchemaVersion: domain.SchemaVersion, SessionID: "nested-restart-session", Services: []domain.ServiceUnitRecord{record}}
+	if err := log.Create(ctx, snapshot); err != nil {
+		t.Fatal(err)
+	}
+	parent := ports.IntentRecord{ID: "checkpoint-1-3", SessionID: snapshot.SessionID, Transition: "RegistrySnapshotSealed", Attempt: 1, Timestamp: time.Unix(20, 0).UTC()}
+	if err := log.RecordIntent(ctx, parent); err != nil {
+		t.Fatal(err)
+	}
+	manager := &fakeUnitProcessManager{log: log, sessionID: snapshot.SessionID, helper: helper, children: []ports.ProcessStatus{child}, start: helper.Identity}
+	controller := NewServiceSupervisor(log, manager, &fakeUnitInspector{evidence: UnitEvidence{ChildNetNS: child.NetNS}})
+
+	if _, _, err := controller.RestartWithin(ctx, snapshot.SessionID, record.Name, "restart-token", parent.ID); err != nil {
+		t.Fatalf("RestartWithin() error = %v", err)
+	}
+	_, pending, err := log.Load(ctx, snapshot.SessionID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(pending) != 1 || pending[0].Intent.ID != parent.ID {
+		t.Fatalf("pending after nested restart = %#v, want only parent", pending)
+	}
+}
+
 func observedServiceFixture(t *testing.T) (domain.ServiceUnitRecord, ServiceSpec, ports.ProcessStatus, ports.ProcessStatus) {
 	t.Helper()
 	privateRoot := t.TempDir()
