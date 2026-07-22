@@ -70,11 +70,23 @@ shape. They do not prove a GitHub release, a usable tap update path, native
 DEB/RPM/APK ownership, clean install/upgrade/uninstall, first-use managed-tool
 bootstrap, or a real DevPod/Kubernetes lifecycle.
 
+The real Homebrew lifecycle fixture builds two archive versions, serves a
+local git tap to the official `homebrew/brew` container, and requires tap,
+install, completion, update, upgrade, and uninstall to succeed. It sets
+`HOMEBREW_NO_AUTOREMOVE=1` only for uninstall: Camp does not own the shared
+`passt` prerequisite, and Homebrew 5.0.13 on Linux can recurse through injected
+global dependencies (`bubblewrap`, GCC, and `passt`) while autoremoving them.
+The fixture still requires Camp's keg and linked binary to be removed and
+verifies operator configuration survives. Run it with GNU tar first on `PATH`;
+BusyBox tar cannot build the reproducible input archives because it lacks
+`--sort=name` and the other normalization flags.
+
 ## Evidence
 
 - `AGENTS.md`
 - `cmd/camp/main.go`
-- `packaging/build-archives.sh`, `archive_smoke_test.go`, and `homebrew_metadata_test.go`
+- `packaging/build-archives.sh`, `archive_smoke_test.go`, `homebrew_metadata_test.go`, and `homebrew_lifecycle_test.go`
+- `packaging/fixtures/homebrew-smoke.sh` (observed against Homebrew 5.0.13)
 - `packaging/homebrew/metadata.json` and `camp.rb.tmpl`
 - `integration/contracts_test.go`
 - `internal/capsule/ownership.go` and `internal/capsule/ownership_test.go`

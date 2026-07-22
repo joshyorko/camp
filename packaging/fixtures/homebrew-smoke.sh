@@ -67,10 +67,7 @@ chmod -R a+rwX "$fixture_root"
     brew upgrade joshyorko/camp/camp
     camp --version | grep '0.0.1 (commit 0123456789abcdef0123456789abcdef01234567, built 2026-07-22T00:00:00Z, dirty false)'
     test \"\$(cat /state/config/operator-state)\" = operator-owned
-    if ! uninstall_output=\$(brew uninstall --force --ignore-dependencies joshyorko/camp/camp 2>&1); then
-      printf '%s\\n' \"\$uninstall_output\"
-      printf '%s\\n' \"\$uninstall_output\" | grep 'Uninstalling .*/Cellar/camp/0.0.1'
-    fi
+    HOMEBREW_NO_AUTOREMOVE=1 brew uninstall --force --ignore-dependencies joshyorko/camp/camp
     test ! -e \"\$(brew --prefix)/bin/camp\"
     test \"\$(cat /state/config/operator-state)\" = operator-owned
   "
