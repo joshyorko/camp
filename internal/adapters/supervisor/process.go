@@ -141,7 +141,11 @@ func (m *ProcessManager) Group(ctx context.Context, pgid int) ([]ports.ProcessSt
 			if isProcessGone(err) {
 				continue
 			}
-			return nil, fmt.Errorf("inspect process-group member %d: %w", pid, err)
+			latest, latestErr := m.inspectPIDStat(pid)
+			if reconcileErr := reconcileGroupInspectionFailure(candidate, latest, latestErr, err); reconcileErr != nil {
+				return nil, fmt.Errorf("inspect process-group member %d: %w", pid, reconcileErr)
+			}
+			continue
 		}
 		if err := validateGroupCandidate(candidate, status); err != nil {
 			return nil, fmt.Errorf("inspect process-group member %d changed during validation: %w", pid, err)
@@ -159,6 +163,22 @@ func validateGroupCandidate(candidate, observed ports.ProcessStatus) error {
 		return ErrProcessIdentity
 	}
 	return nil
+}
+
+func reconcileGroupInspectionFailure(candidate, latest ports.ProcessStatus, latestErr, inspectErr error) error {
+	if isProcessGone(latestErr) {
+		return nil
+	}
+	if latestErr != nil {
+		return errors.Join(inspectErr, latestErr)
+	}
+	if !latest.Running {
+		return nil
+	}
+	if err := validateGroupCandidate(candidate, latest); err != nil {
+		return errors.Join(inspectErr, err)
+	}
+	return inspectErr
 }
 
 func (m *ProcessManager) Stop(ctx context.Context, identity domain.ProcessIdentity, grace time.Duration) error {

@@ -121,6 +121,20 @@ func TestProcessManagerGroupFailsClosedWhenCandidateChangesGroup(t *testing.T) {
 	}
 }
 
+func TestReconcileGroupInspectionFailureAllowsOnlyExitedCandidate(t *testing.T) {
+	t.Parallel()
+	candidate := ports.ProcessStatus{Identity: domain.ProcessIdentity{PID: 123, BootID: "boot", StartTicks: 42}, Running: true, PGID: 7}
+	inspectErr := errors.New("empty cmdline during exit")
+	exited := candidate
+	exited.Running = false
+	if err := reconcileGroupInspectionFailure(candidate, exited, nil, inspectErr); err != nil {
+		t.Fatalf("exited candidate error = %v", err)
+	}
+	if err := reconcileGroupInspectionFailure(candidate, candidate, nil, inspectErr); !errors.Is(err, inspectErr) {
+		t.Fatalf("live candidate error = %v, want inspection failure", err)
+	}
+}
+
 func TestCapabilityBearingExecutableFallsBackOnlyToValidatedAbsoluteArgv(t *testing.T) {
 	t.Parallel()
 	denied := func(string) (string, error) { return "", syscall.EPERM }
