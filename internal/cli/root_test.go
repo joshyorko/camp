@@ -50,6 +50,7 @@ func TestLifecycleCommandsDelegateWithStrictArgumentsAndInheritedMode(t *testing
 		want string
 	}{
 		{name: "init", args: []string{"--json", "init", "/brain"}, want: "init:/brain:json"},
+		{name: "setup", args: []string{"setup"}, want: "setup::human"},
 		{name: "open", args: []string{"open", "memoryd"}, want: "open:memoryd:human"},
 		{name: "sync", args: []string{"sync"}, want: "sync::human"},
 		{name: "close", args: []string{"close"}, want: "close::human"},
@@ -81,6 +82,10 @@ type recordingLifecycle struct{ calls []string }
 
 func (r *recordingLifecycle) Init(_ context.Context, value string, mode OutputMode, _ io.Writer) error {
 	r.calls = append(r.calls, "init:"+value+":"+string(mode))
+	return nil
+}
+func (r *recordingLifecycle) Setup(_ context.Context, mode OutputMode, _ io.Writer) error {
+	r.calls = append(r.calls, "setup::"+string(mode))
 	return nil
 }
 func (r *recordingLifecycle) Open(_ context.Context, value string, mode OutputMode, _ io.Writer) error {
