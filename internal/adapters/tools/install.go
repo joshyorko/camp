@@ -32,15 +32,15 @@ const (
 )
 
 type Resolution struct {
-	Path         string
-	Managed      bool
-	Repository   string
-	Version      string
-	Commit       string
-	GOOS         string
-	Architecture string
-	AssetSHA256  string
-	BinarySHA256 string
+	Path         string `json:"path"`
+	Managed      bool   `json:"managed"`
+	Repository   string `json:"repository"`
+	Version      string `json:"version"`
+	Commit       string `json:"commit"`
+	GOOS         string `json:"goos"`
+	Architecture string `json:"architecture"`
+	AssetSHA256  string `json:"assetSha256"`
+	BinarySHA256 string `json:"binarySha256"`
 }
 
 type installIdentity struct {

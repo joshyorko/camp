@@ -42,14 +42,16 @@ type ProductionLifecycle struct{}
 func NewProductionLifecycle() *ProductionLifecycle { return &ProductionLifecycle{} }
 
 func (p *ProductionLifecycle) Init(ctx context.Context, request InitRequest, mode OutputMode, out io.Writer) error {
+	settings, err := resolveProductionSettings()
+	if err != nil {
+		return err
+	}
 	if request.Source != "" {
-		if err := config.ValidatePersistent(config.Persistent{
-			DefaultCapsule: request.Capsule, Backend: request.Backend, Source: request.Source, DevPodProvider: request.DevPodProvider,
-		}); err != nil {
+		if _, err := validateConfiguredInit(request, settings.runtime.S3); err != nil {
 			return UsageError(err)
 		}
 	}
-	composition, err := composeProduction(ctx)
+	composition, err := composeProductionWithSettings(ctx, settings)
 	if err != nil {
 		return err
 	}
@@ -72,13 +74,13 @@ func (p *ProductionLifecycle) Init(ctx context.Context, request InitRequest, mod
 		return err
 	}
 	if request.Source != "" {
-		written, err := persistInitConfiguration(composition.paths.ConfigPath, request)
+		written, err := persistInitConfiguration(composition.paths.ConfigPath, request, composition.runtime.S3)
 		if err != nil {
 			return err
 		}
 		return writeConfiguredInitSuccess(out, mode, configuredInitResult{
 			ConfigPath: composition.paths.ConfigPath, Source: written.Source, Backend: written.Backend,
-			Capsule: written.DefaultCapsule, DevPodProvider: written.DevPodProvider,
+			Capsule: written.DefaultCapsule, DevPodProvider: written.DevPodProvider, DevPodContext: written.DevPodContext,
 		})
 	}
 	return writeSuccess(out, mode, "init", result, fmt.Sprintf("Initialized %s at %s\n", result.Metadata.ID, root))
@@ -90,29 +92,33 @@ type configuredInitResult struct {
 	Backend        string `json:"backend"`
 	Capsule        string `json:"capsule"`
 	DevPodProvider string `json:"devpodProvider"`
+	DevPodContext  string `json:"devpodContext"`
 }
 
-func persistInitConfiguration(path string, request InitRequest) (config.Persistent, error) {
-	value := config.Persistent{
-		DefaultCapsule: request.Capsule, Backend: request.Backend, Source: request.Source,
-		DevPodProvider: request.DevPodProvider,
+func validateConfiguredInit(request InitRequest, s3 config.S3Values) (config.Backend, error) {
+	value := config.Persistent{DefaultCapsule: request.Capsule, Backend: request.Backend, Source: request.Source, DevPodProvider: request.DevPodProvider, DevPodContext: request.DevPodContext, S3: s3}
+	if err := config.ValidatePersistent(value); err != nil {
+		return config.Backend{}, err
 	}
+	return config.ResolveBackend(request.Backend, s3)
+}
+
+func persistInitConfiguration(path string, request InitRequest, s3 config.S3Values) (config.Persistent, error) {
 	store := config.NewStore(path)
-	if existing, err := store.Read(); err == nil {
-		value.RegistryPort = existing.RegistryPort
-		value.FileserverPort = existing.FileserverPort
-	} else if !errors.Is(err, os.ErrNotExist) {
-		return config.Persistent{}, err
-	}
-	if err := store.Update(value); err != nil {
-		return config.Persistent{}, err
-	}
-	return value, nil
+	return store.Modify(func(value *config.Persistent) error {
+		value.DefaultCapsule = request.Capsule
+		value.Backend = request.Backend
+		value.Source = request.Source
+		value.DevPodProvider = request.DevPodProvider
+		value.DevPodContext = request.DevPodContext
+		value.S3 = s3
+		return nil
+	})
 }
 
 func writeConfiguredInitSuccess(out io.Writer, mode OutputMode, result configuredInitResult) error {
 	if mode == ModeHuman {
-		_, err := fmt.Fprintf(out, "Wrote %s: source=%s backend=%s capsule=%s devpod-provider=%s\n", result.ConfigPath, result.Source, result.Backend, result.Capsule, result.DevPodProvider)
+		_, err := fmt.Fprintf(out, "Wrote %s: source=%s backend=%s capsule=%s devpod-provider=%s devpod-context=%s\n", result.ConfigPath, result.Source, result.Backend, result.Capsule, result.DevPodProvider, result.DevPodContext)
 		return err
 	}
 	return writeSuccess(out, mode, "init", result, "")
@@ -148,7 +154,7 @@ func (p *ProductionLifecycle) Open(ctx context.Context, value string, mode Outpu
 		Capsule: composition.runtime.Capsule, ExplicitRoot: explicitRoot, Target: landing,
 		Runtime: composition.runtime, ResolvedBackend: composition.backend,
 		Mode: domain.SessionReadWrite, EntryMode: domain.EntryTerminal,
-		Machine: machine, RemoteAvailable: explicitRoot == "", Provider: provider, LocalProvider: localProvider,
+		Machine: machine, RemoteAvailable: explicitRoot == "", Context: composition.runtime.DevPodContext, Provider: provider, LocalProvider: localProvider,
 	}
 	usecase, err := composeOpen(ctx, composition, services)
 	if err != nil {
@@ -354,6 +360,12 @@ type productionComposition struct {
 	hauler           *hauler.Client
 }
 
+type productionSettings struct {
+	paths   config.XDGPaths
+	runtime config.Runtime
+	backend config.Backend
+}
+
 type serviceBundle struct {
 	starter   app.OpenServiceStarter
 	units     *supervisor.ServiceSupervisor
@@ -436,26 +448,39 @@ func composeServiceBundle(composition productionComposition) (serviceBundle, err
 }
 
 func composeProduction(ctx context.Context) (productionComposition, error) {
-	environment := environmentMap(os.Environ())
-	paths, err := config.ResolveXDGPaths(config.XDGInput{Environment: environment})
+	settings, err := resolveProductionSettings()
 	if err != nil {
 		return productionComposition{}, err
 	}
+	return composeProductionWithSettings(ctx, settings)
+}
+
+func resolveProductionSettings() (productionSettings, error) {
+	environment := environmentMap(os.Environ())
+	paths, err := config.ResolveXDGPaths(config.XDGInput{Environment: environment})
+	if err != nil {
+		return productionSettings{}, err
+	}
 	bootstrap, err := config.ResolveBootstrap(config.BootstrapInput{ConfigPath: paths.ConfigPath, Environment: environment})
 	if err != nil {
-		return productionComposition{}, err
+		return productionSettings{}, err
 	}
 	if bootstrap.Backend == "" {
 		bootstrap.Backend = "file://" + filepath.Join(paths.DataRoot, "backend")
 	}
 	runtime, err := config.ResolveRuntime(config.RuntimeInput{Bootstrap: bootstrap, Environment: environment})
 	if err != nil {
-		return productionComposition{}, err
+		return productionSettings{}, err
 	}
 	backend, err := config.ResolveBackend(runtime.Backend, runtime.S3)
 	if err != nil {
-		return productionComposition{}, err
+		return productionSettings{}, err
 	}
+	return productionSettings{paths: paths, runtime: runtime, backend: backend}, nil
+}
+
+func composeProductionWithSettings(ctx context.Context, settings productionSettings) (productionComposition, error) {
+	paths, runtime, backend := settings.paths, settings.runtime, settings.backend
 	journal, err := journalstore.NewStore(paths.DataRoot)
 	if err != nil {
 		return productionComposition{}, err

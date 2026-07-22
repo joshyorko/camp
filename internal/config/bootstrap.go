@@ -35,6 +35,7 @@ type Bootstrap struct {
 	Backend        string   `json:"backend" yaml:"backend"`
 	Source         string   `json:"source,omitempty" yaml:"source,omitempty"`
 	DevPodProvider string   `json:"devpodProvider,omitempty" yaml:"devpodProvider,omitempty"`
+	DevPodContext  string   `json:"devpodContext,omitempty" yaml:"devpodContext,omitempty"`
 	RegistryPort   int      `json:"registryPort" yaml:"registryPort"`
 	FileserverPort int      `json:"fileserverPort" yaml:"fileserverPort"`
 	AccessToken    string   `json:"accessToken,omitempty" yaml:"accessToken,omitempty"`
@@ -46,13 +47,14 @@ type userConfig struct {
 	Backend        string   `yaml:"backend"`
 	Source         string   `yaml:"source"`
 	DevPodProvider string   `yaml:"devpodProvider"`
+	DevPodContext  string   `yaml:"devpodContext"`
 	RegistryPort   int      `yaml:"registryPort"`
 	FileserverPort int      `yaml:"fileserverPort"`
 	S3             S3Values `yaml:"s3"`
 }
 
 func ResolveBootstrap(input BootstrapInput) (Bootstrap, error) {
-	config := Bootstrap{Capsule: "default", RegistryPort: 5000, FileserverPort: 8080}
+	config := Bootstrap{Capsule: "default", DevPodContext: "default", RegistryPort: 5000, FileserverPort: 8080}
 	path := input.ConfigPath
 	if path == "" {
 		root, err := os.UserConfigDir()
@@ -74,6 +76,9 @@ func ResolveBootstrap(input BootstrapInput) (Bootstrap, error) {
 		return Bootstrap{}, errors.New("effective capsule is empty")
 	}
 	if err := ValidateDevPodProvider(config.DevPodProvider); err != nil {
+		return Bootstrap{}, err
+	}
+	if err := ValidateDevPodContext(config.DevPodContext); err != nil {
 		return Bootstrap{}, err
 	}
 	if err := validatePort(config.RegistryPort); err != nil {
@@ -120,6 +125,9 @@ func applyUser(config *Bootstrap, user userConfig) {
 	if user.DevPodProvider != "" {
 		config.DevPodProvider = user.DevPodProvider
 	}
+	if user.DevPodContext != "" {
+		config.DevPodContext = user.DevPodContext
+	}
 	if user.RegistryPort != 0 {
 		config.RegistryPort = user.RegistryPort
 	}
@@ -141,6 +149,9 @@ func applyBootstrapEnvironment(config *Bootstrap, environment map[string]string)
 	}
 	if value, ok := environmentValue(environment, "CAMP_DEVPOD_PROVIDER"); ok {
 		config.DevPodProvider = value
+	}
+	if value, ok := environmentValue(environment, "CAMP_DEVPOD_CONTEXT"); ok {
+		config.DevPodContext = value
 	}
 	if value, ok := environmentValue(environment, "CAMP_ACCESS_TOKEN"); ok {
 		config.AccessToken = value

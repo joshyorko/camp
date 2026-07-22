@@ -30,6 +30,11 @@ type InitRequest struct {
 	Backend        string
 	Capsule        string
 	DevPodProvider string
+	DevPodContext  string
+}
+
+type Setup interface {
+	Setup(context.Context, OutputMode, io.Writer) error
 }
 
 func NewRootWithLifecycle(lifecycle Lifecycle) *cobra.Command {
@@ -52,6 +57,9 @@ func NewRootWithLifecycle(lifecycle Lifecycle) *cobra.Command {
 	})
 	root.DisableAutoGenTag = true
 	root.AddCommand(newCompletionCommand(root))
+	if setup, ok := lifecycle.(Setup); ok {
+		root.AddCommand(noArgumentCommand("setup", "Install or reuse pinned DevPod and Hauler tools", setup.Setup))
+	}
 	root.AddCommand(
 		newInitCommand(lifecycle.Init),
 		optionalArgumentCommand("open", "Open a capsule workspace", lifecycle.Open),
@@ -89,6 +97,9 @@ func newInitCommand(run func(context.Context, InitRequest, OutputMode, io.Writer
 					return UsageError(fmt.Errorf("persistent init values cannot be empty"))
 				}
 			}
+			if configured == 0 && command.Flags().Changed("devpod-context") {
+				return UsageError(fmt.Errorf("--source, --backend, --capsule, and --devpod-provider must be provided together when --devpod-context is set"))
+			}
 			return run(command.Context(), request, OutputModeFrom(command), command.OutOrStdout())
 		},
 	}
@@ -96,6 +107,7 @@ func newInitCommand(run func(context.Context, InitRequest, OutputMode, io.Writer
 	command.Flags().StringVar(&request.Backend, "backend", "", "persist the default backend URL")
 	command.Flags().StringVar(&request.Capsule, "capsule", "", "persist the default capsule name")
 	command.Flags().StringVar(&request.DevPodProvider, "devpod-provider", "", "persist the default DevPod provider")
+	command.Flags().StringVar(&request.DevPodContext, "devpod-context", "default", "persist the DevPod context")
 	return command
 }
 

@@ -15,12 +15,14 @@ import (
 var ErrCredentialPersistence = errors.New("credentials cannot be persisted in Camp configuration")
 
 type Persistent struct {
-	DefaultCapsule string `yaml:"defaultCapsule,omitempty" json:"defaultCapsule,omitempty"`
-	Backend        string `yaml:"backend,omitempty" json:"backend,omitempty"`
-	Source         string `yaml:"source,omitempty" json:"source,omitempty"`
-	DevPodProvider string `yaml:"devpodProvider,omitempty" json:"devpodProvider,omitempty"`
-	RegistryPort   int    `yaml:"registryPort,omitempty" json:"registryPort,omitempty"`
-	FileserverPort int    `yaml:"fileserverPort,omitempty" json:"fileserverPort,omitempty"`
+	DefaultCapsule string   `yaml:"defaultCapsule,omitempty" json:"defaultCapsule,omitempty"`
+	Backend        string   `yaml:"backend,omitempty" json:"backend,omitempty"`
+	Source         string   `yaml:"source,omitempty" json:"source,omitempty"`
+	DevPodProvider string   `yaml:"devpodProvider,omitempty" json:"devpodProvider,omitempty"`
+	DevPodContext  string   `yaml:"devpodContext,omitempty" json:"devpodContext,omitempty"`
+	RegistryPort   int      `yaml:"registryPort,omitempty" json:"registryPort,omitempty"`
+	FileserverPort int      `yaml:"fileserverPort,omitempty" json:"fileserverPort,omitempty"`
+	S3             S3Values `yaml:"s3,omitempty" json:"s3,omitempty"`
 }
 
 type Store struct{ path string }
@@ -32,13 +34,7 @@ func (s *Store) Read() (Persistent, error) {
 	if err != nil {
 		return Persistent{}, err
 	}
-	var value Persistent
-	decoder := yaml.NewDecoder(strings.NewReader(string(body)))
-	decoder.KnownFields(true)
-	if err := decoder.Decode(&value); err != nil {
-		return Persistent{}, fmt.Errorf("decode Camp configuration: %w", err)
-	}
-	return value, nil
+	return decodePersistent(body)
 }
 
 func (s *Store) Update(value Persistent) error {
@@ -48,6 +44,40 @@ func (s *Store) Update(value Persistent) error {
 	if err := os.MkdirAll(filepath.Dir(s.path), 0o700); err != nil {
 		return err
 	}
+	return s.withLock(func() error { return s.write(value) })
+}
+
+func (s *Store) Modify(change func(*Persistent) error) (Persistent, error) {
+	if change == nil {
+		return Persistent{}, errors.New("Camp configuration change is nil")
+	}
+	if err := os.MkdirAll(filepath.Dir(s.path), 0o700); err != nil {
+		return Persistent{}, err
+	}
+	var updated Persistent
+	err := s.withLock(func() error {
+		body, err := os.ReadFile(s.path)
+		if err != nil && !errors.Is(err, os.ErrNotExist) {
+			return err
+		}
+		if err == nil {
+			updated, err = decodePersistent(body)
+			if err != nil {
+				return err
+			}
+		}
+		if err := change(&updated); err != nil {
+			return err
+		}
+		if err := ValidatePersistent(updated); err != nil {
+			return err
+		}
+		return s.write(updated)
+	})
+	return updated, err
+}
+
+func (s *Store) withLock(run func() error) error {
 	guard, err := os.OpenFile(s.path+".lock", os.O_CREATE|os.O_RDWR, 0o600)
 	if err != nil {
 		return fmt.Errorf("open Camp configuration lock: %w", err)
@@ -57,6 +87,10 @@ func (s *Store) Update(value Persistent) error {
 		return fmt.Errorf("lock Camp configuration: %w", err)
 	}
 	defer syscall.Flock(int(guard.Fd()), syscall.LOCK_UN)
+	return run()
+}
+
+func (s *Store) write(value Persistent) error {
 	body, err := yaml.Marshal(value)
 	if err != nil {
 		return err
@@ -94,11 +128,27 @@ func (s *Store) Update(value Persistent) error {
 	return parent.Sync()
 }
 
+func decodePersistent(body []byte) (Persistent, error) {
+	var value Persistent
+	decoder := yaml.NewDecoder(strings.NewReader(string(body)))
+	decoder.KnownFields(true)
+	if err := decoder.Decode(&value); err != nil {
+		return Persistent{}, fmt.Errorf("decode Camp configuration: %w", err)
+	}
+	if err := ValidatePersistent(value); err != nil {
+		return Persistent{}, err
+	}
+	return value, nil
+}
+
 func ValidatePersistent(value Persistent) error {
 	if err := ValidateDevPodProvider(value.DevPodProvider); err != nil {
 		return err
 	}
-	for _, candidate := range []string{value.Backend, value.Source} {
+	if err := ValidateDevPodContext(value.DevPodContext); err != nil {
+		return err
+	}
+	for _, candidate := range []string{value.Backend, value.Source, value.S3.Endpoint} {
 		parsed, err := url.Parse(candidate)
 		if err != nil {
 			return err
@@ -110,6 +160,15 @@ func ValidatePersistent(value Persistent) error {
 			if sensitiveKey(key) {
 				return ErrCredentialPersistence
 			}
+		}
+	}
+	if value.Backend != "" {
+		if _, err := ResolveBackend(value.Backend, value.S3); err != nil {
+			return err
+		}
+	} else if value.S3 != (S3Values{}) {
+		if _, err := ResolveBackend("s3://camp-validation", value.S3); err != nil {
+			return err
 		}
 	}
 	if value.RegistryPort != 0 {
@@ -126,11 +185,19 @@ func ValidatePersistent(value Persistent) error {
 }
 
 func ValidateDevPodProvider(provider string) error {
-	if provider == "" {
+	return validateDevPodIdentifier("provider", provider)
+}
+
+func ValidateDevPodContext(context string) error {
+	return validateDevPodIdentifier("context", context)
+}
+
+func validateDevPodIdentifier(kind, value string) error {
+	if value == "" {
 		return nil
 	}
-	if strings.TrimSpace(provider) != provider || provider == "." || provider == ".." || strings.ContainsAny(provider, "/\\\t\r\n ") {
-		return errors.New("DevPod provider is invalid")
+	if strings.TrimSpace(value) != value || value == "." || value == ".." || strings.ContainsAny(value, "/\\\t\r\n ") {
+		return fmt.Errorf("DevPod %s is invalid", kind)
 	}
 	return nil
 }

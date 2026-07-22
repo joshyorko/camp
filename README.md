@@ -18,7 +18,7 @@ resolve → hydrate → serve → enter → checkpoint → seal → publish → 
 
 Camp is under active construction and is not ready for daily use yet. The repository contains the durable journal, coordination, archive, hydration, ownership, checkpoint, registry, image, supervision, workspace, and application-layer foundations. The public command tree and complete real local lifecycle are still being wired and verified.
 
-The current executable intentionally exposes only the root Cobra command. Do not treat the target commands below as released behavior until their integration gates pass.
+The current executable exposes setup and lifecycle commands, but the complete real lifecycle still has environment-specific gates. Do not treat a help entry or skipped real-tool test as released lifecycle proof.
 
 ### Implemented and tested internally
 
@@ -82,9 +82,17 @@ Camp targets Linux and currently locks:
 | --- | --- | --- |
 | DevPod | [`skevetter/devpod` v0.26.1](https://github.com/skevetter/devpod/releases/tag/v0.26.1) | Providers, devcontainers, SSH, forwarding, and IDE transport |
 | Hauler | [`hauler-dev/hauler` v2.0.2](https://github.com/hauler-dev/hauler/releases/tag/v2.0.2) | Versioned haul files, OCI content, registry, and file serving |
-| Room of Requirement | [`joshyorko/room-of-requirement` v1.18.0](https://github.com/joshyorko/room-of-requirement/releases/tag/v1.18.0) | Default Wolfi development-image compatibility fixture |
+| Room of Requirement | [`joshyorko/room-of-requirement` v1.18.3](https://github.com/joshyorko/room-of-requirement/releases/tag/v1.18.3) | Default Wolfi development-image compatibility fixture |
 
 Exact commits, Linux asset URLs, architectures, and SHA-256 checksums live in [`tools.lock.yaml`](tools.lock.yaml).
+
+Install or reuse the pinned DevPod and Hauler binaries without running them:
+
+```console
+$ camp setup
+```
+
+When a locked binary is not already on PATH, setup prints the exact shell-local PATH export for its verified managed location. It does not edit shell startup files or install `pasta`; `pasta` remains an external host capability tracked separately in issue #11.
 
 ## Development
 

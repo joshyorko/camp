@@ -1,0 +1,9 @@
+{
+  "tapRepository": "joshyorko/homebrew-tap",
+  "formulaPath": "Formula/camp.rb",
+  "dependency": "passt",
+  "artifacts": {
+    "amd64": "camp_{{VERSION}}_linux_amd64.tar.gz",
+    "arm64": "camp_{{VERSION}}_linux_arm64.tar.gz"
+  }
+}

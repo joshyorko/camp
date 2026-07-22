@@ -17,21 +17,21 @@ func TestBootstrapPrecedenceFlagsEnvironmentUserDefaultsAndRejectsPersistedSecre
 	if err == nil {
 		t.Fatal("ResolveBootstrap() accepted persisted secret config")
 	}
-	body = []byte("defaultCapsule: user-capsule\nbackend: file:///user/backend\nsource: /user/source\ndevpodProvider: user-provider\n")
+	body = []byte("defaultCapsule: user-capsule\nbackend: file:///user/backend\nsource: /user/source\ndevpodProvider: user-provider\ndevpodContext: user-context\n")
 	if err := os.WriteFile(path, body, 0o600); err != nil {
 		t.Fatal(err)
 	}
 	result, err := ResolveBootstrap(BootstrapInput{
 		ConfigPath: path,
 		Environment: map[string]string{
-			"CAMP_CAPSULE": "env-capsule", "CAMP_BACKEND": "file:///env/backend", "CAMP_ACCESS_TOKEN": "runtime-secret", "CAMP_DEVPOD_PROVIDER": "env-provider",
+			"CAMP_CAPSULE": "env-capsule", "CAMP_BACKEND": "file:///env/backend", "CAMP_ACCESS_TOKEN": "runtime-secret", "CAMP_DEVPOD_PROVIDER": "env-provider", "CAMP_DEVPOD_CONTEXT": "ror",
 		},
 		Flags: Overrides{Capsule: ptr("flag-capsule")},
 	})
 	if err != nil {
 		t.Fatalf("ResolveBootstrap() error = %v", err)
 	}
-	if result.Capsule != "flag-capsule" || result.Backend != "file:///env/backend" || result.Source != "/user/source" || result.DevPodProvider != "env-provider" || result.AccessToken != "runtime-secret" {
+	if result.Capsule != "flag-capsule" || result.Backend != "file:///env/backend" || result.Source != "/user/source" || result.DevPodProvider != "env-provider" || result.DevPodContext != "ror" || result.AccessToken != "runtime-secret" {
 		t.Fatalf("bootstrap = %#v", result)
 	}
 }
