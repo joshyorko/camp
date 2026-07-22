@@ -26,6 +26,12 @@ This guard currently matters for `TestLocalLifecycleVertical` and `TestLocalLife
 
 For filesystem-dependent safety tests, prove determinism with repeated focused execution when practical. The ownership-marker temporary-name substitution test requires injection of the named fallback because a Linux filesystem may support `O_TMPFILE`; the focused test passed 50 repetitions after that injection, and `go test ./internal/capsule -count=1` passed 52 tests.
 
+Supervisor heartbeat tests must synchronize on the complete event being
+asserted. The fake lease keeper's `renewed` channel fires inside `Renew`, before
+the supervisor records the durable fact and releases its operation lock; using
+that signal alone to assert `fact` or `release` is timing-dependent under the
+race detector. Wait for the required event-log sequence instead.
+
 ## Release gate
 
 Do not describe Camp as released or clean-machine-ready until the packaged binary, locked tools, real local lifecycle, portable backend lifecycle, and required Room/Wolfi/Rust/direct-registry acceptance matrix have concrete passing evidence. The executable is buildable and locally packageable, but that is not release evidence.
