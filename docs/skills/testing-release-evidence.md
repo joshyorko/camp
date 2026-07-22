@@ -172,7 +172,10 @@ global dependencies (`bubblewrap`, GCC, and `passt`) while autoremoving them.
 The fixture still requires Camp's keg and linked binary to be removed and
 verifies operator configuration survives. Run it with GNU tar first on `PATH`;
 BusyBox tar cannot build the reproducible input archives because it lacks
-`--sort=name` and the other normalization flags.
+`--sort=name` and the other normalization flags. A clean container must also
+mark the bind-mounted local tap as a Git safe directory before advancing its
+test ref; the fixture removes only Homebrew's test-owned XDG subtree before
+the host deletes its temporary root.
 
 ## Evidence
 
