@@ -1,9 +1,11 @@
 package devpod
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"reflect"
+	"strings"
 	"testing"
 
 	"github.com/joshyorko/camp/internal/ports"
@@ -247,6 +249,29 @@ func TestEnsureProviderAcceptsExistingInitializedNamedProviderWithoutMutation(t 
 	want := [][]string{{"provider", "list", "--context", "default", "--output", "json"}}
 	if !reflect.DeepEqual(runner.argv, want) {
 		t.Fatalf("provider argv = %#v, want %#v", runner.argv, want)
+	}
+}
+
+func TestProbeProviderVerifiesConfiguredIdentityWithoutMutation(t *testing.T) {
+	t.Parallel()
+	runner := &providerSequenceRunner{results: []ports.Result{{Stdout: []byte(`{"room-of-requirement":{"state":{"initialized":true}}}`)}}}
+	if err := NewClient("/opt/devpod", runner).ProbeProvider(context.Background(), "default", "room-of-requirement"); err != nil {
+		t.Fatal(err)
+	}
+	want := [][]string{{"provider", "list", "--context", "default", "--output", "json"}}
+	if !reflect.DeepEqual(runner.argv, want) {
+		t.Fatalf("provider argv = %#v, want read-only %#v", runner.argv, want)
+	}
+}
+
+func TestProbeProviderNeverAddsMissingDocker(t *testing.T) {
+	t.Parallel()
+	runner := &providerSequenceRunner{results: []ports.Result{{Stdout: []byte(`{}`)}}}
+	if err := NewClient("/opt/devpod", runner).ProbeProvider(context.Background(), "default", "docker"); err == nil {
+		t.Fatal("ProbeProvider accepted missing docker")
+	}
+	if len(runner.argv) != 1 || runner.argv[0][0] != "provider" || runner.argv[0][1] != "list" {
+		t.Fatalf("provider argv = %#v, want one list", runner.argv)
 	}
 }
 
@@ -595,6 +620,21 @@ func TestSSHPreservesEveryTypedRepeatedPublicFlag(t *testing.T) {
 	}
 	if len(runner.commands) != 1 || !reflect.DeepEqual(runner.commands[0].Argv, want) {
 		t.Fatalf("commands = %#v, want argv %#v", runner.commands, want)
+	}
+}
+
+func TestSSHCommandKeepsInteractiveStreamsAttached(t *testing.T) {
+	t.Parallel()
+	stdin := strings.NewReader("input")
+	var stdout, stderr bytes.Buffer
+	command, err := NewClient("devpod", &recordingRunner{}).SSHCommand(SSHOptions{
+		WorkspaceID: "camp", Stdin: stdin, Stdout: &stdout, Stderr: &stderr,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if command.Stdin != stdin || command.Stdout != &stdout || command.Stderr != &stderr {
+		t.Fatalf("command streams = (%#v, %#v, %#v)", command.Stdin, command.Stdout, command.Stderr)
 	}
 }
 

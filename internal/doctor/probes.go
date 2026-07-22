@@ -155,6 +155,8 @@ type BackendProbe struct {
 	Environment      map[string]string
 	DefaultBackend   string
 	CheckCredentials func(context.Context, config.Backend) error
+	OpenStore        func(context.Context, config.Backend) (ports.ObjectStore, error)
+	NewSuffix        func() (string, error)
 }
 
 func (BackendProbe) Capability() string { return "backend" }
@@ -176,6 +178,9 @@ func (p BackendProbe) Probe(ctx context.Context) Result {
 	}
 	evidence := map[string]string{"kind": string(backend.Kind), "url": backend.SanitizedURL, "fingerprint": backend.Fingerprint}
 	if backend.Kind == config.BackendFile {
+		if p.OpenStore != nil {
+			return p.probeTransactions(ctx, backend, evidence)
+		}
 		return Result{Capability: "backend", Status: StatusDegraded, Code: "file_backend_configuration_valid_io_unprobed", Summary: "file backend configuration is valid; backend I/O health was not probed", Evidence: evidence, Remediation: "run a later issue #11 backend functional probe before relying on backend health"}
 	}
 	if p.CheckCredentials == nil {
@@ -184,7 +189,25 @@ func (p BackendProbe) Probe(ctx context.Context) Result {
 	if err := p.CheckCredentials(ctx, backend); err != nil {
 		return Result{Capability: "backend", Status: StatusBlocked, Code: "s3_credentials_unavailable", Summary: "S3 host credential chain did not resolve", Evidence: evidence, Remediation: "configure the host AWS credential chain, then rerun camp doctor"}
 	}
+	if p.OpenStore != nil {
+		return p.probeTransactions(ctx, backend, evidence)
+	}
 	return Result{Capability: "backend", Status: StatusDegraded, Code: "s3_credentials_available_backend_unprobed", Summary: "S3 configuration is valid and the host credential chain resolved; backend I/O health was not probed", Evidence: evidence, Remediation: "run a later issue #11 backend functional probe before relying on backend health"}
+}
+
+func (p BackendProbe) probeTransactions(ctx context.Context, backend config.Backend, evidence map[string]string) Result {
+	store, err := p.OpenStore(ctx, backend)
+	if err != nil {
+		return Result{Capability: "backend", Status: StatusBlocked, Code: "backend_open_failed", Summary: "backend could not be opened for a functional transaction", Evidence: evidence, Remediation: "repair backend access, then rerun camp doctor"}
+	}
+	result := (BackendTransactionProbe{Store: store, NewSuffix: p.NewSuffix}).Probe(ctx)
+	if result.Evidence == nil {
+		result.Evidence = map[string]string{}
+	}
+	for key, value := range evidence {
+		result.Evidence[key] = value
+	}
+	return result
 }
 
 func safeSingleLine(value string) string {
@@ -202,6 +225,12 @@ func safeSingleLine(value string) string {
 			break
 		}
 	}
+	line = strings.Map(func(value rune) rune {
+		if value < 0x20 || value == 0x7f {
+			return -1
+		}
+		return value
+	}, line)
 	line = identityURLCredentials.ReplaceAllString(line, "://[REDACTED]@")
 	line = identityAssignmentSecret.ReplaceAllString(line, "$1=[REDACTED]")
 	line = identityBearerSecret.ReplaceAllString(line, "$1[REDACTED]")

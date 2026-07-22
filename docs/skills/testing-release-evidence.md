@@ -102,10 +102,12 @@ dependency, completion, and formula-test shape. Its URL, version, and checksum
 tokens stay unresolved until a separate publication lane supplies real release
 artifacts.
 
-These checks prove only reproducible local archive construction and package
-shape. They do not prove a GitHub release, a usable tap update path, native
-DEB/RPM/APK ownership, clean install/upgrade/uninstall, first-use managed-tool
-bootstrap, or a real DevPod/Kubernetes lifecycle.
+These checks prove reproducible archive and native-package construction. The
+non-skipping package fixtures additionally prove clean DEB/RPM/APK and local
+Homebrew install, packaged completions, first-use managed-tool bootstrap,
+upgrade state preservation, and package-owned uninstall behavior. They do not
+prove a GitHub release, a published tap update path, or a real
+DevPod/Kubernetes lifecycle.
 
 ## Release-candidate evidence
 
@@ -161,11 +163,23 @@ SBOM digest bindings, attestations, protected provider evidence for every
 claimed profile, and every explicit gated or unsupported lane. A green local
 run or draft PR is not closure evidence and must not trigger a real release.
 
+The real Homebrew lifecycle fixture builds two archive versions, serves a
+local git tap to the official `homebrew/brew` container, and requires tap,
+install, completion, update, upgrade, and uninstall to succeed. It sets
+`HOMEBREW_NO_AUTOREMOVE=1` only for uninstall: Camp does not own the shared
+`passt` prerequisite, and Homebrew 5.0.13 on Linux can recurse through injected
+global dependencies (`bubblewrap`, GCC, and `passt`) while autoremoving them.
+The fixture still requires Camp's keg and linked binary to be removed and
+verifies operator configuration survives. Run it with GNU tar first on `PATH`;
+BusyBox tar cannot build the reproducible input archives because it lacks
+`--sort=name` and the other normalization flags.
+
 ## Evidence
 
 - `AGENTS.md`
 - `cmd/camp/main.go`
-- `packaging/build-archives.sh`, `archive_smoke_test.go`, and `homebrew_metadata_test.go`
+- `packaging/build-archives.sh`, `archive_smoke_test.go`, `homebrew_metadata_test.go`, and `homebrew_lifecycle_test.go`
+- `packaging/fixtures/homebrew-smoke.sh` (observed against Homebrew 5.0.13)
 - `packaging/homebrew/metadata.json` and `camp.rb.tmpl`
 - `integration/contracts_test.go`
 - `internal/capsule/ownership.go` and `internal/capsule/ownership_test.go`

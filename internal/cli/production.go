@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -10,10 +11,12 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	runtimepkg "runtime"
 	"strings"
 	"time"
 
 	awsconfig "github.com/aws/aws-sdk-go-v2/config"
+	campcontract "github.com/joshyorko/camp"
 	"github.com/joshyorko/camp/internal/adapters/archive"
 	"github.com/joshyorko/camp/internal/adapters/devpod"
 	"github.com/joshyorko/camp/internal/adapters/hauler"
@@ -24,6 +27,7 @@ import (
 	"github.com/joshyorko/camp/internal/adapters/sshtransfer"
 	"github.com/joshyorko/camp/internal/adapters/subprocess"
 	"github.com/joshyorko/camp/internal/adapters/supervisor"
+	tooladapter "github.com/joshyorko/camp/internal/adapters/tools"
 	"github.com/joshyorko/camp/internal/app"
 	"github.com/joshyorko/camp/internal/capsule"
 	"github.com/joshyorko/camp/internal/checkpoint"
@@ -51,13 +55,36 @@ func (p *ProductionLifecycle) Doctor(ctx context.Context, mode OutputMode, out i
 	}
 	runner := subprocess.NewRunner()
 	confinement := supervisor.NewConfinementResolver(runner, exec.LookPath, func() string { return "host" })
-	report := (doctor.Runner{Timeout: 5 * time.Second, Probes: []doctor.Probe{
-		doctor.ToolProbe{Name: "devpod", Arguments: []string{"version"}},
-		doctor.ToolProbe{Name: "hauler", Arguments: []string{"version"}},
-		doctor.ConfinementProbe{Resolver: confinement},
+	pastaRuntime, err := newProductionPastaRuntime(confinement, paths.DataRoot)
+	if err != nil {
+		return err
+	}
+	managedTools, err := newDoctorManagedToolResolver(campcontract.DistributionToolLock(), paths.DataRoot)
+	if err != nil {
+		return err
+	}
+	bootstrap, err := config.ResolveBootstrap(config.BootstrapInput{ConfigPath: paths.ConfigPath, Environment: environment})
+	if err != nil {
+		return err
+	}
+	doctorJournal, err := journalstore.NewStore(paths.DataRoot)
+	if err != nil {
+		return err
+	}
+	sessions, err := doctorJournal.List(ctx)
+	if err != nil {
+		return err
+	}
+	probes := []doctor.Probe{
+		doctor.ManagedToolProbe{Name: "devpod", Resolver: managedTools},
+		doctor.ManagedToolProbe{Name: "hauler", Resolver: managedTools},
+		doctor.PastaProbe{Runtime: pastaRuntime},
 		doctor.BackendProbe{
 			ConfigPath: paths.ConfigPath, Environment: environment,
 			DefaultBackend: "file://" + filepath.Join(paths.DataRoot, "backend"),
+			OpenStore: func(ctx context.Context, backend config.Backend) (ports.ObjectStore, error) {
+				return objectstore.New(ctx, backend, objectstore.Options{})
+			},
 			CheckCredentials: func(ctx context.Context, backend config.Backend) error {
 				awsRuntime, err := awsconfig.LoadDefaultConfig(ctx, awsconfig.WithRegion(backend.S3.Region))
 				if err != nil {
@@ -67,7 +94,10 @@ func (p *ProductionLifecycle) Doctor(ctx context.Context, mode OutputMode, out i
 				return err
 			},
 		},
-	}}).Run(ctx)
+	}
+	probes = append(probes, doctor.LinuxHostProbes()...)
+	probes = append(probes, productionReachabilityProbes(bootstrap, sessions, managedTools)...)
+	report := (doctor.Runner{Timeout: 5 * time.Second, Probes: probes}).Run(ctx)
 	if mode == ModeJSON {
 		err = doctor.RenderJSON(out, report)
 	} else {
@@ -201,14 +231,47 @@ func (p *ProductionLifecycle) Open(ctx context.Context, value string, mode Outpu
 	}
 	result, err := usecase.Run(ctx, request)
 	if err != nil {
-		return err
+		return lifecycleFailure(err, result.RecoveryCommand)
 	}
 	if result.Snapshot.Mode == domain.SessionReadWrite {
 		if err := startSessionSupervisor(ctx, composition, services.processes, result.Snapshot.SessionID); err != nil {
 			return err
 		}
 	}
+	if mode == ModeHuman {
+		return writeHumanLifecycleResult(out, mode, "open", openTerminalEvents(result.Snapshot.Capsule, result.Snapshot.SessionID), "")
+	}
 	return writeSuccess(out, mode, "open", result, fmt.Sprintf("Opened %s (%s)\n", result.Snapshot.Capsule, result.Snapshot.SessionID))
+}
+
+func (p *ProductionLifecycle) Attach(ctx context.Context, request AttachRequest, mode OutputMode, out io.Writer) error {
+	composition, err := composeProduction(ctx)
+	if err != nil {
+		return err
+	}
+	usecase := app.NewAttach(app.AttachDependencies{
+		Sessions: composition.journal, Ownership: composition.ownership,
+		Target: target.Resolver{Zoxide: target.NewCommandZoxide("zoxide", composition.runner)}, DevPod: composition.devpod,
+	})
+	result, err := usecase.Run(ctx, app.AttachRequest{
+		Selector: app.SessionSelector{Capsule: composition.runtime.Capsule, Branch: "main"},
+		Target:   request.Target, Entry: devpod.IDEEntry{IDE: devpod.IDE(request.IDE)},
+		SSH: devpod.SSHOptions{
+			User: request.User, ForwardPorts: request.ForwardPorts, ReverseForwards: request.ReverseForwardPorts,
+			SendEnv: request.SendEnv, SetEnv: request.SetEnv, ForwardPortsTimeout: request.ForwardPortsTimeout,
+			AgentForwarding: request.AgentForwarding, GPGAgentForwarding: request.GPGAgentForwarding, Stdio: request.Stdio,
+			SSHKeepAliveInterval: request.SSHKeepAliveInterval, GitSSHSigningKey: request.GitSSHSigningKey,
+			TermMode: request.TermMode, InstallTerminfo: request.InstallTerminfo, ForwardedArgv: request.DevPodArgs,
+			Stdin: os.Stdin, Stdout: os.Stdout, Stderr: os.Stderr,
+		},
+	})
+	if err != nil {
+		return err
+	}
+	if mode == ModeJSON {
+		return writeSuccess(out, mode, "attach", result, "")
+	}
+	return nil
 }
 
 func resolveProductionProvider(provider string) (string, bool, error) {
@@ -277,7 +340,14 @@ func (p *ProductionLifecycle) Sync(ctx context.Context, mode OutputMode, out io.
 	}
 	result, err := app.NewSync(c.base.journal, c.locks, c.publisher).Run(ctx, session.SessionID)
 	if err != nil {
-		return err
+		recovery := result.RecoveryCommand
+		if recovery == "" {
+			recovery = "camp recover " + session.SessionID
+		}
+		return lifecycleFailure(err, recovery)
+	}
+	if mode == ModeHuman {
+		return writeHumanLifecycleResult(out, mode, "sync", syncTerminalEvents(result.Generation.Generation), "")
 	}
 	return writeSuccess(out, mode, "sync", result, fmt.Sprintf("Published checkpoint %d\n", result.Generation.Generation))
 }
@@ -293,7 +363,10 @@ func (p *ProductionLifecycle) Close(ctx context.Context, mode OutputMode, out io
 	}
 	result, err := c.close.Run(ctx, app.CloseRequest{SessionID: session.SessionID})
 	if err != nil {
-		return err
+		return lifecycleFailure(err, result.RecoveryCommand)
+	}
+	if mode == ModeHuman {
+		return writeHumanLifecycleResult(out, mode, "close", closeTerminalEvents(result.Generation.Generation, result.CleanupSucceeded), "")
 	}
 	return writeSuccess(out, mode, "close", result, fmt.Sprintf("Closed %s\n", session.SessionID))
 }
@@ -396,13 +469,17 @@ type productionComposition struct {
 	clock            *host.Clock
 	devpod           *devpod.Client
 	devpodExecutable string
+	haulerExecutable string
 	hauler           *hauler.Client
 }
 
 type productionSettings struct {
-	paths   config.XDGPaths
-	runtime config.Runtime
-	backend config.Backend
+	paths       config.XDGPaths
+	runtime     config.Runtime
+	backend     config.Backend
+	toolEnsurer toolEnsurer
+	goos        string
+	arch        string
 }
 
 type serviceBundle struct {
@@ -465,18 +542,7 @@ func waitForSupervisorClaim(ctx context.Context, journal ports.Journal, sessionI
 }
 
 func composeServiceBundle(composition productionComposition) (serviceBundle, error) {
-	haulerPath, err := exec.LookPath("hauler")
-	if err != nil {
-		return serviceBundle{}, fmt.Errorf("resolve locked Hauler executable: %w", err)
-	}
-	haulerPath, err = filepath.Abs(haulerPath)
-	if err != nil {
-		return serviceBundle{}, err
-	}
-	haulerPath, err = filepath.EvalSymlinks(haulerPath)
-	if err != nil {
-		return serviceBundle{}, fmt.Errorf("resolve locked Hauler executable target: %w", err)
-	}
+	haulerPath := composition.haulerExecutable
 	processes, err := supervisor.NewProcessManager()
 	if err != nil {
 		return serviceBundle{}, err
@@ -520,6 +586,28 @@ func resolveProductionSettings() (productionSettings, error) {
 
 func composeProductionWithSettings(ctx context.Context, settings productionSettings) (productionComposition, error) {
 	paths, runtime, backend := settings.paths, settings.runtime, settings.backend
+	ensurer := settings.toolEnsurer
+	if ensurer == nil {
+		lock, err := tooladapter.ParseLock(bytes.NewReader(campcontract.DistributionToolLock()))
+		if err != nil {
+			return productionComposition{}, err
+		}
+		ensurer, err = tooladapter.NewInstaller(lock, paths.DataRoot)
+		if err != nil {
+			return productionComposition{}, err
+		}
+	}
+	goos, arch := settings.goos, settings.arch
+	if goos == "" {
+		goos = runtimepkg.GOOS
+	}
+	if arch == "" {
+		arch = runtimepkg.GOARCH
+	}
+	toolPaths, err := resolveManagedToolPaths(ctx, ensurer, goos, arch)
+	if err != nil {
+		return productionComposition{}, err
+	}
 	journal, err := journalstore.NewStore(paths.DataRoot)
 	if err != nil {
 		return productionComposition{}, err
@@ -530,22 +618,13 @@ func composeProductionWithSettings(ctx context.Context, settings productionSetti
 	}
 	runner := subprocess.NewRunner()
 	clock := host.NewClock()
-	devpodPath, err := exec.LookPath("devpod")
-	if err != nil {
-		return productionComposition{}, fmt.Errorf("resolve DevPod executable: %w", err)
-	}
-	devpodPath, err = filepath.Abs(devpodPath)
-	if err != nil {
-		return productionComposition{}, err
-	}
-	devpodPath, err = filepath.EvalSymlinks(devpodPath)
-	if err != nil {
-		return productionComposition{}, fmt.Errorf("resolve DevPod executable target: %w", err)
-	}
+	devpodPath := toolPaths.devpod
+	haulerPath := toolPaths.hauler
 	return productionComposition{
 		paths: paths, runtime: runtime, backend: backend, journal: journal, ownership: ownership,
 		initializer: capsule.NewInitializer(clock, capsule.NewCommandDigestResolver("docker", runner)),
-		runner:      runner, clock: clock, devpod: devpod.NewClient(devpodPath, runner), devpodExecutable: devpodPath, hauler: hauler.NewClient("hauler", runner),
+		runner:      runner, clock: clock, devpod: devpod.NewClient(devpodPath, runner), devpodExecutable: devpodPath,
+		haulerExecutable: haulerPath, hauler: hauler.NewClient(haulerPath, runner),
 	}, nil
 }
 

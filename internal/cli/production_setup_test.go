@@ -16,6 +16,7 @@ import (
 	"testing"
 
 	tooladapter "github.com/joshyorko/camp/internal/adapters/tools"
+	"github.com/joshyorko/camp/internal/config"
 )
 
 func TestRunProductionToolSetupInstallsLockedFixturesUnderXDGData(t *testing.T) {
@@ -117,6 +118,26 @@ func TestRunManagedToolSetupReportsLockedIdentityAndPATH(t *testing.T) {
 	}
 }
 
+func TestRunManagedToolSetupEmitsOnlyCompletedToolEvents(t *testing.T) {
+	ensurer := &recordingToolEnsurer{resolutions: map[string]tooladapter.Resolution{
+		"devpod": {Version: "v0.26.1"},
+		"hauler": {Version: "v2.0.2"},
+	}}
+	var events []string
+	if err := runManagedToolSetupWithEvents(context.Background(), ModeHuman, &bytes.Buffer{}, ensurer, "linux", "amd64", func(name string, resolution tooladapter.Resolution) error {
+		events = append(events, name+" "+resolution.Version)
+		if len(events) != len(ensurer.calls) {
+			t.Fatalf("event emitted before Ensure completed: events=%v calls=%v", events, ensurer.calls)
+		}
+		return nil
+	}); err != nil {
+		t.Fatalf("runManagedToolSetupWithEvents: %v", err)
+	}
+	if got := strings.Join(events, ","); got != "devpod v0.26.1,hauler v2.0.2" {
+		t.Fatalf("events = %q", got)
+	}
+}
+
 func TestRunManagedToolSetupJSONUsesStableIdentityFields(t *testing.T) {
 	ensurer := &recordingToolEnsurer{resolutions: map[string]tooladapter.Resolution{
 		"devpod": {Path: "/usr/bin/devpod", Repository: "skevetter/devpod", Version: "v0.26.1", AssetSHA256: strings.Repeat("a", 64), BinarySHA256: strings.Repeat("a", 64)},
@@ -134,6 +155,67 @@ func TestRunManagedToolSetupJSONUsesStableIdentityFields(t *testing.T) {
 	}
 	if strings.Contains(output.String(), `"AssetSHA256"`) {
 		t.Fatalf("output = %q, want stable lower-camel fields", output.String())
+	}
+}
+
+type staticToolInspector struct {
+	resolution tooladapter.Resolution
+	err        error
+}
+
+func (i staticToolInspector) Inspect(context.Context, string, string, string) (tooladapter.Resolution, error) {
+	return i.resolution, i.err
+}
+
+func TestDoctorManagedToolResolverMapsLockedIdentity(t *testing.T) {
+	resolver := doctorManagedToolResolver{inspector: staticToolInspector{resolution: tooladapter.Resolution{
+		Path: "/camp/devpod", Repository: "loft-sh/devpod", Version: "v0.26.1", BinarySHA256: strings.Repeat("a", 64), Managed: true,
+	}}, goos: "linux", arch: "amd64"}
+	identity, err := resolver.Inspect(context.Background(), "devpod")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if identity.Path != "/camp/devpod" || identity.Repository != "loft-sh/devpod" || !identity.Managed {
+		t.Fatalf("identity = %#v", identity)
+	}
+}
+
+func TestResolveManagedToolPathsReturnsVerifiedExecutablesWithoutPATHMutation(t *testing.T) {
+	ensurer := &recordingToolEnsurer{resolutions: map[string]tooladapter.Resolution{
+		"devpod": {Path: "/managed/devpod", Managed: true},
+		"hauler": {Path: "/managed/hauler", Managed: true},
+	}}
+
+	got, err := resolveManagedToolPaths(context.Background(), ensurer, "linux", "amd64")
+	if err != nil {
+		t.Fatalf("resolveManagedToolPaths: %v", err)
+	}
+	if got.devpod != "/managed/devpod" || got.hauler != "/managed/hauler" {
+		t.Fatalf("managed paths = %+v", got)
+	}
+	if gotEnvironment := strings.Join(ensurer.calls, ","); gotEnvironment != "devpod:linux:amd64,hauler:linux:amd64" {
+		t.Fatalf("Ensure calls = %q", gotEnvironment)
+	}
+}
+
+func TestComposeProductionBootstrapsAndWiresManagedToolPaths(t *testing.T) {
+	ensurer := &recordingToolEnsurer{resolutions: map[string]tooladapter.Resolution{
+		"devpod": {Path: "/managed/devpod", Managed: true},
+		"hauler": {Path: "/managed/hauler", Managed: true},
+	}}
+	dataRoot := filepath.Join(t.TempDir(), "data")
+
+	composition, err := composeProductionWithSettings(context.Background(), productionSettings{
+		paths:       config.XDGPaths{DataRoot: dataRoot},
+		toolEnsurer: ensurer,
+		goos:        "linux",
+		arch:        "amd64",
+	})
+	if err != nil {
+		t.Fatalf("composeProductionWithSettings: %v", err)
+	}
+	if composition.devpodExecutable != "/managed/devpod" || composition.haulerExecutable != "/managed/hauler" {
+		t.Fatalf("composition tool paths = devpod %q hauler %q", composition.devpodExecutable, composition.haulerExecutable)
 	}
 }
 

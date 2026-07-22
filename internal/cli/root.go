@@ -2,6 +2,7 @@ package cli
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 
@@ -17,11 +18,31 @@ func NewRoot() *cobra.Command {
 type Lifecycle interface {
 	Init(context.Context, InitRequest, OutputMode, io.Writer) error
 	Open(context.Context, string, OutputMode, io.Writer) error
+	Attach(context.Context, AttachRequest, OutputMode, io.Writer) error
 	Sync(context.Context, OutputMode, io.Writer) error
 	Close(context.Context, OutputMode, io.Writer) error
 	Reopen(context.Context, string, OutputMode, io.Writer) error
 	Recover(context.Context, string, OutputMode, io.Writer) error
 	Supervise(context.Context, string, OutputMode, io.Writer) error
+}
+
+type AttachRequest struct {
+	Target               string
+	IDE                  string
+	User                 string
+	ForwardPorts         []string
+	ReverseForwardPorts  []string
+	SendEnv              []string
+	SetEnv               []string
+	ForwardPortsTimeout  string
+	AgentForwarding      *bool
+	GPGAgentForwarding   *bool
+	Stdio                *bool
+	SSHKeepAliveInterval string
+	GitSSHSigningKey     string
+	TermMode             string
+	InstallTerminfo      *bool
+	DevPodArgs           []string
 }
 
 type InitRequest struct {
@@ -70,6 +91,7 @@ func NewRootWithLifecycle(lifecycle Lifecycle) *cobra.Command {
 	root.AddCommand(
 		newInitCommand(lifecycle.Init),
 		optionalArgumentCommand("open", "Open a capsule workspace", lifecycle.Open),
+		newAttachCommand(lifecycle.Attach),
 		noArgumentCommand("sync", "Publish a checkpoint and remain open", lifecycle.Sync),
 		noArgumentCommand("close", "Publish a checkpoint and close", lifecycle.Close),
 		optionalArgumentCommand("reopen", "Reopen a closed capsule workspace", lifecycle.Reopen),
@@ -77,6 +99,68 @@ func NewRootWithLifecycle(lifecycle Lifecycle) *cobra.Command {
 		hiddenRequiredArgumentCommand("supervise", lifecycle.Supervise),
 	)
 	return root
+}
+
+func newAttachCommand(run func(context.Context, AttachRequest, OutputMode, io.Writer) error) *cobra.Command {
+	request := AttachRequest{IDE: "none"}
+	var insiders, agentForwarding, gpgAgentForwarding, stdio, installTerminfo bool
+	command := &cobra.Command{
+		Use: "attach [target]", Short: "Attach to an open capsule workspace",
+		Args: func(command *cobra.Command, args []string) error {
+			positional := args
+			if index := command.ArgsLenAtDash(); index >= 0 {
+				positional = args[:index]
+			}
+			return usageArgs(cobra.MaximumNArgs(1))(command, positional)
+		},
+		RunE: func(command *cobra.Command, args []string) error {
+			positional := args
+			if index := command.ArgsLenAtDash(); index >= 0 {
+				positional = args[:index]
+				request.DevPodArgs = append(request.DevPodArgs, args[index:]...)
+			}
+			if len(positional) == 1 {
+				request.Target = positional[0]
+			}
+			if insiders {
+				if command.Flags().Changed("ide") && request.IDE != "vscode-insiders" {
+					return UsageError(errors.New("--insiders conflicts with --ide unless --ide=vscode-insiders"))
+				}
+				request.IDE = "vscode-insiders"
+			}
+			if command.Flags().Changed("agent-forwarding") {
+				request.AgentForwarding = &agentForwarding
+			}
+			if command.Flags().Changed("gpg-agent-forwarding") {
+				request.GPGAgentForwarding = &gpgAgentForwarding
+			}
+			if command.Flags().Changed("stdio") {
+				request.Stdio = &stdio
+			}
+			if command.Flags().Changed("install-terminfo") {
+				request.InstallTerminfo = &installTerminfo
+			}
+			return run(command.Context(), request, OutputModeFrom(command), command.OutOrStdout())
+		},
+	}
+	flags := command.Flags()
+	flags.StringVar(&request.IDE, "ide", "none", "entry mode: none, vscode, vscode-insiders, or t3-code")
+	flags.BoolVar(&insiders, "insiders", false, "alias for --ide=vscode-insiders")
+	flags.StringVar(&request.User, "user", "", "SSH user")
+	flags.StringSliceVarP(&request.ForwardPorts, "forward-ports", "L", nil, "forward a local port through DevPod SSH")
+	flags.StringSliceVarP(&request.ReverseForwardPorts, "reverse-forward-ports", "R", nil, "reverse-forward a port through DevPod SSH")
+	flags.StringSliceVar(&request.SendEnv, "send-env", nil, "send an environment variable through DevPod SSH")
+	flags.StringSliceVar(&request.SetEnv, "set-env", nil, "set an environment variable in DevPod SSH")
+	flags.StringVar(&request.ForwardPortsTimeout, "forward-ports-timeout", "", "DevPod forward-port timeout")
+	flags.BoolVar(&agentForwarding, "agent-forwarding", false, "forward the SSH agent")
+	flags.BoolVar(&gpgAgentForwarding, "gpg-agent-forwarding", false, "forward the GPG agent")
+	flags.BoolVar(&stdio, "stdio", false, "attach SSH to standard I/O")
+	flags.StringVar(&request.SSHKeepAliveInterval, "ssh-keepalive-interval", "", "SSH keepalive interval")
+	flags.StringVar(&request.GitSSHSigningKey, "git-ssh-signing-key", "", "Git SSH signing key path")
+	flags.StringVar(&request.TermMode, "term-mode", "", "terminal mode")
+	flags.BoolVar(&installTerminfo, "install-terminfo", false, "install local terminal information")
+	flags.StringSliceVar(&request.DevPodArgs, "devpod-arg", nil, "append one raw DevPod SSH argument")
+	return command
 }
 
 func newInitCommand(run func(context.Context, InitRequest, OutputMode, io.Writer) error) *cobra.Command {

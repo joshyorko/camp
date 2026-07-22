@@ -313,6 +313,40 @@ func (i *Installer) Ensure(ctx context.Context, name, goos, arch string) (Resolu
 	return resolution(finalPath, true, identity, verifiedDigest), nil
 }
 
+// Inspect resolves an already-present executable against the distribution
+// lock without downloading, repairing, or deleting any tool state.
+func (i *Installer) Inspect(ctx context.Context, name, goos, arch string) (Resolution, error) {
+	if err := ctx.Err(); err != nil {
+		return Resolution{}, err
+	}
+	tool, asset, err := i.lock.Resolve(name, goos, arch)
+	if err != nil {
+		return Resolution{}, err
+	}
+	identity := installIdentity{
+		Repository: tool.Repository, Version: tool.Version, Commit: tool.Commit,
+		GOOS: goos, Architecture: arch, AssetSHA256: asset.SHA256,
+	}
+	var candidatePath, candidateDigest string
+	if candidate, pathErr := i.lookPath(name); pathErr == nil {
+		if digest, verifyErr := verifyExecutable(candidate, i.maxExecutableBytes); verifyErr == nil {
+			candidatePath, candidateDigest = candidate, digest
+			if candidateDigest == asset.SHA256 && !isArchiveAsset(name, asset) {
+				return resolution(candidate, false, identity, candidateDigest), nil
+			}
+		}
+	}
+	_, finalPath, markerPath := i.managedPaths(name, identity)
+	binaryDigest, err := verifyManaged(name, asset, finalPath, markerPath, identity, i.maxDownloadBytes, i.maxExecutableBytes)
+	if err != nil {
+		return Resolution{}, errors.New("no installed executable matches the locked tool identity")
+	}
+	if candidatePath != "" && candidateDigest == binaryDigest {
+		return resolution(candidatePath, false, identity, candidateDigest), nil
+	}
+	return resolution(finalPath, true, identity, binaryDigest), nil
+}
+
 func (i *Installer) runHook(stage InstallStage) error {
 	if hook := i.hooks[stage]; hook != nil {
 		if err := hook(); err != nil {
