@@ -61,13 +61,24 @@ func RenderManifest(capsule string, inventory domain.ImageInventory) ([]byte, er
 		if image.CapturedReference == "" {
 			return nil, errors.New("image inventory entry lacks reference")
 		}
-		name := image.CapturedReference
+		names := []string{image.CapturedReference}
 		switch image.Source {
 		case domain.ImageSourceRegistry:
-			var err error
-			name, err = immutableImageReference(image.CapturedReference, image.CapturedManifestDigest)
+			name, err := immutableImageReference(image.CapturedReference, image.CapturedManifestDigest)
 			if err != nil {
 				return nil, err
+			}
+			names = []string{name}
+			capturedAuthority := strings.SplitN(image.CapturedReference, "/", 2)[0]
+			for _, original := range image.OriginalTags {
+				if strings.SplitN(original, "/", 2)[0] != capturedAuthority {
+					continue
+				}
+				alias, err := immutableImageReference(original, image.CapturedManifestDigest)
+				if err != nil {
+					return nil, err
+				}
+				names = append(names, alias)
 			}
 		case domain.ImageSourceDaemon:
 		default:
@@ -85,12 +96,14 @@ func RenderManifest(capsule string, inventory domain.ImageInventory) ([]byte, er
 		} else if image.Source == domain.ImageSourceDaemon {
 			return nil, errors.New("daemon image inventory entry lacks platform")
 		}
-		key := name + "\x00" + platform
-		if _, duplicate := seen[key]; duplicate {
-			return nil, fmt.Errorf("duplicate manifest image %q", name)
+		for _, name := range names {
+			key := name + "\x00" + platform
+			if _, duplicate := seen[key]; duplicate {
+				continue
+			}
+			seen[key] = struct{}{}
+			images = append(images, manifestImage{Name: name, Platform: platform, Local: image.Source == domain.ImageSourceDaemon})
 		}
-		seen[key] = struct{}{}
-		images = append(images, manifestImage{Name: name, Platform: platform, Local: image.Source == domain.ImageSourceDaemon})
 	}
 	sort.Slice(images, func(i, j int) bool {
 		if images[i].Name == images[j].Name {

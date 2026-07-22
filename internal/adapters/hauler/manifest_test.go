@@ -82,3 +82,24 @@ func TestManifestAcceptsDigestPinnedDirectPushWithoutPlatformAndRejectsUnknownSo
 		t.Fatalf("RenderManifest(unknown source) error = %v", err)
 	}
 }
+
+func TestManifestPreservesSameRegistryOriginalRepositoryByDigest(t *testing.T) {
+	t.Parallel()
+	digest := "sha256:" + strings.Repeat("c", 64)
+	body, err := RenderManifest("second-brain", domain.ImageInventory{SchemaVersion: domain.SchemaVersion, Images: []domain.Image{{
+		CapturedReference:      "127.0.0.1:5000/camp/captured:v1",
+		CapturedManifestDigest: digest,
+		OriginalTags:           []string{"127.0.0.1:5000/camp-acceptance:named", "example.test/team/app:v1"},
+		Source:                 domain.ImageSourceRegistry,
+	}}})
+	if err != nil {
+		t.Fatalf("RenderManifest() error = %v", err)
+	}
+	text := string(body)
+	if !strings.Contains(text, "127.0.0.1:5000/camp/captured@"+digest) || !strings.Contains(text, "127.0.0.1:5000/camp-acceptance@"+digest) {
+		t.Fatalf("same-registry digest aliases are incomplete: %s", text)
+	}
+	if strings.Contains(text, "example.test/team/app@") {
+		t.Fatalf("external original tag became a registry import: %s", text)
+	}
+}
