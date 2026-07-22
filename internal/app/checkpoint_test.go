@@ -826,6 +826,66 @@ func TestCheckpointPublisherAdoptsExactCommittedPointerAndAdvancesBaseline(t *te
 	}
 }
 
+func TestCheckpointPublisherRejectsPendingPointerDriftFromVerifiedGeneration(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	sandbox := t.TempDir()
+	root := filepath.Join(sandbox, "root")
+	if err := os.MkdirAll(filepath.Join(root, ".camp", "build"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	backend, err := filebackend.New(filepath.Join(sandbox, "backend"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := time.Unix(100, 0).UTC()
+	lease := domain.WriterLease{SchemaVersion: domain.SchemaVersion, SessionID: "session-pointer-drift", Capsule: "brain", Lineage: domain.Lineage{Branch: "main"}, Machine: "machine", CreatedAt: now, HeartbeatAt: now, ExpiresAt: now.Add(time.Hour)}
+	snapshot := domain.JournalSnapshot{SchemaVersion: domain.SchemaVersion, SessionID: lease.SessionID, Capsule: lease.Capsule, Lineage: lease.Lineage, Mode: domain.SessionReadWrite, State: domain.SessionOpen, Lease: domain.LeaseRecord{Lease: &lease, Revision: "lease-r1"}, Workspace: domain.WorkspaceRecord{ID: "camp-brain", Context: "default", Provider: "docker", LocalProvider: true, LocalFolder: root, StagingRoot: root, Mirror: domain.MirrorAttemptRecord{LogicalAttempt: 1, AttemptID: lease.SessionID + "-checkpoint-1", State: domain.MirrorCompleted, Root: root, Method: "local-noop"}}, RegistryCutRoot: filepath.Join(root, ".camp", "build", "registry-cut-1")}
+	prepareCheckpointRuntime(t, &snapshot, sandbox)
+	builder := &fakeCheckpointBuilder{}
+	built, err := builder.Build(ctx, checkpoint.BuildRequest{Capsule: snapshot.Capsule, Root: root, Lineage: snapshot.Lineage, Generation: 1, SessionID: snapshot.SessionID, CreatedAt: now})
+	if err != nil {
+		t.Fatal(err)
+	}
+	generations := coordination.NewGenerationRepository(backend)
+	if _, err := generations.PutAndVerify(ctx, built.Metadata, restartableFile(built.Artifact.Path)); err != nil {
+		t.Fatal(err)
+	}
+	snapshot.Checkpoint = domain.Checkpoint{State: domain.CheckpointUploaded, Generation: &built.Metadata.Generation, LocalHaulPath: built.Artifact.Path, ObjectKey: built.Metadata.ObjectKey}
+	log, err := journal.NewStore(filepath.Join(sandbox, "journal"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := log.Create(ctx, snapshot); err != nil {
+		t.Fatal(err)
+	}
+	drifted := domain.LatestPointer{SchemaVersion: domain.SchemaVersion, Capsule: snapshot.Capsule, Lineage: snapshot.Lineage, Generation: built.Metadata.Generation, ObjectKey: built.Metadata.ObjectKey, Size: built.Metadata.Size + 1, CreatedAt: built.Metadata.CreatedAt, Tools: built.Metadata.Tools, SessionID: snapshot.SessionID}
+	intent := checkpointAttemptIntent(snapshot.SessionID, snapshot.Workspace.Mirror.AttemptID, "PointerCommitted", 6, now, drifted)
+	if err := log.RecordIntent(ctx, intent); err != nil {
+		t.Fatal(err)
+	}
+	pointers := coordination.NewPointerRepository(backend)
+	mirror := &fakeMirror{}
+	fakes := newCheckpointFakes(now)
+	rebuild := &fakeCheckpointBuilder{}
+	publisher := NewCheckpointPublisher(log, &fakeLockValidator{}, &fakeLeaseValidator{}, localCheckpointTransports(mirror), fakes.pipeline(), rebuild, generations, pointers, fixedAppClock{now: now})
+	token := ports.OperationToken{ID: "lock", Owner: ports.OperationOwner{SessionID: snapshot.SessionID, Operation: "sync"}}
+
+	if _, err := publisher.Publish(ctx, token, snapshot.SessionID); err == nil || !strings.Contains(err.Error(), "drifted from the verified generation") {
+		t.Fatalf("Publish() error = %v, want verified-generation drift rejection", err)
+	}
+	if mirror.calls != 0 || fakes.capture.calls != 0 || fakes.seal.calls != 0 || rebuild.calls != 0 {
+		t.Fatalf("earlier effects repeated mirror=%d capture=%d seal=%d build=%d", mirror.calls, fakes.capture.calls, fakes.seal.calls, rebuild.calls)
+	}
+	if _, err := pointers.Read(ctx, snapshot.Capsule, snapshot.Lineage); !errors.Is(err, ports.ErrNotFound) {
+		t.Fatalf("pointer moved after drifted recovery: %v", err)
+	}
+	_, pending, err := log.Load(ctx, snapshot.SessionID)
+	if err != nil || len(pending) != 1 || pending[0].Intent.ID != intent.ID {
+		t.Fatalf("pending pointer = %#v error=%v", pending, err)
+	}
+}
+
 func TestCheckpointPublisherPreservesUploadedGenerationAndBaselineOnCASConflict(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()

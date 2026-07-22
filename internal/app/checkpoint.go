@@ -296,6 +296,18 @@ func (p *CheckpointPublisher) resumePendingPointer(ctx context.Context, snapshot
 	if err := json.Unmarshal(intent.Input, &next); err != nil || next.SchemaVersion != domain.SchemaVersion || next.Capsule != snapshot.Capsule || next.Lineage != snapshot.Lineage || next.Generation != *snapshot.Checkpoint.Generation || next.ObjectKey != snapshot.Checkpoint.ObjectKey || next.SessionID != snapshot.SessionID || !sameGeneration(next.Parent, snapshot.CurrentBase) {
 		return CheckpointResult{}, errors.New("pending pointer commit drifted from the uploaded checkpoint")
 	}
+	metadata, _, err := p.generations.ReadMetadata(ctx, snapshot.Capsule, snapshot.Lineage, *snapshot.Checkpoint.Generation)
+	if err != nil {
+		return CheckpointResult{}, fmt.Errorf("verify pending pointer generation: %w", err)
+	}
+	expected := domain.LatestPointer{
+		SchemaVersion: domain.SchemaVersion, Capsule: metadata.Capsule, Lineage: metadata.Lineage,
+		Generation: metadata.Generation, Parent: cloneGeneration(metadata.Parent), ObjectKey: metadata.ObjectKey,
+		Size: metadata.Size, CreatedAt: metadata.CreatedAt, Tools: metadata.Tools, SessionID: metadata.SessionID,
+	}
+	if !reflect.DeepEqual(next, expected) {
+		return CheckpointResult{}, errors.New("pending pointer commit drifted from the verified generation")
+	}
 	var adopted *coordination.PointerRecord
 	if current, err := p.pointers.Read(ctx, snapshot.Capsule, snapshot.Lineage); err == nil && reflect.DeepEqual(current.Pointer, next) {
 		adopted = &current
