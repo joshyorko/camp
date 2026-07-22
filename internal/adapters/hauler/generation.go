@@ -148,11 +148,17 @@ func readGenerationExpectations(path string) (generationExpectations, error) {
 			}
 		case "Images":
 			for _, item := range document.Spec.Images {
-				separator := strings.LastIndexByte(item.Name, '@')
-				if separator < 1 || !manifestDigestPattern.MatchString(item.Name[separator+1:]) {
-					return generationExpectations{}, errors.New("Hauler image manifest is not digest pinned")
+				digest := item.ExpectedDigest
+				if digest == "" {
+					separator := strings.LastIndexByte(item.Name, '@')
+					if separator >= 1 {
+						digest = item.Name[separator+1:]
+					}
 				}
-				result.Images = append(result.Images, expectedGenerationImage{Digest: item.Name[separator+1:], Platform: item.Platform})
+				if !manifestDigestPattern.MatchString(digest) {
+					return generationExpectations{}, errors.New("Hauler image manifest lacks a verified digest expectation")
+				}
+				result.Images = append(result.Images, expectedGenerationImage{Digest: digest, Platform: item.Platform})
 			}
 		default:
 			return generationExpectations{}, fmt.Errorf("unsupported Hauler manifest kind %q", document.Kind)

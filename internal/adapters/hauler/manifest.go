@@ -44,10 +44,10 @@ type imagesSpec struct {
 }
 
 type manifestImage struct {
-	Name     string `yaml:"name"`
-	Platform string `yaml:"platform,omitempty"`
-	Rewrite  string `yaml:"rewrite,omitempty"`
-	Local    bool   `yaml:"local,omitempty"`
+	Name           string `yaml:"name"`
+	Platform       string `yaml:"platform,omitempty"`
+	ExpectedDigest string `yaml:"x-camp-digest,omitempty"`
+	Local          bool   `yaml:"local,omitempty"`
 }
 
 var manifestDigestPattern = regexp.MustCompile(`^sha256:[a-f0-9]{64}$`)
@@ -63,18 +63,10 @@ func RenderManifest(capsule string, inventory domain.ImageInventory) ([]byte, er
 			return nil, errors.New("image inventory entry lacks reference")
 		}
 		name := preferredRegistryReference(image)
-		rewrite := ""
 		switch image.Source {
 		case domain.ImageSourceRegistry:
-			mutableName := name
-			var err error
-			name, err = immutableImageReference(name, image.CapturedManifestDigest)
-			if err != nil {
+			if _, err := immutableImageReference(name, image.CapturedManifestDigest); err != nil {
 				return nil, err
-			}
-			parts := strings.SplitN(mutableName, "/", 2)
-			if len(parts) == 2 && strings.LastIndexByte(parts[1], ':') > strings.LastIndexByte(parts[1], '/') {
-				rewrite = parts[1]
 			}
 		case domain.ImageSourceDaemon:
 		default:
@@ -97,7 +89,7 @@ func RenderManifest(capsule string, inventory domain.ImageInventory) ([]byte, er
 			return nil, fmt.Errorf("duplicate manifest image %q", name)
 		}
 		seen[key] = struct{}{}
-		images = append(images, manifestImage{Name: name, Platform: platform, Rewrite: rewrite, Local: image.Source == domain.ImageSourceDaemon})
+		images = append(images, manifestImage{Name: name, Platform: platform, ExpectedDigest: image.CapturedManifestDigest, Local: image.Source == domain.ImageSourceDaemon})
 	}
 	sort.Slice(images, func(i, j int) bool {
 		if images[i].Name == images[j].Name {

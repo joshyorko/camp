@@ -39,10 +39,10 @@ func TestManifestIsDeterministicAndLocalOnlyForDaemonSources(t *testing.T) {
 		t.Fatalf("RenderManifest() error = %v", err)
 	}
 	text := string(body)
-	if strings.Index(text, "127.0.0.1:5000/camp/z@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa") > strings.Index(text, "example.test/a:v2") {
+	if strings.Index(text, "127.0.0.1:5000/camp/z:v1") > strings.Index(text, "example.test/a:v2") {
 		t.Fatalf("images are not sorted: %s", text)
 	}
-	if strings.Contains(text, "127.0.0.1:5000/camp/z:v1") || strings.Count(text, "local: true") != 1 || !strings.Contains(text, "platform: linux/arm64/v8") || !strings.Contains(text, "path: .camp/build/second-brain.tar.zst") {
+	if !strings.Contains(text, "x-camp-digest: sha256:aaaaaaaa") || strings.Count(text, "local: true") != 1 || !strings.Contains(text, "platform: linux/arm64/v8") || !strings.Contains(text, "path: .camp/build/second-brain.tar.zst") {
 		t.Fatalf("manifest semantics are wrong: %s", text)
 	}
 	second, err := RenderManifest("second-brain", inventory)
@@ -72,7 +72,7 @@ func TestManifestAcceptsDigestPinnedDirectPushWithoutPlatformAndRejectsUnknownSo
 	if err != nil {
 		t.Fatalf("RenderManifest(direct push) error = %v", err)
 	}
-	if text := string(body); !strings.Contains(text, "127.0.0.1:5000/manual/tool@"+digest) || strings.Contains(text, "platform:") {
+	if text := string(body); !strings.Contains(text, "127.0.0.1:5000/manual/tool:latest") || !strings.Contains(text, "x-camp-digest: "+digest) || strings.Contains(text, "platform:") {
 		t.Fatalf("direct push manifest = %s", text)
 	}
 	_, err = RenderManifest("second-brain", domain.ImageInventory{SchemaVersion: domain.SchemaVersion, Images: []domain.Image{{
@@ -94,7 +94,7 @@ func TestManifestPrefersDeterministicSameRegistryOriginalReference(t *testing.T)
 		t.Fatalf("RenderManifest() error = %v", err)
 	}
 	text := string(body)
-	if !strings.Contains(text, "127.0.0.1:5000/camp-acceptance@"+digest) || !strings.Contains(text, "rewrite: camp-acceptance:named") || strings.Contains(text, "camp/captured@") || strings.Contains(text, "example.test/team/app") {
+	if !strings.Contains(text, "name: 127.0.0.1:5000/camp-acceptance:named") || !strings.Contains(text, "x-camp-digest: "+digest) || strings.Contains(text, "camp/captured") || strings.Contains(text, "example.test/team/app") {
 		t.Fatalf("manifest did not select the same-registry direct reference: %s", text)
 	}
 }
