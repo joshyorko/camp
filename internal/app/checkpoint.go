@@ -125,48 +125,58 @@ func (p *CheckpointPublisher) Publish(ctx context.Context, operation ports.Opera
 	if err := p.leases.Revalidate(ctx, lease, now); err != nil {
 		return CheckpointResult{}, fmt.Errorf("validate checkpoint writer lease: %w", err)
 	}
-	prepared, err := p.prepareRegistrySeal(ctx, snapshot, pending, lease, generation, now)
-	if err != nil {
-		return CheckpointResult{}, err
-	}
-	snapshot = prepared.snapshot
-	attemptID := prepared.attemptID
-	mirrored := ports.MirrorResult{Root: prepared.root}
-	inventory := prepared.inventory
-	runtime := prepared.runtime
-	cutRoot := prepared.request.SnapshotRoot
-	sealRequest := prepared.request
-	sealIntent := prepared.intent
-	sealed, err := p.pipeline.Sealer.Seal(ctx, sealRequest)
-	if err != nil {
-		return CheckpointResult{}, err
-	}
-	if sealed.Root != cutRoot {
-		return CheckpointResult{}, errors.New("registry sealer returned an unexpected cut root")
-	}
-	inventory, err = registryadapter.MergeCatalog(inventory, runtime.authority, sealed.References, now)
-	if err != nil {
-		return CheckpointResult{}, err
-	}
-	snapshot.Images = inventory
-	snapshot.RegistryCutRoot = sealed.Root
-	if err := p.journal.RecordFact(context.WithoutCancel(ctx), checkpointFact(sealIntent, now), snapshot); err != nil {
-		return CheckpointResult{}, err
+	attemptID := ""
+	root := ""
+	inventory := snapshot.Images
+	cutRoot := snapshot.RegistryCutRoot
+	var buildIntent ports.IntentRecord
+	if len(pending) == 1 && pending[0].Intent.Transition == "RootSnapshotStable" {
+		attemptID, root, buildIntent, err = preparePendingRootSnapshot(snapshot, pending[0].Intent, generation)
+		if err != nil {
+			return CheckpointResult{}, err
+		}
+	} else {
+		prepared, err := p.prepareRegistrySeal(ctx, snapshot, pending, lease, generation, now)
+		if err != nil {
+			return CheckpointResult{}, err
+		}
+		snapshot = prepared.snapshot
+		attemptID = prepared.attemptID
+		root = prepared.root
+		inventory = prepared.inventory
+		runtime := prepared.runtime
+		cutRoot = prepared.request.SnapshotRoot
+		sealed, err := p.pipeline.Sealer.Seal(ctx, prepared.request)
+		if err != nil {
+			return CheckpointResult{}, err
+		}
+		if sealed.Root != cutRoot {
+			return CheckpointResult{}, errors.New("registry sealer returned an unexpected cut root")
+		}
+		inventory, err = registryadapter.MergeCatalog(inventory, runtime.authority, sealed.References, now)
+		if err != nil {
+			return CheckpointResult{}, err
+		}
+		snapshot.Images = inventory
+		snapshot.RegistryCutRoot = sealed.Root
+		if err := p.journal.RecordFact(context.WithoutCancel(ctx), checkpointFact(prepared.intent, now), snapshot); err != nil {
+			return CheckpointResult{}, err
+		}
+		buildIntent = checkpointAttemptIntent(sessionID, attemptID, "RootSnapshotStable", 4, now, struct {
+			Root       string `json:"root"`
+			Generation uint64 `json:"generation"`
+		}{Root: root, Generation: generation})
+		if err := p.journal.RecordIntent(ctx, buildIntent); err != nil {
+			return CheckpointResult{}, err
+		}
 	}
 
 	tools := snapshot.Tools
 	if tools == (domain.ToolVersions{}) && snapshot.CurrentPointer != nil {
 		tools = snapshot.CurrentPointer.Tools
 	}
-	buildIntent := checkpointAttemptIntent(sessionID, attemptID, "RootSnapshotStable", 4, now, struct {
-		Root       string `json:"root"`
-		Generation uint64 `json:"generation"`
-	}{Root: mirrored.Root, Generation: generation})
-	if err := p.journal.RecordIntent(ctx, buildIntent); err != nil {
-		return CheckpointResult{}, err
-	}
 	built, err := p.builder.Build(ctx, checkpoint.BuildRequest{
-		Capsule: snapshot.Capsule, Root: mirrored.Root, Inventory: inventory, Lineage: snapshot.Lineage,
+		Capsule: snapshot.Capsule, Root: root, Inventory: inventory, Lineage: snapshot.Lineage,
 		Generation: generation, Parent: parent, SessionID: sessionID,
 		CreatedAt: now, Tools: tools,
 	})
@@ -231,7 +241,7 @@ func (p *CheckpointPublisher) Publish(ctx context.Context, operation ports.Opera
 	snapshot.ExpectedPointerRevision = string(published.Revision)
 	refreshRequest := ServingRefreshRequest{
 		SessionID: sessionID, Generation: result.Generation, HaulPath: built.Artifact.Path,
-		RegistrySnapshotRoot: sealed.Root,
+		RegistrySnapshotRoot: cutRoot,
 	}
 	refreshIntent := checkpointAttemptIntent(sessionID, attemptID, "ServingContentRefreshed", 7, now, refreshRequest)
 	if err := p.journal.RecordIntent(context.WithoutCancel(ctx), refreshIntent); err != nil {
@@ -257,6 +267,26 @@ func (p *CheckpointPublisher) Publish(ctx context.Context, operation ports.Opera
 		return result, nil
 	}
 	return result, nil
+}
+
+func preparePendingRootSnapshot(snapshot domain.JournalSnapshot, intent ports.IntentRecord, generation uint64) (string, string, ports.IntentRecord, error) {
+	attemptID := snapshot.Workspace.Mirror.AttemptID
+	root := snapshot.Workspace.Mirror.Root
+	if attemptID == "" || snapshot.Workspace.Mirror.State != domain.MirrorCompleted || root == "" || intent.ID != attemptID+"-4" || intent.SessionID != snapshot.SessionID {
+		return "", "", ports.IntentRecord{}, errors.New("pending root snapshot does not match the durable checkpoint attempt")
+	}
+	var request struct {
+		Root       string `json:"root"`
+		Generation uint64 `json:"generation"`
+	}
+	if err := json.Unmarshal(intent.Input, &request); err != nil || request.Root != root || request.Generation != generation {
+		return "", "", ports.IntentRecord{}, errors.New("pending root snapshot request drifted from durable session state")
+	}
+	expectedCutRoot := filepath.Join(root, ".camp", "build", "registry-cut-"+strconv.FormatUint(generation, 10))
+	if snapshot.RegistryCutRoot != expectedCutRoot {
+		return "", "", ports.IntentRecord{}, errors.New("pending root snapshot lacks its sealed registry cut")
+	}
+	return attemptID, root, intent, nil
 }
 
 type preparedRegistrySeal struct {

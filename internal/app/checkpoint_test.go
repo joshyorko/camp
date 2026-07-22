@@ -757,6 +757,63 @@ func TestCheckpointPublisherSnapshotFailureCannotBuildUploadOrMovePointer(t *tes
 	}
 }
 
+func TestCheckpointPublisherResumesExactPendingRootSnapshotWithoutRepeatingEarlierEffects(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	sandbox := t.TempDir()
+	root := filepath.Join(sandbox, "root")
+	if err := os.MkdirAll(filepath.Join(root, ".camp", "build"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	backend, err := filebackend.New(filepath.Join(sandbox, "backend"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := time.Unix(100, 0).UTC()
+	lease := domain.WriterLease{
+		SchemaVersion: domain.SchemaVersion, SessionID: "session-build-retry", Capsule: "brain", Lineage: domain.Lineage{Branch: "main"},
+		Machine: "machine-a", CreatedAt: now.Add(-time.Minute), HeartbeatAt: now, ExpiresAt: now.Add(time.Minute),
+	}
+	attemptID := lease.SessionID + "-checkpoint-1"
+	snapshot := domain.JournalSnapshot{
+		SchemaVersion: domain.SchemaVersion, SessionID: lease.SessionID, Capsule: lease.Capsule, Lineage: lease.Lineage, Mode: domain.SessionReadWrite, State: domain.SessionOpen,
+		Lease: domain.LeaseRecord{Lease: &lease, Revision: "lease-r1"},
+		Workspace: domain.WorkspaceRecord{
+			ID: "camp-brain", Context: "default", Provider: "docker", LocalProvider: true, LocalFolder: root, StagingRoot: root,
+			Mirror: domain.MirrorAttemptRecord{LogicalAttempt: 1, AttemptID: attemptID, State: domain.MirrorCompleted, Root: root, Method: "local-noop"},
+		},
+		Images:          domain.ImageInventory{SchemaVersion: domain.SchemaVersion, GeneratedAt: now, Images: []domain.Image{}},
+		RegistryCutRoot: filepath.Join(root, ".camp", "build", "registry-cut-1"),
+	}
+	prepareCheckpointRuntime(t, &snapshot, sandbox)
+	log, err := journal.NewStore(filepath.Join(sandbox, "journal"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := log.Create(ctx, snapshot); err != nil {
+		t.Fatal(err)
+	}
+	buildIntent := checkpointAttemptIntent(snapshot.SessionID, attemptID, "RootSnapshotStable", 4, now, struct {
+		Root       string `json:"root"`
+		Generation uint64 `json:"generation"`
+	}{Root: root, Generation: 1})
+	if err := log.RecordIntent(ctx, buildIntent); err != nil {
+		t.Fatal(err)
+	}
+	mirror := &fakeMirror{}
+	fakes := newCheckpointFakes(now)
+	publisher := NewCheckpointPublisher(log, &fakeLockValidator{}, &fakeLeaseValidator{}, localCheckpointTransports(mirror), fakes.pipeline(), &fakeCheckpointBuilder{}, coordination.NewGenerationRepository(backend), coordination.NewPointerRepository(backend), fixedAppClock{now: now})
+	token := ports.OperationToken{ID: "lock", Owner: ports.OperationOwner{SessionID: snapshot.SessionID, Operation: "sync"}}
+
+	result, err := publisher.Publish(ctx, token, snapshot.SessionID)
+	if err != nil || !result.Published {
+		t.Fatalf("resume pending root snapshot result=%#v error=%v", result, err)
+	}
+	if mirror.calls != 0 || fakes.capture.calls != 0 || fakes.seal.calls != 0 {
+		t.Fatalf("earlier effects repeated: mirror=%d capture=%d seal=%d", mirror.calls, fakes.capture.calls, fakes.seal.calls)
+	}
+}
+
 type fixedAppClock struct{ now time.Time }
 
 func (c fixedAppClock) Now() time.Time                       { return c.now }
