@@ -1,0 +1,29 @@
+class Camp < Formula
+  desc "Recoverable capsule workspaces"
+  homepage "https://github.com/joshyorko/camp"
+  version "{{VERSION}}"
+
+  on_linux do
+    if Hardware::CPU.arm?
+      url "{{ARM64_URL}}"
+      sha256 "{{ARM64_SHA256}}"
+    else
+      url "{{AMD64_URL}}"
+      sha256 "{{AMD64_SHA256}}"
+    end
+  end
+
+  depends_on "passt"
+
+  def install
+    bin.install "camp"
+    bash_completion.install "completions/camp.bash" => "camp"
+    zsh_completion.install "completions/_camp"
+    fish_completion.install "completions/camp.fish"
+  end
+
+  test do
+    system "#{bin}/camp", "--version"
+    system "#{bin}/camp", "--help"
+  end
+end
