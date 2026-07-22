@@ -71,65 +71,137 @@ func (u *Close) Run(ctx context.Context, request CloseRequest) (result CloseResu
 		}
 		return result, nil
 	}
-	if len(pending) != 0 {
-		if snapshot.Mode != domain.SessionReadWrite {
-			return result, fmt.Errorf("close requires recovery of %d pending transition(s)", len(pending))
-		}
-		recovered, err := u.publisher.Publish(ctx, token, snapshot.SessionID)
-		if err != nil {
-			return result, fmt.Errorf("recover pending checkpoint before close: %w", err)
-		}
-		if !recovered.Published || recovered.RefreshError != "" {
-			return result, fmt.Errorf("recover pending checkpoint before close: %s", recovered.RefreshError)
-		}
-		snapshot, pending, err = u.journal.Load(ctx, request.SessionID)
-		if err != nil {
-			return result, err
-		}
-		if len(pending) != 0 {
-			return result, fmt.Errorf("close recovery left %d pending transition(s)", len(pending))
-		}
+	resumeIntent, resumeIndex, resumeCleanup, err := selectCloseCleanupPending(snapshot, pending)
+	if err != nil {
+		return result, err
 	}
 	now := u.clock.Now().UTC()
 	sequence := 1
-	if err := u.record(ctx, &snapshot, "CloseStarted", sequence, now); err != nil {
-		return result, err
-	}
-	sequence++
-	snapshot.Cleanup = domain.Cleanup{State: domain.CleanupRunning}
-
-	if snapshot.Mode == domain.SessionReadWrite {
-		published, err := u.publisher.Publish(ctx, token, snapshot.SessionID)
-		if err != nil {
-			return result, err
-		}
-		if !published.Published {
-			return result, errors.New("final checkpoint did not publish")
-		}
-		if loaded, _, loadErr := u.journal.Load(ctx, snapshot.SessionID); loadErr == nil {
-			snapshot = loaded
-		}
-		result.PublicationSucceeded = true
-		result.Generation = published.Generation
-		result.RefreshError = published.RefreshError
-		snapshot.Checkpoint.State = domain.CheckpointPublished
-		snapshot.Checkpoint.Generation = cloneGeneration(&published.Generation)
-		snapshot.Checkpoint.PublicationSucceeded = true
-		if err := u.record(context.WithoutCancel(ctx), &snapshot, "FinalCheckpointComplete", sequence, now); err != nil {
-			return result, err
+	if resumeCleanup {
+		result.PublicationSucceeded = snapshot.Checkpoint.PublicationSucceeded
+		if snapshot.Checkpoint.Generation != nil {
+			result.Generation = *snapshot.Checkpoint.Generation
 		}
 	} else {
-		if err := u.record(ctx, &snapshot, "ReadonlyDiscardRecorded", sequence, now); err != nil {
+		if err := u.record(ctx, &snapshot, "CloseStarted", sequence, now); err != nil {
+			return result, err
+		}
+		sequence++
+		snapshot.Cleanup = domain.Cleanup{State: domain.CleanupRunning}
+
+		if snapshot.Mode == domain.SessionReadWrite {
+			published, err := u.publisher.Publish(ctx, token, snapshot.SessionID)
+			if err != nil {
+				return result, err
+			}
+			if !published.Published {
+				return result, errors.New("final checkpoint did not publish")
+			}
+			if loaded, _, loadErr := u.journal.Load(ctx, snapshot.SessionID); loadErr == nil {
+				snapshot = loaded
+			}
+			result.PublicationSucceeded = true
+			result.Generation = published.Generation
+			result.RefreshError = published.RefreshError
+			snapshot.Checkpoint.State = domain.CheckpointPublished
+			snapshot.Checkpoint.Generation = cloneGeneration(&published.Generation)
+			snapshot.Checkpoint.PublicationSucceeded = true
+			if err := u.record(context.WithoutCancel(ctx), &snapshot, "FinalCheckpointComplete", sequence, now); err != nil {
+				return result, err
+			}
+		} else {
+			if err := u.record(ctx, &snapshot, "ReadonlyDiscardRecorded", sequence, now); err != nil {
+				return result, err
+			}
+		}
+		sequence++
+	}
+
+	steps := u.closeCleanupSteps(ctx, request.KeepWorkspace, snapshot)
+	for i, step := range steps {
+		intentSequence := i + 3
+		if resumeCleanup && i < resumeIndex {
+			continue
+		}
+		intent := closeIntent(snapshot.SessionID, step.transition, intentSequence, now)
+		if resumeCleanup && i == resumeIndex {
+			intent = resumeIntent.Intent
+		} else if err := u.journal.RecordIntent(ctx, intent); err != nil {
+			return result, err
+		}
+		if err := step.effect(); err != nil {
+			snapshot.Cleanup = domain.Cleanup{State: domain.CleanupFailed, LastErr: err.Error()}
+			_ = u.record(context.WithoutCancel(ctx), &snapshot, "CleanupFailed", intentSequence, now)
+			return result, err
+		}
+		if err := u.journal.RecordFact(context.WithoutCancel(ctx), checkpointFact(intent, now), snapshot); err != nil {
 			return result, err
 		}
 	}
-	sequence++
+	snapshot.State = domain.SessionClosed
+	snapshot.Cleanup = domain.Cleanup{State: domain.CleanupSucceeded}
+	if err := u.record(context.WithoutCancel(ctx), &snapshot, "SessionClosed", len(steps)+3, now); err != nil {
+		return result, err
+	}
+	result.CleanupSucceeded = true
+	if snapshot.Mode == domain.SessionReadOnly {
+		result.RecoveryCommand = ""
+	}
+	return result, nil
+}
 
+func selectCloseCleanupPending(snapshot domain.JournalSnapshot, pending []ports.PendingIntent) (ports.PendingIntent, int, bool, error) {
+	if snapshot.Cleanup.State != domain.CleanupRunning && snapshot.Cleanup.State != domain.CleanupFailed {
+		for _, item := range pending {
+			if isCloseCleanupTransition(item.Intent.Transition) {
+				return ports.PendingIntent{}, 0, false, fmt.Errorf("unsupported pending cleanup state %q", snapshot.Cleanup.State)
+			}
+		}
+		return ports.PendingIntent{}, 0, false, nil
+	}
+	if len(pending) != 1 {
+		return ports.PendingIntent{}, 0, false, fmt.Errorf("close recovery requires exactly one pending cleanup intent, got %d", len(pending))
+	}
+	index, ok := closeCleanupTransitionIndex(pending[0].Intent.Transition)
+	if !ok {
+		return ports.PendingIntent{}, 0, false, fmt.Errorf("unsupported pending cleanup transition %q", pending[0].Intent.Transition)
+	}
+	return pending[0], index, true, nil
+}
+
+func isCloseCleanupTransition(transition string) bool {
+	switch transition {
+	case "WorkspaceStoppedOrDeleted", "ForwardersStopped", "ServicesStopped", "SupervisorStopped", "LeaseReleased", "MaterializationRemoved", "AdoptedPreserved":
+		return true
+	default:
+		return false
+	}
+}
+
+func closeCleanupTransitionIndex(transition string) (int, bool) {
+	switch transition {
+	case "WorkspaceStoppedOrDeleted":
+		return 0, true
+	case "ForwardersStopped":
+		return 1, true
+	case "ServicesStopped":
+		return 2, true
+	case "SupervisorStopped":
+		return 3, true
+	default:
+		return 0, false
+	}
+}
+
+func (u *Close) closeCleanupSteps(ctx context.Context, keepWorkspace bool, snapshot domain.JournalSnapshot) []struct {
+	transition string
+	effect     func() error
+} {
 	steps := []struct {
 		transition string
 		effect     func() error
 	}{
-		{"WorkspaceStoppedOrDeleted", func() error { return u.effects.CloseWorkspace(ctx, snapshot, request.KeepWorkspace) }},
+		{"WorkspaceStoppedOrDeleted", func() error { return u.effects.CloseWorkspace(ctx, snapshot, keepWorkspace) }},
 		{"ForwardersStopped", func() error { return u.effects.StopForwarders(ctx, snapshot) }},
 		{"ServicesStopped", func() error { return u.effects.StopServices(ctx, snapshot) }},
 		{"SupervisorStopped", func() error { return u.effects.StopSupervisor(ctx, snapshot) }},
@@ -160,32 +232,7 @@ func (u *Close) Run(ctx context.Context, request CloseRequest) (result CloseResu
 		}
 		return nil
 	}})
-
-	for _, step := range steps {
-		intent := closeIntent(snapshot.SessionID, step.transition, sequence, now)
-		if err := u.journal.RecordIntent(ctx, intent); err != nil {
-			return result, err
-		}
-		if err := step.effect(); err != nil {
-			snapshot.Cleanup = domain.Cleanup{State: domain.CleanupFailed, LastErr: err.Error()}
-			_ = u.record(context.WithoutCancel(ctx), &snapshot, "CleanupFailed", sequence, now)
-			return result, err
-		}
-		if err := u.journal.RecordFact(context.WithoutCancel(ctx), checkpointFact(intent, now), snapshot); err != nil {
-			return result, err
-		}
-		sequence++
-	}
-	snapshot.State = domain.SessionClosed
-	snapshot.Cleanup = domain.Cleanup{State: domain.CleanupSucceeded}
-	if err := u.record(context.WithoutCancel(ctx), &snapshot, "SessionClosed", sequence, now); err != nil {
-		return result, err
-	}
-	result.CleanupSucceeded = true
-	if snapshot.Mode == domain.SessionReadOnly {
-		result.RecoveryCommand = ""
-	}
-	return result, nil
+	return steps
 }
 
 func (u *Close) record(ctx context.Context, snapshot *domain.JournalSnapshot, transition string, sequence int, timestamp time.Time) error {
