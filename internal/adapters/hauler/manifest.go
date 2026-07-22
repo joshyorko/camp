@@ -46,7 +46,6 @@ type imagesSpec struct {
 type manifestImage struct {
 	Name     string `yaml:"name"`
 	Platform string `yaml:"platform,omitempty"`
-	Rewrite  string `yaml:"rewrite,omitempty"`
 	Local    bool   `yaml:"local,omitempty"`
 }
 
@@ -63,24 +62,12 @@ func RenderManifest(capsule string, inventory domain.ImageInventory) ([]byte, er
 			return nil, errors.New("image inventory entry lacks reference")
 		}
 		name := image.CapturedReference
-		rewrites := []string{""}
 		switch image.Source {
 		case domain.ImageSourceRegistry:
 			var err error
 			name, err = immutableImageReference(image.CapturedReference, image.CapturedManifestDigest)
 			if err != nil {
 				return nil, err
-			}
-			capturedAuthority := strings.SplitN(image.CapturedReference, "/", 2)[0]
-			for _, original := range image.OriginalTags {
-				parts := strings.SplitN(original, "/", 2)
-				if len(parts) != 2 || parts[0] != capturedAuthority {
-					continue
-				}
-				if _, err := immutableImageReference(original, image.CapturedManifestDigest); err != nil {
-					return nil, err
-				}
-				rewrites = append(rewrites, parts[1])
 			}
 		case domain.ImageSourceDaemon:
 		default:
@@ -98,21 +85,16 @@ func RenderManifest(capsule string, inventory domain.ImageInventory) ([]byte, er
 		} else if image.Source == domain.ImageSourceDaemon {
 			return nil, errors.New("daemon image inventory entry lacks platform")
 		}
-		for _, rewrite := range rewrites {
-			key := name + "\x00" + rewrite + "\x00" + platform
-			if _, duplicate := seen[key]; duplicate {
-				continue
-			}
-			seen[key] = struct{}{}
-			images = append(images, manifestImage{Name: name, Platform: platform, Rewrite: rewrite, Local: image.Source == domain.ImageSourceDaemon})
+		key := name + "\x00" + platform
+		if _, duplicate := seen[key]; duplicate {
+			return nil, fmt.Errorf("duplicate manifest image %q", name)
 		}
+		seen[key] = struct{}{}
+		images = append(images, manifestImage{Name: name, Platform: platform, Local: image.Source == domain.ImageSourceDaemon})
 	}
 	sort.Slice(images, func(i, j int) bool {
 		if images[i].Name == images[j].Name {
-			if images[i].Rewrite == images[j].Rewrite {
-				return images[i].Platform < images[j].Platform
-			}
-			return images[i].Rewrite < images[j].Rewrite
+			return images[i].Platform < images[j].Platform
 		}
 		return images[i].Name < images[j].Name
 	})
