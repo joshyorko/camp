@@ -24,6 +24,10 @@ type Lifecycle interface {
 	Supervise(context.Context, string, OutputMode, io.Writer) error
 }
 
+type Setup interface {
+	Setup(context.Context, OutputMode, io.Writer) error
+}
+
 func NewRootWithLifecycle(lifecycle Lifecycle) *cobra.Command {
 	root := &cobra.Command{
 		Use:           "camp",
@@ -44,6 +48,9 @@ func NewRootWithLifecycle(lifecycle Lifecycle) *cobra.Command {
 	})
 	root.DisableAutoGenTag = true
 	root.AddCommand(newCompletionCommand(root))
+	if setup, ok := lifecycle.(Setup); ok {
+		root.AddCommand(noArgumentCommand("setup", "Install or reuse pinned DevPod and Hauler tools", setup.Setup))
+	}
 	root.AddCommand(
 		optionalArgumentCommand("init", "Initialize a capsule root", lifecycle.Init),
 		optionalArgumentCommand("open", "Open a capsule workspace", lifecycle.Open),

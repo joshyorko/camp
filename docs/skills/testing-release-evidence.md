@@ -78,5 +78,6 @@ bootstrap, or a real DevPod/Kubernetes lifecycle.
 - `packaging/homebrew/metadata.json` and `camp.rb.tmpl`
 - `integration/contracts_test.go`
 - `internal/capsule/ownership.go` and `internal/capsule/ownership_test.go`
+- `internal/app/supervise_test.go`
 - `docs/superpowers/plans/2026-07-14-camp.md` (names the currently missing local lifecycle gates)
 - `.github/` is currently absent, so no repository CI/release workflow is established.
