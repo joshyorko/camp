@@ -15,6 +15,7 @@ import (
 	campcontract "github.com/joshyorko/camp"
 	tooladapter "github.com/joshyorko/camp/internal/adapters/tools"
 	"github.com/joshyorko/camp/internal/config"
+	"github.com/joshyorko/camp/internal/presentation"
 )
 
 type toolEnsurer interface {
@@ -29,13 +30,24 @@ type setupResult struct {
 
 func (p *ProductionLifecycle) Setup(ctx context.Context, mode OutputMode, out io.Writer) error {
 	lockBytes := campcontract.DistributionToolLock()
-	if err := runProductionToolSetup(ctx, mode, out, lockBytes, "", environmentMap(os.Environ()), runtime.GOOS, runtime.GOARCH); err != nil || mode == ModeJSON {
+	experience := resolveTerminalExperience(mode, out, environmentMap(os.Environ()), probeTerminal)
+	completed := func(name string, resolution tooladapter.Resolution) error {
+		return writeLifecycleEvents(out, experience, "setup", presentation.LifecycleEvent{Stage: presentation.StageToolReady, Message: fmt.Sprintf("%s %s is ready", name, resolution.Version)})
+	}
+	if mode == ModeJSON {
+		completed = nil
+	}
+	if err := runProductionToolSetupWithEvents(ctx, mode, out, lockBytes, "", environmentMap(os.Environ()), runtime.GOOS, runtime.GOARCH, completed); err != nil || mode == ModeJSON {
 		return err
 	}
 	return renderProductionSetupCampsite(ctx, out, lockBytes)
 }
 
 func runProductionToolSetup(ctx context.Context, mode OutputMode, out io.Writer, lockBytes []byte, home string, environment map[string]string, goos, arch string, options ...tooladapter.InstallerOption) error {
+	return runProductionToolSetupWithEvents(ctx, mode, out, lockBytes, home, environment, goos, arch, nil, options...)
+}
+
+func runProductionToolSetupWithEvents(ctx context.Context, mode OutputMode, out io.Writer, lockBytes []byte, home string, environment map[string]string, goos, arch string, completed func(string, tooladapter.Resolution) error, options ...tooladapter.InstallerOption) error {
 	lock, err := tooladapter.ParseLock(bytes.NewReader(lockBytes))
 	if err != nil {
 		return err
@@ -48,10 +60,14 @@ func runProductionToolSetup(ctx context.Context, mode OutputMode, out io.Writer,
 	if err != nil {
 		return err
 	}
-	return runManagedToolSetup(ctx, mode, out, installer, goos, arch)
+	return runManagedToolSetupWithEvents(ctx, mode, out, installer, goos, arch, completed)
 }
 
 func runManagedToolSetup(ctx context.Context, mode OutputMode, out io.Writer, ensurer toolEnsurer, goos, arch string) error {
+	return runManagedToolSetupWithEvents(ctx, mode, out, ensurer, goos, arch, nil)
+}
+
+func runManagedToolSetupWithEvents(ctx context.Context, mode OutputMode, out io.Writer, ensurer toolEnsurer, goos, arch string, completed func(string, tooladapter.Resolution) error) error {
 	result := setupResult{Tools: make([]tooladapter.Resolution, 0, 2)}
 	for _, name := range []string{"devpod", "hauler"} {
 		resolution, err := ensurer.Ensure(ctx, name, goos, arch)
@@ -59,6 +75,11 @@ func runManagedToolSetup(ctx context.Context, mode OutputMode, out io.Writer, en
 			return fmt.Errorf("prepare %s: %w", name, err)
 		}
 		result.Tools = append(result.Tools, resolution)
+		if completed != nil {
+			if err := completed(name, resolution); err != nil {
+				return err
+			}
+		}
 		if resolution.Managed {
 			result.PATH = append(result.PATH, filepath.Dir(resolution.Path))
 		}
