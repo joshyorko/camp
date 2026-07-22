@@ -63,6 +63,14 @@ func TestArchiveBuildIsReproducibleAndSmokeTestable(t *testing.T) {
 	if !strings.Contains(string(install), "passt") || !strings.Contains(string(install), "pasta") {
 		t.Fatalf("INSTALL.md does not declare the external passt/pasta prerequisite:\n%s", install)
 	}
+	for _, required := range []string{"first lifecycle command", "automatically", "no PATH export"} {
+		if !strings.Contains(string(install), required) {
+			t.Fatalf("INSTALL.md does not document %q managed-tool behavior:\n%s", required, install)
+		}
+	}
+	if strings.Contains(string(install), "once that behavior lands") {
+		t.Fatalf("INSTALL.md still describes managed bootstrap as unfinished:\n%s", install)
+	}
 }
 
 func buildArchives(t *testing.T, repositoryRoot, output string) {

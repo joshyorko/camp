@@ -9,6 +9,8 @@ loopback-confined services. Generic archives do not install this external host
 capability. Install `passt` using the supported mechanism for the Linux host and
 verify that `pasta` is on `PATH` before running a lifecycle command.
 
-The binary can bootstrap its pinned DevPod and Hauler tools on first use once
-that behavior lands in Camp. The generic archive itself does not bundle those
-tools or prove that unfinished bootstrap path.
+The first lifecycle command automatically downloads or reuses Camp's pinned,
+checksum-verified DevPod and Hauler binaries under the XDG data directory. Camp
+passes those verified executable paths directly to its adapters, so no PATH export
+or shell-startup edit is required. `camp setup` remains available to
+prewarm and inspect the same managed installation before a lifecycle command.
