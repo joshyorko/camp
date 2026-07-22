@@ -7,6 +7,7 @@ import (
 	"os"
 	"os/exec"
 	"sort"
+	"syscall"
 
 	"github.com/joshyorko/camp/internal/ports"
 )
@@ -26,6 +27,19 @@ func (r *Runner) RunStarted(ctx context.Context, command ports.Command, started 
 
 func (r *Runner) run(ctx context.Context, command ports.Command, started func() error) (ports.Result, error) {
 	cmd := exec.CommandContext(ctx, command.Executable, command.Argv...)
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	cmd.Cancel = func() error {
+		if cmd.Process == nil {
+			return os.ErrProcessDone
+		}
+		if err := syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL); err != nil {
+			if err == syscall.ESRCH {
+				return os.ErrProcessDone
+			}
+			return err
+		}
+		return nil
+	}
 	cmd.Dir = command.Directory
 	cmd.Stdin = command.Stdin
 	cmd.Env = mergeEnvironment(command.Environment)
@@ -37,7 +51,7 @@ func (r *Runner) run(ctx context.Context, command ports.Command, started func() 
 	err := cmd.Start()
 	if err == nil && started != nil {
 		if startedErr := started(); startedErr != nil {
-			_ = cmd.Process.Kill()
+			_ = cmd.Cancel()
 			_ = cmd.Wait()
 			result := ports.Result{ExitCode: -1, Stdout: stdout.Bytes(), Stderr: stderr.Bytes()}
 			return result, startedErr

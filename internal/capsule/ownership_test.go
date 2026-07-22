@@ -68,7 +68,7 @@ func runOwnershipShortWriteHelper(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	canonical, _, device, inode, err := inspectRoot(root)
+	canonical, _, device, inode, _, err := inspectRoot(root)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -336,7 +336,7 @@ func TestOwnershipMarkerCreationRequiresStrictExistingMarker(t *testing.T) {
 func TestOwnershipMarkerDirectorySyncsEachNewParent(t *testing.T) {
 	t.Parallel()
 	root := t.TempDir()
-	_, _, device, inode, err := inspectRoot(root)
+	_, _, device, inode, _, err := inspectRoot(root)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -597,7 +597,7 @@ func TestOwnershipMarkerAnchorRejectsRootOrRuntimeReplacement(t *testing.T) {
 			if err := os.Mkdir(root, 0o700); err != nil {
 				t.Fatal(err)
 			}
-			_, _, device, inode, err := inspectRoot(root)
+			_, _, device, inode, _, err := inspectRoot(root)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -928,7 +928,7 @@ func TestOwnershipMarkerConvergesAfterProcessCrash(t *testing.T) {
 func runOwnershipMarkerCrashHelper(t *testing.T, mode string) {
 	root := os.Getenv("CAMP_OWNERSHIP_CRASH_ROOT")
 	token := os.Getenv("CAMP_OWNERSHIP_CRASH_TOKEN")
-	canonical, _, device, inode, err := inspectRoot(root)
+	canonical, _, device, inode, _, err := inspectRoot(root)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1136,6 +1136,12 @@ func TestOwnershipRevalidateAdoptedRejectsReplacedRootIdentity(t *testing.T) {
 	}
 	if info, err := os.Stat(root); err != nil || !info.IsDir() {
 		t.Fatalf("Revalidate mutated replacement root: info=%v error=%v", info, err)
+	}
+}
+
+func TestSameRootIdentityRejectsReusedInodeWithDifferentBirthTime(t *testing.T) {
+	if sameRootIdentity(7, 11, 13, 7, 11, 17) {
+		t.Fatal("root identity accepted a reused device and inode with a different birth time")
 	}
 }
 
