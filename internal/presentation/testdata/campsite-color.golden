@@ -1,0 +1,11 @@
+<ESC>[38;2;78;163;235m        ·          ✦                ·            ✦          ·<ESC>[0m
+<ESC>[38;2;69;119;74m      /\       /\          /\        /\       /\<ESC>[0m
+<ESC>[38;2;102;214;86m  ✓ TOOLCHAIN        ✓ RUNTIME        ✓ CAPSULE        ✓ STORAGE<ESC>[0m
+<ESC>[38;2;238;215;169m  DevPod v0.26.1 · Hauler v2.0.2<ESC>[0m
+<ESC>[38;2;238;215;169m  ror · remote DevPod · context work<ESC>[0m
+<ESC>[38;2;238;215;169m  brain · /home/josh/brain<ESC>[0m
+<ESC>[38;2;238;215;169m  s3 backend · s3://camp/brain · generation 42<ESC>[0m
+<ESC>[38;2;255;171;45m  ━━━━━━━━◆━━━━━━━━━━◆━━━━━━━━━━◆━━━━━━━━━━🔥<ESC>[0m
+
+<ESC>[38;2;255;171;45m                 CAMP IS READY<ESC>[0m
+<ESC>[38;2;56;155;255m                 > camp open /home/josh/brain<ESC>[0m
