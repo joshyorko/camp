@@ -13,6 +13,20 @@ git diff --check
 
 Report passed, failed, and skipped gates separately. Installed-tool tests may skip without pinned DevPod, Hauler, or `pasta`; those skips leave the real lifecycle unproved. A package test, commit, push, merge, packaged artifact, and deployed release are distinct evidence states.
 
+## Generated documentation gate
+
+Generate the command reference, deterministic command transcripts, versioned
+presentation examples, and bash/zsh/fish completions from the production Cobra
+tree with `go run ./cmd/camp-docs`. Never hand-edit `docs/generated/`.
+
+`go test ./internal/docsgen ./docs -count=1` compares every checked-in generated
+artifact byte-for-byte, excludes hidden commands, requires an effect-free
+dispatch transcript for every visible command, and verifies operator-index
+links. The transcript lifecycle proves Cobra parsing and handler dispatch only;
+it is not DevPod, Hauler, backend, lifecycle, or release evidence. When the
+public tree changes, regenerate and review
+`git diff -- docs/generated/commands.md` before accepting the change.
+
 When a stacked PR's base merges, restack the child directly onto the resulting `master` commit and compare `master...HEAD` before pushing. The post-rebase diff must contain only the child scope; record the old and new head SHAs, then force-push with a lease pinned to the observed old remote head so concurrent updates fail instead of being overwritten.
 
 Named acceptance gates require discovery evidence before execution evidence. `go test -run` exits zero even when no matching test exists, so first require the exact test name from `go test -list`, then run with `-v` and retain the matching `=== RUN` and `--- PASS` lines. A package-level `PASS` accompanied by `[no tests to run]` is not acceptance evidence.
