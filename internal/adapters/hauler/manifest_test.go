@@ -94,7 +94,7 @@ func TestManifestPrefersDeterministicSameRegistryOriginalReference(t *testing.T)
 		t.Fatalf("RenderManifest() error = %v", err)
 	}
 	text := string(body)
-	if !strings.Contains(text, "127.0.0.1:5000/camp-acceptance@"+digest) || strings.Contains(text, "camp/captured@") || strings.Contains(text, "example.test/team/app") {
+	if !strings.Contains(text, "127.0.0.1:5000/camp-acceptance@"+digest) || !strings.Contains(text, "rewrite: camp-acceptance:named") || strings.Contains(text, "camp/captured@") || strings.Contains(text, "example.test/team/app") {
 		t.Fatalf("manifest did not select the same-registry direct reference: %s", text)
 	}
 }
