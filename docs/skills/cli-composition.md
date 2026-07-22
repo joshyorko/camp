@@ -2,7 +2,7 @@
 
 ## Current boundary
 
-The executable delegates process I/O and exit status to `internal/cli`. The production tree exposes `init`, `open`, `sync`, `close`, `reopen`, and `recover` through concrete application and adapter composition, alongside deterministic help, global `--json`, and completion generation. A command is not real-tool lifecycle proof until the pinned tools complete it without skips.
+The executable delegates process I/O and exit status to `internal/cli`. The production tree exposes `setup`, `init`, `open`, `sync`, `close`, `reopen`, and `recover` through concrete application and adapter composition, alongside deterministic help, global `--json`, and completion generation. `setup` composes the locked installer but does not execute a lifecycle; lifecycle commands are not real-tool proof until the pinned tools complete them without skips.
 
 When adding commands, compose existing application use cases and adapters instead of moving lifecycle logic into Cobra handlers. Preserve exact argument arrays through typed ports; do not rebuild shell command strings.
 
