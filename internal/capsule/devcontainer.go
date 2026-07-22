@@ -12,6 +12,40 @@ import (
 
 var ErrInvalidDevcontainer = errors.New("invalid devcontainer configuration")
 
+const roomIPTablesCompatibility = `#!/bin/sh
+set -eu
+
+command_name=${0##*/}
+case "${command_name}" in
+iptables|iptables-save|iptables-restore)
+	if /usr/bin/iptables-legacy -t nat -L >/dev/null 2>&1; then
+		backend=iptables-legacy
+	else
+		backend=iptables-nft
+	fi
+	;;
+ip6tables|ip6tables-save|ip6tables-restore)
+	if /usr/bin/ip6tables-legacy -t nat -L >/dev/null 2>&1; then
+		backend=ip6tables-legacy
+	else
+		backend=ip6tables-nft
+	fi
+	;;
+*)
+	echo "unsupported iptables compatibility command: ${command_name}" >&2
+	exit 2
+	;;
+esac
+
+case "${command_name}" in
+*-save) suffix=-save ;;
+*-restore) suffix=-restore ;;
+*) suffix= ;;
+esac
+
+exec "/usr/bin/${backend}${suffix}" "$@"
+`
+
 type Devcontainer struct {
 	Path      string
 	Generated bool
@@ -62,10 +96,19 @@ func ResolveDevcontainer(root, explicit string, lock domain.CapsuleLock) (Devcon
 	if err := os.MkdirAll(runtimeDirectory, 0o700); err != nil {
 		return Devcontainer{}, err
 	}
+	compatibilityPath := filepath.Join(runtimeDirectory, "iptables-compat")
+	if err := writeExecutableStable(compatibilityPath, []byte(roomIPTablesCompatibility)); err != nil {
+		return Devcontainer{}, err
+	}
+	mounts := make([]string, 0, 6)
+	for _, executable := range []string{"iptables", "iptables-save", "iptables-restore", "ip6tables", "ip6tables-save", "ip6tables-restore"} {
+		mounts = append(mounts, "source=${localWorkspaceFolder}/.camp/runtime/iptables-compat,target=/usr/local/sbin/"+executable+",type=bind,readonly")
+	}
 	path := filepath.Join(runtimeDirectory, "devcontainer.json")
 	document := map[string]any{
 		"name":       "Camp Room of Requirement",
 		"image":      lock.Room.Image + "@" + lock.Room.Digest,
+		"mounts":     mounts,
 		"runArgs":    []string{"--privileged"},
 		"remoteUser": "vscode",
 	}
@@ -78,6 +121,20 @@ func ResolveDevcontainer(root, explicit string, lock domain.CapsuleLock) (Devcon
 		return Devcontainer{}, err
 	}
 	return Devcontainer{Path: path, Generated: true}, nil
+}
+
+func writeExecutableStable(path string, body []byte) error {
+	if err := writeStable(path, body); err != nil {
+		return err
+	}
+	info, err := os.Lstat(path)
+	if err != nil {
+		return err
+	}
+	if !info.Mode().IsRegular() || info.Mode()&os.ModeSymlink != 0 {
+		return fmt.Errorf("stable executable %q is not a regular file: %w", path, ErrInitializationConflict)
+	}
+	return os.Chmod(path, 0o755)
 }
 
 func validateDevcontainerPath(root, path string) (string, error) {

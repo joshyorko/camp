@@ -194,13 +194,41 @@ func serviceSpecFromRecord(record domain.ServiceUnitRecord) (ServiceSpec, error)
 	if record.Name == "" || record.LaunchToken == "" || record.Child.DesiredExecutable == "" || len(record.Child.Argv) < 2 || record.Child.Argv[0] != record.Child.DesiredExecutable || record.Helper.DesiredExecutable != record.Confinement.Executable {
 		return ServiceSpec{}, fmt.Errorf("recorded service identity is incomplete: %w", ErrUnitInvariant)
 	}
+	childContextPrefix, err := recordedChildContextPrefix(record)
+	if err != nil {
+		return ServiceSpec{}, err
+	}
 	return ServiceSpec{
 		SessionID: "observed-" + record.Name, Name: record.Name, LaunchToken: record.LaunchToken,
-		Capability: ConfinementCapability{Executable: record.Confinement.Executable, Version: record.Confinement.Version, EnvironmentFingerprint: record.Confinement.EnvironmentFingerprint, Boundary: record.Confinement.Boundary},
+		Capability: ConfinementCapability{Executable: record.Confinement.Executable, Version: record.Confinement.Version, EnvironmentFingerprint: record.Confinement.EnvironmentFingerprint, Boundary: record.Confinement.Boundary, ChildContextPrefix: childContextPrefix},
 		Mapping:    PortMapping{HostAddress: record.Mapping.HostAddress, HostPort: record.Mapping.HostPort, GuestPort: record.Mapping.GuestPort},
 		LogPath:    record.LogPath, PIDPath: record.PIDPath,
 		Child: ports.Command{Executable: record.Child.DesiredExecutable, Argv: append([]string(nil), record.Child.Argv[1:]...)},
 	}, nil
+}
+
+func recordedChildContextPrefix(record domain.ServiceUnitRecord) ([]string, error) {
+	separator := -1
+	for index, argument := range record.Helper.Argv {
+		if argument != "--" {
+			continue
+		}
+		if separator >= 0 {
+			return nil, fmt.Errorf("recorded helper has multiple child separators: %w", ErrUnitInvariant)
+		}
+		separator = index
+	}
+	if separator < 0 {
+		return nil, fmt.Errorf("recorded helper lacks a child separator: %w", ErrUnitInvariant)
+	}
+	tail := record.Helper.Argv[separator+1:]
+	if reflect.DeepEqual(tail, record.Child.Argv) {
+		return nil, nil
+	}
+	if len(tail) == len(record.Child.Argv)+3 && filepath.IsAbs(tail[0]) && tail[1] == "-t" && tail[2] == "unconfined_t" && reflect.DeepEqual(tail[3:], record.Child.Argv) {
+		return append([]string(nil), tail[:3]...), nil
+	}
+	return nil, fmt.Errorf("recorded helper child prefix or command drifted: %w", ErrUnitInvariant)
 }
 
 func recordedService(snapshot domain.JournalSnapshot, name string) (domain.ServiceUnitRecord, bool) {
@@ -333,7 +361,7 @@ func validateRecordedGroup(members []ports.ProcessStatus, record domain.ServiceU
 			continue
 		}
 		if member.Identity == record.Helper.Identity {
-			if !matchesProcessRecord(member, record.Helper) {
+			if !matchesDetachedHelperRecord(member, record.Helper) {
 				return fmt.Errorf("recorded helper identity drift: %w", ErrUnitInvariant)
 			}
 			continue
@@ -514,6 +542,11 @@ func argvSHA256(argv []string) string {
 func matchesProcessRecord(status ports.ProcessStatus, record domain.ProcessRecord) bool {
 	return status.Identity == record.Identity && status.Executable == record.ObservedExecutable && reflect.DeepEqual(status.Argv, record.Argv) &&
 		argvSHA256(status.Argv) == record.ArgvSHA256 && status.ParentPID == record.ParentPID && status.PGID == record.PGID && status.SID == record.SID && status.NetNS == record.NetNS
+}
+
+func matchesDetachedHelperRecord(status ports.ProcessStatus, record domain.ProcessRecord) bool {
+	record.ParentPID = status.ParentPID
+	return matchesProcessRecord(status, record)
 }
 
 func upsertService(snapshot domain.JournalSnapshot, record domain.ServiceUnitRecord) domain.JournalSnapshot {

@@ -126,6 +126,16 @@ func (m *ProcessManager) Group(ctx context.Context, pgid int) ([]ports.ProcessSt
 		if err != nil || pid <= 0 {
 			continue
 		}
+		candidate, err := m.inspectPIDStat(pid)
+		if err != nil {
+			if isProcessGone(err) {
+				continue
+			}
+			return nil, fmt.Errorf("inspect process-group member %d stat: %w", pid, err)
+		}
+		if !candidate.Running || candidate.PGID != pgid {
+			continue
+		}
 		status, err := m.inspectPID(pid)
 		if err != nil {
 			if isProcessGone(err) {
@@ -133,12 +143,22 @@ func (m *ProcessManager) Group(ctx context.Context, pgid int) ([]ports.ProcessSt
 			}
 			return nil, fmt.Errorf("inspect process-group member %d: %w", pid, err)
 		}
+		if err := validateGroupCandidate(candidate, status); err != nil {
+			return nil, fmt.Errorf("inspect process-group member %d changed during validation: %w", pid, err)
+		}
 		if status.Running && status.PGID == pgid {
 			result = append(result, status)
 		}
 	}
 	sort.Slice(result, func(i, j int) bool { return result[i].Identity.PID < result[j].Identity.PID })
 	return result, nil
+}
+
+func validateGroupCandidate(candidate, observed ports.ProcessStatus) error {
+	if observed.Identity != candidate.Identity || observed.PGID != candidate.PGID {
+		return ErrProcessIdentity
+	}
+	return nil
 }
 
 func (m *ProcessManager) Stop(ctx context.Context, identity domain.ProcessIdentity, grace time.Duration) error {
@@ -239,6 +259,31 @@ func isProcessGone(err error) bool {
 }
 
 func (m *ProcessManager) inspectPID(pid int) (ports.ProcessStatus, error) {
+	status, err := m.inspectPIDStat(pid)
+	if err != nil || !status.Running {
+		return status, err
+	}
+	identity := status.Identity
+	cmdline, err := os.ReadFile(filepath.Join(m.procRoot, strconv.Itoa(pid), "cmdline"))
+	if err != nil {
+		return ports.ProcessStatus{}, err
+	}
+	argv := splitNUL(cmdline)
+	executable, err := resolveObservedExecutable(filepath.Join(m.procRoot, strconv.Itoa(pid), "exe"), argv, os.Readlink)
+	if err != nil {
+		return ports.ProcessStatus{}, err
+	}
+	netns, err := resolveObservedNetNS(filepath.Join(m.procRoot, strconv.Itoa(pid), "ns", "net"), identity, os.Readlink)
+	if err != nil {
+		return ports.ProcessStatus{}, err
+	}
+	status.Executable = executable
+	status.Argv = argv
+	status.NetNS = netns
+	return status, nil
+}
+
+func (m *ProcessManager) inspectPIDStat(pid int) (ports.ProcessStatus, error) {
 	statBody, err := os.ReadFile(filepath.Join(m.procRoot, strconv.Itoa(pid), "stat"))
 	if err != nil {
 		return ports.ProcessStatus{}, err
@@ -271,22 +316,8 @@ func (m *ProcessManager) inspectPID(pid int) (ports.ProcessStatus, error) {
 	if fields[0] == "Z" {
 		return ports.ProcessStatus{Identity: identity, Running: false, ParentPID: parent, PGID: pgid, SID: sid}, nil
 	}
-	cmdline, err := os.ReadFile(filepath.Join(m.procRoot, strconv.Itoa(pid), "cmdline"))
-	if err != nil {
-		return ports.ProcessStatus{}, err
-	}
-	argv := splitNUL(cmdline)
-	executable, err := resolveObservedExecutable(filepath.Join(m.procRoot, strconv.Itoa(pid), "exe"), argv, os.Readlink)
-	if err != nil {
-		return ports.ProcessStatus{}, err
-	}
-	netns, err := resolveObservedNetNS(filepath.Join(m.procRoot, strconv.Itoa(pid), "ns", "net"), identity, os.Readlink)
-	if err != nil {
-		return ports.ProcessStatus{}, err
-	}
 	return ports.ProcessStatus{
-		Identity: identity, Running: true, Executable: executable, Argv: argv,
-		ParentPID: parent, PGID: pgid, SID: sid, NetNS: netns,
+		Identity: identity, Running: true, ParentPID: parent, PGID: pgid, SID: sid,
 	}, nil
 }
 

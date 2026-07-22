@@ -106,6 +106,30 @@ func TestServiceSupervisorObserveRejectsPIDReuseAndStaleListeners(t *testing.T) 
 	_ = spec
 }
 
+func TestServiceSupervisorObserveReconstructsRecordedSELinuxChildPrefix(t *testing.T) {
+	t.Parallel()
+	record, _, helper, child := observedServiceFixture(t)
+	separator := -1
+	for index, argument := range helper.Argv {
+		if argument == "--" {
+			separator = index
+			break
+		}
+	}
+	if separator < 0 {
+		t.Fatal("fixture helper argv lacks Pasta child separator")
+	}
+	prefix := []string{"/usr/bin/runcon", "-t", "unconfined_t"}
+	helper.Argv = append(append(append([]string(nil), helper.Argv[:separator+1]...), prefix...), helper.Argv[separator+1:]...)
+	record.Helper = processRecord(record.Helper.DesiredExecutable, helper)
+	manager := &fakeUnitProcessManager{helper: helper, children: []ports.ProcessStatus{child}}
+	inspector := &fakeUnitInspector{evidence: UnitEvidence{ChildNetNS: child.NetNS}}
+	observation, err := NewServiceSupervisor(nil, manager, inspector).Observe(context.Background(), record)
+	if err != nil || observation.State != UnitLive {
+		t.Fatalf("Observe(SELinux child prefix) = %#v, %v", observation, err)
+	}
+}
+
 func TestServiceSupervisorRestartJournalsBeforeStopAndReusesRecordedCommand(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
@@ -289,6 +313,21 @@ func TestRecordedProcessArgvDigestRejectsKnownIdentityDrift(t *testing.T) {
 	drifted.Argv = []string{"/opt/hauler", "other"}
 	if err := validateRecordedGroup([]ports.ProcessStatus{drifted}, domain.ServiceUnitRecord{Child: record}); err == nil {
 		t.Fatal("known process argv drift was accepted")
+	}
+}
+
+func TestValidateRecordedGroupAllowsDetachedHelperReparenting(t *testing.T) {
+	t.Parallel()
+	record, _, helper, child := observedServiceFixture(t)
+	helper.ParentPID++
+	if err := validateRecordedGroup([]ports.ProcessStatus{helper, child}, record); err != nil {
+		t.Fatalf("validateRecordedGroup(reparented helper) error = %v", err)
+	}
+
+	driftedChild := child
+	driftedChild.ParentPID++
+	if err := validateRecordedGroup([]ports.ProcessStatus{helper, driftedChild}, record); err == nil {
+		t.Fatal("validateRecordedGroup() accepted child parent drift")
 	}
 }
 

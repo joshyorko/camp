@@ -83,6 +83,44 @@ func TestProcessManagerGroupFailsClosedWhenMemberCannotBeInspected(t *testing.T)
 	}
 }
 
+func TestProcessManagerGroupIgnoresUninspectableNonMember(t *testing.T) {
+	t.Parallel()
+	root := t.TempDir()
+	processRoot := filepath.Join(root, "123")
+	if err := os.MkdirAll(processRoot, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	stat := "123 (kernel worker) S 1 8 8 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 42\n"
+	if err := os.WriteFile(filepath.Join(processRoot, "stat"), []byte(stat), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(processRoot, "cmdline"), []byte("kernel-worker\x00"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(processRoot, "exe"), nil, 0o000); err != nil {
+		t.Fatal(err)
+	}
+
+	manager := &ProcessManager{procRoot: root, bootID: "boot"}
+	group, err := manager.Group(context.Background(), 7)
+	if err != nil {
+		t.Fatalf("Group() error = %v; unrelated process must not require full inspection", err)
+	}
+	if len(group) != 0 {
+		t.Fatalf("Group() = %#v, want no members", group)
+	}
+}
+
+func TestProcessManagerGroupFailsClosedWhenCandidateChangesGroup(t *testing.T) {
+	t.Parallel()
+	candidate := ports.ProcessStatus{Identity: domain.ProcessIdentity{PID: 123, BootID: "boot", StartTicks: 42}, Running: true, PGID: 7}
+	observed := candidate
+	observed.PGID = 8
+	if err := validateGroupCandidate(candidate, observed); !errors.Is(err, ErrProcessIdentity) {
+		t.Fatalf("validateGroupCandidate() error = %v, want ErrProcessIdentity", err)
+	}
+}
+
 func TestCapabilityBearingExecutableFallsBackOnlyToValidatedAbsoluteArgv(t *testing.T) {
 	t.Parallel()
 	denied := func(string) (string, error) { return "", syscall.EPERM }
