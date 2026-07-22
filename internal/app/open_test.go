@@ -619,15 +619,16 @@ func (*localOpenLeases) AcquireBranchFrom(context.Context, string, domain.Lineag
 }
 
 type openForwarders struct {
-	events  *[]string
-	records map[string]domain.ForwardingRecord
+	events     *[]string
+	records    map[string]domain.ForwardingRecord
+	observeErr error
 }
 
 func (f *openForwarders) Start(_ context.Context, request domain.ForwardingRequest) (domain.ForwardingRecord, error) {
 	*f.events = append(*f.events, "forward:"+request.Name)
 	record := domain.ForwardingRecord{
 		Name: request.Name, LocalEndpoint: request.LocalEndpoint, WorkspaceEndpoint: request.WorkspaceEndpoint,
-		EvidencePath: request.EvidencePath,
+		EvidencePath: request.EvidencePath, EvidenceDevice: 1, EvidenceInode: uint64(len(request.Name) + 1),
 		Process:      domain.ProcessRecord{Identity: domain.ProcessIdentity{PID: len(request.Name) + 100, BootID: "boot", StartTicks: 10}},
 		DesiredState: domain.RuntimeDesiredRunning, ObservedState: domain.RuntimeObservedReady,
 	}
@@ -640,6 +641,9 @@ func (f *openForwarders) Start(_ context.Context, request domain.ForwardingReque
 
 func (f *openForwarders) Observe(_ context.Context, request domain.ForwardingRequest) (domain.ForwardingRecord, error) {
 	*f.events = append(*f.events, "observe-forward:"+request.Name)
+	if f.observeErr != nil {
+		return domain.ForwardingRecord{}, f.observeErr
+	}
 	record, ok := f.records[request.Name]
 	if !ok || record.EvidencePath != request.EvidencePath {
 		return domain.ForwardingRecord{}, errors.New("exact durable forwarder evidence is unavailable")

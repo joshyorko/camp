@@ -2,7 +2,9 @@ package app
 
 import (
 	"context"
+	"errors"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -10,7 +12,7 @@ import (
 	"github.com/joshyorko/camp/internal/ports"
 )
 
-func TestOpenReconcileRejectsPendingForwarderStartWithoutExactDurableEvidence(t *testing.T) {
+func TestOpenReconcileAdoptsPendingForwarderFromExactDurableEvidence(t *testing.T) {
 	t.Parallel()
 	env := newRemoteOpenTestEnvironment(t)
 	events := []string{}
@@ -60,6 +62,57 @@ func TestOpenReconcileRejectsPendingForwarderStartWithoutExactDurableEvidence(t 
 	}
 	if len(reconciled.Recovery.Forwarding) != 1 || reconciled.Recovery.Forwarding[0].Name != "registry" || journal.fact.IntentID != pending.ID {
 		t.Fatalf("reconciled forwarding = %#v fact = %#v", reconciled.Recovery.Forwarding, journal.fact)
+	}
+}
+
+func TestOpenReconcilePendingForwarderFailsClosedWithoutExactEvidence(t *testing.T) {
+	t.Parallel()
+	for _, failure := range []string{"durable evidence is absent", "durable evidence identity mismatched"} {
+		failure := failure
+		t.Run(failure, func(t *testing.T) {
+			t.Parallel()
+			env := newRemoteOpenTestEnvironment(t)
+			events := []string{}
+			forwarders := &openForwarders{events: &events}
+			env.open.deps.Forwarders = forwarders
+			first, err := env.open.Run(context.Background(), OpenRequest{
+				SessionID: "forwarder-fail-closed-" + strings.ReplaceAll(failure, " ", "-"), Capsule: "brain", Branch: "feature", SourceLineage: domain.Lineage{Branch: "main"},
+				Mode: domain.SessionReadWrite, RemoteAvailable: true, Target: "MemoryD", EntryMode: domain.EntryTerminal,
+				Context: "default", Provider: "docker", Machine: "machine-a", Runtime: env.runtime, Backend: env.backend,
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			runtimeRoot := first.Snapshot.Recovery.Session.RuntimeRoot
+			registryEndpoint := endpoint(first.Snapshot.Recovery.Configuration.RegistryPort)
+			pending := ports.IntentRecord{
+				ID: "forwarder-fail-closed-intent", SessionID: first.Snapshot.SessionID, Transition: "ForwarderStarted:registry", Timestamp: time.Unix(99, 0).UTC(),
+				Input: safeJSON(domain.ForwardingRequest{
+					Name: "registry", WorkspaceID: first.Snapshot.Workspace.ID, Context: first.Snapshot.Workspace.Context,
+					LocalEndpoint: registryEndpoint, WorkspaceEndpoint: registryEndpoint,
+					LogPath: filepath.Join(runtimeRoot, "registry-forward.log"), EvidencePath: filepath.Join(runtimeRoot, "registry-forward.json"),
+				}),
+			}
+			crashed := first.Snapshot
+			crashed.State = domain.SessionOpening
+			crashed.Recovery.Forwarding = nil
+			journal := &fakeOpenReconcileJournal{snapshot: crashed, pending: []ports.PendingIntent{{Intent: pending}}}
+			env.open.deps.Journal = journal
+			forwarders.observeErr = errors.New(failure)
+
+			if _, err := env.open.Reconcile(context.Background(), first.Snapshot.SessionID); err == nil {
+				t.Fatal("Reconcile() error = nil")
+			}
+			registryStarts := 0
+			for _, event := range events {
+				if event == "forward:registry" {
+					registryStarts++
+				}
+			}
+			if registryStarts != 1 || journal.fact.IntentID != "" || len(journal.snapshot.Recovery.Forwarding) != 0 {
+				t.Fatalf("starts=%d fact=%#v forwarding=%#v", registryStarts, journal.fact, journal.snapshot.Recovery.Forwarding)
+			}
+		})
 	}
 }
 

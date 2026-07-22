@@ -351,7 +351,8 @@ func (o *Open) observeForwarderStarted(ctx context.Context, snapshot domain.Jour
 		return ports.FactRecord{}, snapshot, err
 	}
 	if record.Name != request.Name || record.LocalEndpoint != request.LocalEndpoint || record.WorkspaceEndpoint != request.WorkspaceEndpoint ||
-		record.EvidencePath != request.EvidencePath || record.Process.Identity.PID <= 0 || record.Process.Identity.BootID == "" || record.Process.Identity.StartTicks == 0 ||
+		record.EvidencePath != request.EvidencePath || record.EvidenceDevice == 0 || record.EvidenceInode == 0 ||
+		record.Process.Identity.PID <= 0 || record.Process.Identity.BootID == "" || record.Process.Identity.StartTicks == 0 ||
 		record.DesiredState != domain.RuntimeDesiredRunning || record.ObservedState != domain.RuntimeObservedReady {
 		return ports.FactRecord{}, snapshot, errors.New("observed workspace forwarder does not match the pending intent")
 	}

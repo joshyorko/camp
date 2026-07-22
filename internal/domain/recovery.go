@@ -75,6 +75,8 @@ type ForwardingRecord struct {
 	LocalEndpoint     string        `json:"localEndpoint" yaml:"localEndpoint"`
 	WorkspaceEndpoint string        `json:"workspaceEndpoint" yaml:"workspaceEndpoint"`
 	EvidencePath      string        `json:"evidencePath" yaml:"evidencePath"`
+	EvidenceDevice    uint64        `json:"evidenceDevice,omitempty" yaml:"evidenceDevice,omitempty"`
+	EvidenceInode     uint64        `json:"evidenceInode,omitempty" yaml:"evidenceInode,omitempty"`
 	Process           ProcessRecord `json:"process" yaml:"process"`
 	DesiredState      RuntimeState  `json:"desiredState" yaml:"desiredState"`
 	ObservedState     RuntimeState  `json:"observedState" yaml:"observedState"`
