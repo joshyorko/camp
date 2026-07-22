@@ -220,6 +220,36 @@ func (p *ProductionLifecycle) Open(ctx context.Context, value string, mode Outpu
 	return writeSuccess(out, mode, "open", result, fmt.Sprintf("Opened %s (%s)\n", result.Snapshot.Capsule, result.Snapshot.SessionID))
 }
 
+func (p *ProductionLifecycle) Attach(ctx context.Context, request AttachRequest, mode OutputMode, out io.Writer) error {
+	composition, err := composeProduction(ctx)
+	if err != nil {
+		return err
+	}
+	usecase := app.NewAttach(app.AttachDependencies{
+		Sessions: composition.journal, Ownership: composition.ownership,
+		Target: target.Resolver{Zoxide: target.NewCommandZoxide("zoxide", composition.runner)}, DevPod: composition.devpod,
+	})
+	result, err := usecase.Run(ctx, app.AttachRequest{
+		Selector: app.SessionSelector{Capsule: composition.runtime.Capsule, Branch: "main"},
+		Target:   request.Target, Entry: devpod.IDEEntry{IDE: devpod.IDE(request.IDE)},
+		SSH: devpod.SSHOptions{
+			User: request.User, ForwardPorts: request.ForwardPorts, ReverseForwards: request.ReverseForwardPorts,
+			SendEnv: request.SendEnv, SetEnv: request.SetEnv, ForwardPortsTimeout: request.ForwardPortsTimeout,
+			AgentForwarding: request.AgentForwarding, GPGAgentForwarding: request.GPGAgentForwarding, Stdio: request.Stdio,
+			SSHKeepAliveInterval: request.SSHKeepAliveInterval, GitSSHSigningKey: request.GitSSHSigningKey,
+			TermMode: request.TermMode, InstallTerminfo: request.InstallTerminfo, ForwardedArgv: request.DevPodArgs,
+			Stdin: os.Stdin, Stdout: os.Stdout, Stderr: os.Stderr,
+		},
+	})
+	if err != nil {
+		return err
+	}
+	if mode == ModeJSON {
+		return writeSuccess(out, mode, "attach", result, "")
+	}
+	return nil
+}
+
 func resolveProductionProvider(provider string) (string, bool, error) {
 	provider = strings.TrimSpace(provider)
 	if provider == "" {

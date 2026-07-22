@@ -1,9 +1,11 @@
 package devpod
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"reflect"
+	"strings"
 	"testing"
 
 	"github.com/joshyorko/camp/internal/ports"
@@ -595,6 +597,21 @@ func TestSSHPreservesEveryTypedRepeatedPublicFlag(t *testing.T) {
 	}
 	if len(runner.commands) != 1 || !reflect.DeepEqual(runner.commands[0].Argv, want) {
 		t.Fatalf("commands = %#v, want argv %#v", runner.commands, want)
+	}
+}
+
+func TestSSHCommandKeepsInteractiveStreamsAttached(t *testing.T) {
+	t.Parallel()
+	stdin := strings.NewReader("input")
+	var stdout, stderr bytes.Buffer
+	command, err := NewClient("devpod", &recordingRunner{}).SSHCommand(SSHOptions{
+		WorkspaceID: "camp", Stdin: stdin, Stdout: &stdout, Stderr: &stderr,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if command.Stdin != stdin || command.Stdout != &stdout || command.Stderr != &stderr {
+		t.Fatalf("command streams = (%#v, %#v, %#v)", command.Stdin, command.Stdout, command.Stderr)
 	}
 }
 
