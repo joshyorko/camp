@@ -538,7 +538,7 @@ func reuseRunningSessionSupervisor(ctx context.Context, journal ports.Journal, p
 		return false, nil
 	}
 	record := snapshot.Supervisor
-	if record.Identity.PID <= 0 || record.Identity.BootID == "" || record.Identity.StartTicks == 0 || record.Desired != domain.RuntimeDesiredRunning || record.Observed != domain.RuntimeObservedReady {
+	if record.Identity.PID <= 0 || record.Identity.BootID == "" || record.Identity.StartTicks == 0 || record.Desired != domain.RuntimeDesiredRunning || record.Observed != domain.RuntimeObservedReady && record.Observed != domain.RuntimeObservedPending {
 		return false, nil
 	}
 	status, err := processes.Inspect(ctx, record.Identity)
@@ -548,7 +548,15 @@ func reuseRunningSessionSupervisor(ctx context.Context, journal ports.Journal, p
 		}
 		return false, err
 	}
-	return status.Running && status.Identity == record.Identity, nil
+	if !status.Running || status.Identity != record.Identity {
+		return false, nil
+	}
+	if record.Observed == domain.RuntimeObservedPending {
+		if err := waitForSupervisorClaim(ctx, journal, processes, sessionID, record.Identity); err != nil {
+			return false, err
+		}
+	}
+	return true, nil
 }
 
 func waitForSupervisorClaim(ctx context.Context, journal ports.Journal, processes ports.ProcessManager, sessionID string, identity domain.ProcessIdentity) error {

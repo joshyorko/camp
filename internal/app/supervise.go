@@ -160,6 +160,23 @@ func (u *Supervise) reconcileSupervisorClaims(ctx context.Context, snapshot doma
 		if intent.SessionID != snapshot.SessionID || intent.Transition != "SupervisorClaimed" {
 			return snapshot, fmt.Errorf("supervisor claim has unrelated pending transition %q", intent.Transition)
 		}
+		if len(intent.Input) == 0 {
+			fact := ports.FactRecord{IntentID: intent.ID, SessionID: intent.SessionID, Transition: intent.Transition, Timestamp: u.clock.Now().UTC()}
+			if err := u.journal.RecordFact(context.WithoutCancel(ctx), fact, snapshot); err != nil {
+				return snapshot, err
+			}
+			loaded, remaining, err := u.journal.Load(ctx, snapshot.SessionID)
+			if err != nil {
+				return snapshot, err
+			}
+			for _, candidate := range remaining {
+				if candidate.Intent.ID == intent.ID {
+					return snapshot, fmt.Errorf("pending supervisor claim %q remained after fact", intent.ID)
+				}
+			}
+			snapshot = loaded
+			continue
+		}
 		var input supervisorClaimInput
 		if err := json.Unmarshal(intent.Input, &input); err != nil {
 			return snapshot, fmt.Errorf("decode pending supervisor claim %q: %w", intent.ID, err)

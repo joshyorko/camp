@@ -215,6 +215,38 @@ func TestStartSessionSupervisorReusesExactRunningOwnerOnReentry(t *testing.T) {
 	}
 }
 
+func TestStartSessionSupervisorWaitsForExactRunningPendingOwner(t *testing.T) {
+	t.Parallel()
+
+	owner := domain.ProcessIdentity{PID: 331, BootID: "boot-pending", StartTicks: 21}
+	journal := &recordingJournal{snapshot: domain.JournalSnapshot{
+		SchemaVersion: domain.SchemaVersion,
+		SessionID:     "session-pending-owner",
+		Supervisor: domain.SupervisorRecord{
+			Identity: owner,
+			Desired:  domain.RuntimeDesiredRunning,
+			Observed: domain.RuntimeObservedPending,
+		},
+	}}
+	processes := &recordingProcessManager{
+		journal:  journal,
+		statuses: map[domain.ProcessIdentity]ports.ProcessStatus{owner: {Identity: owner, Running: true}},
+		onInspect: func(identity domain.ProcessIdentity) {
+			if identity == owner {
+				journal.snapshot.Supervisor.Observed = domain.RuntimeObservedReady
+			}
+		},
+	}
+	composition := productionComposition{productionBase: productionBase{paths: config.XDGPaths{DataRoot: t.TempDir()}, journal: journal}}
+
+	if err := startSessionSupervisor(context.Background(), composition, processes, "session-pending-owner"); err != nil {
+		t.Fatalf("startSessionSupervisor(pending owner) error = %v", err)
+	}
+	if processes.startCalls != 0 {
+		t.Fatalf("ProcessManager.Start calls = %d, want 0", processes.startCalls)
+	}
+}
+
 func TestStartSessionSupervisorDoesNotReuseOwnerWithPendingClaimRecovery(t *testing.T) {
 	t.Parallel()
 
@@ -387,6 +419,7 @@ type recordingProcessManager struct {
 	inspectErrs map[domain.ProcessIdentity]error
 	startCalls  int
 	stopCalls   int
+	onInspect   func(domain.ProcessIdentity)
 }
 
 func (r *recordingProcessManager) Start(_ context.Context, spec ports.ProcessSpec) (domain.ProcessIdentity, error) {
@@ -400,6 +433,9 @@ func (r *recordingProcessManager) Start(_ context.Context, spec ports.ProcessSpe
 	return r.identity, nil
 }
 func (r *recordingProcessManager) Inspect(_ context.Context, identity domain.ProcessIdentity) (ports.ProcessStatus, error) {
+	if r.onInspect != nil {
+		r.onInspect(identity)
+	}
 	if err := r.inspectErrs[identity]; err != nil {
 		return ports.ProcessStatus{}, err
 	}

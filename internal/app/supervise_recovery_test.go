@@ -93,6 +93,35 @@ func TestSupervisorClaimAcceptsDurableFactAfterLostResponseWithoutDuplicateInten
 	}
 }
 
+func TestSupervisorClaimRecoversLegacyPendingIntentWithoutInputBeforeReplacement(t *testing.T) {
+	t.Parallel()
+
+	store, err := journal.NewStore(filepath.Join(t.TempDir(), "journal"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	const sessionID = "session-legacy-claim"
+	if err := store.Create(context.Background(), domain.JournalSnapshot{SchemaVersion: domain.SchemaVersion, SessionID: sessionID, Mode: domain.SessionReadWrite}); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.RecordIntent(context.Background(), ports.IntentRecord{
+		ID: "legacy-supervisor-claim", SessionID: sessionID, Transition: "SupervisorClaimed", Attempt: 1, Timestamp: time.Unix(250, 0).UTC(),
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	replacementIdentity := domain.ProcessIdentity{PID: 353, BootID: "boot-legacy-replacement", StartTicks: 35}
+	clock := &controlledClock{now: time.Unix(251, 0).UTC(), ticker: &controlledTicker{channel: make(chan time.Time)}}
+	supervise := NewSupervise(store, nil, &recordingOperationLocker{}, clock, time.Minute, fakeHostIdentity{process: replacementIdentity})
+	if err := supervise.Claim(context.Background(), sessionID); err != nil {
+		t.Fatalf("replacement Claim() error = %v", err)
+	}
+	loaded, pending, err := store.Load(context.Background(), sessionID)
+	if err != nil || len(pending) != 0 || loaded.Supervisor.Identity != replacementIdentity || loaded.Supervisor.Observed != domain.RuntimeObservedPending {
+		t.Fatalf("loaded = %#v pending=%#v error=%v", loaded, pending, err)
+	}
+}
+
 func TestSupervisorHeartbeatReturnsOwnershipLossSoReplacedOwnerExitsBeforeLeaseSideEffect(t *testing.T) {
 	t.Parallel()
 
