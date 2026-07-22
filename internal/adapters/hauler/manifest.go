@@ -61,11 +61,11 @@ func RenderManifest(capsule string, inventory domain.ImageInventory) ([]byte, er
 		if image.CapturedReference == "" {
 			return nil, errors.New("image inventory entry lacks reference")
 		}
-		name := image.CapturedReference
+		name := preferredRegistryReference(image)
 		switch image.Source {
 		case domain.ImageSourceRegistry:
 			var err error
-			name, err = immutableImageReference(image.CapturedReference, image.CapturedManifestDigest)
+			name, err = immutableImageReference(name, image.CapturedManifestDigest)
 			if err != nil {
 				return nil, err
 			}
@@ -119,6 +119,21 @@ func RenderManifest(capsule string, inventory domain.ImageInventory) ([]byte, er
 		return nil, err
 	}
 	return output.Bytes(), nil
+}
+
+func preferredRegistryReference(image domain.Image) string {
+	preferred := image.CapturedReference
+	parts := strings.SplitN(image.CapturedReference, "/", 2)
+	if len(parts) != 2 {
+		return preferred
+	}
+	for _, original := range image.OriginalTags {
+		originalParts := strings.SplitN(original, "/", 2)
+		if len(originalParts) == 2 && originalParts[0] == parts[0] && original < preferred {
+			preferred = original
+		}
+	}
+	return preferred
 }
 
 func immutableImageReference(reference, digest string) (string, error) {

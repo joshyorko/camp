@@ -215,9 +215,6 @@ func TestMergeCatalogRetainsDirectPushesWithoutDuplicatingCapturedImages(t *test
 	if len(merged.Images) != 2 || !reflect.DeepEqual(merged.Images[0].OriginalTags, []string{"127.0.0.1:5000/camp-acceptance:named", "example.test/app:v1"}) {
 		t.Fatalf("merged aliases = %#v", merged.Images)
 	}
-	if merged.Images[0].CapturedReference != "127.0.0.1:5000/camp-acceptance:named" {
-		t.Fatalf("captured reference did not prefer the deterministic direct registry name: %#v", merged.Images[0])
-	}
 	if merged.Images[1].CapturedReference != "127.0.0.1:5000/manual/tool:latest" || !reflect.DeepEqual(merged.Images[1].OriginalTags, []string{"127.0.0.1:5000/manual/tool:latest"}) || merged.Images[1].CapturedManifestDigest != digestB || merged.Images[1].Source != domain.ImageSourceRegistry {
 		t.Fatalf("merged inventory = %#v", merged)
 	}

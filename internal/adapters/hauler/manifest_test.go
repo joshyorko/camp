@@ -82,3 +82,19 @@ func TestManifestAcceptsDigestPinnedDirectPushWithoutPlatformAndRejectsUnknownSo
 		t.Fatalf("RenderManifest(unknown source) error = %v", err)
 	}
 }
+
+func TestManifestPrefersDeterministicSameRegistryOriginalReference(t *testing.T) {
+	t.Parallel()
+	digest := "sha256:" + strings.Repeat("c", 64)
+	body, err := RenderManifest("second-brain", domain.ImageInventory{SchemaVersion: domain.SchemaVersion, Images: []domain.Image{{
+		CapturedReference: "127.0.0.1:5000/camp/captured:v1", CapturedManifestDigest: digest,
+		OriginalTags: []string{"127.0.0.1:5000/camp-acceptance:named", "example.test/team/app:v1"}, Source: domain.ImageSourceRegistry,
+	}}})
+	if err != nil {
+		t.Fatalf("RenderManifest() error = %v", err)
+	}
+	text := string(body)
+	if !strings.Contains(text, "127.0.0.1:5000/camp-acceptance@"+digest) || strings.Contains(text, "camp/captured@") || strings.Contains(text, "example.test/team/app") {
+		t.Fatalf("manifest did not select the same-registry direct reference: %s", text)
+	}
+}

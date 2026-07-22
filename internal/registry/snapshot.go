@@ -215,9 +215,6 @@ func MergeCatalog(inventory domain.ImageInventory, authority string, references 
 		if index, exists := byDigest[reference.ManifestDigest]; exists {
 			result.Images[index].OriginalTags = append(result.Images[index].OriginalTags, captured)
 			result.Images[index].OriginalTags = sortedUniqueStrings(result.Images[index].OriginalTags)
-			if captured < result.Images[index].CapturedReference {
-				result.Images[index].CapturedReference = captured
-			}
 			seen[captured] = reference.ManifestDigest
 			continue
 		}
