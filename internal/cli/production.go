@@ -63,6 +63,9 @@ func (p *ProductionLifecycle) Doctor(ctx context.Context, mode OutputMode, out i
 		doctor.BackendProbe{
 			ConfigPath: paths.ConfigPath, Environment: environment,
 			DefaultBackend: "file://" + filepath.Join(paths.DataRoot, "backend"),
+			OpenStore: func(ctx context.Context, backend config.Backend) (ports.ObjectStore, error) {
+				return objectstore.New(ctx, backend, objectstore.Options{})
+			},
 			CheckCredentials: func(ctx context.Context, backend config.Backend) error {
 				awsRuntime, err := awsconfig.LoadDefaultConfig(ctx, awsconfig.WithRegion(backend.S3.Region))
 				if err != nil {

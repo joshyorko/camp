@@ -9,6 +9,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/joshyorko/camp/internal/adapters/filebackend"
 	"github.com/joshyorko/camp/internal/config"
 	"github.com/joshyorko/camp/internal/ports"
 )
@@ -136,6 +137,22 @@ func TestBackendProbeDistinguishesConfigurationFromHealth(t *testing.T) {
 				t.Fatalf("configuration probe claimed backend health: %#v", result)
 			}
 		})
+	}
+}
+
+func TestBackendProbeReportsHealthyOnlyAfterFunctionalTransaction(t *testing.T) {
+	store, err := filebackend.New(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	probe := BackendProbe{
+		ConfigPath: filepath.Join(t.TempDir(), "missing"), DefaultBackend: "file:///tmp/camp-backend",
+		OpenStore: func(context.Context, config.Backend) (ports.ObjectStore, error) { return store, nil },
+		NewSuffix: func() (string, error) { return "unique", nil },
+	}
+	result := probe.Probe(context.Background())
+	if result.Status != StatusHealthy || result.Code != "backend_transaction_verified" || result.Evidence["kind"] != "file" {
+		t.Fatalf("result = %#v", result)
 	}
 }
 
