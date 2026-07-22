@@ -1,0 +1,30 @@
+name: camp
+arch: {{ARCH}}
+platform: linux
+version: {{VERSION}}
+release: "1"
+section: utils
+priority: optional
+maintainer: Camp contributors <noreply@camp.invalid>
+description: Recoverable capsule workspaces
+vendor: Camp
+homepage: https://github.com/joshyorko/camp
+license: Apache-2.0
+depends:
+  - passt
+contents:
+  - src: {{STAGE}}/camp
+    dst: /usr/bin/camp
+    file_info:
+      mode: 0755
+  - src: {{STAGE}}/completions/camp.bash
+    dst: /usr/share/bash-completion/completions/camp
+  - src: {{STAGE}}/completions/_camp
+    dst: /usr/share/zsh/site-functions/_camp
+  - src: {{STAGE}}/completions/camp.fish
+    dst: /usr/share/fish/vendor_completions.d/camp.fish
+  - src: {{STAGE}}/README.md
+    dst: /usr/share/doc/camp/README.md
+  - src: {{STAGE}}/INSTALL.md
+    dst: /usr/share/doc/camp/INSTALL.md
+
