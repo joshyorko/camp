@@ -87,6 +87,7 @@ type OpenServiceStarter interface {
 
 type OpenForwarderManager interface {
 	Start(context.Context, domain.ForwardingRequest) (domain.ForwardingRecord, error)
+	Observe(context.Context, domain.ForwardingRequest) (domain.ForwardingRecord, error)
 	Stop(context.Context, domain.ForwardingRecord) error
 }
 
@@ -290,14 +291,16 @@ func (o *Open) Reconcile(ctx context.Context, sessionID string) (domain.JournalS
 		return snapshot, err
 	}
 	reconciled, err := journalstore.Reconcile(ctx, o.deps.Journal, sessionID, map[string]journalstore.Observer{
-		"LocalLeaseAcquisition":      withOpenRecoveryObjective(o.observeRemoteLeaseAcquisition),
-		"RemoteLeaseAcquisition":     withOpenRecoveryObjective(o.observeRemoteLeaseAcquisition),
-		"WorkspaceUp":                withOpenRecoveryObjective(o.observeWorkspaceUp),
-		"WorkspaceRootResolved":      withOpenRecoveryObjective(o.observeWorkspaceRootResolved),
-		"WorkspaceHardlinksRestored": withOpenRecoveryObjective(o.observeWorkspaceHardlinksRestored),
-		"WorkspaceImagesRestored":    withOpenRecoveryObjective(o.observeWorkspaceImagesRestored),
-		"SessionOpened":              withOpenRecoveryObjective(o.observeSessionOpened),
-		"TerminalEntryDispatched":    withOpenRecoveryObjective(o.observeTerminalEntryDispatched),
+		"LocalLeaseAcquisition":       withOpenRecoveryObjective(o.observeRemoteLeaseAcquisition),
+		"RemoteLeaseAcquisition":      withOpenRecoveryObjective(o.observeRemoteLeaseAcquisition),
+		"WorkspaceUp":                 withOpenRecoveryObjective(o.observeWorkspaceUp),
+		"WorkspaceRootResolved":       withOpenRecoveryObjective(o.observeWorkspaceRootResolved),
+		"ForwarderStarted:registry":   withOpenRecoveryObjective(o.observeForwarderStarted),
+		"ForwarderStarted:fileserver": withOpenRecoveryObjective(o.observeForwarderStarted),
+		"WorkspaceHardlinksRestored":  withOpenRecoveryObjective(o.observeWorkspaceHardlinksRestored),
+		"WorkspaceImagesRestored":     withOpenRecoveryObjective(o.observeWorkspaceImagesRestored),
+		"SessionOpened":               withOpenRecoveryObjective(o.observeSessionOpened),
+		"TerminalEntryDispatched":     withOpenRecoveryObjective(o.observeTerminalEntryDispatched),
 	})
 	if err != nil {
 		return reconciled, err
@@ -306,6 +309,59 @@ func (o *Open) Reconcile(ctx context.Context, sessionID string) (domain.JournalS
 		return reconciled, err
 	}
 	return reconciled, nil
+}
+
+func (o *Open) observeForwarderStarted(ctx context.Context, snapshot domain.JournalSnapshot, intent ports.IntentRecord) (ports.FactRecord, domain.JournalSnapshot, error) {
+	if o.deps.Forwarders == nil {
+		return ports.FactRecord{}, snapshot, errors.New("workspace forwarder recovery dependency is incomplete")
+	}
+	var request domain.ForwardingRequest
+	if err := json.Unmarshal(intent.Input, &request); err != nil {
+		return ports.FactRecord{}, snapshot, fmt.Errorf("decode workspace forwarder intent: %w", err)
+	}
+	registryPort, fileserverPort, err := committedServicePorts(snapshot)
+	if err != nil {
+		return ports.FactRecord{}, snapshot, err
+	}
+	expectedPort := 0
+	switch request.Name {
+	case "registry":
+		expectedPort = registryPort
+	case "fileserver":
+		expectedPort = fileserverPort
+	default:
+		return ports.FactRecord{}, snapshot, errors.New("workspace forwarder intent names an unsupported service")
+	}
+	expectedEndpoint := endpoint(expectedPort)
+	expectedLogPath := filepath.Join(snapshot.Recovery.Session.RuntimeRoot, request.Name+"-forward.log")
+	expectedEvidencePath := filepath.Join(snapshot.Recovery.Session.RuntimeRoot, request.Name+"-forward.json")
+	if intent.SessionID != snapshot.SessionID || intent.Transition != "ForwarderStarted:"+request.Name ||
+		request.WorkspaceID == "" || request.WorkspaceID != snapshot.Workspace.ID || request.Context == "" || request.Context != snapshot.Workspace.Context ||
+		request.LocalEndpoint != expectedEndpoint || request.WorkspaceEndpoint != expectedEndpoint ||
+		request.LogPath != expectedLogPath || request.EvidencePath != expectedEvidencePath {
+		return ports.FactRecord{}, snapshot, errors.New("workspace forwarder intent does not match the pending session")
+	}
+	for _, existing := range snapshot.Recovery.Forwarding {
+		if existing.Name == request.Name {
+			return ports.FactRecord{}, snapshot, errors.New("pending workspace forwarder already has a committed record")
+		}
+	}
+	record, err := o.deps.Forwarders.Observe(ctx, request)
+	if err != nil {
+		return ports.FactRecord{}, snapshot, err
+	}
+	if record.Name != request.Name || record.LocalEndpoint != request.LocalEndpoint || record.WorkspaceEndpoint != request.WorkspaceEndpoint ||
+		record.EvidencePath != request.EvidencePath || record.Process.Identity.PID <= 0 || record.Process.Identity.BootID == "" || record.Process.Identity.StartTicks == 0 ||
+		record.DesiredState != domain.RuntimeDesiredRunning || record.ObservedState != domain.RuntimeObservedReady {
+		return ports.FactRecord{}, snapshot, errors.New("observed workspace forwarder does not match the pending intent")
+	}
+	next := snapshot
+	next.Recovery.Forwarding = append(next.Recovery.Forwarding, record)
+	now := o.deps.Clock.Now().UTC()
+	if now.IsZero() {
+		return ports.FactRecord{}, snapshot, errors.New("workspace forwarder recovery clock returned zero time")
+	}
+	return ports.FactRecord{IntentID: intent.ID, SessionID: intent.SessionID, Transition: intent.Transition, Timestamp: now, Output: safeJSON(record)}, next, nil
 }
 
 func withOpenRecoveryObjective(observer journalstore.Observer) journalstore.Observer {
@@ -1286,7 +1342,8 @@ func (o *Open) completeWorkspaceOpen(ctx context.Context, snapshot domain.Journa
 			request := domain.ForwardingRequest{
 				Name: item.name, WorkspaceID: snapshot.Workspace.ID, Context: snapshot.Workspace.Context,
 				LocalEndpoint: endpoint, WorkspaceEndpoint: endpoint,
-				LogPath: filepath.Join(snapshot.Recovery.Session.RuntimeRoot, item.name+"-forward.log"),
+				LogPath:      filepath.Join(snapshot.Recovery.Session.RuntimeRoot, item.name+"-forward.log"),
+				EvidencePath: filepath.Join(snapshot.Recovery.Session.RuntimeRoot, item.name+"-forward.json"),
 			}
 			var record domain.ForwardingRecord
 			if err := journal.phase(ctx, "ForwarderStarted:"+item.name, request, &record, func() error {
