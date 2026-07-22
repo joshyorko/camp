@@ -57,7 +57,7 @@ func (s *Store) ProbeWriter(ctx context.Context, prefix string) (resultErr error
 	}
 
 	replaced, err := s.PutConditional(ctx, key, secondBody, ports.WriteCondition{MatchRevision: created.Revision})
-	if err != nil && !errors.Is(err, ports.ErrConflict) {
+	if errors.Is(err, ports.ErrAmbiguous) {
 		observed, observeErr := s.Head(ctx, key)
 		switch {
 		case observeErr == nil && observed.Revision == created.Revision:

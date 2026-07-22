@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"strconv"
 	"testing"
 	"time"
 
@@ -492,6 +493,36 @@ func TestValidateRecordedGroupAllowsDetachedHelperReparenting(t *testing.T) {
 	driftedChild.ParentPID++
 	if err := validateRecordedGroup([]ports.ProcessStatus{helper, driftedChild}, record); err == nil {
 		t.Fatal("validateRecordedGroup() accepted child parent drift")
+	}
+}
+
+func TestValidateRecordedGroupAllowsDetachedHelperExecutablePathAlias(t *testing.T) {
+	t.Parallel()
+	record, _, helper, child := observedServiceFixture(t)
+	record.Helper.ObservedExecutable = "/codex-workbench/.tools/pasta/pasta"
+
+	if err := validateRecordedGroup([]ports.ProcessStatus{helper, child}, record); err != nil {
+		t.Fatalf("validateRecordedGroup(namespace-rendered helper executable) error = %v", err)
+	}
+}
+
+func TestValidateRecordedGroupRejectsDetachedHelperUnrelatedExecutable(t *testing.T) {
+	t.Parallel()
+	record, _, helper, child := observedServiceFixture(t)
+	helper.Executable = "/tmp/unrelated"
+
+	if err := validateRecordedGroup([]ports.ProcessStatus{helper, child}, record); err == nil {
+		t.Fatal("validateRecordedGroup() accepted unrelated helper executable")
+	}
+}
+
+func TestValidateRecordedGroupAllowsDetachedHelperKernelDeniedNamespaceIdentity(t *testing.T) {
+	t.Parallel()
+	record, _, helper, child := observedServiceFixture(t)
+	helper.NetNS = "kernel-denied:" + helper.Identity.BootID + ":" + strconv.FormatUint(helper.Identity.StartTicks, 10)
+
+	if err := validateRecordedGroup([]ports.ProcessStatus{helper, child}, record); err != nil {
+		t.Fatalf("validateRecordedGroup(identity-bound denied helper namespace) error = %v", err)
 	}
 }
 

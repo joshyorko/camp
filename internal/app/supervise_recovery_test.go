@@ -25,6 +25,7 @@ func TestSupervisorClaimReconcilesCrashedClaimantBeforeReplacement(t *testing.T)
 	if err := store.Create(context.Background(), domain.JournalSnapshot{
 		SchemaVersion: domain.SchemaVersion,
 		SessionID:     sessionID,
+		State:         domain.SessionOpen,
 		Mode:          domain.SessionReadWrite,
 	}); err != nil {
 		t.Fatal(err)
@@ -69,7 +70,7 @@ func TestSupervisorClaimAcceptsDurableFactAfterLostResponseWithoutDuplicateInten
 		t.Fatal(err)
 	}
 	const sessionID = "session-claim-response"
-	if err := store.Create(context.Background(), domain.JournalSnapshot{SchemaVersion: domain.SchemaVersion, SessionID: sessionID, Mode: domain.SessionReadWrite}); err != nil {
+	if err := store.Create(context.Background(), domain.JournalSnapshot{SchemaVersion: domain.SchemaVersion, SessionID: sessionID, State: domain.SessionOpen, Mode: domain.SessionReadWrite}); err != nil {
 		t.Fatal(err)
 	}
 
@@ -101,7 +102,7 @@ func TestSupervisorClaimRecoversLegacyPendingIntentWithoutInputBeforeReplacement
 		t.Fatal(err)
 	}
 	const sessionID = "session-legacy-claim"
-	if err := store.Create(context.Background(), domain.JournalSnapshot{SchemaVersion: domain.SchemaVersion, SessionID: sessionID, Mode: domain.SessionReadWrite}); err != nil {
+	if err := store.Create(context.Background(), domain.JournalSnapshot{SchemaVersion: domain.SchemaVersion, SessionID: sessionID, State: domain.SessionOpen, Mode: domain.SessionReadWrite}); err != nil {
 		t.Fatal(err)
 	}
 	if err := store.RecordIntent(context.Background(), ports.IntentRecord{

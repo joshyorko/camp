@@ -622,6 +622,17 @@ func matchesProcessRecord(status ports.ProcessStatus, record domain.ProcessRecor
 
 func matchesDetachedHelperRecord(status ports.ProcessStatus, record domain.ProcessRecord) bool {
 	record.ParentPID = status.ParentPID
+	// After pasta detaches, the kernel can deny namespace/executable links.
+	// ProcessManager then returns identity-bound namespace evidence and the
+	// resolved launch executable from the still-exact argv. Accept only those
+	// two constrained replacements, never an arbitrary observed value.
+	if len(record.Argv) > 0 && status.Executable == record.Argv[0] {
+		record.ObservedExecutable = status.Executable
+	}
+	deniedNetNS := "kernel-denied:" + status.Identity.BootID + ":" + strconv.FormatUint(status.Identity.StartTicks, 10)
+	if status.NetNS == deniedNetNS {
+		record.NetNS = status.NetNS
+	}
 	return matchesProcessRecord(status, record)
 }
 

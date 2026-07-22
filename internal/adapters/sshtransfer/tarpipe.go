@@ -49,7 +49,7 @@ func BuildTarPipe(spec TarPipeSpec) (TarPipe, error) {
 		Consumer: ports.Command{
 			Executable: spec.TarExecutable,
 			Argv: []string{
-				"--extract", "--file=-", "--directory=" + spec.LocalRoot,
+				"--extract", "--file=-", "--directory=" + spec.LocalRoot, "-p",
 			},
 		},
 	}, nil

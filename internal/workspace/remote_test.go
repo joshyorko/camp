@@ -92,7 +92,7 @@ func TestRemoteMirrorFallsBackOnlyForUnavailableBeforeStartAndUsesSecondFreshDes
 			"tar --create --file=- --directory='/workspace/effective' --exclude='./.camp/build' --exclude='./.camp/runtime' .",
 		}},
 		Consumer: ports.Command{Executable: "tar", Argv: []string{
-			"--extract", "--file=-", "--directory=/stage/tar",
+			"--extract", "--file=-", "--directory=/stage/tar", "-p",
 		}},
 	}
 	if tar.calls != 1 || !reflect.DeepEqual(tar.pipeline, wantPipeline) {

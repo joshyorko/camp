@@ -57,7 +57,7 @@ func TestSuperviseOwnsLeaseHeartbeatAndPersistsExactRenewedToken(t *testing.T) {
 	now := time.Unix(100, 0).UTC()
 	lease := domain.WriterLease{SchemaVersion: domain.SchemaVersion, Capsule: "brain", Lineage: domain.Lineage{Branch: "main"}, SessionID: "session-a", Machine: "machine", CreatedAt: now, HeartbeatAt: now, ExpiresAt: now.Add(time.Minute)}
 	supervisorIdentity := domain.ProcessIdentity{PID: 900, BootID: "boot", StartTicks: 44}
-	snapshot := domain.JournalSnapshot{SchemaVersion: domain.SchemaVersion, SessionID: lease.SessionID, Mode: domain.SessionReadWrite, Lease: domain.LeaseRecord{Lease: &lease, Revision: "r1"}, Supervisor: domain.SupervisorRecord{Identity: supervisorIdentity, Desired: domain.RuntimeDesiredRunning, Observed: domain.RuntimeObservedReady}}
+	snapshot := domain.JournalSnapshot{SchemaVersion: domain.SchemaVersion, SessionID: lease.SessionID, State: domain.SessionOpen, Mode: domain.SessionReadWrite, Lease: domain.LeaseRecord{Lease: &lease, Revision: "r1"}, Supervisor: domain.SupervisorRecord{Identity: supervisorIdentity, Desired: domain.RuntimeDesiredRunning, Observed: domain.RuntimeObservedReady}}
 	if err := log.Create(ctx, snapshot); err != nil {
 		t.Fatal(err)
 	}
@@ -96,7 +96,7 @@ func TestSuperviseReturnsTypedHeartbeatLoss(t *testing.T) {
 	now := time.Unix(100, 0).UTC()
 	lease := domain.WriterLease{SessionID: "session-a", HeartbeatAt: now, ExpiresAt: now.Add(time.Minute)}
 	supervisorIdentity := domain.ProcessIdentity{PID: 901, BootID: "boot", StartTicks: 45}
-	snapshot := domain.JournalSnapshot{SchemaVersion: domain.SchemaVersion, SessionID: lease.SessionID, Mode: domain.SessionReadWrite, Lease: domain.LeaseRecord{Lease: &lease, Revision: "r1"}, Supervisor: domain.SupervisorRecord{Identity: supervisorIdentity, Desired: domain.RuntimeDesiredRunning, Observed: domain.RuntimeObservedReady}}
+	snapshot := domain.JournalSnapshot{SchemaVersion: domain.SchemaVersion, SessionID: lease.SessionID, State: domain.SessionOpen, Mode: domain.SessionReadWrite, Lease: domain.LeaseRecord{Lease: &lease, Revision: "r1"}, Supervisor: domain.SupervisorRecord{Identity: supervisorIdentity, Desired: domain.RuntimeDesiredRunning, Observed: domain.RuntimeObservedReady}}
 	_ = log.Create(ctx, snapshot)
 	keeper := &fakeLeaseKeeper{renewed: make(chan coordination.LeaseToken, 1), err: errors.New("lost")}
 	ticker := &controlledTicker{channel: make(chan time.Time, 1)}
@@ -105,6 +105,25 @@ func TestSuperviseReturnsTypedHeartbeatLoss(t *testing.T) {
 	err := NewSupervise(log, keeper, &recordingOperationLocker{}, clock, time.Minute, fakeHostIdentity{process: supervisorIdentity}).Run(ctx, snapshot.SessionID)
 	if !errors.Is(err, ErrLeaseHeartbeat) {
 		t.Fatalf("Run() error = %v, want ErrLeaseHeartbeat", err)
+	}
+}
+
+func TestSuperviseClaimRejectsClosedSessionWithoutJournalMutation(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	log, _ := journal.NewStore(filepath.Join(t.TempDir(), "journal"))
+	snapshot := domain.JournalSnapshot{SchemaVersion: domain.SchemaVersion, SessionID: "session-closed", State: domain.SessionClosed}
+	if err := log.Create(ctx, snapshot); err != nil {
+		t.Fatal(err)
+	}
+	clock := &controlledClock{now: time.Unix(100, 0).UTC(), ticker: &controlledTicker{channel: make(chan time.Time)}}
+	err := NewSupervise(log, nil, &recordingOperationLocker{}, clock, time.Minute, fakeHostIdentity{process: domain.ProcessIdentity{PID: 902, BootID: "boot", StartTicks: 46}}).Claim(ctx, snapshot.SessionID)
+	if !errors.Is(err, ErrNoActiveSession) {
+		t.Fatalf("Claim(closed) error = %v, want ErrNoActiveSession", err)
+	}
+	loaded, pending, loadErr := log.Load(ctx, snapshot.SessionID)
+	if loadErr != nil || len(pending) != 0 || loaded.Supervisor != (domain.SupervisorRecord{}) {
+		t.Fatalf("closed claim mutated journal: supervisor=%#v pending=%#v err=%v", loaded.Supervisor, pending, loadErr)
 	}
 }
 
@@ -120,6 +139,7 @@ func TestSuperviseReloadsDurableSnapshotUnderOperationLock(t *testing.T) {
 		snapshot: domain.JournalSnapshot{
 			SchemaVersion: domain.SchemaVersion,
 			SessionID:     "session-a",
+			State:         domain.SessionOpen,
 			Mode:          domain.SessionReadWrite,
 			Supervisor:    domain.SupervisorRecord{Identity: domain.ProcessIdentity{PID: 902, BootID: "boot", StartTicks: 46}, Desired: domain.RuntimeDesiredRunning, Observed: domain.RuntimeObservedReady},
 			Lease:         domain.LeaseRecord{Lease: &domain.WriterLease{SessionID: "session-a", HeartbeatAt: time.Unix(100, 0), ExpiresAt: time.Unix(160, 0)}, Revision: "r1"},
@@ -178,6 +198,7 @@ func TestSuperviseReleasesLockWhenCancelledDuringHeartbeat(t *testing.T) {
 		snapshot: domain.JournalSnapshot{
 			SchemaVersion: domain.SchemaVersion,
 			SessionID:     "session-b",
+			State:         domain.SessionOpen,
 			Mode:          domain.SessionReadWrite,
 			Supervisor:    domain.SupervisorRecord{Identity: domain.ProcessIdentity{PID: 903, BootID: "boot", StartTicks: 47}, Desired: domain.RuntimeDesiredRunning, Observed: domain.RuntimeObservedReady},
 			Lease:         domain.LeaseRecord{Lease: &domain.WriterLease{SessionID: "session-b", HeartbeatAt: time.Unix(100, 0), ExpiresAt: time.Unix(160, 0)}, Revision: "r1"},
@@ -221,6 +242,7 @@ func TestSuperviseReleasesInitialLoadLockBeforeHeartbeat(t *testing.T) {
 		snapshot: domain.JournalSnapshot{
 			SchemaVersion: domain.SchemaVersion,
 			SessionID:     "session-c",
+			State:         domain.SessionOpen,
 			Mode:          domain.SessionReadWrite,
 			Supervisor:    domain.SupervisorRecord{Identity: domain.ProcessIdentity{PID: 904, BootID: "boot", StartTicks: 48}, Desired: domain.RuntimeDesiredRunning, Observed: domain.RuntimeObservedReady},
 			Lease:         domain.LeaseRecord{Lease: &domain.WriterLease{SessionID: "session-c", HeartbeatAt: time.Unix(100, 0), ExpiresAt: time.Unix(160, 0)}, Revision: "r1"},

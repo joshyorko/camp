@@ -127,16 +127,19 @@ func (r *Restorer) Restore(ctx context.Context, request RestoreRequest) (Restore
 }
 
 func preferredServedReference(image domain.Image) string {
-	preferred := image.CapturedReference
+	preferred := ""
 	parts := strings.SplitN(image.CapturedReference, "/", 2)
 	if len(parts) != 2 {
-		return preferred
+		return image.CapturedReference
 	}
 	for _, original := range image.OriginalTags {
 		originalParts := strings.SplitN(original, "/", 2)
-		if len(originalParts) == 2 && originalParts[0] == parts[0] && original < preferred {
+		if len(originalParts) == 2 && originalParts[0] == parts[0] && (preferred == "" || original < preferred) {
 			preferred = original
 		}
+	}
+	if preferred == "" {
+		return image.CapturedReference
 	}
 	return preferred
 }

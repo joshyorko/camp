@@ -33,7 +33,7 @@ func TestTarPipeFallbackIsStructured(t *testing.T) {
 		Consumer: ports.Command{
 			Executable: "/usr/bin/tar",
 			Argv: []string{
-				"--extract", "--file=-", "--directory=/var/lib/camp/staging/Second Brain",
+				"--extract", "--file=-", "--directory=/var/lib/camp/staging/Second Brain", "-p",
 			},
 		},
 	}

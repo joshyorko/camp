@@ -133,6 +133,9 @@ func (u *Supervise) recordSupervisorState(ctx context.Context, sessionID string,
 	if snapshot.SessionID != sessionID {
 		return errors.New("supervisor journal returned the wrong session")
 	}
+	if !activeSessionState(snapshot.State) {
+		return ErrNoActiveSession
+	}
 	snapshot, err = u.reconcileSupervisorClaims(ctx, snapshot, pending)
 	if err != nil {
 		return err

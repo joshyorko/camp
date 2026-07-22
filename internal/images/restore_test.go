@@ -170,3 +170,14 @@ func TestPreferredServedReferenceKeepsCaptureIdentitySeparateFromServingName(t *
 		t.Fatalf("capture identity mutated: %#v", image)
 	}
 }
+
+func TestPreferredServedReferencePrefersSameRegistryOriginalBeforeCaptureName(t *testing.T) {
+	t.Parallel()
+	image := domain.Image{
+		CapturedReference: "127.0.0.1:5000/a-capture/internal:v1",
+		OriginalTags:      []string{"example.test/team/app:v1", "127.0.0.1:5000/team/app:v1"},
+	}
+	if got := preferredServedReference(image); got != "127.0.0.1:5000/team/app:v1" {
+		t.Fatalf("preferredServedReference() = %q", got)
+	}
+}
