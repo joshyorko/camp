@@ -70,15 +70,21 @@ type fakeRegistrySealer struct {
 	calls   int
 	request registryadapter.SnapshotRequest
 	result  registryadapter.Snapshot
+	after   func(context.Context, registryadapter.SnapshotRequest) error
 	err     error
 }
 
-func (s *fakeRegistrySealer) Seal(_ context.Context, request registryadapter.SnapshotRequest) (registryadapter.Snapshot, error) {
+func (s *fakeRegistrySealer) Seal(ctx context.Context, request registryadapter.SnapshotRequest) (registryadapter.Snapshot, error) {
 	s.calls++
 	s.request = request
 	result := s.result
 	if result.Root == "" {
 		result.Root = request.SnapshotRoot
+	}
+	if s.err == nil && s.after != nil {
+		if err := s.after(ctx, request); err != nil {
+			return result, err
+		}
 	}
 	return result, s.err
 }
@@ -761,12 +767,29 @@ func TestCheckpointPublisherSnapshotFailureCannotBuildUploadOrMovePointer(t *tes
 		t.Fatalf("failed-cut recovery state pending=%#v error=%v", pending, err)
 	}
 	fakes.seal.err = nil
+	fakes.seal.after = func(ctx context.Context, _ registryadapter.SnapshotRequest) error {
+		current, _, err := log.Load(ctx, snapshot.SessionID)
+		if err != nil {
+			return err
+		}
+		current.Services[0].Helper.Identity = domain.ProcessIdentity{PID: 202, BootID: "boot", StartTicks: 2}
+		current.Services[0].Child.Identity = domain.ProcessIdentity{PID: 303, BootID: "boot-child", StartTicks: 3}
+		nested := ports.IntentRecord{ID: "registry-seal-restart", SessionID: snapshot.SessionID, Transition: "ServiceRestart", Attempt: 1, Timestamp: now}
+		if err := log.RecordIntent(ctx, nested); err != nil {
+			return err
+		}
+		return log.RecordFact(ctx, checkpointFact(nested, now), current)
+	}
 	result, err := publisher.Publish(ctx, token, snapshot.SessionID)
 	if err != nil || !result.Published {
 		t.Fatalf("resume pending registry seal result=%#v error=%v", result, err)
 	}
 	if fakes.capture.calls != 1 || fakes.seal.calls != 2 {
 		t.Fatalf("resume effects capture=%d seal=%d, want image capture once and exact seal retry", fakes.capture.calls, fakes.seal.calls)
+	}
+	loaded, _, err := log.Load(ctx, snapshot.SessionID)
+	if err != nil || loaded.Services[0].Helper.Identity != (domain.ProcessIdentity{PID: 202, BootID: "boot", StartTicks: 2}) || loaded.Services[0].Child.Identity != (domain.ProcessIdentity{PID: 303, BootID: "boot-child", StartTicks: 3}) {
+		t.Fatalf("registry seal replay lost nested restart identities: services=%#v error=%v", loaded.Services, err)
 	}
 }
 

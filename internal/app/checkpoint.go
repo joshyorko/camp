@@ -9,6 +9,7 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strconv"
 	"strings"
 	"time"
@@ -158,6 +159,20 @@ func (p *CheckpointPublisher) Publish(ctx context.Context, operation ports.Opera
 		if sealed.Root != cutRoot {
 			return CheckpointResult{}, errors.New("registry sealer returned an unexpected cut root")
 		}
+		current, remaining, err := p.journal.Load(context.WithoutCancel(ctx), sessionID)
+		if err != nil {
+			return CheckpointResult{}, err
+		}
+		if len(remaining) != 1 || remaining[0].Intent.ID != prepared.intent.ID || remaining[0].Intent.Transition != prepared.intent.Transition {
+			return CheckpointResult{}, errors.New("registry seal left unexpected pending reconciliation work")
+		}
+		stable := current
+		stable.Services = snapshot.Services
+		stable.UpdatedAt = snapshot.UpdatedAt
+		if !reflect.DeepEqual(stable, snapshot) {
+			return CheckpointResult{}, errors.New("registry seal changed unrelated durable session state")
+		}
+		snapshot = current
 		inventory, err = registryadapter.MergeCatalog(inventory, runtime.authority, sealed.References, now)
 		if err != nil {
 			return CheckpointResult{}, err
