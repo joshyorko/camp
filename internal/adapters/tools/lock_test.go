@@ -26,8 +26,8 @@ func TestCommittedDistributionToolLock(t *testing.T) {
 	}{
 		{"devpod", "linux", "amd64", "skevetter/devpod", "v0.26.1", "86b6f9f5d6713fecdeff5dd240e775a8c7e8d44e", "01bbc2d88090d546e04aa435c63fc5eb95ec49ffb7ab102a67de0d6d12c82d8d"},
 		{"devpod", "linux", "arm64", "skevetter/devpod", "v0.26.1", "86b6f9f5d6713fecdeff5dd240e775a8c7e8d44e", "268621da428ca6d470d1812d63c9e41a1681b681861fc984648a57c5725478ee"},
-		{"hauler", "linux", "amd64", "hauler-dev/hauler", "v2.0.1", "4f47155d6f8ccec22ba6f609f2f1f4919b02fce1", "c8b65ea57f10a03f02104ebbecbf1249c41f499bc85771488824b70f6ccfc76c"},
-		{"hauler", "linux", "arm64", "hauler-dev/hauler", "v2.0.1", "4f47155d6f8ccec22ba6f609f2f1f4919b02fce1", "ffe9811bbb77f844200f0644b98a08b65ee2d5ffcc0e2b49b1df31719a0a052f"},
+		{"hauler", "linux", "amd64", "hauler-dev/hauler", "v2.0.2", "4ece589a5c763fff15e253735263bd13a889d3cc", "d96ac67cac3c9e4fc2d24c8347fba956b2a165a2237318cc2564e44bbaabc4c3"},
+		{"hauler", "linux", "arm64", "hauler-dev/hauler", "v2.0.2", "4ece589a5c763fff15e253735263bd13a889d3cc", "e77a7d2b707ba2ffbb5a69e1f6cacbf046065333cd9b1abe51ed8f9f099c2870"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name+"/"+tt.arch, func(t *testing.T) {

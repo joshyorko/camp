@@ -2,7 +2,7 @@
 
 ## Locked tools
 
-`tools.lock.yaml` is authoritative for supported assets and digests. The current contracts are `skevetter/devpod` v0.26.1 and `hauler-dev/hauler` v2.0.1.
+`tools.lock.yaml` is authoritative for supported assets and digests. The current contracts are `skevetter/devpod` v0.26.1 and `hauler-dev/hauler` v2.0.2. Hauler v2.0.1 must not be accepted: a real save/load probe dropped digest-addressed image descriptors from the loaded store, while v2.0.2 preserved the same named-image descriptors and digests; v2.0.2 includes the upstream digest-artifact copy fixes.
 
 ## Implemented adapter behavior
 

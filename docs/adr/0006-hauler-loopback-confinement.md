@@ -8,7 +8,7 @@ Accepted on 2026-07-14.
 
 ## Context
 
-Pinned Hauler v2.0.1 binds both its registry and fileserver broadly and exposes no bind-address option. Starting either service directly would violate Camp's loopback-only contract. A runtime probe on Bluefin proved that `pasta` can put Hauler in a private network namespace while publishing exactly one host-loopback mapping.
+Pinned Hauler v2.0.2 binds both its registry and fileserver broadly and exposes no bind-address option. Starting either service directly would violate Camp's loopback-only contract. A runtime probe on Bluefin proved that `pasta` can put Hauler in a private network namespace while publishing exactly one host-loopback mapping.
 
 ## Decision
 

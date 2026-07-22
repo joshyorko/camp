@@ -81,7 +81,7 @@ Camp targets Linux and currently locks:
 | Component | Locked contract | Responsibility |
 | --- | --- | --- |
 | DevPod | [`skevetter/devpod` v0.26.1](https://github.com/skevetter/devpod/releases/tag/v0.26.1) | Providers, devcontainers, SSH, forwarding, and IDE transport |
-| Hauler | [`hauler-dev/hauler` v2.0.1](https://github.com/hauler-dev/hauler/releases/tag/v2.0.1) | Versioned haul files, OCI content, registry, and file serving |
+| Hauler | [`hauler-dev/hauler` v2.0.2](https://github.com/hauler-dev/hauler/releases/tag/v2.0.2) | Versioned haul files, OCI content, registry, and file serving |
 | Room of Requirement | [`joshyorko/room-of-requirement` v1.18.0](https://github.com/joshyorko/room-of-requirement/releases/tag/v1.18.0) | Default Wolfi development-image compatibility fixture |
 
 Exact commits, Linux asset URLs, architectures, and SHA-256 checksums live in [`tools.lock.yaml`](tools.lock.yaml).
