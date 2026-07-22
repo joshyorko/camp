@@ -135,6 +135,34 @@ func TestReconcileGroupInspectionFailureAllowsOnlyExitedCandidate(t *testing.T) 
 	}
 }
 
+func TestOriginalGoneWaitsForSameLiveIdentityWhenFullInspectionFails(t *testing.T) {
+	t.Parallel()
+	root := t.TempDir()
+	processRoot := filepath.Join(root, "123")
+	if err := os.MkdirAll(processRoot, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	stat := "123 (pasta) S 1 123 123 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 42\n"
+	if err := os.WriteFile(filepath.Join(processRoot, "stat"), []byte(stat), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(processRoot, "cmdline"), nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(processRoot, "exe"), nil, 0o000); err != nil {
+		t.Fatal(err)
+	}
+
+	manager := &ProcessManager{procRoot: root, bootID: "boot"}
+	gone, err := manager.originalGone(context.Background(), domain.ProcessIdentity{PID: 123, BootID: "boot", StartTicks: 42})
+	if err != nil {
+		t.Fatalf("originalGone() error = %v", err)
+	}
+	if gone {
+		t.Fatal("originalGone() treated the same live start identity as gone")
+	}
+}
+
 func TestCapabilityBearingExecutableFallsBackOnlyToValidatedAbsoluteArgv(t *testing.T) {
 	t.Parallel()
 	denied := func(string) (string, error) { return "", syscall.EPERM }

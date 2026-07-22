@@ -239,10 +239,20 @@ func (m *ProcessManager) Stop(ctx context.Context, identity domain.ProcessIdenti
 
 func (m *ProcessManager) originalGone(ctx context.Context, identity domain.ProcessIdentity) (bool, error) {
 	status, err := m.Inspect(ctx, identity)
-	if errors.Is(err, ErrProcessIdentity) {
+	if err == nil {
+		return !status.Running, nil
+	}
+	latest, statErr := m.inspectPIDStat(identity.PID)
+	if isProcessGone(statErr) {
 		return true, nil
 	}
-	return err == nil && !status.Running, err
+	if statErr != nil {
+		return false, errors.Join(err, statErr)
+	}
+	if latest.Identity != identity || !latest.Running {
+		return true, nil
+	}
+	return false, nil
 }
 
 func (m *ProcessManager) scan(ctx context.Context, include func(ports.ProcessStatus) bool) ([]ports.ProcessStatus, error) {
