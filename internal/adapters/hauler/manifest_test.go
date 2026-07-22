@@ -96,10 +96,10 @@ func TestManifestPreservesSameRegistryOriginalRepositoryByDigest(t *testing.T) {
 		t.Fatalf("RenderManifest() error = %v", err)
 	}
 	text := string(body)
-	if !strings.Contains(text, "127.0.0.1:5000/camp/captured@"+digest) || !strings.Contains(text, "127.0.0.1:5000/camp-acceptance@"+digest) {
+	if strings.Count(text, "127.0.0.1:5000/camp/captured@"+digest) != 2 || !strings.Contains(text, "rewrite: camp-acceptance:named") {
 		t.Fatalf("same-registry digest aliases are incomplete: %s", text)
 	}
-	if strings.Contains(text, "example.test/team/app@") {
+	if strings.Contains(text, "example.test/team/app") {
 		t.Fatalf("external original tag became a registry import: %s", text)
 	}
 }
