@@ -72,6 +72,27 @@ func TestRunnerReturnsTypedExitAndHonorsCancellation(t *testing.T) {
 	}
 }
 
+func TestRunnerCancellationTerminatesSpawnedProcessGroup(t *testing.T) {
+	t.Parallel()
+	if runtime.GOOS != "linux" {
+		t.Skip("Camp process-group cancellation is Linux-only")
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
+	defer cancel()
+	started := time.Now()
+	_, err := NewRunner().Run(ctx, ports.Command{
+		Executable: "/bin/sh",
+		Argv:       []string{"-c", "sleep 30 & wait"},
+	})
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("canceled process group error = %v, want deadline exceeded", err)
+	}
+	if elapsed := time.Since(started); elapsed > 5*time.Second {
+		t.Fatalf("canceled process group remained alive for %s", elapsed)
+	}
+}
+
 func TestRunStartedCallsCallbackOnceAfterStartAndBeforeWait(t *testing.T) {
 	t.Parallel()
 	if runtime.GOOS == "windows" {

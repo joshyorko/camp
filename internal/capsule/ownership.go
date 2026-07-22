@@ -14,6 +14,7 @@ import (
 	"sort"
 	"strings"
 	"syscall"
+	"time"
 
 	"github.com/joshyorko/camp/internal/domain"
 	"golang.org/x/sys/unix"
@@ -76,7 +77,7 @@ func NewOwnership(dataHome string) (*Ownership, error) {
 	if err != nil {
 		return nil, fmt.Errorf("canonicalize materialization root: %w", err)
 	}
-	_, _, device, inode, err := inspectRoot(canonical)
+	_, _, device, inode, _, err := inspectRoot(canonical)
 	if err != nil {
 		return nil, fmt.Errorf("inspect materialization root: %w", err)
 	}
@@ -84,7 +85,7 @@ func NewOwnership(dataHome string) (*Ownership, error) {
 }
 
 func (o *Ownership) Adopt(path string) (domain.Materialization, error) {
-	canonical, original, device, inode, err := inspectRoot(path)
+	canonical, original, device, inode, birthTimeNS, err := inspectRoot(path)
 	if err != nil {
 		return domain.Materialization{}, err
 	}
@@ -95,6 +96,7 @@ func (o *Ownership) Adopt(path string) (domain.Materialization, error) {
 		Mode:             domain.MaterializationAdopted,
 		Device:           device,
 		Inode:            inode,
+		BirthTimeNS:      birthTimeNS,
 		CleanupPermitted: false,
 	}, nil
 }
@@ -123,7 +125,7 @@ func (o *Ownership) MarkCreatedWithToken(path, token string) (domain.Materializa
 	if err != nil || len(decoded) != 32 || hex.EncodeToString(decoded) != token {
 		return domain.Materialization{}, fmt.Errorf("ownership token is invalid: %w", ErrOwnershipMismatch)
 	}
-	canonical, original, device, inode, err := inspectRoot(path)
+	canonical, original, device, inode, birthTimeNS, err := inspectRoot(path)
 	if err != nil {
 		return domain.Materialization{}, err
 	}
@@ -138,6 +140,7 @@ func (o *Ownership) MarkCreatedWithToken(path, token string) (domain.Materializa
 		Mode:             domain.MaterializationCreated,
 		Device:           device,
 		Inode:            inode,
+		BirthTimeNS:      birthTimeNS,
 		CleanupPermitted: true,
 	}
 	marker := ownershipMarker{Token: token, CanonicalPath: canonical, Device: device, Inode: inode}
@@ -551,11 +554,11 @@ func (o *Ownership) Revalidate(materialization domain.Materialization) error {
 	if materialization.Mode != domain.MaterializationAdopted || materialization.CleanupPermitted || materialization.OwnershipMarker != "" {
 		return ErrOwnershipMismatch
 	}
-	canonical, original, device, inode, err := inspectRoot(materialization.OriginalPath)
+	canonical, original, device, inode, birthTimeNS, err := inspectRoot(materialization.OriginalPath)
 	if err != nil {
 		return fmt.Errorf("revalidate adopted materialization: %w", errors.Join(err, ErrOwnershipMismatch))
 	}
-	if canonical != materialization.CanonicalPath || original != materialization.OriginalPath || device != materialization.Device || inode != materialization.Inode {
+	if canonical != materialization.CanonicalPath || original != materialization.OriginalPath || !sameRootIdentity(materialization.Device, materialization.Inode, materialization.BirthTimeNS, device, inode, birthTimeNS) {
 		return ErrOwnershipMismatch
 	}
 	return nil
@@ -569,11 +572,11 @@ func (o *Ownership) revalidateCreated(materialization domain.Materialization) (s
 	if err != nil || len(decoded) != 32 || hex.EncodeToString(decoded) != materialization.OwnershipMarker {
 		return "", ErrOwnershipMismatch
 	}
-	canonical, original, device, inode, err := inspectRoot(materialization.CanonicalPath)
+	canonical, original, device, inode, birthTimeNS, err := inspectRoot(materialization.CanonicalPath)
 	if err != nil {
 		return "", fmt.Errorf("revalidate materialization: %w", errors.Join(err, ErrOwnershipMismatch))
 	}
-	if canonical != materialization.CanonicalPath || original != materialization.OriginalPath || !contained(o.materializationRoot, canonical) || device != materialization.Device || inode != materialization.Inode {
+	if canonical != materialization.CanonicalPath || original != materialization.OriginalPath || !contained(o.materializationRoot, canonical) || !sameRootIdentity(materialization.Device, materialization.Inode, materialization.BirthTimeNS, device, inode, birthTimeNS) {
 		return "", ErrOwnershipMismatch
 	}
 	runtimeDirectory, err := openOwnershipMarkerDirectory(canonical, device, inode, false, (*os.File).Sync)
@@ -863,30 +866,55 @@ func ownershipCleanupPriority(name string) int {
 	}
 }
 
-func inspectRoot(path string) (canonical, original string, device, inode uint64, err error) {
+func inspectRoot(path string) (canonical, original string, device, inode uint64, birthTimeNS int64, err error) {
 	if path == "" {
-		return "", "", 0, 0, errors.New("materialization path is empty")
+		return "", "", 0, 0, 0, errors.New("materialization path is empty")
 	}
 	original, err = filepath.Abs(path)
 	if err != nil {
-		return "", "", 0, 0, err
+		return "", "", 0, 0, 0, err
 	}
 	info, err := os.Lstat(original)
 	if err != nil {
-		return "", "", 0, 0, err
+		return "", "", 0, 0, 0, err
 	}
 	if info.Mode()&os.ModeSymlink != 0 || !info.IsDir() {
-		return "", "", 0, 0, errors.New("materialization root must be a real directory")
+		return "", "", 0, 0, 0, errors.New("materialization root must be a real directory")
 	}
 	canonical, err = filepath.EvalSymlinks(original)
 	if err != nil {
-		return "", "", 0, 0, err
+		return "", "", 0, 0, 0, err
 	}
 	stat, ok := info.Sys().(*syscall.Stat_t)
 	if !ok {
-		return "", "", 0, 0, errors.New("materialization identity unavailable")
+		return "", "", 0, 0, 0, errors.New("materialization identity unavailable")
 	}
-	return canonical, original, uint64(stat.Dev), stat.Ino, nil
+	birthTimeNS, err = rootBirthTimeNS(original)
+	if err != nil {
+		return "", "", 0, 0, 0, err
+	}
+	return canonical, original, uint64(stat.Dev), stat.Ino, birthTimeNS, nil
+}
+
+func rootBirthTimeNS(path string) (int64, error) {
+	var stat unix.Statx_t
+	if err := unix.Statx(unix.AT_FDCWD, path, unix.AT_SYMLINK_NOFOLLOW, unix.STATX_BTIME, &stat); err != nil {
+		if errors.Is(err, unix.ENOSYS) || errors.Is(err, unix.EOPNOTSUPP) || errors.Is(err, unix.EINVAL) {
+			return 0, nil
+		}
+		return 0, fmt.Errorf("inspect materialization birth time: %w", err)
+	}
+	if stat.Mask&unix.STATX_BTIME == 0 {
+		return 0, nil
+	}
+	return stat.Btime.Sec*int64(time.Second) + int64(stat.Btime.Nsec), nil
+}
+
+func sameRootIdentity(wantDevice, wantInode uint64, wantBirthTimeNS int64, gotDevice, gotInode uint64, gotBirthTimeNS int64) bool {
+	if wantDevice != gotDevice || wantInode != gotInode {
+		return false
+	}
+	return wantBirthTimeNS == 0 || wantBirthTimeNS == gotBirthTimeNS
 }
 
 func contained(root, candidate string) bool {

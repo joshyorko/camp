@@ -51,6 +51,23 @@ run exist, `provider-evidence.yml` records `result=gated` and the reason; a job
 skipped by `if: secrets.* != ''` is never provider evidence. Do not put secret
 values in evidence JSON, artifacts, caches, output, plans, or generated config.
 
+Clean-runner CI must not inherit workstation capabilities. Run CLI composition
+tests with a PATH containing only the test's declared fakes and the Go/system
+tools; `camp init` must not resolve DevPod or Hauler because initialization uses
+only the Docker manifest boundary. Linux cancellation tests must spawn a child
+process (`sleep 30 & wait`) and prove the whole process group terminates within
+the deadline; killing only the shell can leave descendants holding captured
+stdout/stderr open until their natural exit.
+
+Replacement-identity tests must account for immediate inode reuse on GitHub's
+Ubuntu filesystems. New materialization and hydration records include Linux
+`statx` birth time when the filesystem provides it, in addition to device and
+inode. Older records and filesystems without birth time retain the legacy
+device/inode comparison, while new records reject a replacement even when the
+filesystem reuses the same inode. Cleanup of a renamed regular file compares
+mode, link count, size, and modification time as well as device/inode; change
+time cannot be compared across rename because rename itself changes it.
+
 ## Generic archive evidence
 
 Run the repository-owned archive builder from the repository root with an

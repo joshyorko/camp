@@ -175,6 +175,10 @@ func (c *Controller) Hydrate(ctx context.Context, request Request) (Result, erro
 		if err != nil {
 			return Result{}, err
 		}
+		state.FinalBirthTimeNS, err = directoryBirthTimeNS(request.FinalRoot)
+		if err != nil {
+			return Result{}, err
+		}
 		if err := c.writeState(request.StageRoot, state); err != nil && stageExists {
 			return Result{}, err
 		}
@@ -187,6 +191,10 @@ func (c *Controller) Hydrate(ctx context.Context, request Request) (Result, erro
 				state.StageCreated = true
 				var err error
 				state.StageDevice, state.StageInode, err = directoryIdentity(request.StageRoot)
+				if err != nil {
+					return err
+				}
+				state.StageBirthTimeNS, err = directoryBirthTimeNS(request.StageRoot)
 				if err != nil {
 					return err
 				}
@@ -323,6 +331,10 @@ func (c *Controller) Hydrate(ctx context.Context, request Request) (Result, erro
 			if err != nil {
 				return err
 			}
+			state.FinalBirthTimeNS, err = directoryBirthTimeNS(request.FinalRoot)
+			if err != nil {
+				return err
+			}
 			return c.writeState(request.StageRoot, state)
 		}); err != nil {
 			return Result{}, err
@@ -400,6 +412,7 @@ type stageState struct {
 	StageCreated      bool   `json:"stageCreated"`
 	StageDevice       uint64 `json:"stageDevice,omitempty"`
 	StageInode        uint64 `json:"stageInode,omitempty"`
+	StageBirthTimeNS  int64  `json:"stageBirthTimeNs,omitempty"`
 	GenerationFetched bool   `json:"generationFetched"`
 	GenerationLoaded  bool   `json:"generationLoaded"`
 	ExtractComplete   bool   `json:"extractComplete"`
@@ -407,6 +420,7 @@ type stageState struct {
 	OwnershipFact     bool   `json:"ownershipFact"`
 	FinalDevice       uint64 `json:"finalDevice,omitempty"`
 	FinalInode        uint64 `json:"finalInode,omitempty"`
+	FinalBirthTimeNS  int64  `json:"finalBirthTimeNs,omitempty"`
 }
 
 type hydrationMarker struct {
@@ -512,7 +526,11 @@ func (c *Controller) loadOrCreateState(request Request) (stageState, bool, bool,
 		if err != nil {
 			return stageState{}, true, finalExists, err
 		}
-		if state.StageDevice != device || state.StageInode != inode {
+		birthTimeNS, err := directoryBirthTimeNS(request.StageRoot)
+		if err != nil {
+			return stageState{}, true, finalExists, err
+		}
+		if !sameDirectoryIdentity(state.StageDevice, state.StageInode, state.StageBirthTimeNS, device, inode, birthTimeNS) {
 			return stageState{}, true, finalExists, fmt.Errorf("materialization stage identity changed: %w", ErrUnsafeMaterialization)
 		}
 	}
@@ -527,7 +545,11 @@ func (c *Controller) validateFinal(request Request, state stageState) error {
 	if err != nil {
 		return err
 	}
-	if state.FinalDevice != 0 && (state.FinalDevice != device || state.FinalInode != inode) {
+	birthTimeNS, err := directoryBirthTimeNS(request.FinalRoot)
+	if err != nil {
+		return err
+	}
+	if state.FinalDevice != 0 && !sameDirectoryIdentity(state.FinalDevice, state.FinalInode, state.FinalBirthTimeNS, device, inode, birthTimeNS) {
 		return fmt.Errorf("materialization final identity changed: %w", ErrUnsafeMaterialization)
 	}
 	return nil
@@ -959,7 +981,7 @@ func removeExactEntryAt(parentFD int, name string, expected unix.Stat_t) error {
 		return err
 	}
 	current, err := validateEntryIdentityAt(parentFD, quarantine)
-	if err != nil || !sameStatIdentity(expected, current) {
+	if err != nil || !sameCleanupEntryStat(expected, current) {
 		restoreErr := unix.Renameat2(parentFD, quarantine, parentFD, name, unix.RENAME_NOREPLACE)
 		syncErr := unix.Fsync(parentFD)
 		return errors.Join(fmt.Errorf("entry %q changed before cleanup: %w", name, ErrUnsafeMaterialization), err, restoreErr, syncErr)
@@ -986,6 +1008,10 @@ func sameStatIdentity(left, right unix.Stat_t) bool {
 
 func sameMarkerStat(left, right unix.Stat_t) bool {
 	return sameStatIdentity(left, right) && left.Mode == right.Mode && left.Nlink == right.Nlink && left.Size == right.Size && left.Mtim == right.Mtim && left.Ctim == right.Ctim
+}
+
+func sameCleanupEntryStat(left, right unix.Stat_t) bool {
+	return sameStatIdentity(left, right) && left.Mode == right.Mode && left.Nlink == right.Nlink && left.Size == right.Size && left.Mtim == right.Mtim
 }
 
 func writeAll(file *os.File, body []byte) error {
@@ -1048,7 +1074,11 @@ func removeOwnedStage(stage string, request Request) error {
 	if err != nil {
 		return err
 	}
-	if state.StageDevice != device || state.StageInode != inode {
+	birthTimeNS, err := directoryBirthTimeNS(stage)
+	if err != nil {
+		return err
+	}
+	if !sameDirectoryIdentity(state.StageDevice, state.StageInode, state.StageBirthTimeNS, device, inode, birthTimeNS) {
 		return fmt.Errorf("materialization stage identity changed: %w", ErrUnsafeMaterialization)
 	}
 	return os.RemoveAll(stage)
@@ -1378,6 +1408,27 @@ func directoryIdentity(path string) (uint64, uint64, error) {
 		return 0, 0, errors.New("directory identity unavailable")
 	}
 	return uint64(stat.Dev), stat.Ino, nil
+}
+
+func directoryBirthTimeNS(path string) (int64, error) {
+	var stat unix.Statx_t
+	if err := unix.Statx(unix.AT_FDCWD, path, unix.AT_SYMLINK_NOFOLLOW, unix.STATX_BTIME, &stat); err != nil {
+		if errors.Is(err, unix.ENOSYS) || errors.Is(err, unix.EOPNOTSUPP) || errors.Is(err, unix.EINVAL) {
+			return 0, nil
+		}
+		return 0, fmt.Errorf("inspect directory birth time: %w", err)
+	}
+	if stat.Mask&unix.STATX_BTIME == 0 {
+		return 0, nil
+	}
+	return stat.Btime.Sec*1_000_000_000 + int64(stat.Btime.Nsec), nil
+}
+
+func sameDirectoryIdentity(wantDevice, wantInode uint64, wantBirthTimeNS int64, gotDevice, gotInode uint64, gotBirthTimeNS int64) bool {
+	if wantDevice != gotDevice || wantInode != gotInode {
+		return false
+	}
+	return wantBirthTimeNS == 0 || wantBirthTimeNS == gotBirthTimeNS
 }
 
 func within(root, candidate string) bool {

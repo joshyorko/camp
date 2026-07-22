@@ -92,35 +92,33 @@ func (p *ProductionLifecycle) Init(ctx context.Context, request InitRequest, mod
 			return UsageError(err)
 		}
 	}
-	composition, err := composeProductionWithSettings(ctx, settings)
-	if err != nil {
-		return err
-	}
+	runner := subprocess.NewRunner()
+	initializer := capsule.NewInitializer(host.NewClock(), capsule.NewCommandDigestResolver("docker", runner))
 	root := request.Root
 	if request.Source != "" {
 		root = request.Source
 	}
 	if root == "" {
-		root = composition.runtime.Source
+		root = settings.runtime.Source
 	}
 	if root == "" {
 		return UsageError(errors.New("init requires a root or CAMP_SOURCE"))
 	}
-	capsuleID := composition.runtime.Capsule
+	capsuleID := settings.runtime.Capsule
 	if request.Capsule != "" {
 		capsuleID = request.Capsule
 	}
-	result, err := composition.initializer.Initialize(ctx, root, capsuleID)
+	result, err := initializer.Initialize(ctx, root, capsuleID)
 	if err != nil {
 		return err
 	}
 	if request.Source != "" {
-		written, err := persistInitConfiguration(composition.paths.ConfigPath, request, composition.runtime.S3)
+		written, err := persistInitConfiguration(settings.paths.ConfigPath, request, settings.runtime.S3)
 		if err != nil {
 			return err
 		}
 		return writeConfiguredInitSuccess(out, mode, configuredInitResult{
-			ConfigPath: composition.paths.ConfigPath, Source: written.Source, Backend: written.Backend,
+			ConfigPath: settings.paths.ConfigPath, Source: written.Source, Backend: written.Backend,
 			Capsule: written.DefaultCapsule, DevPodProvider: written.DevPodProvider, DevPodContext: written.DevPodContext,
 		})
 	}

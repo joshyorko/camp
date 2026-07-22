@@ -23,6 +23,7 @@ func TestDurableJSONDocumentsRoundTrip(t *testing.T) {
 		Mode:             MaterializationCreated,
 		Device:           2049,
 		Inode:            998877,
+		BirthTimeNS:      1784678400000000000,
 		CleanupPermitted: true,
 	}
 
