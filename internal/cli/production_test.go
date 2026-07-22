@@ -9,6 +9,7 @@ import (
 
 	"github.com/joshyorko/camp/internal/config"
 	"github.com/joshyorko/camp/internal/domain"
+	journalstore "github.com/joshyorko/camp/internal/journal"
 	"github.com/joshyorko/camp/internal/ports"
 )
 
@@ -60,7 +61,7 @@ func TestStartSessionSupervisorUsesHiddenCommandAndWaitsForClaim(t *testing.T) {
 		Supervisor:    domain.SupervisorRecord{},
 	}}
 	processes := &recordingProcessManager{journal: journal, identity: domain.ProcessIdentity{PID: 321, BootID: "boot", StartTicks: 9}}
-	composition := productionComposition{paths: config.XDGPaths{DataRoot: t.TempDir()}, journal: journal}
+	composition := productionComposition{productionBase: productionBase{paths: config.XDGPaths{DataRoot: t.TempDir()}, journal: journal}}
 
 	if err := startSessionSupervisor(context.Background(), composition, processes, "session-1"); err != nil {
 		t.Fatalf("startSessionSupervisor() error = %v", err)
@@ -77,6 +78,91 @@ func TestStartSessionSupervisorUsesHiddenCommandAndWaitsForClaim(t *testing.T) {
 	}
 	if loaded.Supervisor.Identity != processes.identity || loaded.Supervisor.Desired != domain.RuntimeDesiredRunning || loaded.Supervisor.Observed != domain.RuntimeObservedReady {
 		t.Fatalf("loaded supervisor = %#v", loaded.Supervisor)
+	}
+}
+
+func TestRunSupervisorClaimsBeforeHeartbeatComposition(t *testing.T) {
+	root := t.TempDir()
+	t.Setenv("XDG_CONFIG_HOME", filepath.Join(root, "config"))
+	t.Setenv("XDG_DATA_HOME", filepath.Join(root, "data"))
+	t.Setenv("XDG_CACHE_HOME", filepath.Join(root, "cache"))
+	t.Setenv("CAMP_BACKEND", "file://"+filepath.Join(root, "backend"))
+	t.Setenv("CAMP_CAPSULE", "default")
+	sessionID := "session-1"
+	journalRoot := filepath.Join(root, "data", "camp")
+	journal, err := journalstore.NewStore(journalRoot)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := journal.Create(context.Background(), domain.JournalSnapshot{
+		SchemaVersion: domain.SchemaVersion,
+		SessionID:     sessionID,
+		Capsule:       "default",
+		Lineage:       domain.Lineage{Branch: "main"},
+		Mode:          domain.SessionReadWrite,
+		State:         domain.SessionOpen,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	sentinel := errors.New("heartbeat composer reached")
+	err = runSupervisor(context.Background(), sessionID, func(ctx context.Context, base productionBase) (supervisorHeartbeat, error) {
+		loaded, _, loadErr := base.journal.Load(ctx, sessionID)
+		if loadErr != nil {
+			return supervisorHeartbeat{}, loadErr
+		}
+		if loaded.Supervisor.Identity == (domain.ProcessIdentity{}) || loaded.Supervisor.Desired != domain.RuntimeDesiredRunning || loaded.Supervisor.Observed != domain.RuntimeObservedPending {
+			t.Fatalf("supervisor claim not recorded before heartbeat composition: %#v", loaded.Supervisor)
+		}
+		return supervisorHeartbeat{}, sentinel
+	})
+	if !errors.Is(err, sentinel) {
+		t.Fatalf("runSupervisor() error = %v, want %v", err, sentinel)
+	}
+}
+
+func TestRunSupervisorHeartbeatFailureLeavesClaimPending(t *testing.T) {
+	root := t.TempDir()
+	t.Setenv("XDG_CONFIG_HOME", filepath.Join(root, "config"))
+	t.Setenv("XDG_DATA_HOME", filepath.Join(root, "data"))
+	t.Setenv("XDG_CACHE_HOME", filepath.Join(root, "cache"))
+	t.Setenv("CAMP_BACKEND", "file://"+filepath.Join(root, "backend"))
+	t.Setenv("CAMP_CAPSULE", "default")
+	sessionID := "session-2"
+	journalRoot := filepath.Join(root, "data", "camp")
+	journal, err := journalstore.NewStore(journalRoot)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := journal.Create(context.Background(), domain.JournalSnapshot{
+		SchemaVersion: domain.SchemaVersion,
+		SessionID:     sessionID,
+		Capsule:       "default",
+		Lineage:       domain.Lineage{Branch: "main"},
+		Mode:          domain.SessionReadWrite,
+		State:         domain.SessionOpen,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	sentinel := errors.New("heartbeat composer failed")
+	err = runSupervisor(context.Background(), sessionID, func(ctx context.Context, base productionBase) (supervisorHeartbeat, error) {
+		loaded, _, loadErr := base.journal.Load(ctx, sessionID)
+		if loadErr != nil {
+			return supervisorHeartbeat{}, loadErr
+		}
+		if loaded.Supervisor.Identity == (domain.ProcessIdentity{}) || loaded.Supervisor.Observed != domain.RuntimeObservedPending {
+			t.Fatalf("supervisor claim not pending before heartbeat composition failure: %#v", loaded.Supervisor)
+		}
+		return supervisorHeartbeat{}, sentinel
+	})
+	if !errors.Is(err, sentinel) {
+		t.Fatalf("runSupervisor() error = %v, want %v", err, sentinel)
+	}
+	loaded, _, err := journal.Load(context.Background(), sessionID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if loaded.Supervisor.Observed != domain.RuntimeObservedPending {
+		t.Fatalf("supervisor after heartbeat failure = %#v", loaded.Supervisor)
 	}
 }
 
@@ -110,7 +196,7 @@ func (r *recordingProcessManager) Start(_ context.Context, spec ports.ProcessSpe
 	return r.identity, nil
 }
 func (r *recordingProcessManager) Inspect(context.Context, domain.ProcessIdentity) (ports.ProcessStatus, error) {
-	return ports.ProcessStatus{}, nil
+	return ports.ProcessStatus{Identity: r.identity, Running: true}, nil
 }
 func (r *recordingProcessManager) InspectPID(context.Context, int) (ports.ProcessStatus, error) {
 	return ports.ProcessStatus{}, nil

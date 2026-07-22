@@ -41,13 +41,40 @@ func (u *Supervise) Run(ctx context.Context, sessionID string) error {
 		return errors.New("supervisor dependencies are incomplete")
 	}
 	if u.identity != nil {
-		if err := u.claim(ctx, sessionID); err != nil {
+		if err := u.Claim(ctx, sessionID); err != nil {
 			return err
 		}
+		if err := u.MarkReady(ctx, sessionID); err != nil {
+			return err
+		}
+	}
+	return u.RunClaimed(ctx, sessionID)
+}
+
+func (u *Supervise) Claim(ctx context.Context, sessionID string) error {
+	if u == nil || u.journal == nil || u.clock == nil || u.locks == nil || u.identity == nil {
+		return errors.New("supervisor dependencies are incomplete")
+	}
+	return u.recordSupervisorState(ctx, sessionID, domain.RuntimeObservedPending)
+}
+
+func (u *Supervise) MarkReady(ctx context.Context, sessionID string) error {
+	if u == nil || u.journal == nil || u.clock == nil || u.locks == nil || u.identity == nil {
+		return errors.New("supervisor dependencies are incomplete")
+	}
+	return u.recordSupervisorState(ctx, sessionID, domain.RuntimeObservedReady)
+}
+
+func (u *Supervise) RunClaimed(ctx context.Context, sessionID string) error {
+	if u == nil || u.journal == nil || u.clock == nil || u.ttl <= 0 || u.locks == nil {
+		return errors.New("supervisor dependencies are incomplete")
 	}
 	snapshot, err := u.loadSnapshot(ctx, sessionID)
 	if err != nil {
 		return err
+	}
+	if snapshot.Supervisor.Observed != domain.RuntimeObservedReady {
+		return errors.New("supervisor claim is not ready")
 	}
 	if snapshot.Mode == domain.SessionReadOnly || snapshot.Lease.Lease == nil {
 		<-ctx.Done()
@@ -76,6 +103,10 @@ func (u *Supervise) Run(ctx context.Context, sessionID string) error {
 }
 
 func (u *Supervise) claim(ctx context.Context, sessionID string) error {
+	return u.recordSupervisorState(ctx, sessionID, domain.RuntimeObservedPending)
+}
+
+func (u *Supervise) recordSupervisorState(ctx context.Context, sessionID string, observed domain.RuntimeState) error {
 	token, err := u.locks.Acquire(ctx, ports.OperationOwner{SessionID: sessionID, Operation: "supervise"})
 	if err != nil {
 		return err
@@ -99,7 +130,7 @@ func (u *Supervise) claim(ctx context.Context, sessionID string) error {
 	if err != nil {
 		return err
 	}
-	snapshot.Supervisor = domain.SupervisorRecord{Identity: process, Desired: domain.RuntimeDesiredRunning, Observed: domain.RuntimeObservedReady}
+	snapshot.Supervisor = domain.SupervisorRecord{Identity: process, Desired: domain.RuntimeDesiredRunning, Observed: observed}
 	fact := ports.FactRecord{IntentID: intent.ID, SessionID: sessionID, Transition: intent.Transition, Timestamp: now}
 	return u.journal.RecordFact(context.WithoutCancel(ctx), fact, snapshot)
 }

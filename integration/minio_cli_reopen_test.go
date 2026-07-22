@@ -43,9 +43,15 @@ func TestMinIOCLIFreshControllerReopen(t *testing.T) {
 	t.Cleanup(func() {
 		cleanupCtx, cleanupCancel := context.WithTimeout(context.Background(), 5*time.Minute)
 		defer cleanupCancel()
-		workspaces, _ := listDevPodWorkspaces(cleanupCtx)
+		workspaces, err := listDevPodWorkspaces(cleanupCtx)
+		if err != nil {
+			t.Errorf("list DevPod workspaces during cleanup: %v", err)
+			return
+		}
 		for _, workspace := range workspaces {
-			_, _ = runLifecycleCommand(cleanupCtx, nil, "devpod", "delete", "--context", "default", "--ignore-not-found", workspace)
+			if output, err := runLifecycleCommand(cleanupCtx, nil, "devpod", "delete", "--context", "default", "--ignore-not-found", workspace); err != nil {
+				t.Errorf("delete DevPod workspace %s: %v: %s", workspace, err, output)
+			}
 		}
 	})
 
@@ -58,9 +64,10 @@ func TestMinIOCLIFreshControllerReopen(t *testing.T) {
 	if workspaceID == "" || recovered.SessionID == "" || recovered.Target != "Projects/Unicode space" {
 		t.Fatalf("open = %#v", recovered)
 	}
+	assertExactlyOneDevPodWorkspace(t, ctx, workspaceID)
 	workspaceRoot := "/workspaces/" + workspaceID
-	t.Log("mutate workspace and publish an explicit checkpoint")
-	mutate := fmt.Sprintf("set -eux; cd %s; printf 'after-open\\n' >> 'Projects/Unicode space/λ-note.txt'; chmod 600 'Projects/Unicode space/λ-note.txt'; test \"$CAMP_REGISTRY\" = %s; test \"$CAMP_FILESERVER\" = %s; wget -qO- \"http://$CAMP_REGISTRY/v2/\" >/dev/null; wget -qO- \"http://$CAMP_FILESERVER/\" >/dev/null", shellQuote(workspaceRoot), shellQuote(loopbackEndpoint(registryPort)), shellQuote(loopbackEndpoint(fileserverPort)))
+	t.Log("mutate workspace and publish a named image through CAMP_REGISTRY")
+	mutate := fmt.Sprintf("set -eu; cd %s; printf 'after-open\\n' >> 'Projects/Unicode space/λ-note.txt'; chmod 600 'Projects/Unicode space/λ-note.txt'; test \"$CAMP_REGISTRY\" = %s; test \"$CAMP_FILESERVER\" = %s; wget -qO- \"http://$CAMP_REGISTRY/v2/\" >/dev/null; wget -qO- \"http://$CAMP_FILESERVER/\" >/dev/null; engine=; attempts=0; while test -z \"$engine\"; do for candidate in docker podman nerdctl; do if command -v \"$candidate\" >/dev/null 2>&1 && \"$candidate\" info >/dev/null 2>&1; then engine=$candidate; break; fi; done; attempts=$((attempts+1)); test $attempts -lt 60; sleep 1; done; \"$engine\" pull alpine:3.20; image_id=$(\"$engine\" create alpine:3.20); \"$engine\" commit \"$image_id\" %s/camp-acceptance:named; \"$engine\" rm \"$image_id\"; \"$engine\" push %s/camp-acceptance:named", shellQuote(workspaceRoot), shellQuote(loopbackEndpoint(registryPort)), shellQuote(loopbackEndpoint(fileserverPort)), loopbackEndpoint(registryPort), loopbackEndpoint(registryPort))
 	mustRunLifecycle(t, ctx, nil, "devpod", "ssh", "--context", "default", workspaceID, "--command", mutate)
 
 	if generation := decodeGeneration(t, mustRunLifecycle(t, ctx, envA, bin, "--json", "sync")); generation != 1 {
@@ -83,8 +90,10 @@ func TestMinIOCLIFreshControllerReopen(t *testing.T) {
 	if reopened.Generation != 2 || reopened.WorkspaceID == "" || reopened.Materialization == "" {
 		t.Fatalf("fresh-controller reopen = %#v", reopened)
 	}
+	assertExactlyOneDevPodWorkspace(t, ctx, reopened.WorkspaceID)
 	workspaceRoot = "/workspaces/" + reopened.WorkspaceID
-	verify := fmt.Sprintf("set -eux; grep -q before-open %s; grep -q after-open %s; grep -q after-sync %s; stat -c %%a %s | grep -qx 600; stat -c %%s %s | grep -qx %d", shellQuote(filepath.ToSlash(filepath.Join(workspaceRoot, "Projects/Unicode space/λ-note.txt"))), shellQuote(filepath.ToSlash(filepath.Join(workspaceRoot, "Projects/Unicode space/λ-note.txt"))), shellQuote(filepath.ToSlash(filepath.Join(workspaceRoot, "Projects/Unicode space/λ-note.txt"))), shellQuote(filepath.ToSlash(filepath.Join(workspaceRoot, "Projects/Unicode space/λ-note.txt"))), shellQuote(filepath.ToSlash(filepath.Join(workspaceRoot, "large.bin"))), lifecycleLargeSize)
+	note := shellQuote(filepath.ToSlash(filepath.Join(workspaceRoot, "Projects/Unicode space/λ-note.txt")))
+	verify := fmt.Sprintf("set -eux; grep -q before-open %s; grep -q after-open %s; grep -q after-sync %s; stat -c %%a %s | grep -qx 600; stat -c %%s %s | grep -qx %d; readlink %s | grep -qx README.md; find %s -xdev -samefile %s | grep -q README-hardlink.md; engine=; for candidate in docker podman nerdctl; do if command -v \"$candidate\" >/dev/null 2>&1 && \"$candidate\" info >/dev/null 2>&1; then engine=$candidate; break; fi; done; test -n \"$engine\"; \"$engine\" image inspect %s/camp-acceptance:named >/dev/null; \"$engine\" run --rm %s/camp-acceptance:named true", note, note, note, note, shellQuote(filepath.ToSlash(filepath.Join(workspaceRoot, "large.bin"))), lifecycleLargeSize, shellQuote(filepath.ToSlash(filepath.Join(workspaceRoot, "README-link.md"))), shellQuote(workspaceRoot), shellQuote(filepath.ToSlash(filepath.Join(workspaceRoot, "README.md"))), loopbackEndpoint(registryPort), loopbackEndpoint(registryPort))
 	mustRunLifecycle(t, ctx, nil, "devpod", "ssh", "--context", "default", reopened.WorkspaceID, "--command", verify)
 	t.Log("close fresh controller and verify teardown")
 	mustRunLifecycle(t, ctx, envB, bin, "--json", "close")
@@ -100,6 +109,7 @@ func minioLifecycleEnvironment(controller, source, endpoint, access, secret stri
 	env := []string{
 		"XDG_CONFIG_HOME=" + filepath.Join(controller, "config"),
 		"XDG_DATA_HOME=" + filepath.Join(controller, "data"),
+		"XDG_STATE_HOME=" + filepath.Join(controller, "state"),
 		"XDG_CACHE_HOME=" + filepath.Join(controller, "cache"),
 		"CAMP_BACKEND=s3://" + portabilityBucket + "/camp",
 		"CAMP_CAPSULE=default",
@@ -118,4 +128,15 @@ func minioLifecycleEnvironment(controller, source, endpoint, access, secret stri
 		env = append(env, "CAMP_SOURCE="+source)
 	}
 	return env
+}
+
+func assertExactlyOneDevPodWorkspace(t *testing.T, ctx context.Context, expected string) {
+	t.Helper()
+	workspaces, err := listDevPodWorkspaces(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(workspaces) != 1 || workspaces[0] != expected {
+		t.Fatalf("DevPod workspaces = %v, want [%s]", workspaces, expected)
+	}
 }
