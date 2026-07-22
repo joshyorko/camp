@@ -21,10 +21,12 @@ tree with `go run ./cmd/camp-docs`. Never hand-edit `docs/generated/`.
 
 `go test ./internal/docsgen ./docs -count=1` compares every checked-in generated
 artifact byte-for-byte, excludes hidden commands, requires an effect-free
-dispatch transcript for every visible command, and verifies operator-index
-links. The transcript lifecycle proves Cobra parsing and handler dispatch only;
-it is not DevPod, Hauler, backend, lifecycle, or release evidence. When the
-public tree changes, regenerate and review
+dispatch marker for every visible lifecycle command, executes completion
+generation, rejects non-public command mentions in operator docs, and verifies
+operator-index links. An exit-zero transcript without handler output is
+insufficient dispatch evidence. The transcript lifecycle proves Cobra parsing
+and handler dispatch only; it is not DevPod, Hauler, backend, lifecycle, or
+release evidence. When the public tree changes, regenerate and review
 `git diff -- docs/generated/commands.md` before accepting the change.
 
 When a stacked PR's base merges, restack the child directly onto the resulting `master` commit and compare `master...HEAD` before pushing. The post-rebase diff must contain only the child scope; record the old and new head SHAs, then force-push with a lease pinned to the observed old remote head so concurrent updates fail instead of being overwritten.

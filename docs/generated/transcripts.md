@@ -37,63 +37,62 @@ Use "camp [command] --help" for more information about a command.
 
 ```console
 $ camp close
+effect-free docs fixture: close dispatched; external effects disabled
 ```
 
-## `camp completion --help`
+## `camp completion bash`
 
 ```console
-$ camp completion --help
-Generate shell completion
-
-Usage:
-  camp completion [bash|zsh|fish] [flags]
-
-Flags:
-  -h, --help   help for completion
-
-Global Flags:
-      --json   emit stable JSON output
+$ camp completion bash
+generated bash completion: 16033 bytes, sha256 c71f420df86270070783db8dab96672fcec9ed3433df71fe8b60a09992ca3a02
 ```
 
 ## `camp doctor`
 
 ```console
 $ camp doctor
+effect-free docs fixture: doctor dispatched; external effects disabled
 ```
 
 ## `camp init /tmp/camp-docs-capsule`
 
 ```console
 $ camp init /tmp/camp-docs-capsule
+effect-free docs fixture: init dispatched; external effects disabled
 ```
 
 ## `camp open memoryd`
 
 ```console
 $ camp open memoryd
+effect-free docs fixture: open dispatched; external effects disabled
 ```
 
 ## `camp recover memoryd`
 
 ```console
 $ camp recover memoryd
+effect-free docs fixture: recover dispatched; external effects disabled
 ```
 
 ## `camp reopen memoryd`
 
 ```console
 $ camp reopen memoryd
+effect-free docs fixture: reopen dispatched; external effects disabled
 ```
 
 ## `camp setup`
 
 ```console
 $ camp setup
+effect-free docs fixture: setup dispatched; external effects disabled
 ```
 
 ## `camp sync`
 
 ```console
 $ camp sync
+effect-free docs fixture: sync dispatched; external effects disabled
 ```
 

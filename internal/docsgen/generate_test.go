@@ -32,6 +32,9 @@ func TestDocumentedInvocationsExecute(t *testing.T) {
 			if code != 0 {
 				t.Fatalf("%v exited %d\nstdout:\n%s\nstderr:\n%s", invocation.Args, code, stdout.String(), stderr.String())
 			}
+			if invocation.CommandPath != "camp" && stdout.Len() == 0 {
+				t.Fatalf("%v did not emit dispatch or generated-output evidence", invocation.Args)
+			}
 		})
 	}
 }

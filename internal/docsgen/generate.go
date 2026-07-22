@@ -3,6 +3,7 @@ package docsgen
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
 	"fmt"
 	"io"
 	"sort"
@@ -76,7 +77,7 @@ func DocumentedInvocations() []Invocation {
 	return []Invocation{
 		{CommandPath: "camp", Args: []string{"--help"}},
 		{CommandPath: "camp close", Args: []string{"close"}},
-		{CommandPath: "camp completion", Args: []string{"completion", "--help"}},
+		{CommandPath: "camp completion", Args: []string{"completion", "bash"}},
 		{CommandPath: "camp doctor", Args: []string{"doctor"}},
 		{CommandPath: "camp init", Args: []string{"init", "/tmp/camp-docs-capsule"}},
 		{CommandPath: "camp open", Args: []string{"open", "memoryd"}},
@@ -99,7 +100,11 @@ func transcriptReference() ([]byte, error) {
 			return nil, fmt.Errorf("execute %s: exit %d: %s", invocation.CommandPath, code, stderr.String())
 		}
 		output.WriteString("## `" + strings.Join(append([]string{"camp"}, invocation.Args...), " ") + "`\n\n```console\n$ camp " + strings.Join(invocation.Args, " ") + "\n")
-		output.Write(stdout.Bytes())
+		if invocation.CommandPath == "camp completion" {
+			fmt.Fprintf(&output, "generated bash completion: %d bytes, sha256 %x\n", stdout.Len(), sha256.Sum256(stdout.Bytes()))
+		} else {
+			output.Write(stdout.Bytes())
+		}
 		output.Write(stderr.Bytes())
 		output.WriteString("```\n\n")
 	}
@@ -108,23 +113,37 @@ func transcriptReference() ([]byte, error) {
 
 type transcriptLifecycle struct{}
 
-func (transcriptLifecycle) Init(context.Context, cli.InitRequest, cli.OutputMode, io.Writer) error {
-	return nil
+func fixtureDispatch(output io.Writer, command string) error {
+	_, err := fmt.Fprintf(output, "effect-free docs fixture: %s dispatched; external effects disabled\n", command)
+	return err
 }
-func (transcriptLifecycle) Open(context.Context, string, cli.OutputMode, io.Writer) error { return nil }
-func (transcriptLifecycle) Sync(context.Context, cli.OutputMode, io.Writer) error         { return nil }
-func (transcriptLifecycle) Close(context.Context, cli.OutputMode, io.Writer) error        { return nil }
-func (transcriptLifecycle) Reopen(context.Context, string, cli.OutputMode, io.Writer) error {
-	return nil
+func (transcriptLifecycle) Init(_ context.Context, _ cli.InitRequest, _ cli.OutputMode, output io.Writer) error {
+	return fixtureDispatch(output, "init")
 }
-func (transcriptLifecycle) Recover(context.Context, string, cli.OutputMode, io.Writer) error {
-	return nil
+func (transcriptLifecycle) Open(_ context.Context, _ string, _ cli.OutputMode, output io.Writer) error {
+	return fixtureDispatch(output, "open")
 }
-func (transcriptLifecycle) Supervise(context.Context, string, cli.OutputMode, io.Writer) error {
-	return nil
+func (transcriptLifecycle) Sync(_ context.Context, _ cli.OutputMode, output io.Writer) error {
+	return fixtureDispatch(output, "sync")
 }
-func (transcriptLifecycle) Doctor(context.Context, cli.OutputMode, io.Writer) error { return nil }
-func (transcriptLifecycle) Setup(context.Context, cli.OutputMode, io.Writer) error  { return nil }
+func (transcriptLifecycle) Close(_ context.Context, _ cli.OutputMode, output io.Writer) error {
+	return fixtureDispatch(output, "close")
+}
+func (transcriptLifecycle) Reopen(_ context.Context, _ string, _ cli.OutputMode, output io.Writer) error {
+	return fixtureDispatch(output, "reopen")
+}
+func (transcriptLifecycle) Recover(_ context.Context, _ string, _ cli.OutputMode, output io.Writer) error {
+	return fixtureDispatch(output, "recover")
+}
+func (transcriptLifecycle) Supervise(_ context.Context, _ string, _ cli.OutputMode, output io.Writer) error {
+	return fixtureDispatch(output, "supervise")
+}
+func (transcriptLifecycle) Doctor(_ context.Context, _ cli.OutputMode, output io.Writer) error {
+	return fixtureDispatch(output, "doctor")
+}
+func (transcriptLifecycle) Setup(_ context.Context, _ cli.OutputMode, output io.Writer) error {
+	return fixtureDispatch(output, "setup")
+}
 
 func transcriptRoot() *cobra.Command { return cli.NewRootWithLifecycle(transcriptLifecycle{}) }
 

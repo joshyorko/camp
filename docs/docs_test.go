@@ -43,3 +43,28 @@ func TestOperatorIndexLinksExistingFiles(t *testing.T) {
 		}
 	}
 }
+
+func TestOperatorDocsMentionOnlyPublicCommands(t *testing.T) {
+	generated, err := os.ReadFile("generated/commands.md")
+	if err != nil {
+		t.Fatal(err)
+	}
+	public := map[string]bool{}
+	for _, match := range regexp.MustCompile("(?m)^## `camp(?: ([a-z-]+))?`$").FindAllStringSubmatch(string(generated), -1) {
+		public[match[1]] = true
+	}
+
+	paths := []string{"../README.md", "README.md", "architecture.md", "backends.md", "install.md", "recovery.md", "release.md", "setup-and-doctor.md", "../packaging/INSTALL.md"}
+	mention := regexp.MustCompile("`camp(?: ([a-z-]+))?(?: [^`]*)?`")
+	for _, path := range paths {
+		contents, err := os.ReadFile(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, match := range mention.FindAllStringSubmatch(string(contents), -1) {
+			if !public[match[1]] {
+				t.Errorf("%s documents non-public command %q", path, match[0])
+			}
+		}
+	}
+}
