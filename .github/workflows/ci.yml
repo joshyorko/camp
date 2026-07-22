@@ -1,0 +1,107 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [master]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    name: Unit, race, vet, and vulnerability
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
+        with:
+          go-version-file: go.mod
+          cache: true
+      - name: Unit tests
+        run: go test ./... -count=1
+      - name: Race tests
+        run: go test -race ./... -count=1
+      - name: Vet
+        run: go vet ./...
+      - name: Vulnerability scan
+        run: |
+          go install golang.org/x/vuln/cmd/govulncheck@v1.1.4
+          govulncheck ./...
+
+  integration:
+    name: Credential-free integration
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
+        with:
+          go-version-file: go.mod
+          cache: true
+      - run: go test ./integration -count=1
+
+  minio:
+    name: Mandatory containerized MinIO
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
+        with:
+          go-version-file: go.mod
+          cache: true
+      - name: Prove MinIO tests exist
+        run: |
+          tests="$(go test ./integration -list '^TestMinIO')"
+          grep -q '^TestMinIO' <<<"$tests"
+      - name: Run mandatory MinIO matrix
+        run: go test -v ./integration -run '^TestMinIO' -count=1
+
+  locked-tools:
+    name: Pinned tool bootstrap
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
+        with:
+          go-version-file: go.mod
+          cache: true
+      - name: Validate tools.lock.yaml and bootstrap behavior
+        env:
+          CAMP_TEST_REAL_TOOLS: "1"
+        run: |
+          tests="$(go test ./internal/adapters/tools -list '^TestInstallerCleanInstallsRealPinnedTools$')"
+          grep -qx 'TestInstallerCleanInstallsRealPinnedTools' <<<"$tests"
+          go test -v ./internal/adapters/tools -run '^TestInstallerCleanInstallsRealPinnedTools$' -count=1
+
+  packaging:
+    name: Reproducible packaging
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
+        with:
+          go-version-file: go.mod
+          cache: true
+      - run: go test ./packaging -count=1
+      - name: Build candidate artifacts
+        env:
+          VERSION: 0.0.0-${{ github.sha }}
+          COMMIT: ${{ github.sha }}
+          SOURCE_DATE_EPOCH: "0"
+          OUTPUT_DIR: dist
+        run: ./packaging/build-archives.sh
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: credential-free-candidate-${{ github.sha }}
+          path: dist/
+          if-no-files-found: error
+          retention-days: 14

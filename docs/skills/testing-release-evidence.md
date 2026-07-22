@@ -36,6 +36,21 @@ race detector. Wait for the required event-log sequence instead.
 
 Do not describe Camp as released or clean-machine-ready until the packaged binary, locked tools, real local lifecycle, portable backend lifecycle, and required Room/Wolfi/Rust/direct-registry acceptance matrix have concrete passing evidence. The executable is buildable and locally packageable, but that is not release evidence.
 
+The repository CI contract is enforced by `go test ./releasepipeline -count=1`.
+Pull-request CI has read-only contents permission and no protected environment,
+release write token, attestation token, or secret reference. Its unit, race, vet,
+vulnerability, integration, containerized MinIO, real pinned-tool download, and
+reproducible-package jobs are mandatory. The MinIO and real-tool jobs name and
+run their exact acceptance tests so an absent match or an unset opt-in cannot
+turn a skip into release evidence.
+
+Credentialed provider runs are separate from credential-free CI. A protected
+`release-providers` environment and an explicit named profile are required
+before a provider can be claimed. Until such a profile and successful hosted
+run exist, `provider-evidence.yml` records `result=gated` and the reason; a job
+skipped by `if: secrets.* != ''` is never provider evidence. Do not put secret
+values in evidence JSON, artifacts, caches, output, plans, or generated config.
+
 ## Generic archive evidence
 
 Run the repository-owned archive builder from the repository root with an
@@ -70,6 +85,53 @@ shape. They do not prove a GitHub release, a usable tap update path, native
 DEB/RPM/APK ownership, clean install/upgrade/uninstall, first-use managed-tool
 bootstrap, or a real DevPod/Kubernetes lifecycle.
 
+## Release-candidate evidence
+
+Build the candidate bundle with the same immutable inputs used for generic
+archives:
+
+```bash
+VERSION=0.0.0-test \
+COMMIT=0123456789abcdef0123456789abcdef01234567 \
+SOURCE_DATE_EPOCH=1784678400 \
+OUTPUT_DIR="$PWD/dist" \
+./packaging/build-release-evidence.sh build
+```
+
+The bundle contains Linux amd64/arm64 archives, `checksums.txt`, one SPDX 2.3
+JSON SBOM per archive, a rendered `camp.rb`, and `evidence.json`. Each SBOM
+package checksum must equal the SHA-256 of the final compressed archive, not an
+intermediate binary or directory. The evidence manifest records the commit,
+version, platform, digest, result, SBOM filename, package result, and every
+gated reason.
+
+Verification must happen after artifact download into a fresh job. Run one
+native job per supported architecture:
+
+```bash
+VERSION=0.0.0-test \
+COMMIT=0123456789abcdef0123456789abcdef01234567 \
+VERIFY_ARCH=amd64 \
+OUTPUT_DIR="$PWD/dist" \
+./packaging/build-release-evidence.sh verify
+```
+
+Verification checks the downloaded checksum manifest and SBOM digest, extracts
+the matching archive, installs its binary into a fresh temporary prefix, and
+executes version, help, and bash/zsh/fish completion commands. It emits
+`verification-<arch>.json`; both supported architectures must report `passed`.
+Checksums stored beside mutable release assets detect accidental or transport
+corruption but do not authenticate the publisher. GitHub artifact attestations
+bind final archive digests to the workflow identity; protected tag/manual
+publication remains downstream of downloaded-artifact verification and
+attestation.
+
+Before closing issue #13, link the successful mandatory CI run, both native
+verification jobs, uploaded GitHub artifact digest, archive checksums, exact
+SBOM digest bindings, attestations, protected provider evidence for every
+claimed profile, and every explicit gated or unsupported lane. A green local
+run or draft PR is not closure evidence and must not trigger a real release.
+
 ## Evidence
 
 - `AGENTS.md`
@@ -80,4 +142,6 @@ bootstrap, or a real DevPod/Kubernetes lifecycle.
 - `internal/capsule/ownership.go` and `internal/capsule/ownership_test.go`
 - `internal/app/supervise_test.go`
 - `docs/superpowers/plans/2026-07-14-camp.md` (names the currently missing local lifecycle gates)
-- `.github/` is currently absent, so no repository CI/release workflow is established.
+- `.github/workflows/ci.yml`, `release.yml`, and `provider-evidence.yml`
+- `releasepipeline/workflow_contract_test.go` and `evidence_test.go`
+- `packaging/build-release-evidence.sh`

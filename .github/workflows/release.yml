@@ -1,0 +1,124 @@
+name: Release candidate and publication
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+    inputs:
+      version:
+        description: Candidate version without a leading v
+        required: true
+        type: string
+      publish:
+        description: Publish after verification
+        required: true
+        default: false
+        type: boolean
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
+        with:
+          go-version-file: go.mod
+          cache: true
+      - name: Build release evidence
+        env:
+          VERSION: ${{ inputs.version || github.ref_name }}
+          COMMIT: ${{ github.sha }}
+        run: |
+          SOURCE_DATE_EPOCH="$(git show -s --format=%ct HEAD)"
+          export SOURCE_DATE_EPOCH
+          ./packaging/build-release-evidence.sh build
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: release-candidate-${{ github.sha }}
+          path: dist/
+          if-no-files-found: error
+          retention-days: 30
+
+  verify:
+    needs: build
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - architecture: amd64
+            runner: ubuntu-24.04
+          - architecture: arm64
+            runner: ubuntu-24.04-arm
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: release-candidate-${{ github.sha }}
+          path: dist
+      - name: Verify downloaded checksums, SBOMs, and installed archives
+        env:
+          VERSION: ${{ inputs.version || github.ref_name }}
+          COMMIT: ${{ github.sha }}
+          VERIFY_ARCH: ${{ matrix.architecture }}
+        run: |
+          cd dist
+          sha256sum --check checksums.txt
+          cd ..
+          ./packaging/build-release-evidence.sh verify
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: verified-release-evidence-${{ matrix.architecture }}-${{ github.sha }}
+          path: |
+            dist/evidence.json
+            dist/verification-${{ matrix.architecture }}.json
+          if-no-files-found: error
+          retention-days: 90
+
+  attest:
+    needs: verify
+    permissions:
+      contents: read
+      id-token: write
+      attestations: write
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: release-candidate-${{ github.sha }}
+          path: dist
+      - uses: actions/attest-build-provenance@96b4a1ef7235a096b17240c259729fdd70c83d45 # v2
+        with:
+          subject-path: dist/camp_*.tar.gz
+
+  publish:
+    needs: attest
+    if: github.event_name == 'push' || inputs.publish == true
+    environment: release
+    permissions:
+      contents: write
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: release-candidate-${{ github.sha }}
+          path: dist
+      - name: Publish verified assets
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REQUESTED_VERSION: ${{ inputs.version }}
+        run: |
+          release_tag="${GITHUB_REF_NAME}"
+          if [[ "${GITHUB_EVENT_NAME}" == "workflow_dispatch" ]]; then
+            release_tag="v${REQUESTED_VERSION#v}"
+          fi
+          gh release create "$release_tag" dist/* --verify-tag --generate-notes
