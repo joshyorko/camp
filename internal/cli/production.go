@@ -52,14 +52,30 @@ func (p *ProductionLifecycle) Doctor(ctx context.Context, mode OutputMode, out i
 	}
 	runner := subprocess.NewRunner()
 	confinement := supervisor.NewConfinementResolver(runner, exec.LookPath, func() string { return "host" })
+	pastaRuntime, err := newProductionPastaRuntime(confinement, paths.DataRoot)
+	if err != nil {
+		return err
+	}
 	managedTools, err := newDoctorManagedToolResolver(campcontract.DistributionToolLock(), paths.DataRoot)
+	if err != nil {
+		return err
+	}
+	bootstrap, err := config.ResolveBootstrap(config.BootstrapInput{ConfigPath: paths.ConfigPath, Environment: environment})
+	if err != nil {
+		return err
+	}
+	doctorJournal, err := journalstore.NewStore(paths.DataRoot)
+	if err != nil {
+		return err
+	}
+	sessions, err := doctorJournal.List(ctx)
 	if err != nil {
 		return err
 	}
 	probes := []doctor.Probe{
 		doctor.ManagedToolProbe{Name: "devpod", Resolver: managedTools},
 		doctor.ManagedToolProbe{Name: "hauler", Resolver: managedTools},
-		doctor.ConfinementProbe{Resolver: confinement},
+		doctor.PastaProbe{Runtime: pastaRuntime},
 		doctor.BackendProbe{
 			ConfigPath: paths.ConfigPath, Environment: environment,
 			DefaultBackend: "file://" + filepath.Join(paths.DataRoot, "backend"),
@@ -77,6 +93,7 @@ func (p *ProductionLifecycle) Doctor(ctx context.Context, mode OutputMode, out i
 		},
 	}
 	probes = append(probes, doctor.LinuxHostProbes()...)
+	probes = append(probes, productionReachabilityProbes(bootstrap, sessions, managedTools)...)
 	report := (doctor.Runner{Timeout: 5 * time.Second, Probes: probes}).Run(ctx)
 	if mode == ModeJSON {
 		err = doctor.RenderJSON(out, report)

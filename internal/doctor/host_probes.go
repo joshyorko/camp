@@ -93,15 +93,30 @@ func checkLSM(context.Context) (map[string]string, error) {
 }
 
 func checkContainerBoundary(context.Context) (map[string]string, error) {
-	boundary := "host"
+	marker := false
 	for _, path := range []string{"/.dockerenv", "/run/.containerenv"} {
 		if _, err := os.Stat(path); err == nil {
-			boundary = "container"
+			marker = true
 			break
 		}
 	}
-	if body, err := os.ReadFile("/proc/1/cgroup"); err == nil && strings.ContainsAny(strings.ToLower(string(body)), "docker containerd kubepods libpod") {
-		boundary = "container"
+	cgroup := ""
+	if body, err := os.ReadFile("/proc/1/cgroup"); err == nil {
+		cgroup = string(body)
 	}
+	boundary := detectContainerBoundary(marker, cgroup)
 	return map[string]string{"boundary": boundary, "operation": "proc-and-marker-inspection"}, nil
+}
+
+func detectContainerBoundary(marker bool, cgroup string) string {
+	if marker {
+		return "container"
+	}
+	cgroup = strings.ToLower(cgroup)
+	for _, signature := range []string{"docker", "containerd", "kubepods", "libpod"} {
+		if strings.Contains(cgroup, signature) {
+			return "container"
+		}
+	}
+	return "host"
 }

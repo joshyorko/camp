@@ -258,6 +258,32 @@ func (c *Client) EnsureProvider(ctx context.Context, devpodContext, provider str
 	return nil
 }
 
+// ProbeProvider verifies existing provider identity without adding, selecting,
+// or reconfiguring provider state.
+func (c *Client) ProbeProvider(ctx context.Context, devpodContext, provider string) error {
+	if c == nil || c.runner == nil || strings.TrimSpace(devpodContext) == "" || strings.TrimSpace(provider) == "" {
+		return errors.New("unsupported or incomplete DevPod provider probe")
+	}
+	providers, err := c.listProviders(ctx, devpodContext)
+	if err != nil {
+		return err
+	}
+	configured, exists := providers[provider]
+	if !exists {
+		return fmt.Errorf("configured DevPod provider identity %q was not found", provider)
+	}
+	if provider == "docker" {
+		if !configured.Default {
+			return fmt.Errorf("configured DevPod provider identity %q is not selected", provider)
+		}
+		return nil
+	}
+	if !configured.State.Initialized {
+		return fmt.Errorf("configured DevPod provider identity %q is not initialized", provider)
+	}
+	return nil
+}
+
 type providerState struct {
 	Default bool `json:"default"`
 	State   struct {

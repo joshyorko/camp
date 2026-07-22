@@ -43,3 +43,12 @@ func TestLinuxHostProbesExposeEveryRequiredBoundary(t *testing.T) {
 		}
 	}
 }
+
+func TestDetectContainerBoundaryDoesNotTreatArbitraryCgroupCharactersAsContainerEvidence(t *testing.T) {
+	if got := detectContainerBoundary(false, "0::/user.slice/user-1000.slice/session.scope"); got != "host" {
+		t.Fatalf("boundary = %q, want host", got)
+	}
+	if got := detectContainerBoundary(false, "0::/kubepods/burstable/pod"); got != "container" {
+		t.Fatalf("boundary = %q, want container", got)
+	}
+}
