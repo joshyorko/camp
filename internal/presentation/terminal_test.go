@@ -102,3 +102,75 @@ func TestTerminalSessionFailurePrintsUnderlyingErrorAndOneRecoveryCommand(t *tes
 		t.Fatalf("output = %q, want %q", got, want)
 	}
 }
+
+func TestSetupAnimatorRedrawsColorSceneOnlyFromOrderedWaypoints(t *testing.T) {
+	model := CampsiteModel{
+		DevPod: ToolIdentity{Name: "DevPod", Version: "v0.26.1"}, Hauler: ToolIdentity{Name: "Hauler", Version: "v2.0.2"},
+		Provider: "ror", RuntimeKind: "remote DevPod", Context: "work", Capsule: "brain", Source: "/brain",
+		BackendKind: "s3", Storage: "s3://camp/brain · generation 42", NextCommand: "camp open /brain",
+	}
+	var output bytes.Buffer
+	animator, err := NewSetupAnimator(&output, TerminalColor, model)
+	if err != nil {
+		t.Fatalf("NewSetupAnimator: %v", err)
+	}
+	for _, waypoint := range []SetupWaypoint{SetupToolchain, SetupRuntime, SetupCapsule, SetupStorage} {
+		if err := animator.Advance(context.Background(), waypoint); err != nil {
+			t.Fatalf("Advance(%s): %v", waypoint, err)
+		}
+	}
+	got := output.String()
+	if count := strings.Count(got, "\x1b[2J\x1b[H"); count != 4 {
+		t.Fatalf("full-screen redraws = %d, want 4", count)
+	}
+	if count := strings.Count(got, "CAMP IS READY"); count != 1 {
+		t.Fatalf("ready claims = %d, want final frame only", count)
+	}
+	if !strings.Contains(got, "DevPod v0.26.1") || !strings.Contains(got, "generation 42") {
+		t.Fatalf("output lacks authoritative values: %q", got)
+	}
+}
+
+func TestSetupAnimatorRejectsSkippedOrRepeatedWaypointBeforeWriting(t *testing.T) {
+	model := CampsiteModel{
+		DevPod: ToolIdentity{Name: "DevPod", Version: "v0.26.1"}, Hauler: ToolIdentity{Name: "Hauler", Version: "v2.0.2"},
+		Provider: "ror", RuntimeKind: "remote DevPod", Context: "work", Capsule: "brain", Source: "/brain",
+		BackendKind: "s3", Storage: "s3://camp/brain · generation 42", NextCommand: "camp open /brain",
+	}
+	var output bytes.Buffer
+	animator, err := NewSetupAnimator(&output, TerminalPlain, model)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := animator.Advance(context.Background(), SetupRuntime); err == nil {
+		t.Fatal("Advance accepted skipped toolchain waypoint")
+	}
+	if output.Len() != 0 {
+		t.Fatalf("Advance wrote partial output %q", output.String())
+	}
+}
+
+func TestSetupAnimatorPlainFallbackIsStableAndControlFree(t *testing.T) {
+	model := CampsiteModel{
+		DevPod: ToolIdentity{Name: "DevPod", Version: "v0.26.1"}, Hauler: ToolIdentity{Name: "Hauler", Version: "v2.0.2"},
+		Provider: "ror", RuntimeKind: "remote DevPod", Context: "work", Capsule: "brain", Source: "/brain",
+		BackendKind: "s3", Storage: "s3://camp/brain · generation 42", NextCommand: "camp open /brain",
+	}
+	var output bytes.Buffer
+	animator, err := NewSetupAnimator(&output, TerminalPlain, model)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, waypoint := range []SetupWaypoint{SetupToolchain, SetupRuntime, SetupCapsule, SetupStorage} {
+		if err := animator.Advance(context.Background(), waypoint); err != nil {
+			t.Fatal(err)
+		}
+	}
+	want := "setup: toolchain: DevPod v0.26.1 · Hauler v2.0.2\nsetup: runtime: ror · remote DevPod · context work\nsetup: capsule: brain · /brain\nsetup: storage: s3 backend · s3://camp/brain · generation 42\nsetup: camp is ready; next: camp open /brain\n"
+	if got := output.String(); got != want {
+		t.Fatalf("output = %q, want %q", got, want)
+	}
+	if strings.Contains(output.String(), "\x1b[") {
+		t.Fatalf("plain setup output contains controls: %q", output.String())
+	}
+}

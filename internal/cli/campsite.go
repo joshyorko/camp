@@ -43,7 +43,16 @@ func renderProductionSetupCampsite(ctx context.Context, out io.Writer, lockBytes
 	if err != nil {
 		return err
 	}
-	return presentation.RenderCampsite(out, model, presentation.CampsiteOptions{Color: experience == presentation.TerminalColor, Width: 120})
+	animator, err := presentation.NewSetupAnimator(out, experience, model)
+	if err != nil {
+		return err
+	}
+	for _, waypoint := range []presentation.SetupWaypoint{presentation.SetupToolchain, presentation.SetupRuntime, presentation.SetupCapsule, presentation.SetupStorage} {
+		if err := animator.Advance(ctx, waypoint); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 func buildCampsiteModel(lock tooladapter.Lock, runtime config.Runtime, backend config.Backend, sessions []domain.JournalSnapshot) (presentation.CampsiteModel, error) {
