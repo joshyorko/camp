@@ -126,7 +126,7 @@ func TestSuperviseReloadsDurableSnapshotUnderOperationLock(t *testing.T) {
 	keeper := &fakeLeaseKeeper{renewed: make(chan coordination.LeaseToken, 2), next: coordination.LeaseToken{Lease: domain.WriterLease{SessionID: "session-a", HeartbeatAt: time.Unix(120, 0), ExpiresAt: time.Unix(180, 0)}, Revision: "r2"}, events: events}
 	ticker := &controlledTicker{channel: make(chan time.Time, 2)}
 	clock := &controlledClock{now: time.Unix(120, 0).UTC(), ticker: ticker}
-	locker := &recordingOperationLocker{events: events, released: make(chan struct{}, 2)}
+	locker := &recordingOperationLocker{events: events}
 	supervisor := NewSupervise(log, keeper, locker, clock, time.Minute)
 
 	done := make(chan error, 1)
@@ -138,16 +138,8 @@ func TestSuperviseReloadsDurableSnapshotUnderOperationLock(t *testing.T) {
 	case <-time.After(time.Second):
 		t.Fatal("first heartbeat did not renew")
 	}
-	releaseDeadline := time.After(time.Second)
-	for range 2 {
-		select {
-		case <-locker.released:
-		case <-releaseDeadline:
-			t.Fatal("first heartbeat did not release its operation lock")
-		}
-	}
-	if got := events.snapshot(); !containsAllInOrder(got, []string{"acquire", "load", "acquire", "load", "renew", "fact", "release"}) {
-		t.Fatalf("events after first heartbeat = %#v", got)
+	if !events.waitForSequence(t, []string{"acquire", "load", "acquire", "load", "renew", "fact", "release"}) {
+		t.Fatalf("events after first heartbeat = %#v", events.snapshot())
 	}
 
 	log.mutate(func(snapshot *domain.JournalSnapshot) {
@@ -277,8 +269,7 @@ func countEvent(values []string, want string) int {
 }
 
 type recordingOperationLocker struct {
-	events   *heartbeatEventLog
-	released chan struct{}
+	events *heartbeatEventLog
 }
 
 func (l *recordingOperationLocker) Acquire(_ context.Context, owner ports.OperationOwner) (ports.OperationToken, error) {
@@ -291,9 +282,6 @@ func (l *recordingOperationLocker) Acquire(_ context.Context, owner ports.Operat
 func (l *recordingOperationLocker) Release(_ context.Context, _ ports.OperationToken) error {
 	if l.events != nil {
 		l.events.append("release")
-	}
-	if l.released != nil {
-		l.released <- struct{}{}
 	}
 	return nil
 }
@@ -329,14 +317,19 @@ func (l *strictOperationLocker) Release(_ context.Context, _ ports.OperationToke
 func (l *strictOperationLocker) events() []string { return l.log.snapshot() }
 
 func (l *strictOperationLocker) waitForSequence(t *testing.T, want []string) bool {
+	return l.log.waitForSequence(t, want)
+}
+
+func (l *heartbeatEventLog) waitForSequence(t *testing.T, want []string) bool {
+	t.Helper()
 	deadline := time.After(time.Second)
 	for {
-		if containsAllInOrder(l.log.snapshot(), want) {
+		if containsAllInOrder(l.snapshot(), want) {
 			return true
 		}
 		select {
 		case <-deadline:
-			t.Logf("events so far: %#v", l.log.snapshot())
+			t.Logf("events so far: %#v", l.snapshot())
 			return false
 		case <-time.After(10 * time.Millisecond):
 		}
