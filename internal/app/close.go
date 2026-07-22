@@ -72,7 +72,23 @@ func (u *Close) Run(ctx context.Context, request CloseRequest) (result CloseResu
 		return result, nil
 	}
 	if len(pending) != 0 {
-		return result, fmt.Errorf("close requires recovery of %d pending transition(s)", len(pending))
+		if snapshot.Mode != domain.SessionReadWrite {
+			return result, fmt.Errorf("close requires recovery of %d pending transition(s)", len(pending))
+		}
+		recovered, err := u.publisher.Publish(ctx, token, snapshot.SessionID)
+		if err != nil {
+			return result, fmt.Errorf("recover pending checkpoint before close: %w", err)
+		}
+		if !recovered.Published || recovered.RefreshError != "" {
+			return result, fmt.Errorf("recover pending checkpoint before close: %s", recovered.RefreshError)
+		}
+		snapshot, pending, err = u.journal.Load(ctx, request.SessionID)
+		if err != nil {
+			return result, err
+		}
+		if len(pending) != 0 {
+			return result, fmt.Errorf("close recovery left %d pending transition(s)", len(pending))
+		}
 	}
 	now := u.clock.Now().UTC()
 	sequence := 1

@@ -217,7 +217,7 @@ func composeLifecycle(ctx context.Context) (lifecycleComposition, error) {
 	pointers := coordination.NewPointerRepository(store)
 	catalog := registry.NewCatalog(http.DefaultClient, 100)
 	barrier := lifecycleadapter.NewRegistryBarrier(base.journal, services.units)
-	pipeline := app.CheckpointPipeline{Capturer: images.NewCapturer(base.devpod, catalog, base.clock), Sealer: registry.NewSnapshotter(catalog, barrier), Refresher: lifecycleadapter.NewServingRefresher(base.journal, services.units)}
+	pipeline := app.CheckpointPipeline{Capturer: images.NewCapturer(base.devpod, catalog, base.clock), Sealer: registry.NewSnapshotter(barrier), Refresher: lifecycleadapter.NewServingRefresher(base.journal, services.units)}
 	builder := checkpoint.NewBuilder(archive.NewTarZstd(), hauler.NewGenerationAssembler(base.hauler))
 	publisher := app.NewCheckpointPublisher(base.journal, locks, leases, app.CheckpointTransports{Local: workspace.Local{}}, pipeline, builder, generations, pointers, base.clock)
 	effects := lifecycleadapter.NewCloseEffects(base.devpod, services.processes, services.units, leases, base.ownership)

@@ -135,6 +135,26 @@ func TestReconcileGroupInspectionFailureAllowsOnlyExitedCandidate(t *testing.T) 
 	}
 }
 
+func TestWaitForGroupCandidateAllowsExitAfterTransientInspectionFailure(t *testing.T) {
+	t.Parallel()
+	candidate := ports.ProcessStatus{Identity: domain.ProcessIdentity{PID: 123, BootID: "boot", StartTicks: 42}, Running: true, PGID: 7}
+	exited := candidate
+	exited.Running = false
+	inspectCalls := 0
+	status, include, err := waitForGroupCandidate(context.Background(), candidate, func() (ports.ProcessStatus, error) {
+		inspectCalls++
+		if inspectCalls == 1 {
+			return ports.ProcessStatus{}, errors.New("empty cmdline during exit")
+		}
+		return exited, nil
+	}, func() (ports.ProcessStatus, error) {
+		return candidate, nil
+	}, 100*time.Millisecond, time.Millisecond)
+	if err != nil || include || status.Running {
+		t.Fatalf("waitForGroupCandidate() status=%#v include=%t error=%v", status, include, err)
+	}
+}
+
 func TestOriginalGoneWaitsForSameLiveIdentityWhenFullInspectionFails(t *testing.T) {
 	t.Parallel()
 	root := t.TempDir()

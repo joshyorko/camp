@@ -131,14 +131,21 @@ func TestCloseComposesWithRealCheckpointPublisherWithoutSelfCreatedPendingIntent
 		t.Fatal(err)
 	}
 	fakes := newCheckpointFakes(now)
+	fakes.refresh.err = errors.New("serving refresh unavailable")
 	publisher := NewCheckpointPublisher(
 		log, &fakeLockValidator{}, &fakeLeaseValidator{}, localCheckpointTransports(&fakeMirror{}), fakes.pipeline(), &fakeCheckpointBuilder{},
 		coordination.NewGenerationRepository(backend), coordination.NewPointerRepository(backend), fixedAppClock{now: now},
 	)
 	events := []string{}
+	locker := &fakeOperationLocker{events: &events, token: ports.OperationToken{ID: "lock"}}
+	synced, err := NewSync(log, locker, publisher).Run(ctx, snapshot.SessionID)
+	if err != nil || !synced.Published || synced.RefreshError == "" {
+		t.Fatalf("pre-close sync result=%#v error=%v", synced, err)
+	}
+	fakes.refresh.err = nil
 	result, err := NewClose(
 		log,
-		&fakeOperationLocker{events: &events, token: ports.OperationToken{ID: "lock"}},
+		locker,
 		publisher,
 		&fakeCloseEffects{events: &events},
 		fixedAppClock{now: now},
@@ -146,7 +153,7 @@ func TestCloseComposesWithRealCheckpointPublisherWithoutSelfCreatedPendingIntent
 	if err != nil {
 		t.Fatalf("Run() error = %v", err)
 	}
-	if !result.PublicationSucceeded || !result.CleanupSucceeded || result.Generation.Generation != 1 {
+	if !result.PublicationSucceeded || !result.CleanupSucceeded || result.Generation.Generation != 2 {
 		t.Fatalf("Run() result = %#v", result)
 	}
 	loaded, pending, err := log.Load(ctx, snapshot.SessionID)

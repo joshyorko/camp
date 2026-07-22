@@ -13,6 +13,7 @@ import (
 	"strings"
 	"time"
 
+	hauleradapter "github.com/joshyorko/camp/internal/adapters/hauler"
 	"github.com/joshyorko/camp/internal/checkpoint"
 	"github.com/joshyorko/camp/internal/coordination"
 	"github.com/joshyorko/camp/internal/domain"
@@ -125,9 +126,13 @@ func (p *CheckpointPublisher) Publish(ctx context.Context, operation ports.Opera
 	if err := p.leases.Revalidate(ctx, lease, now); err != nil {
 		return CheckpointResult{}, fmt.Errorf("validate checkpoint writer lease: %w", err)
 	}
+	if hasPendingTransition(pending, "ServingContentRefreshed") {
+		return p.resumeServingRefresh(ctx, snapshot, pending, now)
+	}
 	attemptID := ""
 	root := ""
-	inventory := snapshot.Images
+	inventory := registryadapter.ExcludeInternalArtifacts(snapshot.Images)
+	snapshot.Images = inventory
 	cutRoot := snapshot.RegistryCutRoot
 	var buildIntent ports.IntentRecord
 	if len(pending) == 1 && pending[0].Intent.Transition == "RootSnapshotStable" {
@@ -269,6 +274,59 @@ func (p *CheckpointPublisher) Publish(ctx context.Context, operation ports.Opera
 	return result, nil
 }
 
+func (p *CheckpointPublisher) resumeServingRefresh(ctx context.Context, snapshot domain.JournalSnapshot, pending []ports.PendingIntent, now time.Time) (CheckpointResult, error) {
+	result := CheckpointResult{Disposition: CheckpointDispositionPublished, Published: true, RecoveryCommand: "camp recover " + snapshot.SessionID}
+	if snapshot.Checkpoint.State != domain.CheckpointPublished || !snapshot.Checkpoint.PublicationSucceeded || snapshot.Checkpoint.Generation == nil || snapshot.CurrentPointer == nil || snapshot.ExpectedPointerRevision == "" {
+		return CheckpointResult{}, errors.New("pending serving refresh lacks a published checkpoint")
+	}
+	result.Generation = *snapshot.Checkpoint.Generation
+	result.Pointer = coordination.PointerRecord{Pointer: *snapshot.CurrentPointer, Revision: ports.Revision(snapshot.ExpectedPointerRevision)}
+	var refreshIntent ports.IntentRecord
+	var request ServingRefreshRequest
+	for _, item := range pending {
+		intent := item.Intent
+		if intent.Transition == "ServingContentRefreshed" {
+			if refreshIntent.ID != "" || json.Unmarshal(intent.Input, &request) != nil {
+				return CheckpointResult{}, errors.New("pending serving refresh is ambiguous")
+			}
+			refreshIntent = intent
+			continue
+		}
+		if intent.Transition != "ServiceStart" || intent.SessionID != snapshot.SessionID || (intent.ID != "registry-"+snapshot.SessionID+"-generation-"+strconv.FormatUint(result.Generation.Generation, 10)+"-registry" && intent.ID != "fileserver-"+snapshot.SessionID+"-generation-"+strconv.FormatUint(result.Generation.Generation, 10)+"-fileserver") {
+			return CheckpointResult{}, errors.New("pending serving refresh has unrelated reconciliation work")
+		}
+	}
+	if refreshIntent.ID == "" || refreshIntent.SessionID != snapshot.SessionID || request.SessionID != snapshot.SessionID || request.Generation != result.Generation || request.HaulPath != snapshot.Checkpoint.LocalHaulPath || request.RegistrySnapshotRoot != snapshot.RegistryCutRoot {
+		return CheckpointResult{}, errors.New("pending serving refresh request drifted from published checkpoint")
+	}
+	if err := p.pipeline.Refresher.Refresh(context.WithoutCancel(ctx), request); err != nil {
+		result.RefreshError = err.Error()
+		return result, nil
+	}
+	refreshed, remaining, err := p.journal.Load(context.WithoutCancel(ctx), snapshot.SessionID)
+	if err != nil {
+		result.RefreshError = err.Error()
+		return result, nil
+	}
+	if len(remaining) != 1 || remaining[0].Intent.ID != refreshIntent.ID {
+		result.RefreshError = "serving refresh left unexpected pending reconciliation work"
+		return result, nil
+	}
+	if err := p.journal.RecordFact(context.WithoutCancel(ctx), checkpointFact(refreshIntent, now), refreshed); err != nil {
+		result.RefreshError = err.Error()
+	}
+	return result, nil
+}
+
+func hasPendingTransition(pending []ports.PendingIntent, transition string) bool {
+	for _, item := range pending {
+		if item.Intent.Transition == transition {
+			return true
+		}
+	}
+	return false
+}
+
 func preparePendingRootSnapshot(snapshot domain.JournalSnapshot, intent ports.IntentRecord, generation uint64) (string, string, ports.IntentRecord, error) {
 	attemptID := snapshot.Workspace.Mirror.AttemptID
 	root := snapshot.Workspace.Mirror.Root
@@ -305,10 +363,19 @@ func (p *CheckpointPublisher) prepareRegistrySeal(ctx context.Context, snapshot 
 		return preparedRegistrySeal{}, err
 	}
 	if len(pending) != 0 {
-		if len(pending) != 1 || pending[0].Intent.Transition != "RegistrySnapshotSealed" {
+		sealIndex := -1
+		for index, item := range pending {
+			if item.Intent.Transition == "RegistrySnapshotSealed" {
+				if sealIndex >= 0 {
+					return preparedRegistrySeal{}, errors.New("checkpoint has multiple pending registry seals")
+				}
+				sealIndex = index
+			}
+		}
+		if sealIndex < 0 || len(pending) > 3 {
 			return preparedRegistrySeal{}, errors.New("checkpoint has pending reconciliation work")
 		}
-		intent := pending[0].Intent
+		intent := pending[sealIndex].Intent
 		attemptID := snapshot.Workspace.Mirror.AttemptID
 		root := snapshot.Workspace.Mirror.Root
 		if attemptID == "" || snapshot.Workspace.Mirror.State != domain.MirrorCompleted || root == "" || intent.ID != attemptID+"-3" || intent.SessionID != snapshot.SessionID {
@@ -325,6 +392,22 @@ func (p *CheckpointPublisher) prepareRegistrySeal(ctx context.Context, snapshot 
 		}
 		if request != expected {
 			return preparedRegistrySeal{}, errors.New("pending registry seal request drifted from durable session state")
+		}
+		restartFound := false
+		for index, item := range pending {
+			if index == sealIndex {
+				continue
+			}
+			child := item.Intent
+			restartID := hauleradapter.RegistryServiceName + "-" + request.RegistryLaunchToken + "-restart"
+			startID := hauleradapter.RegistryServiceName + "-" + request.RegistryLaunchToken
+			if child.SessionID != snapshot.SessionID || !((child.Transition == "ServiceRestart" && child.ID == restartID) || (child.Transition == "ServiceStart" && child.ID == startID)) {
+				return preparedRegistrySeal{}, errors.New("checkpoint has unrelated pending reconciliation work")
+			}
+			restartFound = restartFound || child.Transition == "ServiceRestart"
+		}
+		if len(pending) > 1 && !restartFound {
+			return preparedRegistrySeal{}, errors.New("checkpoint service start lacks its pending restart parent")
 		}
 		return preparedRegistrySeal{snapshot: snapshot, attemptID: attemptID, root: root, inventory: snapshot.Images, runtime: runtime, request: request, intent: intent}, nil
 	}

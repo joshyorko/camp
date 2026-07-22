@@ -3,6 +3,7 @@ package supervisor
 import (
 	"context"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -71,9 +72,13 @@ type fakeUnitInspector struct {
 	readyCalls   int
 	stoppedCalls int
 	absentCalls  int
+	prebindCalls int
 }
 
-func (i *fakeUnitInspector) Prebind(context.Context, PortMapping) error { return i.prebindErr }
+func (i *fakeUnitInspector) Prebind(context.Context, PortMapping) error {
+	i.prebindCalls++
+	return i.prebindErr
+}
 func (i *fakeUnitInspector) Ready(context.Context, ServiceSpec, ports.ProcessStatus, ports.ProcessStatus) (UnitEvidence, error) {
 	i.readyCalls++
 	return i.evidence, nil
@@ -190,6 +195,134 @@ func TestServiceSupervisorRestartWithinAuthorizedParentIntent(t *testing.T) {
 	}
 	if len(pending) != 1 || pending[0].Intent.ID != parent.ID {
 		t.Fatalf("pending after nested restart = %#v, want only parent", pending)
+	}
+}
+
+func TestServiceSupervisorRestartCleansProvenStoppedUnitBeforeStart(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	record, spec, helper, child := observedServiceFixture(t)
+	log, err := journal.NewStore(filepath.Join(t.TempDir(), "journal"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	snapshot := domain.JournalSnapshot{SchemaVersion: domain.SchemaVersion, SessionID: "stopped-restart-session", Services: []domain.ServiceUnitRecord{record}}
+	if err := log.Create(ctx, snapshot); err != nil {
+		t.Fatal(err)
+	}
+	parent := ports.IntentRecord{ID: "checkpoint-1-3", SessionID: snapshot.SessionID, Transition: "RegistrySnapshotSealed", Attempt: 1, Timestamp: time.Unix(20, 0).UTC()}
+	if err := log.RecordIntent(ctx, parent); err != nil {
+		t.Fatal(err)
+	}
+	restart := ports.IntentRecord{ID: record.Name + "-" + record.LaunchToken + "-restart", SessionID: snapshot.SessionID, Transition: "ServiceRestart", Attempt: 1, Timestamp: time.Unix(21, 0).UTC()}
+	if err := log.RecordIntent(ctx, restart); err != nil {
+		t.Fatal(err)
+	}
+	spec.SessionID = snapshot.SessionID
+	start, err := serviceStartIntent(spec)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := log.RecordIntent(ctx, start); err != nil {
+		t.Fatal(err)
+	}
+	stopped := helper
+	stopped.Running = false
+	manager := &fakeUnitProcessManager{log: log, sessionID: snapshot.SessionID, helper: stopped, start: helper.Identity}
+	manager.beforeStart = func(context.Context) error {
+		manager.helper = helper
+		manager.children = []ports.ProcessStatus{child}
+		return nil
+	}
+	inspector := &fakeUnitInspector{evidence: UnitEvidence{ChildNetNS: child.NetNS}}
+	controller := NewServiceSupervisor(log, manager, inspector)
+
+	if _, _, err := controller.RestartWithin(ctx, snapshot.SessionID, record.Name, record.LaunchToken, parent.ID); err != nil {
+		t.Fatalf("RestartWithin() error = %v", err)
+	}
+	if inspector.absentCalls != 1 || len(manager.stopOrder) != 0 {
+		t.Fatalf("stopped cleanup absent=%d stopOrder=%#v", inspector.absentCalls, manager.stopOrder)
+	}
+}
+
+func TestServiceSupervisorStartsExactPendingIntentWhenPidfileIsAbsentAndPortIsFree(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	_, spec, helper, child := observedServiceFixture(t)
+	spec.SessionID = "pending-start-session"
+	log, err := journal.NewStore(filepath.Join(t.TempDir(), "journal"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	snapshot := domain.JournalSnapshot{SchemaVersion: domain.SchemaVersion, SessionID: spec.SessionID}
+	if err := log.Create(ctx, snapshot); err != nil {
+		t.Fatal(err)
+	}
+	intent, err := serviceStartIntent(spec)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := log.RecordIntent(ctx, intent); err != nil {
+		t.Fatal(err)
+	}
+	manager := &fakeUnitProcessManager{log: log, sessionID: snapshot.SessionID, start: helper.Identity}
+	manager.beforeStart = func(context.Context) error {
+		manager.helper = helper
+		manager.children = []ports.ProcessStatus{child}
+		return nil
+	}
+	inspector := &fakeUnitInspector{evidence: UnitEvidence{ChildNetNS: child.NetNS}}
+	controller := NewServiceSupervisor(log, manager, inspector)
+
+	if _, _, err := controller.Ensure(ctx, snapshot, spec); err != nil {
+		t.Fatalf("Ensure() error = %v", err)
+	}
+	if manager.startCount != 1 || inspector.prebindCalls != 1 {
+		t.Fatalf("pending start effects start=%d prebind=%d", manager.startCount, inspector.prebindCalls)
+	}
+	_, pending, err := log.Load(ctx, snapshot.SessionID)
+	if err != nil || len(pending) != 0 {
+		t.Fatalf("pending after recovery = %#v error=%v", pending, err)
+	}
+}
+
+func TestServiceSupervisorRestoresRecordedChildContextForProvenAbsentPendingStart(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	record, spec, helper, child := observedServiceFixture(t)
+	spec.SessionID = "pending-prefixed-start-session"
+	log, err := journal.NewStore(filepath.Join(t.TempDir(), "journal"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	legacyIntent, err := serviceStartIntent(spec)
+	if err != nil {
+		t.Fatal(err)
+	}
+	spec.Capability.ChildContextPrefix = []string{"/usr/bin/runcon", "-t", "unconfined_t"}
+	prefixed, err := spec.processSpec()
+	if err != nil {
+		t.Fatal(err)
+	}
+	helper.Argv = append([]string{prefixed.Command.Executable}, prefixed.Command.Argv...)
+	record.Helper = processRecord(spec.Capability.Executable, helper)
+	snapshot := domain.JournalSnapshot{SchemaVersion: domain.SchemaVersion, SessionID: spec.SessionID, Services: []domain.ServiceUnitRecord{record}}
+	if err := log.Create(ctx, snapshot); err != nil {
+		t.Fatal(err)
+	}
+	if err := log.RecordIntent(ctx, legacyIntent); err != nil {
+		t.Fatal(err)
+	}
+	manager := &fakeUnitProcessManager{log: log, sessionID: snapshot.SessionID, start: helper.Identity}
+	manager.beforeStart = func(context.Context) error {
+		manager.helper = helper
+		manager.children = []ports.ProcessStatus{child}
+		return nil
+	}
+	controller := NewServiceSupervisor(log, manager, &fakeUnitInspector{evidence: UnitEvidence{ChildNetNS: child.NetNS}})
+
+	if _, _, err := controller.Ensure(ctx, snapshot, spec); err != nil {
+		t.Fatalf("Ensure() error = %v", err)
 	}
 }
 
@@ -359,6 +492,21 @@ func TestValidateRecordedGroupAllowsDetachedHelperReparenting(t *testing.T) {
 	driftedChild.ParentPID++
 	if err := validateRecordedGroup([]ports.ProcessStatus{helper, driftedChild}, record); err == nil {
 		t.Fatal("validateRecordedGroup() accepted child parent drift")
+	}
+}
+
+func TestWaitForServiceAbsentAllowsTransientListenerShutdown(t *testing.T) {
+	t.Parallel()
+	calls := 0
+	err := waitForServiceAbsent(context.Background(), func() error {
+		calls++
+		if calls == 1 {
+			return fmt.Errorf("listener remains: %w", ErrUnitInvariant)
+		}
+		return nil
+	}, 100*time.Millisecond, time.Millisecond)
+	if err != nil || calls != 2 {
+		t.Fatalf("waitForServiceAbsent() calls=%d error=%v", calls, err)
 	}
 }
 

@@ -55,7 +55,7 @@ func TestSnapshotterCleansPartialCutAndNeverReplacesExistingFinal(t *testing.T) 
 	}
 	destination := filepath.Join(root, "sealed")
 	barrier := &cutBarrier{overlay: overlay}
-	_, err := NewSnapshotter(staticCatalog{}, barrier).Seal(context.Background(), SnapshotRequest{OverlayRoot: overlay, SnapshotRoot: destination, CatalogEndpoint: "http://127.0.0.1:5000"})
+	_, err := NewSnapshotter(barrier).Seal(context.Background(), SnapshotRequest{OverlayRoot: overlay, SnapshotRoot: destination, CatalogEndpoint: "http://127.0.0.1:5000"})
 	if err == nil {
 		t.Fatal("Seal() accepted a symlinked registry entry")
 	}
@@ -72,12 +72,12 @@ func TestSnapshotterCleansPartialCutAndNeverReplacesExistingFinal(t *testing.T) 
 	if err := os.Mkdir(destination, 0o700); err != nil {
 		t.Fatal(err)
 	}
-	_, err = NewSnapshotter(staticCatalog{}, barrier).Seal(context.Background(), SnapshotRequest{OverlayRoot: overlay, SnapshotRoot: destination, CatalogEndpoint: "http://127.0.0.1:5000"})
+	_, err = NewSnapshotter(barrier).Seal(context.Background(), SnapshotRequest{OverlayRoot: overlay, SnapshotRoot: destination, CatalogEndpoint: "http://127.0.0.1:5000"})
 	if !errors.Is(err, os.ErrExist) {
 		t.Fatalf("Seal(existing final) error = %v, want os.ErrExist", err)
 	}
 	barrierErr := errors.New("barrier unavailable")
-	_, err = NewSnapshotter(staticCatalog{}, failingBarrier{err: barrierErr}).Seal(context.Background(), SnapshotRequest{OverlayRoot: overlay, SnapshotRoot: filepath.Join(root, "other"), CatalogEndpoint: "http://127.0.0.1:5000"})
+	_, err = NewSnapshotter(failingBarrier{err: barrierErr}).Seal(context.Background(), SnapshotRequest{OverlayRoot: overlay, SnapshotRoot: filepath.Join(root, "other"), CatalogEndpoint: "http://127.0.0.1:5000"})
 	if !errors.Is(err, barrierErr) {
 		t.Fatalf("Seal(barrier failure) error = %v", err)
 	}
@@ -94,12 +94,12 @@ func TestSnapshotterNextCutRetainsPriorPostCutWrites(t *testing.T) {
 		t.Fatal(err)
 	}
 	firstBarrier := &cutBarrier{overlay: overlay}
-	snapshotter := NewSnapshotter(staticCatalog{}, firstBarrier)
+	snapshotter := NewSnapshotter(firstBarrier)
 	if _, err := snapshotter.Seal(context.Background(), SnapshotRequest{OverlayRoot: overlay, SnapshotRoot: filepath.Join(root, "sealed-n"), CatalogEndpoint: "http://127.0.0.1:5000"}); err != nil {
 		t.Fatal(err)
 	}
 	secondBarrier := &cutBarrier{overlay: overlay}
-	snapshotter = NewSnapshotter(staticCatalog{}, secondBarrier)
+	snapshotter = NewSnapshotter(secondBarrier)
 	if _, err := snapshotter.Seal(context.Background(), SnapshotRequest{OverlayRoot: overlay, SnapshotRoot: filepath.Join(root, "sealed-n-plus-1"), CatalogEndpoint: "http://127.0.0.1:5000"}); err != nil {
 		t.Fatal(err)
 	}
@@ -119,9 +119,9 @@ func TestSnapshotterSealsOneCutAndLeavesPostCutWritesInMutableOverlay(t *testing
 	if err := os.WriteFile(filepath.Join(overlay, "docker", "registry", "before"), []byte("current"), 0o640); err != nil {
 		t.Fatal(err)
 	}
-	references := []ports.RegistryReference{{Repository: "team/app", Tag: "v1", ManifestDigest: "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}}
+	references := []ports.RegistryReference{}
 	barrier := &cutBarrier{overlay: overlay}
-	result, err := NewSnapshotter(staticCatalog{references: references}, barrier).Seal(context.Background(), SnapshotRequest{
+	result, err := NewSnapshotter(barrier).Seal(context.Background(), SnapshotRequest{
 		OverlayRoot: overlay, SnapshotRoot: sealed, CatalogEndpoint: "http://127.0.0.1:5000",
 	})
 	if err != nil {
@@ -138,6 +138,35 @@ func TestSnapshotterSealsOneCutAndLeavesPostCutWritesInMutableOverlay(t *testing
 	}
 	if body, err := os.ReadFile(filepath.Join(overlay, "post-cut")); err != nil || string(body) != "next" {
 		t.Fatalf("post-cut write was not retained in overlay: %q, %v", body, err)
+	}
+}
+
+func TestSnapshotterDerivesDirectPushReferencesFromTheSealedCut(t *testing.T) {
+	t.Parallel()
+	root := t.TempDir()
+	overlay := filepath.Join(root, "overlay")
+	digest := "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+	for _, link := range []string{
+		filepath.Join(overlay, "docker", "registry", "v2", "repositories", "manual", "direct", "_manifests", "tags", "v1", "current", "link"),
+		filepath.Join(overlay, "docker", "registry", "v2", "repositories", "hauler", "camp-session-seed", "_manifests", "tags", "latest", "current", "link"),
+	} {
+		if err := os.MkdirAll(filepath.Dir(link), 0o700); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(link, []byte(digest+"\n"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	barrier := &cutBarrier{overlay: overlay}
+	result, err := NewSnapshotter(barrier).Seal(context.Background(), SnapshotRequest{
+		OverlayRoot: overlay, SnapshotRoot: filepath.Join(root, "sealed"), CatalogEndpoint: "http://127.0.0.1:5000",
+	})
+	if err != nil {
+		t.Fatalf("Seal() error = %v", err)
+	}
+	want := []ports.RegistryReference{{Repository: "manual/direct", Tag: "v1", ManifestDigest: digest}}
+	if !reflect.DeepEqual(result.References, want) {
+		t.Fatalf("references = %#v, want %#v", result.References, want)
 	}
 }
 

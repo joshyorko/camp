@@ -136,26 +136,56 @@ func (m *ProcessManager) Group(ctx context.Context, pgid int) ([]ports.ProcessSt
 		if !candidate.Running || candidate.PGID != pgid {
 			continue
 		}
-		status, err := m.inspectPID(pid)
+		status, include, err := waitForGroupCandidate(ctx, candidate,
+			func() (ports.ProcessStatus, error) { return m.inspectPID(pid) },
+			func() (ports.ProcessStatus, error) { return m.inspectPIDStat(pid) },
+			250*time.Millisecond, 5*time.Millisecond)
 		if err != nil {
-			if isProcessGone(err) {
-				continue
-			}
-			latest, latestErr := m.inspectPIDStat(pid)
-			if reconcileErr := reconcileGroupInspectionFailure(candidate, latest, latestErr, err); reconcileErr != nil {
-				return nil, fmt.Errorf("inspect process-group member %d: %w", pid, reconcileErr)
-			}
-			continue
+			return nil, fmt.Errorf("inspect process-group member %d: %w", pid, err)
 		}
-		if err := validateGroupCandidate(candidate, status); err != nil {
-			return nil, fmt.Errorf("inspect process-group member %d changed during validation: %w", pid, err)
-		}
-		if status.Running && status.PGID == pgid {
+		if include && status.PGID == pgid {
 			result = append(result, status)
 		}
 	}
 	sort.Slice(result, func(i, j int) bool { return result[i].Identity.PID < result[j].Identity.PID })
 	return result, nil
+}
+
+func waitForGroupCandidate(ctx context.Context, candidate ports.ProcessStatus, inspect, inspectStat func() (ports.ProcessStatus, error), timeout, interval time.Duration) (ports.ProcessStatus, bool, error) {
+	deadline := time.Now().Add(timeout)
+	for {
+		status, err := inspect()
+		if err == nil {
+			if !status.Running {
+				return status, false, nil
+			}
+			if err := validateGroupCandidate(candidate, status); err != nil {
+				return ports.ProcessStatus{}, false, err
+			}
+			return status, true, nil
+		}
+		if isProcessGone(err) {
+			return ports.ProcessStatus{}, false, nil
+		}
+		latest, latestErr := inspectStat()
+		if isProcessGone(latestErr) || (latestErr == nil && !latest.Running) {
+			return latest, false, nil
+		}
+		if latestErr != nil {
+			return ports.ProcessStatus{}, false, errors.Join(err, latestErr)
+		}
+		if validationErr := validateGroupCandidate(candidate, latest); validationErr != nil {
+			return ports.ProcessStatus{}, false, errors.Join(err, validationErr)
+		}
+		if !time.Now().Before(deadline) {
+			return ports.ProcessStatus{}, false, err
+		}
+		select {
+		case <-ctx.Done():
+			return ports.ProcessStatus{}, false, ctx.Err()
+		case <-time.After(interval):
+		}
+	}
 }
 
 func validateGroupCandidate(candidate, observed ports.ProcessStatus) error {
