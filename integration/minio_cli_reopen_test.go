@@ -4,6 +4,8 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
+	"net/http"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -40,18 +42,18 @@ func TestMinIOCLIFreshControllerReopen(t *testing.T) {
 
 	ctx, cancel := context.WithTimeout(context.Background(), 45*time.Minute)
 	t.Cleanup(cancel)
+	createdWorkspaces := newCreatedWorkspaceTracker()
 	t.Cleanup(func() {
 		cleanupCtx, cleanupCancel := context.WithTimeout(context.Background(), 5*time.Minute)
 		defer cleanupCancel()
-		workspaces, err := listDevPodWorkspaces(cleanupCtx)
-		if err != nil {
-			t.Errorf("list DevPod workspaces during cleanup: %v", err)
-			return
-		}
-		for _, workspace := range workspaces {
-			if output, err := runLifecycleCommand(cleanupCtx, nil, "devpod", "delete", "--context", "default", "--ignore-not-found", workspace); err != nil {
-				t.Errorf("delete DevPod workspace %s: %v: %s", workspace, err, output)
+		if err := createdWorkspaces.DeleteAll(func(workspaceID string) error {
+			output, err := runLifecycleCommand(cleanupCtx, nil, "devpod", "delete", "--context", "default", "--ignore-not-found", workspaceID)
+			if err != nil {
+				return fmt.Errorf("%w: %s", err, output)
 			}
+			return nil
+		}); err != nil {
+			t.Errorf("clean exact test-owned DevPod workspaces: %v", err)
 		}
 	})
 
@@ -61,6 +63,7 @@ func TestMinIOCLIFreshControllerReopen(t *testing.T) {
 	t.Log("open adopted fixture through real DevPod")
 	recovered := decodeOpenResult(t, mustRunLifecycle(t, ctx, envA, bin, "--json", "open", "Projects/Unicode space"))
 	workspaceID := recovered.WorkspaceID
+	createdWorkspaces.Track(workspaceID)
 	if workspaceID == "" || recovered.SessionID == "" || recovered.Target != "Projects/Unicode space" {
 		t.Fatalf("open = %#v", recovered)
 	}
@@ -69,6 +72,7 @@ func TestMinIOCLIFreshControllerReopen(t *testing.T) {
 	t.Log("mutate workspace and publish a named image through CAMP_REGISTRY")
 	mutate := fmt.Sprintf("set -eu; cd %s; printf 'after-open\\n' >> 'Projects/Unicode space/λ-note.txt'; chmod 600 'Projects/Unicode space/λ-note.txt'; test \"$CAMP_REGISTRY\" = %s; test \"$CAMP_FILESERVER\" = %s; wget -qO- \"http://$CAMP_REGISTRY/v2/\" >/dev/null; wget -qO- \"http://$CAMP_FILESERVER/\" >/dev/null; engine=; attempts=0; while test -z \"$engine\"; do for candidate in docker podman nerdctl; do if command -v \"$candidate\" >/dev/null 2>&1 && \"$candidate\" info >/dev/null 2>&1; then engine=$candidate; break; fi; done; attempts=$((attempts+1)); test $attempts -lt 60; sleep 1; done; \"$engine\" pull alpine:3.20; image_id=$(\"$engine\" create alpine:3.20); \"$engine\" commit \"$image_id\" %s/camp-acceptance:named; \"$engine\" rm \"$image_id\"; \"$engine\" push %s/camp-acceptance:named", shellQuote(workspaceRoot), shellQuote(loopbackEndpoint(registryPort)), shellQuote(loopbackEndpoint(fileserverPort)), loopbackEndpoint(registryPort), loopbackEndpoint(registryPort))
 	mustRunLifecycle(t, ctx, nil, "devpod", "ssh", "--context", "default", workspaceID, "--command", mutate)
+	namedImageDigest := registryManifestDigest(t, ctx, registryPort, "camp-acceptance", "named")
 
 	if generation := decodeGeneration(t, mustRunLifecycle(t, ctx, envA, bin, "--json", "sync")); generation != 1 {
 		t.Fatalf("sync generation = %d, want 1", generation)
@@ -87,13 +91,14 @@ func TestMinIOCLIFreshControllerReopen(t *testing.T) {
 	envB := minioLifecycleEnvironment(controllerB, "", fixture.endpoint, fixture.signer.accessKey, fixture.signer.secretKey, registryPort, fileserverPort)
 	t.Log("reopen from MinIO with a fresh XDG controller")
 	reopened := decodeOpenResult(t, mustRunLifecycle(t, ctx, envB, bin, "--json", "reopen"))
+	createdWorkspaces.Track(reopened.WorkspaceID)
 	if reopened.Generation != 2 || reopened.WorkspaceID == "" || reopened.Materialization == "" {
 		t.Fatalf("fresh-controller reopen = %#v", reopened)
 	}
 	assertExactlyOneDevPodWorkspace(t, ctx, reopened.WorkspaceID)
 	workspaceRoot = "/workspaces/" + reopened.WorkspaceID
 	note := shellQuote(filepath.ToSlash(filepath.Join(workspaceRoot, "Projects/Unicode space/λ-note.txt")))
-	verify := fmt.Sprintf("set -eux; grep -q before-open %s; grep -q after-open %s; grep -q after-sync %s; stat -c %%a %s | grep -qx 600; stat -c %%s %s | grep -qx %d; readlink %s | grep -qx README.md; find %s -xdev -samefile %s | grep -q README-hardlink.md; engine=; for candidate in docker podman nerdctl; do if command -v \"$candidate\" >/dev/null 2>&1 && \"$candidate\" info >/dev/null 2>&1; then engine=$candidate; break; fi; done; test -n \"$engine\"; \"$engine\" image inspect %s/camp-acceptance:named >/dev/null; \"$engine\" run --rm %s/camp-acceptance:named true", note, note, note, note, shellQuote(filepath.ToSlash(filepath.Join(workspaceRoot, "large.bin"))), lifecycleLargeSize, shellQuote(filepath.ToSlash(filepath.Join(workspaceRoot, "README-link.md"))), shellQuote(workspaceRoot), shellQuote(filepath.ToSlash(filepath.Join(workspaceRoot, "README.md"))), loopbackEndpoint(registryPort), loopbackEndpoint(registryPort))
+	verify := fmt.Sprintf("set -eux; grep -q before-open %s; grep -q after-open %s; grep -q after-sync %s; stat -c %%a %s | grep -qx 600; stat -c %%s %s | grep -qx %d; readlink %s | grep -qx README.md; find %s -xdev -samefile %s | grep -q README-hardlink.md; engine=; for candidate in docker podman nerdctl; do if command -v \"$candidate\" >/dev/null 2>&1 && \"$candidate\" info >/dev/null 2>&1; then engine=$candidate; break; fi; done; test -n \"$engine\"; %s", note, note, note, note, shellQuote(filepath.ToSlash(filepath.Join(workspaceRoot, "large.bin"))), lifecycleLargeSize, shellQuote(filepath.ToSlash(filepath.Join(workspaceRoot, "README-link.md"))), shellQuote(workspaceRoot), shellQuote(filepath.ToSlash(filepath.Join(workspaceRoot, "README.md"))), namedImageReopenProofCommand(namedImageDigest))
 	mustRunLifecycle(t, ctx, nil, "devpod", "ssh", "--context", "default", reopened.WorkspaceID, "--command", verify)
 	t.Log("close fresh controller and verify teardown")
 	mustRunLifecycle(t, ctx, envB, bin, "--json", "close")
@@ -103,6 +108,35 @@ func TestMinIOCLIFreshControllerReopen(t *testing.T) {
 	}
 	assertLoopbackPortClosed(t, registryPort)
 	assertLoopbackPortClosed(t, fileserverPort)
+}
+
+func namedImageReopenProofCommand(expectedDigest string) string {
+	return fmt.Sprintf("reference=\"$CAMP_REGISTRY/camp-acceptance:named\"; expected_digest=%s; image_id=$(\"$engine\" image inspect --format '{{.Id}}' \"$reference\"); \"$engine\" image rm -f \"$image_id\"; if \"$engine\" image inspect \"$reference\" >/dev/null 2>&1; then exit 1; fi; digest_reference=\"$CAMP_REGISTRY/camp-acceptance@$expected_digest\"; \"$engine\" pull \"$digest_reference\"; repo_digests=$(\"$engine\" image inspect --format '{{json .RepoDigests}}' \"$digest_reference\"); case \"$repo_digests\" in *\"\\\"$digest_reference\\\"\"*) ;; *) exit 1 ;; esac; \"$engine\" run --rm \"$digest_reference\" true", shellQuote(expectedDigest))
+}
+
+func registryManifestDigest(t *testing.T, ctx context.Context, port int, repository, tag string) string {
+	t.Helper()
+	request, err := http.NewRequestWithContext(ctx, http.MethodGet, fmt.Sprintf("http://%s/v2/%s/manifests/%s", loopbackEndpoint(port), repository, tag), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	request.Header.Set("Accept", "application/vnd.oci.image.manifest.v1+json, application/vnd.docker.distribution.manifest.v2+json")
+	response, err := http.DefaultClient.Do(request)
+	if err != nil {
+		t.Fatalf("read pre-close named image manifest: %v", err)
+	}
+	defer response.Body.Close()
+	if _, err := io.Copy(io.Discard, response.Body); err != nil {
+		t.Fatalf("drain pre-close named image manifest: %v", err)
+	}
+	if response.StatusCode != http.StatusOK {
+		t.Fatalf("pre-close named image manifest status = %s", response.Status)
+	}
+	digest, err := parseWorkspaceImageDigest([]byte(response.Header.Get("Docker-Content-Digest")))
+	if err != nil {
+		t.Fatal(err)
+	}
+	return digest
 }
 
 func minioLifecycleEnvironment(controller, source, endpoint, access, secret string, registryPort, fileserverPort int) []string {

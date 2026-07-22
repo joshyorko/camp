@@ -95,13 +95,14 @@ func TestSuperviseReturnsTypedHeartbeatLoss(t *testing.T) {
 	log, _ := journal.NewStore(filepath.Join(t.TempDir(), "journal"))
 	now := time.Unix(100, 0).UTC()
 	lease := domain.WriterLease{SessionID: "session-a", HeartbeatAt: now, ExpiresAt: now.Add(time.Minute)}
-	snapshot := domain.JournalSnapshot{SchemaVersion: domain.SchemaVersion, SessionID: lease.SessionID, Mode: domain.SessionReadWrite, Lease: domain.LeaseRecord{Lease: &lease, Revision: "r1"}, Supervisor: domain.SupervisorRecord{Desired: domain.RuntimeDesiredRunning, Observed: domain.RuntimeObservedReady}}
+	supervisorIdentity := domain.ProcessIdentity{PID: 901, BootID: "boot", StartTicks: 45}
+	snapshot := domain.JournalSnapshot{SchemaVersion: domain.SchemaVersion, SessionID: lease.SessionID, Mode: domain.SessionReadWrite, Lease: domain.LeaseRecord{Lease: &lease, Revision: "r1"}, Supervisor: domain.SupervisorRecord{Identity: supervisorIdentity, Desired: domain.RuntimeDesiredRunning, Observed: domain.RuntimeObservedReady}}
 	_ = log.Create(ctx, snapshot)
 	keeper := &fakeLeaseKeeper{renewed: make(chan coordination.LeaseToken, 1), err: errors.New("lost")}
 	ticker := &controlledTicker{channel: make(chan time.Time, 1)}
 	clock := &controlledClock{now: now.Add(20 * time.Second), ticker: ticker}
 	ticker.channel <- clock.now
-	err := NewSupervise(log, keeper, &recordingOperationLocker{}, clock, time.Minute).Run(ctx, snapshot.SessionID)
+	err := NewSupervise(log, keeper, &recordingOperationLocker{}, clock, time.Minute, fakeHostIdentity{process: supervisorIdentity}).Run(ctx, snapshot.SessionID)
 	if !errors.Is(err, ErrLeaseHeartbeat) {
 		t.Fatalf("Run() error = %v, want ErrLeaseHeartbeat", err)
 	}
@@ -120,7 +121,7 @@ func TestSuperviseReloadsDurableSnapshotUnderOperationLock(t *testing.T) {
 			SchemaVersion: domain.SchemaVersion,
 			SessionID:     "session-a",
 			Mode:          domain.SessionReadWrite,
-			Supervisor:    domain.SupervisorRecord{Desired: domain.RuntimeDesiredRunning, Observed: domain.RuntimeObservedReady},
+			Supervisor:    domain.SupervisorRecord{Identity: domain.ProcessIdentity{PID: 902, BootID: "boot", StartTicks: 46}, Desired: domain.RuntimeDesiredRunning, Observed: domain.RuntimeObservedReady},
 			Lease:         domain.LeaseRecord{Lease: &domain.WriterLease{SessionID: "session-a", HeartbeatAt: time.Unix(100, 0), ExpiresAt: time.Unix(160, 0)}, Revision: "r1"},
 		},
 	}
@@ -128,7 +129,7 @@ func TestSuperviseReloadsDurableSnapshotUnderOperationLock(t *testing.T) {
 	ticker := &controlledTicker{channel: make(chan time.Time, 2)}
 	clock := &controlledClock{now: time.Unix(120, 0).UTC(), ticker: ticker}
 	locker := &recordingOperationLocker{events: events}
-	supervisor := NewSupervise(log, keeper, locker, clock, time.Minute)
+	supervisor := NewSupervise(log, keeper, locker, clock, time.Minute, fakeHostIdentity{process: log.snapshot.Supervisor.Identity})
 
 	done := make(chan error, 1)
 	go func() { done <- supervisor.Run(ctx, "session-a") }()
@@ -139,7 +140,9 @@ func TestSuperviseReloadsDurableSnapshotUnderOperationLock(t *testing.T) {
 	case <-time.After(time.Second):
 		t.Fatal("first heartbeat did not renew")
 	}
-	if got := events.snapshot(); !containsAllInOrder(got, []string{"acquire", "load", "acquire", "load", "renew", "fact", "release"}) {
+	wantFirstHeartbeat := []string{"acquire", "load", "acquire", "load", "renew", "fact", "release"}
+	if !events.waitForSequence(wantFirstHeartbeat, time.Second) {
+		got := events.snapshot()
 		t.Fatalf("events after first heartbeat = %#v", got)
 	}
 
@@ -178,7 +181,7 @@ func TestSuperviseReleasesLockWhenCancelledDuringHeartbeat(t *testing.T) {
 			SchemaVersion: domain.SchemaVersion,
 			SessionID:     "session-b",
 			Mode:          domain.SessionReadWrite,
-			Supervisor:    domain.SupervisorRecord{Desired: domain.RuntimeDesiredRunning, Observed: domain.RuntimeObservedReady},
+			Supervisor:    domain.SupervisorRecord{Identity: domain.ProcessIdentity{PID: 903, BootID: "boot", StartTicks: 47}, Desired: domain.RuntimeDesiredRunning, Observed: domain.RuntimeObservedReady},
 			Lease:         domain.LeaseRecord{Lease: &domain.WriterLease{SessionID: "session-b", HeartbeatAt: time.Unix(100, 0), ExpiresAt: time.Unix(160, 0)}, Revision: "r1"},
 		},
 		factBlock: make(chan struct{}),
@@ -187,7 +190,7 @@ func TestSuperviseReleasesLockWhenCancelledDuringHeartbeat(t *testing.T) {
 	ticker := &controlledTicker{channel: make(chan time.Time, 1)}
 	clock := &controlledClock{now: time.Unix(120, 0).UTC(), ticker: ticker}
 	locker := &recordingOperationLocker{events: events}
-	supervisor := NewSupervise(log, keeper, locker, clock, time.Minute)
+	supervisor := NewSupervise(log, keeper, locker, clock, time.Minute, fakeHostIdentity{process: log.snapshot.Supervisor.Identity})
 
 	done := make(chan error, 1)
 	go func() { done <- supervisor.Run(ctx, "session-b") }()
@@ -221,14 +224,14 @@ func TestSuperviseReleasesInitialLoadLockBeforeHeartbeat(t *testing.T) {
 			SchemaVersion: domain.SchemaVersion,
 			SessionID:     "session-c",
 			Mode:          domain.SessionReadWrite,
-			Supervisor:    domain.SupervisorRecord{Desired: domain.RuntimeDesiredRunning, Observed: domain.RuntimeObservedReady},
+			Supervisor:    domain.SupervisorRecord{Identity: domain.ProcessIdentity{PID: 904, BootID: "boot", StartTicks: 48}, Desired: domain.RuntimeDesiredRunning, Observed: domain.RuntimeObservedReady},
 			Lease:         domain.LeaseRecord{Lease: &domain.WriterLease{SessionID: "session-c", HeartbeatAt: time.Unix(100, 0), ExpiresAt: time.Unix(160, 0)}, Revision: "r1"},
 		},
 	}
 	keeper := &fakeLeaseKeeper{renewed: make(chan coordination.LeaseToken, 1), next: coordination.LeaseToken{Lease: domain.WriterLease{SessionID: "session-c", HeartbeatAt: time.Unix(120, 0), ExpiresAt: time.Unix(180, 0)}, Revision: "r2"}, events: events}
 	ticker := &controlledTicker{channel: make(chan time.Time, 1)}
 	clock := &controlledClock{now: time.Unix(120, 0).UTC(), ticker: ticker}
-	supervisor := NewSupervise(log, keeper, locker, clock, time.Minute)
+	supervisor := NewSupervise(log, keeper, locker, clock, time.Minute, fakeHostIdentity{process: log.snapshot.Supervisor.Identity})
 
 	done := make(chan error, 1)
 	go func() { done <- supervisor.Run(ctx, "session-c") }()
@@ -430,4 +433,17 @@ func (l *heartbeatEventLog) snapshot() []string {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	return append([]string(nil), l.events...)
+}
+
+func (l *heartbeatEventLog) waitForSequence(want []string, timeout time.Duration) bool {
+	deadline := time.Now().Add(timeout)
+	for {
+		if containsAllInOrder(l.snapshot(), want) {
+			return true
+		}
+		if time.Now().After(deadline) {
+			return false
+		}
+		time.Sleep(time.Millisecond)
+	}
 }

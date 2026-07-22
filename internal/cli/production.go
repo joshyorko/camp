@@ -304,6 +304,13 @@ type serviceBundle struct {
 }
 
 func startSessionSupervisor(ctx context.Context, composition productionComposition, processes ports.ProcessManager, sessionID string) error {
+	reused, err := reuseRunningSessionSupervisor(ctx, composition.journal, processes, sessionID)
+	if err != nil {
+		return err
+	}
+	if reused {
+		return nil
+	}
 	campBinary, err := os.Executable()
 	if err != nil {
 		return err
@@ -333,6 +340,28 @@ func startSessionSupervisor(ctx context.Context, composition productionCompositi
 		return err
 	}
 	return nil
+}
+
+func reuseRunningSessionSupervisor(ctx context.Context, journal ports.Journal, processes ports.ProcessManager, sessionID string) (bool, error) {
+	snapshot, pending, err := journal.Load(ctx, sessionID)
+	if err != nil {
+		return false, err
+	}
+	if len(pending) != 0 {
+		return false, nil
+	}
+	record := snapshot.Supervisor
+	if record.Identity.PID <= 0 || record.Identity.BootID == "" || record.Identity.StartTicks == 0 || record.Desired != domain.RuntimeDesiredRunning || record.Observed != domain.RuntimeObservedReady {
+		return false, nil
+	}
+	status, err := processes.Inspect(ctx, record.Identity)
+	if err != nil {
+		if errors.Is(err, supervisor.ErrProcessIdentity) {
+			return false, nil
+		}
+		return false, err
+	}
+	return status.Running && status.Identity == record.Identity, nil
 }
 
 func waitForSupervisorClaim(ctx context.Context, journal ports.Journal, processes ports.ProcessManager, sessionID string, identity domain.ProcessIdentity) error {
@@ -421,7 +450,7 @@ func runSupervisor(ctx context.Context, sessionID string, composeHeartbeat func(
 	if err := claimed.MarkReady(ctx, sessionID); err != nil {
 		return err
 	}
-	return app.NewSupervise(bootstrap.base.journal, heartbeat.leases, bootstrap.locks, bootstrap.base.clock, time.Minute).RunClaimed(ctx, sessionID)
+	return app.NewSupervise(bootstrap.base.journal, heartbeat.leases, bootstrap.locks, bootstrap.base.clock, time.Minute, host.NewIdentity()).RunClaimed(ctx, sessionID)
 }
 
 func composeProductionBase(ctx context.Context) (productionBase, error) {
