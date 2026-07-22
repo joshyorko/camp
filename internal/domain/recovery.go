@@ -74,6 +74,7 @@ type ForwardingRecord struct {
 	Name              string        `json:"name" yaml:"name"`
 	LocalEndpoint     string        `json:"localEndpoint" yaml:"localEndpoint"`
 	WorkspaceEndpoint string        `json:"workspaceEndpoint" yaml:"workspaceEndpoint"`
+	EvidencePath      string        `json:"evidencePath" yaml:"evidencePath"`
 	Process           ProcessRecord `json:"process" yaml:"process"`
 	DesiredState      RuntimeState  `json:"desiredState" yaml:"desiredState"`
 	ObservedState     RuntimeState  `json:"observedState" yaml:"observedState"`
@@ -86,6 +87,7 @@ type ForwardingRequest struct {
 	LocalEndpoint     string `json:"localEndpoint" yaml:"localEndpoint"`
 	WorkspaceEndpoint string `json:"workspaceEndpoint" yaml:"workspaceEndpoint"`
 	LogPath           string `json:"logPath" yaml:"logPath"`
+	EvidencePath      string `json:"evidencePath" yaml:"evidencePath"`
 }
 
 type WorkspaceCleanupAction string

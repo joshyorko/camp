@@ -2,6 +2,9 @@ package lifecycle
 
 import (
 	"context"
+	"encoding/json"
+	"os"
+	"path/filepath"
 	"reflect"
 	"testing"
 	"time"
@@ -21,6 +24,7 @@ func TestForwarderManagerStartsExactDevPodReverseForwardAndProbesWorkspace(t *te
 	record, err := manager.Start(context.Background(), domain.ForwardingRequest{
 		Name: "registry", WorkspaceID: "camp-brain", Context: "default",
 		LocalEndpoint: "127.0.0.1:39401", WorkspaceEndpoint: "127.0.0.1:39401", LogPath: "/tmp/forward.log",
+		EvidencePath: filepath.Join(t.TempDir(), "registry-forwarding.json"),
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -34,6 +38,82 @@ func TestForwarderManagerStartsExactDevPodReverseForwardAndProbesWorkspace(t *te
 	}
 	if record.Process.Identity.PID != 41 || record.ObservedState != domain.RuntimeObservedReady {
 		t.Fatalf("record = %#v", record)
+	}
+}
+
+func TestForwarderManagerStartRejectsPreexistingEvidence(t *testing.T) {
+	t.Parallel()
+	root := t.TempDir()
+	evidencePath := filepath.Join(root, "forwarding.json")
+	if err := os.WriteFile(evidencePath, []byte(`{"name":"registry"}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	manager := NewForwarderManager(&fakeForwardDevPod{}, &fakeForwardProcesses{})
+	_, err := manager.Start(context.Background(), domain.ForwardingRequest{
+		Name: "registry", WorkspaceID: "camp-brain", Context: "default",
+		LocalEndpoint: "127.0.0.1:39401", WorkspaceEndpoint: "127.0.0.1:39401", LogPath: "/tmp/forward.log",
+		EvidencePath: evidencePath,
+	})
+	if err == nil {
+		t.Fatal("Start() error = nil")
+	}
+}
+
+func TestForwarderManagerObserveReplaysPersistedEvidenceWithoutStarting(t *testing.T) {
+	t.Parallel()
+	root := t.TempDir()
+	evidencePath := filepath.Join(root, "forwarding.json")
+	record := domain.ForwardingRecord{
+		Name: "registry", LocalEndpoint: "127.0.0.1:39401", WorkspaceEndpoint: "127.0.0.1:39401", EvidencePath: evidencePath,
+		Process: domain.ProcessRecord{
+			Identity: domain.ProcessIdentity{PID: 41, BootID: "boot", StartTicks: 99},
+			DesiredExecutable: "/opt/devpod", ObservedExecutable: "/opt/devpod",
+			Argv: []string{"/opt/devpod", "ssh", "camp-brain", "--command", "sleep 2147483647"},
+			ArgvSHA256: "0", ParentPID: 1, PGID: 41, SID: 41, NetNS: "net:[1]",
+		},
+		DesiredState: domain.RuntimeDesiredRunning, ObservedState: domain.RuntimeObservedReady,
+	}
+	body, err := json.Marshal(record)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(evidencePath, body, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	processes := &fakeForwardProcesses{status: ports.ProcessStatus{
+		Identity: domain.ProcessIdentity{PID: 41, BootID: "boot", StartTicks: 99}, Running: true,
+		Executable: "/opt/devpod", Argv: []string{"/opt/devpod", "ssh", "camp-brain", "--command", "sleep 2147483647"}, PGID: 41, SID: 41, NetNS: "net:[1]",
+	}}
+	manager := NewForwarderManager(&fakeForwardDevPod{}, processes)
+	got, err := manager.Observe(context.Background(), domain.ForwardingRequest{
+		Name: "registry", WorkspaceID: "camp-brain", Context: "default",
+		LocalEndpoint: "127.0.0.1:39401", WorkspaceEndpoint: "127.0.0.1:39401", LogPath: "/tmp/forward.log",
+		EvidencePath: evidencePath,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(got.Process.Identity, record.Process.Identity) || got.ObservedState != domain.RuntimeObservedReady {
+		t.Fatalf("Observe() = %#v", got)
+	}
+}
+
+func TestForwarderManagerStopRemovesEvidenceAfterSuccessfulIdentityStop(t *testing.T) {
+	t.Parallel()
+	root := t.TempDir()
+	evidencePath := filepath.Join(root, "forwarding.json")
+	if err := os.WriteFile(evidencePath, []byte(`{"evidencePath":"`+evidencePath+`"}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	manager := NewForwarderManager(&fakeForwardDevPod{}, &fakeForwardProcesses{})
+	if err := manager.Stop(context.Background(), domain.ForwardingRecord{
+		EvidencePath: evidencePath,
+		Process: domain.ProcessRecord{Identity: domain.ProcessIdentity{PID: 41, BootID: "boot", StartTicks: 99}},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Lstat(evidencePath); !os.IsNotExist(err) {
+		t.Fatalf("evidence exists after Stop: %v", err)
 	}
 }
 
