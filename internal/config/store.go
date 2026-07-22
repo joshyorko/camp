@@ -42,7 +42,7 @@ func (s *Store) Read() (Persistent, error) {
 }
 
 func (s *Store) Update(value Persistent) error {
-	if err := validatePersistent(value); err != nil {
+	if err := ValidatePersistent(value); err != nil {
 		return err
 	}
 	if err := os.MkdirAll(filepath.Dir(s.path), 0o700); err != nil {
@@ -94,7 +94,7 @@ func (s *Store) Update(value Persistent) error {
 	return parent.Sync()
 }
 
-func validatePersistent(value Persistent) error {
+func ValidatePersistent(value Persistent) error {
 	if err := ValidateDevPodProvider(value.DevPodProvider); err != nil {
 		return err
 	}

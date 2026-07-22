@@ -81,6 +81,14 @@ func newInitCommand(run func(context.Context, InitRequest, OutputMode, io.Writer
 			if configured != 0 && configured != 4 {
 				return UsageError(fmt.Errorf("--source, --backend, --capsule, and --devpod-provider must be provided together"))
 			}
+			if configured == 4 {
+				if request.Root != "" {
+					return UsageError(fmt.Errorf("init root and --source cannot be used together"))
+				}
+				if request.Source == "" || request.Backend == "" || request.Capsule == "" || request.DevPodProvider == "" {
+					return UsageError(fmt.Errorf("persistent init values cannot be empty"))
+				}
+			}
 			return run(command.Context(), request, OutputModeFrom(command), command.OutOrStdout())
 		},
 	}

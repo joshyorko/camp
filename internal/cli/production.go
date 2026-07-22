@@ -42,6 +42,13 @@ type ProductionLifecycle struct{}
 func NewProductionLifecycle() *ProductionLifecycle { return &ProductionLifecycle{} }
 
 func (p *ProductionLifecycle) Init(ctx context.Context, request InitRequest, mode OutputMode, out io.Writer) error {
+	if request.Source != "" {
+		if err := config.ValidatePersistent(config.Persistent{
+			DefaultCapsule: request.Capsule, Backend: request.Backend, Source: request.Source, DevPodProvider: request.DevPodProvider,
+		}); err != nil {
+			return UsageError(err)
+		}
+	}
 	composition, err := composeProduction(ctx)
 	if err != nil {
 		return err

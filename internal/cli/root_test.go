@@ -102,6 +102,20 @@ func TestInitPersistentFlagsAreAllRequiredTogether(t *testing.T) {
 		}
 	}
 }
+
+func TestInitPersistentFlagsRejectEmptyValuesAndConflictingRoot(t *testing.T) {
+	t.Parallel()
+	for _, args := range [][]string{
+		{"init", "--source", "", "--backend", "file:///srv/camp", "--capsule", "brain", "--devpod-provider", "docker"},
+		{"init", "/other", "--source", "/brain", "--backend", "file:///srv/camp", "--capsule", "brain", "--devpod-provider", "docker"},
+	} {
+		var stderr bytes.Buffer
+		code := Execute(context.Background(), NewRootWithLifecycle(&recordingLifecycle{}), args, Streams{ErrOut: &stderr})
+		if code != int(ExitUsage) {
+			t.Fatalf("Execute(%q) code=%d stderr=%q, want usage failure", args, code, stderr.String())
+		}
+	}
+}
 func (r *recordingLifecycle) Open(_ context.Context, value string, mode OutputMode, _ io.Writer) error {
 	r.calls = append(r.calls, "open:"+value+":"+string(mode))
 	return nil
@@ -477,6 +491,22 @@ func TestRootHelpIsDeterministic(t *testing.T) {
 	want := "Recoverable capsule workspaces\n\nUsage:\n  camp [flags]\n  camp [command]\n\nAvailable Commands:\n  close       Publish a checkpoint and close\n  completion  Generate shell completion\n  help        Help about any command\n  init        Initialize a capsule root\n  open        Open a capsule workspace\n  recover     Recover an interrupted lifecycle\n  reopen      Reopen a closed capsule workspace\n  sync        Publish a checkpoint and remain open\n\nFlags:\n  -h, --help   help for camp\n      --json   emit stable JSON output\n\nUse \"camp [command] --help\" for more information about a command.\n"
 	if first != want {
 		t.Fatalf("help:\n%s\nwant:\n%s", first, want)
+	}
+}
+
+func TestInitHelpTruthfullyListsPersistentFirstRunFlags(t *testing.T) {
+	t.Parallel()
+	root := NewRootWithLifecycle(&recordingLifecycle{})
+	var output bytes.Buffer
+	root.SetOut(&output)
+	root.SetErr(&output)
+	root.SetArgs([]string{"init", "--help"})
+	if err := root.Execute(); err != nil {
+		t.Fatal(err)
+	}
+	want := "Initialize a capsule root\n\nUsage:\n  camp init [root] [flags]\n\nFlags:\n      --backend string           persist the default backend URL\n      --capsule string           persist the default capsule name\n      --devpod-provider string   persist the default DevPod provider\n  -h, --help                     help for init\n      --source string            persist the default source path\n\nGlobal Flags:\n      --json   emit stable JSON output\n"
+	if output.String() != want {
+		t.Fatalf("init help:\n%s\nwant:\n%s", output.String(), want)
 	}
 }
 

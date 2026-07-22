@@ -57,3 +57,15 @@ func TestStoreRejectsCredentialBearingValuesBeforeReplacingConfig(t *testing.T) 
 		}
 	}
 }
+
+func TestValidatePersistentRejectsInvalidFirstRunValuesWithoutWriting(t *testing.T) {
+	t.Parallel()
+	for _, value := range []Persistent{
+		{DefaultCapsule: "brain", Backend: "https://user:secret@example.test/camp", Source: "/brain", DevPodProvider: "docker"},
+		{DefaultCapsule: "brain", Backend: "file:///srv/camp", Source: "/brain", DevPodProvider: "../unsafe"},
+	} {
+		if err := ValidatePersistent(value); err == nil {
+			t.Fatalf("ValidatePersistent(%#v) succeeded", value)
+		}
+	}
+}

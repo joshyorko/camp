@@ -22,6 +22,18 @@ The regression test must keep `camp open` nonzero until a real `open` handler is
 
 Camp-owned user configuration persists only the typed non-secret fields in `config.Persistent`. Updates take an adjacent exclusive lock, write a mode-0600 temporary file, fsync it, rename it over the destination, and fsync the parent directory. URL userinfo and credential-shaped query parameters are rejected before effects. `CAMP_ACCESS_TOKEN` remains runtime-only; the legacy `accessToken` YAML field is rejected.
 
+The first-run persistent path is one explicit command:
+
+```bash
+camp init \
+  --source /absolute/capsule/root \
+  --backend file:///absolute/camp/backend \
+  --capsule capsule-name \
+  --devpod-provider docker
+```
+
+These four flags are one contract: all must be present and nonempty, and a positional root cannot be combined with `--source`. After capsule initialization succeeds, Camp writes `source`, `backend`, `defaultCapsule`, and `devpodProvider` to the canonical `XDG_CONFIG_HOME/camp/config.yaml` path using `config.Store`; existing registry and fileserver port choices are retained. Human and JSON success output name that exact path and all four values. A later `camp open` resolves the persisted provider, with `CAMP_DEVPOD_PROVIDER` remaining an explicit runtime override. Provider credentials and provider option values are not part of this file.
+
 Provider reads must redact values using DevPod's option schema: any option marked `password: true` is redacted even when its name is innocuous. A missing provider reader is a composition error and must return a clear error instead of panicking. Provider mutation currently fails unsupported before reader or persistence effects. The pinned DevPod `pkg/config.SaveConfig` implementation at commit `86b6f9f5` writes the live file with `os.WriteFile` and provides neither locking nor temp-file/fsync/rename publication, so delegating `provider set-options` would not satisfy Camp's atomic durability contract.
 
 Before recording `WorkspaceUp`, production open lists providers in the requested DevPod context. An absent supported local `docker` provider is added noninteractively with `provider add docker --context <context> --use`; an existing non-default `docker` provider is configured with `provider use docker --context <context> --reconfigure`. Camp then re-lists and requires the exact provider identity to be default. DevPod's `--devcontainer-path` is capsule-relative even though Camp retains the validated canonical absolute path in recovery state; passing the absolute path makes DevPod join the workspace root twice.
