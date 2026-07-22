@@ -99,10 +99,10 @@ func TestNamedImageReopenProofIsDigestQualifiedValidShell(t *testing.T) {
 	digest := "sha256:" + strings.Repeat("b", 64)
 	command := namedImageReopenProofCommand(digest)
 	for _, required := range []string{
-		`$CAMP_REGISTRY/camp-acceptance:named`,
+		`$CAMP_REGISTRY/camp/acceptance:named`,
 		`image_id=$("$engine" image inspect`,
 		`image rm -f`,
-		`$CAMP_REGISTRY/camp-acceptance@$expected_digest`,
+		`$CAMP_REGISTRY/camp/acceptance@$expected_digest`,
 		`pull "$digest_reference"`,
 		`json .RepoDigests`,
 		`run --rm "$digest_reference"`,
