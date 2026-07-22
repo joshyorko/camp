@@ -210,6 +210,9 @@ func (p *ProductionLifecycle) Open(ctx context.Context, value string, mode Outpu
 			return err
 		}
 	}
+	if mode == ModeHuman {
+		return writeHumanLifecycleResult(out, mode, "open", openTerminalEvents(result.Snapshot.Capsule, result.Snapshot.SessionID), "")
+	}
 	return writeSuccess(out, mode, "open", result, fmt.Sprintf("Opened %s (%s)\n", result.Snapshot.Capsule, result.Snapshot.SessionID))
 }
 
@@ -281,6 +284,9 @@ func (p *ProductionLifecycle) Sync(ctx context.Context, mode OutputMode, out io.
 	if err != nil {
 		return err
 	}
+	if mode == ModeHuman {
+		return writeHumanLifecycleResult(out, mode, "sync", syncTerminalEvents(result.Generation.Generation), "")
+	}
 	return writeSuccess(out, mode, "sync", result, fmt.Sprintf("Published checkpoint %d\n", result.Generation.Generation))
 }
 
@@ -296,6 +302,9 @@ func (p *ProductionLifecycle) Close(ctx context.Context, mode OutputMode, out io
 	result, err := c.close.Run(ctx, app.CloseRequest{SessionID: session.SessionID})
 	if err != nil {
 		return err
+	}
+	if mode == ModeHuman {
+		return writeHumanLifecycleResult(out, mode, "close", closeTerminalEvents(result.Generation.Generation, result.CleanupSucceeded), "")
 	}
 	return writeSuccess(out, mode, "close", result, fmt.Sprintf("Closed %s\n", session.SessionID))
 }
