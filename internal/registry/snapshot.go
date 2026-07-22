@@ -22,10 +22,11 @@ type Barrier interface {
 }
 
 type SnapshotRequest struct {
-	OverlayRoot     string
-	SnapshotRoot    string
-	CatalogEndpoint string
-	SessionID       string
+	OverlayRoot         string
+	SnapshotRoot        string
+	CatalogEndpoint     string
+	SessionID           string
+	RegistryLaunchToken string
 }
 
 type Snapshot struct {

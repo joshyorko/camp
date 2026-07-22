@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/rand"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 
 	"github.com/joshyorko/camp/internal/adapters/hauler"
@@ -39,7 +40,7 @@ func (b *RegistryBarrier) WithCut(ctx context.Context, request registry.Snapshot
 	if err != nil {
 		return err
 	}
-	if len(pending) != 0 {
+	if len(pending) > 1 || len(pending) == 1 && !matchesRegistrySealIntent(pending[0].Intent, request) {
 		return errors.New("registry seal barrier requires a reconciled session")
 	}
 	var record domain.ServiceUnitRecord
@@ -52,6 +53,9 @@ func (b *RegistryBarrier) WithCut(ctx context.Context, request registry.Snapshot
 	}
 	if matches != 1 {
 		return errors.New("registry seal barrier requires exactly one recorded registry")
+	}
+	if request.RegistryLaunchToken == "" || record.LaunchToken != request.RegistryLaunchToken {
+		return errors.New("registry seal barrier cannot repeat an outcome-unknown registry restart")
 	}
 	observation, err := b.services.Observe(ctx, record)
 	if err != nil || observation.State != supervisor.UnitLive {
@@ -69,4 +73,12 @@ func (b *RegistryBarrier) WithCut(ctx context.Context, request registry.Snapshot
 		resultErr = errors.Join(resultErr, restartErr)
 	}()
 	return cut()
+}
+
+func matchesRegistrySealIntent(intent ports.IntentRecord, request registry.SnapshotRequest) bool {
+	if intent.ID == "" || intent.SessionID != request.SessionID || intent.Transition != "RegistrySnapshotSealed" {
+		return false
+	}
+	var intended registry.SnapshotRequest
+	return json.Unmarshal(intent.Input, &intended) == nil && intended == request
 }

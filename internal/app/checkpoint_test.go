@@ -124,7 +124,7 @@ func prepareCheckpointRuntime(t *testing.T, snapshot *domain.JournalSnapshot, sa
 	snapshot.Workspace.Context = "default"
 	snapshot.Workspace.ID = "camp-" + snapshot.SessionID
 	snapshot.Services = []domain.ServiceUnitRecord{{
-		Name: "registry", Mapping: domain.EndpointMapping{HostAddress: "127.0.0.1", HostPort: 45001, GuestPort: 5000},
+		Name: "registry", LaunchToken: "registry-initial", Mapping: domain.EndpointMapping{HostAddress: "127.0.0.1", HostPort: 45001, GuestPort: 5000},
 		Child:        domain.ProcessRecord{Argv: []string{"/opt/hauler", "store", "--store", filepath.Join(sandbox, "store"), "serve", "registry", "--directory", overlay, "--port", "5000", "--readonly=false"}},
 		DesiredState: domain.RuntimeDesiredRunning, ObservedState: domain.RuntimeObservedReady,
 	}}
@@ -746,6 +746,14 @@ func TestCheckpointPublisherSnapshotFailureCannotBuildUploadOrMovePointer(t *tes
 	_, pending, err := log.Load(ctx, snapshot.SessionID)
 	if err != nil || len(pending) != 1 || pending[0].Intent.Transition != "RegistrySnapshotSealed" {
 		t.Fatalf("failed-cut recovery state pending=%#v error=%v", pending, err)
+	}
+	fakes.seal.err = nil
+	result, err := publisher.Publish(ctx, token, snapshot.SessionID)
+	if err != nil || !result.Published {
+		t.Fatalf("resume pending registry seal result=%#v error=%v", result, err)
+	}
+	if fakes.capture.calls != 1 || fakes.seal.calls != 2 {
+		t.Fatalf("resume effects capture=%d seal=%d, want image capture once and exact seal retry", fakes.capture.calls, fakes.seal.calls)
 	}
 }
 
