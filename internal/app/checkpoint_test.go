@@ -154,6 +154,20 @@ func (v *fakeLeaseValidator) Revalidate(context.Context, coordination.LeaseToken
 	return nil
 }
 
+type crashBeforeCheckpointFactJournal struct {
+	ports.Journal
+	transition string
+	crashed    bool
+}
+
+func (j *crashBeforeCheckpointFactJournal) RecordFact(ctx context.Context, fact ports.FactRecord, snapshot domain.JournalSnapshot) error {
+	if !j.crashed && fact.Transition == j.transition {
+		j.crashed = true
+		return errors.New("simulated process death before checkpoint fact")
+	}
+	return j.Journal.RecordFact(ctx, fact, snapshot)
+}
+
 type fakeMirror struct {
 	calls    int
 	requests []ports.MirrorRequest
@@ -647,6 +661,77 @@ func TestCheckpointPublisherProcessDeathAfterMirrorIntentDoesNotStartAnotherTran
 	_, pending, err := log.Load(ctx, snapshot.SessionID)
 	if err != nil || len(pending) != 1 || pending[0].Intent.ID != intent.ID {
 		t.Fatalf("pending mirror = %#v error=%v", pending, err)
+	}
+}
+
+func TestCheckpointPublisherSimulatedProcessDeathMatrix(t *testing.T) {
+	t.Parallel()
+	for _, test := range []struct {
+		transition   string
+		mirrorCalls  int
+		captureCalls int
+		sealCalls    int
+		buildCalls   int
+		refreshCalls int
+	}{
+		{transition: "WorkspaceImagesInventoried", mirrorCalls: 1, captureCalls: 2, sealCalls: 1, buildCalls: 1, refreshCalls: 1},
+		{transition: "RegistrySnapshotSealed", mirrorCalls: 1, captureCalls: 1, sealCalls: 2, buildCalls: 1, refreshCalls: 1},
+		{transition: "RootSnapshotStable", mirrorCalls: 1, captureCalls: 1, sealCalls: 1, buildCalls: 2, refreshCalls: 1},
+		{transition: "GenerationUploaded", mirrorCalls: 1, captureCalls: 1, sealCalls: 1, buildCalls: 1, refreshCalls: 1},
+		{transition: "PointerCommitted", mirrorCalls: 1, captureCalls: 1, sealCalls: 1, buildCalls: 1, refreshCalls: 1},
+		{transition: "ServingContentRefreshed", mirrorCalls: 1, captureCalls: 1, sealCalls: 1, buildCalls: 1, refreshCalls: 2},
+	} {
+		test := test
+		t.Run(test.transition, func(t *testing.T) {
+			t.Parallel()
+			ctx := context.Background()
+			sandbox := t.TempDir()
+			root := filepath.Join(sandbox, "root")
+			if err := os.MkdirAll(filepath.Join(root, ".camp", "build"), 0o700); err != nil {
+				t.Fatal(err)
+			}
+			backend, err := filebackend.New(filepath.Join(sandbox, "backend"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			now := time.Unix(100, 0).UTC()
+			lease := domain.WriterLease{SchemaVersion: domain.SchemaVersion, SessionID: "session-crash-" + test.transition, Capsule: "brain", Lineage: domain.Lineage{Branch: "main"}, Machine: "machine", CreatedAt: now, HeartbeatAt: now, ExpiresAt: now.Add(time.Hour)}
+			snapshot := domain.JournalSnapshot{SchemaVersion: domain.SchemaVersion, SessionID: lease.SessionID, Capsule: lease.Capsule, Lineage: lease.Lineage, Mode: domain.SessionReadWrite, State: domain.SessionOpen, Lease: domain.LeaseRecord{Lease: &lease, Revision: "lease-r1"}, Workspace: domain.WorkspaceRecord{ID: "camp-brain", Context: "default", Provider: "docker", LocalProvider: true, LocalFolder: root, StagingRoot: root}}
+			prepareCheckpointRuntime(t, &snapshot, sandbox)
+			store, err := journal.NewStore(filepath.Join(sandbox, "journal"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := store.Create(ctx, snapshot); err != nil {
+				t.Fatal(err)
+			}
+			crashing := &crashBeforeCheckpointFactJournal{Journal: store, transition: test.transition}
+			mirror := &fakeMirror{}
+			fakes := newCheckpointFakes(now)
+			builder := &fakeCheckpointBuilder{}
+			publisher := NewCheckpointPublisher(crashing, &fakeLockValidator{}, &fakeLeaseValidator{}, localCheckpointTransports(mirror), fakes.pipeline(), builder, coordination.NewGenerationRepository(backend), coordination.NewPointerRepository(backend), fixedAppClock{now: now})
+			token := ports.OperationToken{ID: "lock", Owner: ports.OperationOwner{SessionID: snapshot.SessionID, Operation: "sync"}}
+
+			first, firstErr := publisher.Publish(ctx, token, snapshot.SessionID)
+			if test.transition == "ServingContentRefreshed" {
+				if firstErr != nil || !first.Published || first.RefreshError == "" {
+					t.Fatalf("first Publish() result=%#v error=%v, want published result with refresh recovery", first, firstErr)
+				}
+			} else if firstErr == nil {
+				t.Fatalf("first Publish() result=%#v, want simulated process death", first)
+			}
+			result, err := publisher.Publish(ctx, token, snapshot.SessionID)
+			if err != nil || !result.Published || result.RefreshError != "" {
+				t.Fatalf("retry Publish() result=%#v error=%v", result, err)
+			}
+			if mirror.calls != test.mirrorCalls || fakes.capture.calls != test.captureCalls || fakes.seal.calls != test.sealCalls || builder.calls != test.buildCalls || fakes.refresh.calls != test.refreshCalls {
+				t.Fatalf("effects mirror=%d capture=%d seal=%d build=%d refresh=%d", mirror.calls, fakes.capture.calls, fakes.seal.calls, builder.calls, fakes.refresh.calls)
+			}
+			loaded, pending, err := store.Load(ctx, snapshot.SessionID)
+			if err != nil || len(pending) != 0 || loaded.CurrentBase == nil || *loaded.CurrentBase != result.Generation {
+				t.Fatalf("recovered checkpoint=%#v pending=%#v error=%v", loaded.Checkpoint, pending, err)
+			}
+		})
 	}
 }
 
