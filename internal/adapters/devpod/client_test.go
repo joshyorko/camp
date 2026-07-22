@@ -238,6 +238,18 @@ func TestEnsureProviderFailsClosedWhenConfiguredIdentityDoesNotMatch(t *testing.
 	}
 }
 
+func TestEnsureProviderAcceptsExistingInitializedNamedProviderWithoutMutation(t *testing.T) {
+	t.Parallel()
+	runner := &providerSequenceRunner{results: []ports.Result{{Stdout: []byte(`{"room-of-requirement":{"state":{"initialized":true}}}`)}}}
+	if err := NewClient("/opt/devpod", runner).EnsureProvider(context.Background(), "default", "room-of-requirement"); err != nil {
+		t.Fatal(err)
+	}
+	want := [][]string{{"provider", "list", "--context", "default", "--output", "json"}}
+	if !reflect.DeepEqual(runner.argv, want) {
+		t.Fatalf("provider argv = %#v, want %#v", runner.argv, want)
+	}
+}
+
 type providerSequenceRunner struct {
 	results []ports.Result
 	argv    [][]string

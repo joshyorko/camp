@@ -20,6 +20,7 @@ import (
 	"github.com/joshyorko/camp/internal/adapters/hydration"
 	lifecycleadapter "github.com/joshyorko/camp/internal/adapters/lifecycle"
 	"github.com/joshyorko/camp/internal/adapters/objectstore"
+	"github.com/joshyorko/camp/internal/adapters/sshtransfer"
 	"github.com/joshyorko/camp/internal/adapters/subprocess"
 	"github.com/joshyorko/camp/internal/adapters/supervisor"
 	"github.com/joshyorko/camp/internal/app"
@@ -80,11 +81,15 @@ func (p *ProductionLifecycle) Open(ctx context.Context, value string, mode Outpu
 	if explicitRoot == "" {
 		explicitRoot = composition.runtime.Source
 	}
+	provider, localProvider, err := resolveProductionProvider()
+	if err != nil {
+		return err
+	}
 	request := app.OpenRequest{
 		Capsule: composition.runtime.Capsule, ExplicitRoot: explicitRoot, Target: landing,
 		Runtime: composition.runtime, ResolvedBackend: composition.backend,
 		Mode: domain.SessionReadWrite, EntryMode: domain.EntryTerminal,
-		Machine: machine, RemoteAvailable: explicitRoot == "",
+		Machine: machine, RemoteAvailable: explicitRoot == "", Provider: provider, LocalProvider: localProvider,
 	}
 	usecase, err := composeOpen(ctx, composition, services)
 	if err != nil {
@@ -100,6 +105,17 @@ func (p *ProductionLifecycle) Open(ctx context.Context, value string, mode Outpu
 		}
 	}
 	return writeSuccess(out, mode, "open", result, fmt.Sprintf("Opened %s (%s)\n", result.Snapshot.Capsule, result.Snapshot.SessionID))
+}
+
+func resolveProductionProvider() (string, bool, error) {
+	provider := strings.TrimSpace(os.Getenv("CAMP_DEVPOD_PROVIDER"))
+	if provider == "" {
+		return "", true, nil
+	}
+	if provider == "." || provider == ".." || strings.ContainsAny(provider, "/\\\t\r\n ") {
+		return "", false, errors.New("CAMP_DEVPOD_PROVIDER is invalid")
+	}
+	return provider, provider == "docker" || provider == "podman", nil
 }
 
 func (p *ProductionLifecycle) Supervise(ctx context.Context, sessionID string, mode OutputMode, out io.Writer) error {
@@ -242,7 +258,15 @@ func composeLifecycle(ctx context.Context) (lifecycleComposition, error) {
 	barrier := lifecycleadapter.NewRegistryBarrier(base.journal, services.units)
 	pipeline := app.CheckpointPipeline{Capturer: images.NewCapturer(base.devpod, catalog, base.clock), Sealer: registry.NewSnapshotter(barrier), Refresher: lifecycleadapter.NewServingRefresher(base.journal, services.units)}
 	builder := checkpoint.NewBuilder(archive.NewTarZstd(), hauler.NewGenerationAssembler(base.hauler))
-	publisher := app.NewCheckpointPublisher(base.journal, locks, leases, app.CheckpointTransports{Local: workspace.Local{}}, pipeline, builder, generations, pointers, base.clock)
+	transfer := sshtransfer.NewExecutor()
+	remote := workspace.NewRequestBoundRemote(
+		workspace.RemoteConfig{DevPodExecutable: base.devpodExecutable, TarExecutable: "tar"},
+		base.devpod,
+		workspace.NewMirrorStaging(filepath.Join(base.paths.DataRoot, "mirrors")),
+		transfer,
+		transfer,
+	)
+	publisher := app.NewCheckpointPublisher(base.journal, locks, leases, app.CheckpointTransports{Local: workspace.Local{}, Remote: remote}, pipeline, builder, generations, pointers, base.clock)
 	effects := lifecycleadapter.NewCloseEffects(base.devpod, services.processes, services.units, leases, base.ownership)
 	closeUsecase := app.NewClose(base.journal, locks, publisher, effects, base.clock)
 	observer := lifecycleadapter.NewSessionObserver(services.processes, services.units)
@@ -256,16 +280,17 @@ func composeLifecycle(ctx context.Context) (lifecycleComposition, error) {
 }
 
 type productionComposition struct {
-	paths       config.XDGPaths
-	runtime     config.Runtime
-	backend     config.Backend
-	journal     ports.Journal
-	ownership   *capsule.Ownership
-	initializer *capsule.Initializer
-	runner      *subprocess.Runner
-	clock       *host.Clock
-	devpod      *devpod.Client
-	hauler      *hauler.Client
+	paths            config.XDGPaths
+	runtime          config.Runtime
+	backend          config.Backend
+	journal          ports.Journal
+	ownership        *capsule.Ownership
+	initializer      *capsule.Initializer
+	runner           *subprocess.Runner
+	clock            *host.Clock
+	devpod           *devpod.Client
+	devpodExecutable string
+	hauler           *hauler.Client
 }
 
 type serviceBundle struct {
@@ -395,7 +420,7 @@ func composeProduction(ctx context.Context) (productionComposition, error) {
 	return productionComposition{
 		paths: paths, runtime: runtime, backend: backend, journal: journal, ownership: ownership,
 		initializer: capsule.NewInitializer(clock, capsule.NewCommandDigestResolver("docker", runner)),
-		runner:      runner, clock: clock, devpod: devpod.NewClient(devpodPath, runner), hauler: hauler.NewClient("hauler", runner),
+		runner:      runner, clock: clock, devpod: devpod.NewClient(devpodPath, runner), devpodExecutable: devpodPath, hauler: hauler.NewClient("hauler", runner),
 	}, nil
 }
 

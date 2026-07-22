@@ -21,8 +21,8 @@ var ErrInitializationConflict = errors.New("capsule initialization conflicts wit
 const (
 	roomImage      = "ghcr.io/joshyorko/room-of-requirement:wolfi"
 	roomRepository = "joshyorko/room-of-requirement"
-	roomVersion    = "v1.18.0"
-	roomCommit     = "0aabf18ad291c590498bd8e904a7d09f66378b85"
+	roomVersion    = "v1.18.3"
+	roomCommit     = "3d675a1fbc4c2c494730722e6396a42416a35e22"
 	devpodVersion  = "v0.26.1"
 	haulerVersion  = "v2.0.2"
 )

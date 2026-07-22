@@ -92,7 +92,7 @@ func TestLocalLifecycleVertical(t *testing.T) {
 	workspaceRootB := "/workspaces/" + reopened.WorkspaceID
 	t.Log("verify restored filesystem semantics and runnable named image")
 	note := shellQuote(filepath.ToSlash(filepath.Join(workspaceRootB, "Projects/Unicode space/λ-note.txt")))
-	verify := fmt.Sprintf("set -eu; grep -q before-open %s; grep -q after-open %s; grep -q after-sync %s; stat -c %%a %s | grep -qx 600; stat -c %%s %s | grep -qx %d; readlink %s | grep -qx README.md; find %s -xdev -samefile %s | grep -q README-hardlink.md; engine=; for candidate in docker podman nerdctl; do if command -v \"$candidate\" >/dev/null 2>&1 && \"$candidate\" info >/dev/null 2>&1; then engine=$candidate; break; fi; done; test -n \"$engine\"; \"$engine\" image inspect %s/camp-acceptance:named >/dev/null; \"$engine\" run --rm %s/camp-acceptance:named true", note, note, note, note, shellQuote(filepath.ToSlash(filepath.Join(workspaceRootB, "large.bin"))), lifecycleLargeSize, shellQuote(filepath.ToSlash(filepath.Join(workspaceRootB, "README-link.md"))), shellQuote(workspaceRootB), shellQuote(filepath.ToSlash(filepath.Join(workspaceRootB, "README.md"))), loopbackEndpoint(registryPort), loopbackEndpoint(registryPort))
+	verify := fmt.Sprintf("set -eux; grep -q before-open %s; grep -q after-open %s; grep -q after-sync %s; stat -c %%a %s | grep -qx 600; stat -c %%s %s | grep -qx %d; readlink %s | grep -qx README.md; find %s -xdev -samefile %s | grep -q README-hardlink.md; engine=; for candidate in docker podman nerdctl; do if command -v \"$candidate\" >/dev/null 2>&1 && \"$candidate\" info >/dev/null 2>&1; then engine=$candidate; break; fi; done; test -n \"$engine\"; \"$engine\" image inspect %s/camp-acceptance:named >/dev/null; \"$engine\" run --rm %s/camp-acceptance:named true", note, note, note, note, shellQuote(filepath.ToSlash(filepath.Join(workspaceRootB, "large.bin"))), lifecycleLargeSize, shellQuote(filepath.ToSlash(filepath.Join(workspaceRootB, "README-link.md"))), shellQuote(workspaceRootB), shellQuote(filepath.ToSlash(filepath.Join(workspaceRootB, "README.md"))), loopbackEndpoint(registryPort), loopbackEndpoint(registryPort))
 	mustRunLifecycle(t, ctx, nil, "devpod", "ssh", "--context", "default", reopened.WorkspaceID, "--command", verify)
 	t.Log("close fresh controller and verify teardown")
 	mustRunLifecycle(t, ctx, envB, bin, "--json", "close")
@@ -158,7 +158,7 @@ func decodeGeneration(t *testing.T, output []byte) int {
 }
 
 func lifecycleEnvironment(controller, source, backend string, registryPort, fileserverPort int) []string {
-	env := []string{"XDG_CONFIG_HOME=" + filepath.Join(controller, "config"), "XDG_DATA_HOME=" + filepath.Join(controller, "data"), "XDG_CACHE_HOME=" + filepath.Join(controller, "cache"), "CAMP_BACKEND=file://" + backend, "CAMP_CAPSULE=default", "CAMP_REGISTRY_PORT=" + strconv.Itoa(registryPort), "CAMP_FILESERVER_PORT=" + strconv.Itoa(fileserverPort)}
+	env := []string{"XDG_CONFIG_HOME=" + filepath.Join(controller, "config"), "XDG_DATA_HOME=" + filepath.Join(controller, "data"), "XDG_CACHE_HOME=" + filepath.Join(controller, "cache"), "CAMP_BACKEND=file://" + backend, "CAMP_CAPSULE=default", "CAMP_DEVPOD_PROVIDER=room-of-requirement", "CAMP_REGISTRY_PORT=" + strconv.Itoa(registryPort), "CAMP_FILESERVER_PORT=" + strconv.Itoa(fileserverPort)}
 	if source != "" {
 		env = append(env, "CAMP_SOURCE="+source)
 	}

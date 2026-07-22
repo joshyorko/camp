@@ -205,6 +205,33 @@ func TestRemoteMirrorReportsUnavailableWhenTarFallbackIsNotComposed(t *testing.T
 	}
 }
 
+func TestRequestBoundRemoteBindsPersistedWorkspaceIdentity(t *testing.T) {
+	resolver := &fakeRemoteRootResolver{root: "/workspace/effective"}
+	staging := &fakeRemoteStaging{fresh: []string{"/stage/attempt"}}
+	rsync := &fakeRsyncExecutor{attempt: sshtransfer.TransferAttempt{Method: sshtransfer.MethodRsync, ProducerStarted: true}}
+	transport := NewRequestBoundRemote(RemoteConfig{RsyncExecutable: "rsync"}, resolver, staging, rsync, nil)
+	request := ports.MirrorRequest{Provider: "kubernetes", StagingRoot: "/controller", AttemptID: "mirror-bound", WorkspaceID: "camp-brain", Context: "default"}
+	if _, err := transport.ReturnToStaging(context.Background(), request); err != nil {
+		t.Fatal(err)
+	}
+	if resolver.workspaceID != request.WorkspaceID || resolver.context != request.Context {
+		t.Fatalf("resolver identity = %q/%q", resolver.context, resolver.workspaceID)
+	}
+}
+
+func TestRemoteUsesDirectDevPodTarWhenRsyncAliasIsUnavailable(t *testing.T) {
+	staging := &fakeRemoteStaging{fresh: []string{"/stage/tar"}}
+	tar := &fakeTarPipelineExecutor{attempt: sshtransfer.TransferAttempt{Method: sshtransfer.MethodTarPipe, ProducerStarted: true, ConsumerStarted: true}}
+	transport := NewRemote(RemoteConfig{WorkspaceID: "camp", Context: "default", DevPodExecutable: "devpod", TarExecutable: "tar"}, &fakeRemoteRootResolver{root: "/workspaces/camp"}, staging, &fakeRsyncExecutor{}, tar)
+	result, err := transport.ReturnToStaging(context.Background(), ports.MirrorRequest{Provider: "kubernetes", StagingRoot: "/controller", AttemptID: "mirror-direct", WorkspaceID: "camp", Context: "default"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Method != string(sshtransfer.MethodTarPipe) || tar.calls != 1 {
+		t.Fatalf("result=%#v tar calls=%d", result, tar.calls)
+	}
+}
+
 type fakeRemoteRootResolver struct {
 	root        string
 	err         error

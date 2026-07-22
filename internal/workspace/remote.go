@@ -14,11 +14,12 @@ var ErrNotRemoteMirror = errors.New("workspace is not a remote DevPod mirror")
 var ErrRemoteIdentityMismatch = errors.New("persisted remote workspace identity does not match transport composition")
 
 type RemoteConfig struct {
-	WorkspaceID     string
-	Context         string
-	RsyncExecutable string
-	SSHExecutable   string
-	TarExecutable   string
+	WorkspaceID      string
+	Context          string
+	RsyncExecutable  string
+	SSHExecutable    string
+	DevPodExecutable string
+	TarExecutable    string
 }
 
 type RemoteRootResolver interface {
@@ -64,6 +65,39 @@ type Remote struct {
 	tar      TarPipelineExecutor
 }
 
+type RequestBoundRemote struct {
+	config   RemoteConfig
+	resolver RemoteRootResolver
+	staging  RemoteStaging
+	rsync    RsyncExecutor
+	tar      TarPipelineExecutor
+}
+
+func NewRequestBoundRemote(config RemoteConfig, resolver RemoteRootResolver, staging RemoteStaging, rsync RsyncExecutor, tar TarPipelineExecutor) *RequestBoundRemote {
+	return &RequestBoundRemote{config: config, resolver: resolver, staging: staging, rsync: rsync, tar: tar}
+}
+
+func (r *RequestBoundRemote) bound(request ports.MirrorRequest) *Remote {
+	config := r.config
+	config.WorkspaceID = request.WorkspaceID
+	config.Context = request.Context
+	return NewRemote(config, r.resolver, r.staging, r.rsync, r.tar)
+}
+
+func (r *RequestBoundRemote) Validate(request ports.MirrorRequest) error {
+	if r == nil {
+		return ErrNotRemoteMirror
+	}
+	return r.bound(request).Validate(request)
+}
+
+func (r *RequestBoundRemote) ReturnToStaging(ctx context.Context, request ports.MirrorRequest) (ports.MirrorResult, error) {
+	if r == nil {
+		return ports.MirrorResult{}, ErrNotRemoteMirror
+	}
+	return r.bound(request).ReturnToStaging(ctx, request)
+}
+
 func NewRemote(config RemoteConfig, resolver RemoteRootResolver, staging RemoteStaging, rsync RsyncExecutor, tar TarPipelineExecutor) *Remote {
 	return &Remote{config: config, resolver: resolver, staging: staging, rsync: rsync, tar: tar}
 }
@@ -78,6 +112,9 @@ func (r *Remote) ReturnToStaging(ctx context.Context, request ports.MirrorReques
 	remoteRoot, err := r.resolver.ResolveWorkspaceFolderInContext(ctx, request.Context, request.WorkspaceID)
 	if err != nil {
 		return ports.MirrorResult{}, err
+	}
+	if r.config.RsyncExecutable == "" {
+		return r.returnWithTar(ctx, request, remoteRoot, request.AttemptID+"-tar")
 	}
 	rsyncAttemptID := request.AttemptID + "-rsync"
 	destination, err := r.staging.Fresh(ctx, request.StagingRoot, rsyncAttemptID)
@@ -107,28 +144,35 @@ func (r *Remote) ReturnToStaging(ctx context.Context, request ports.MirrorReques
 		if r.tar == nil {
 			return ports.MirrorResult{}, errors.Join(err, ErrTransportUnavailable)
 		}
-		tarAttemptID := request.AttemptID + "-tar"
-		destination, freshErr := r.staging.Fresh(ctx, request.StagingRoot, tarAttemptID)
-		if freshErr != nil {
-			return ports.MirrorResult{}, errors.Join(err, freshErr)
+		result, tarErr := r.returnWithTar(ctx, request, remoteRoot, request.AttemptID+"-tar")
+		if tarErr != nil {
+			return ports.MirrorResult{}, errors.Join(err, tarErr)
 		}
-		pipeline, buildErr := sshtransfer.BuildTarPipe(sshtransfer.TarPipeSpec{
-			SSHExecutable: r.config.SSHExecutable, TarExecutable: r.config.TarExecutable,
-			WorkspaceID: request.WorkspaceID, RemoteRoot: remoteRoot, LocalRoot: destination,
-		})
-		if buildErr != nil {
-			return ports.MirrorResult{}, errors.Join(buildErr, r.staging.Discard(context.WithoutCancel(ctx), destination))
-		}
-		if _, pipelineErr := sshtransfer.ClassifyTransfer(r.tar.RunTarPipeline(ctx, pipeline)); pipelineErr != nil {
-			var failure *sshtransfer.TransferFailure
-			if errors.As(pipelineErr, &failure) && failure.Kind == sshtransfer.FailurePartial {
-				return ports.MirrorResult{}, &MirrorOutcomeUnknown{Result: remoteMirrorResult(destination, tarAttemptID, sshtransfer.MethodTarPipe, remoteRoot), Err: pipelineErr}
-			}
-			return ports.MirrorResult{}, errors.Join(pipelineErr, r.staging.Discard(context.WithoutCancel(ctx), destination))
-		}
-		return remoteMirrorResult(destination, tarAttemptID, sshtransfer.MethodTarPipe, remoteRoot), nil
+		return result, nil
 	}
 	return remoteMirrorResult(destination, rsyncAttemptID, sshtransfer.MethodRsync, remoteRoot), nil
+}
+
+func (r *Remote) returnWithTar(ctx context.Context, request ports.MirrorRequest, remoteRoot, attemptID string) (ports.MirrorResult, error) {
+	destination, err := r.staging.Fresh(ctx, request.StagingRoot, attemptID)
+	if err != nil {
+		return ports.MirrorResult{}, err
+	}
+	pipeline, err := sshtransfer.BuildTarPipe(sshtransfer.TarPipeSpec{
+		SSHExecutable: r.config.SSHExecutable, DevPodExecutable: r.config.DevPodExecutable, DevPodContext: request.Context,
+		TarExecutable: r.config.TarExecutable, WorkspaceID: request.WorkspaceID, RemoteRoot: remoteRoot, LocalRoot: destination,
+	})
+	if err != nil {
+		return ports.MirrorResult{}, errors.Join(err, r.staging.Discard(context.WithoutCancel(ctx), destination))
+	}
+	if _, err := sshtransfer.ClassifyTransfer(r.tar.RunTarPipeline(ctx, pipeline)); err != nil {
+		var failure *sshtransfer.TransferFailure
+		if errors.As(err, &failure) && failure.Kind == sshtransfer.FailurePartial {
+			return ports.MirrorResult{}, &MirrorOutcomeUnknown{Result: remoteMirrorResult(destination, attemptID, sshtransfer.MethodTarPipe, remoteRoot), Err: err}
+		}
+		return ports.MirrorResult{}, errors.Join(err, r.staging.Discard(context.WithoutCancel(ctx), destination))
+	}
+	return remoteMirrorResult(destination, attemptID, sshtransfer.MethodTarPipe, remoteRoot), nil
 }
 
 func (r *Remote) Validate(request ports.MirrorRequest) error {
@@ -152,3 +196,4 @@ func remoteMirrorResult(root, attemptID string, method sshtransfer.Method, remot
 }
 
 var _ ports.WorkspaceTransport = (*Remote)(nil)
+var _ ports.WorkspaceTransport = (*RequestBoundRemote)(nil)
