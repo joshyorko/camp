@@ -2,6 +2,7 @@ package cli
 
 import (
 	"bytes"
+	"errors"
 	"os"
 	"testing"
 
@@ -81,5 +82,16 @@ func TestWriteLifecycleEventsDoesNotRunForJSON(t *testing.T) {
 	}
 	if output.Len() != 0 {
 		t.Fatalf("JSON helper wrote %q", output.String())
+	}
+}
+
+func TestLifecycleFailurePreservesCauseAndOneRecoveryCommand(t *testing.T) {
+	cause := errors.New("checkpoint upload failed")
+	err := lifecycleFailure(cause, "camp recover session-1")
+	if !errors.Is(err, cause) {
+		t.Fatalf("lifecycleFailure does not wrap cause: %v", err)
+	}
+	if err.Failure.Message != cause.Error() || len(err.Failure.NextCommands) != 1 || err.Failure.NextCommands[0] != "camp recover session-1" {
+		t.Fatalf("failure = %#v", err.Failure)
 	}
 }

@@ -203,7 +203,7 @@ func (p *ProductionLifecycle) Open(ctx context.Context, value string, mode Outpu
 	}
 	result, err := usecase.Run(ctx, request)
 	if err != nil {
-		return err
+		return lifecycleFailure(err, result.RecoveryCommand)
 	}
 	if result.Snapshot.Mode == domain.SessionReadWrite {
 		if err := startSessionSupervisor(ctx, composition, services.processes, result.Snapshot.SessionID); err != nil {
@@ -282,7 +282,11 @@ func (p *ProductionLifecycle) Sync(ctx context.Context, mode OutputMode, out io.
 	}
 	result, err := app.NewSync(c.base.journal, c.locks, c.publisher).Run(ctx, session.SessionID)
 	if err != nil {
-		return err
+		recovery := result.RecoveryCommand
+		if recovery == "" {
+			recovery = "camp recover " + session.SessionID
+		}
+		return lifecycleFailure(err, recovery)
 	}
 	if mode == ModeHuman {
 		return writeHumanLifecycleResult(out, mode, "sync", syncTerminalEvents(result.Generation.Generation), "")
@@ -301,7 +305,7 @@ func (p *ProductionLifecycle) Close(ctx context.Context, mode OutputMode, out io
 	}
 	result, err := c.close.Run(ctx, app.CloseRequest{SessionID: session.SessionID})
 	if err != nil {
-		return err
+		return lifecycleFailure(err, result.RecoveryCommand)
 	}
 	if mode == ModeHuman {
 		return writeHumanLifecycleResult(out, mode, "close", closeTerminalEvents(result.Generation.Generation, result.CleanupSucceeded), "")
