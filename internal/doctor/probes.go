@@ -22,6 +22,7 @@ const maxToolBytes = int64(512 << 20)
 var (
 	identityAssignmentSecret = regexp.MustCompile(`(?i)\b(token|password|secret|credential|accesskey)=([^\s"']+)`)
 	identityURLCredentials   = regexp.MustCompile(`://[^/@\s"']+@`)
+	preferredVersionLine     = regexp.MustCompile(`(?i)^(gitversion|version)\s*:`)
 )
 
 type Probe interface {
@@ -185,9 +186,19 @@ func (p BackendProbe) Probe(ctx context.Context) Result {
 }
 
 func safeSingleLine(value string) string {
-	line := strings.TrimSpace(value)
-	if before, _, ok := strings.Cut(line, "\n"); ok {
-		line = strings.TrimSpace(before)
+	line := ""
+	for _, candidate := range strings.Split(value, "\n") {
+		candidate = strings.TrimSpace(candidate)
+		if candidate == "" {
+			continue
+		}
+		if line == "" {
+			line = candidate
+		}
+		if preferredVersionLine.MatchString(candidate) {
+			line = candidate
+			break
+		}
 	}
 	if len(line) > 256 {
 		line = line[:256]

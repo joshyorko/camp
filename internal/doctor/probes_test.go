@@ -53,6 +53,23 @@ func TestToolProbeRedactsCredentialBearingIdentityOutput(t *testing.T) {
 	}
 }
 
+func TestToolProbeSelectsVersionLineAfterBanner(t *testing.T) {
+	executable := filepath.Join(t.TempDir(), "hauler")
+	if err := os.WriteFile(executable, []byte("executable"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	probe := ToolProbe{
+		Name: "hauler", LookPath: func(string) (string, error) { return executable, nil },
+		Run: func(context.Context, string, ...string) ([]byte, error) {
+			return []byte("__ HAULER ASCII BANNER __\nhauler: Airgap Swiss Army Knife\n\nGitVersion:    v2.0.2\nGitCommit: 4ece589\n"), nil
+		},
+	}
+	result := probe.Probe(context.Background())
+	if result.Evidence["version"] != "GitVersion:    v2.0.2" {
+		t.Fatalf("version evidence = %q", result.Evidence["version"])
+	}
+}
+
 type staticConfinementResolver struct {
 	capability ports.ConfinementCapability
 	err        error
@@ -63,8 +80,8 @@ func (r staticConfinementResolver) Resolve(context.Context) (ports.ConfinementCa
 }
 
 func TestConfinementProbeReportsFunctionalCapability(t *testing.T) {
-	result := (ConfinementProbe{Resolver: staticConfinementResolver{capability: ports.ConfinementCapability{Executable: "/usr/bin/pasta", Version: "passt 2026", Boundary: "host", EnvironmentFingerprint: "abc"}}}).Probe(context.Background())
-	if result.Status != StatusHealthy || result.Code != "pasta_confinement_available" || result.Evidence["boundary"] != "host" || result.Evidence["fingerprint"] != "abc" {
+	result := (ConfinementProbe{Resolver: staticConfinementResolver{capability: ports.ConfinementCapability{Executable: "/usr/bin/pasta", Version: "pasta 2026\nGNU General Public License, version 2 or later", Boundary: "host", EnvironmentFingerprint: "abc"}}}).Probe(context.Background())
+	if result.Status != StatusHealthy || result.Code != "pasta_confinement_available" || result.Evidence["boundary"] != "host" || result.Evidence["fingerprint"] != "abc" || result.Evidence["version"] != "pasta 2026" {
 		t.Fatalf("result = %#v", result)
 	}
 }
