@@ -20,7 +20,9 @@ import (
 const maxToolBytes = int64(512 << 20)
 
 var (
-	identityAssignmentSecret = regexp.MustCompile(`(?i)\b(token|password|secret|credential|accesskey)=([^\s"']+)`)
+	identityAssignmentSecret = regexp.MustCompile(`(?i)\b([a-z0-9_]*(?:token|password|secret|credential|access[_-]?key)[a-z0-9_]*)\s*=\s*([^\s"']+)`)
+	identityBearerSecret     = regexp.MustCompile(`(?i)(authorization\s*:\s*bearer\s+)([^\s,"']+)`)
+	identityQuerySecret      = regexp.MustCompile(`(?i)([?&](?:token|password|secret|credential|access[_-]?key)=)([^&#\s"']+)`)
 	identityURLCredentials   = regexp.MustCompile(`://[^/@\s"']+@`)
 	preferredVersionLine     = regexp.MustCompile(`(?i)^(gitversion|version)\s*:`)
 )
@@ -145,7 +147,7 @@ func (p ConfinementProbe) Probe(ctx context.Context) Result {
 	if err != nil {
 		return Result{Capability: "pasta", Status: StatusBlocked, Code: "pasta_confinement_unavailable", Summary: "pasta cannot provide Camp's required confinement capability", Remediation: "install or repair pasta from passt outside Camp, then rerun camp doctor"}
 	}
-	return Result{Capability: "pasta", Status: StatusHealthy, Code: "pasta_confinement_available", Summary: "pasta provides the required confinement option surface and host policy context", Evidence: map[string]string{"path": capability.Executable, "version": safeSingleLine(capability.Version), "boundary": capability.Boundary, "fingerprint": capability.EnvironmentFingerprint}}
+	return Result{Capability: "pasta", Status: StatusDegraded, Code: "pasta_option_surface_available_runtime_unprobed", Summary: "pasta provides the required option surface and host policy context; runtime confinement was not probed", Evidence: map[string]string{"path": capability.Executable, "version": safeSingleLine(capability.Version), "boundary": capability.Boundary, "fingerprint": capability.EnvironmentFingerprint}, Remediation: "run a later issue #11 functional confinement probe before relying on pasta runtime health"}
 }
 
 type BackendProbe struct {
@@ -174,7 +176,7 @@ func (p BackendProbe) Probe(ctx context.Context) Result {
 	}
 	evidence := map[string]string{"kind": string(backend.Kind), "url": backend.SanitizedURL, "fingerprint": backend.Fingerprint}
 	if backend.Kind == config.BackendFile {
-		return Result{Capability: "backend", Status: StatusHealthy, Code: "backend_configuration_valid", Summary: "file backend configuration is valid; backend I/O health was not probed", Evidence: evidence}
+		return Result{Capability: "backend", Status: StatusDegraded, Code: "file_backend_configuration_valid_io_unprobed", Summary: "file backend configuration is valid; backend I/O health was not probed", Evidence: evidence, Remediation: "run a later issue #11 backend functional probe before relying on backend health"}
 	}
 	if p.CheckCredentials == nil {
 		return Result{Capability: "backend", Status: StatusBlocked, Code: "s3_credential_probe_unconfigured", Summary: "S3 credential-chain probe is unavailable", Evidence: evidence, Remediation: "repair Camp composition, then rerun camp doctor"}
@@ -200,10 +202,12 @@ func safeSingleLine(value string) string {
 			break
 		}
 	}
+	line = identityURLCredentials.ReplaceAllString(line, "://[REDACTED]@")
+	line = identityAssignmentSecret.ReplaceAllString(line, "$1=[REDACTED]")
+	line = identityBearerSecret.ReplaceAllString(line, "$1[REDACTED]")
+	line = identityQuerySecret.ReplaceAllString(line, "$1[REDACTED]")
 	if len(line) > 256 {
 		line = line[:256]
 	}
-	line = identityURLCredentials.ReplaceAllString(line, "://[REDACTED]@")
-	line = identityAssignmentSecret.ReplaceAllString(line, "$1=[REDACTED]")
 	return strings.TrimSpace(line)
 }

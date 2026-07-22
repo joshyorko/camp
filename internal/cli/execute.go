@@ -246,7 +246,9 @@ func finishExecution(err error, streams Streams) int {
 	}
 
 	exitErr := classifyError(err)
-	writeFailure(streams, exitErr.Failure)
+	if exitErr.Failure.Code != "" || exitErr.Failure.Message != "" || len(exitErr.Failure.NextCommands) != 0 {
+		writeFailure(streams, exitErr.Failure)
+	}
 	return int(exitErr.Code)
 }
 

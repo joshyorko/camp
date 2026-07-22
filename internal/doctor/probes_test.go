@@ -53,6 +53,27 @@ func TestToolProbeRedactsCredentialBearingIdentityOutput(t *testing.T) {
 	}
 }
 
+func TestSafeSingleLineRedactsCommonCredentialFormsBeforeTruncation(t *testing.T) {
+	tests := []string{
+		"CAMP_TOKEN=assignment-secret",
+		"Authorization: Bearer bearer-secret",
+		"https://user:pass@example.test/path",
+		"https://example.test/path?token=query-secret&safe=yes",
+		strings.Repeat("x", 240) + " CAMP_PASSWORD=" + strings.Repeat("s", 300),
+	}
+	for _, input := range tests {
+		got := safeSingleLine(input)
+		for _, leaked := range []string{"assignment-secret", "bearer-secret", "user:pass", "query-secret", strings.Repeat("s", 10)} {
+			if strings.Contains(got, leaked) {
+				t.Fatalf("safeSingleLine leaked %q from %q: %q", leaked, input, got)
+			}
+		}
+		if len(got) > 256 {
+			t.Fatalf("safeSingleLine length = %d, want <= 256", len(got))
+		}
+	}
+}
+
 func TestToolProbeSelectsVersionLineAfterBanner(t *testing.T) {
 	executable := filepath.Join(t.TempDir(), "hauler")
 	if err := os.WriteFile(executable, []byte("executable"), 0o700); err != nil {
@@ -79,9 +100,9 @@ func (r staticConfinementResolver) Resolve(context.Context) (ports.ConfinementCa
 	return r.capability, r.err
 }
 
-func TestConfinementProbeReportsFunctionalCapability(t *testing.T) {
+func TestConfinementProbeReportsSyntaxOnlyCapabilityAsDegraded(t *testing.T) {
 	result := (ConfinementProbe{Resolver: staticConfinementResolver{capability: ports.ConfinementCapability{Executable: "/usr/bin/pasta", Version: "pasta 2026\nGNU General Public License, version 2 or later", Boundary: "host", EnvironmentFingerprint: "abc"}}}).Probe(context.Background())
-	if result.Status != StatusHealthy || result.Code != "pasta_confinement_available" || result.Evidence["boundary"] != "host" || result.Evidence["fingerprint"] != "abc" || result.Evidence["version"] != "pasta 2026" {
+	if result.Status != StatusDegraded || result.Code != "pasta_option_surface_available_runtime_unprobed" || result.Evidence["boundary"] != "host" || result.Evidence["fingerprint"] != "abc" || result.Evidence["version"] != "pasta 2026" {
 		t.Fatalf("result = %#v", result)
 	}
 }
@@ -101,7 +122,7 @@ func TestBackendProbeDistinguishesConfigurationFromHealth(t *testing.T) {
 		wantCode   string
 	}{
 		{name: "not configured", probe: BackendProbe{ConfigPath: filepath.Join(t.TempDir(), "missing")}, wantStatus: StatusSkippedNotConfigured, wantCode: "backend_not_configured"},
-		{name: "default file", probe: BackendProbe{ConfigPath: filepath.Join(t.TempDir(), "missing"), DefaultBackend: "file:///tmp/camp-backend"}, wantStatus: StatusHealthy, wantCode: "backend_configuration_valid"},
+		{name: "default file", probe: BackendProbe{ConfigPath: filepath.Join(t.TempDir(), "missing"), DefaultBackend: "file:///tmp/camp-backend"}, wantStatus: StatusDegraded, wantCode: "file_backend_configuration_valid_io_unprobed"},
 		{name: "s3 credentials resolved", probe: BackendProbe{ConfigPath: filepath.Join(t.TempDir(), "missing"), Environment: map[string]string{"CAMP_BACKEND": "s3://camp-bucket/team", "CAMP_S3_ENDPOINT": "https://s3.example.test", "CAMP_S3_REGION": "us-east-1"}, CheckCredentials: func(context.Context, config.Backend) error { return nil }}, wantStatus: StatusDegraded, wantCode: "s3_credentials_available_backend_unprobed"},
 		{name: "s3 credentials unavailable", probe: BackendProbe{ConfigPath: filepath.Join(t.TempDir(), "missing"), Environment: map[string]string{"CAMP_BACKEND": "s3://camp-bucket/team", "CAMP_S3_ENDPOINT": "https://s3.example.test", "CAMP_S3_REGION": "us-east-1"}, CheckCredentials: func(context.Context, config.Backend) error { return errors.New("accessKey=secret") }}, wantStatus: StatusBlocked, wantCode: "s3_credentials_unavailable"},
 	}

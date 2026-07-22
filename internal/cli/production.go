@@ -69,9 +69,17 @@ func (p *ProductionLifecycle) Doctor(ctx context.Context, mode OutputMode, out i
 		},
 	}}).Run(ctx)
 	if mode == ModeJSON {
-		return doctor.RenderJSON(out, report)
+		err = doctor.RenderJSON(out, report)
+	} else {
+		err = doctor.RenderHuman(out, report)
 	}
-	return doctor.RenderHuman(out, report)
+	if err != nil {
+		return err
+	}
+	if report.Blocked() {
+		return &ExitError{Code: ExitFailure}
+	}
+	return nil
 }
 
 func (p *ProductionLifecycle) Init(ctx context.Context, root string, mode OutputMode, out io.Writer) error {

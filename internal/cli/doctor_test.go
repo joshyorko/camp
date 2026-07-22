@@ -28,13 +28,41 @@ func TestProductionDoctorRendersReadOnlyCapabilityReport(t *testing.T) {
 		t.Fatal(err)
 	}
 	body := output.String()
-	for _, expected := range []string{`"kind": "doctor"`, `"capability": "backend"`, `"capability": "devpod"`, `"capability": "hauler"`, `"capability": "pasta"`, `"code": "backend_configuration_valid"`, `"code": "tool_identity_observed"`, `"code": "pasta_confinement_available"`} {
+	for _, expected := range []string{`"kind": "doctor"`, `"capability": "backend"`, `"capability": "devpod"`, `"capability": "hauler"`, `"capability": "pasta"`, `"code": "file_backend_configuration_valid_io_unprobed"`, `"code": "tool_identity_observed"`, `"code": "pasta_option_surface_available_runtime_unprobed"`} {
 		if !strings.Contains(body, expected) {
 			t.Fatalf("output missing %s:\n%s", expected, body)
 		}
 	}
 	if strings.Contains(body, "doctor-secret") {
 		t.Fatalf("doctor leaked credential: %s", body)
+	}
+}
+
+func TestProductionDoctorBlockedReportRendersExactlyOnceAndExitsNonzero(t *testing.T) {
+	for _, jsonMode := range []bool{false, true} {
+		t.Run(map[bool]string{false: "human", true: "json"}[jsonMode], func(t *testing.T) {
+			t.Setenv("PATH", t.TempDir())
+			t.Setenv("HOME", filepath.Join(t.TempDir(), "home"))
+			t.Setenv("XDG_CONFIG_HOME", filepath.Join(t.TempDir(), "config"))
+			t.Setenv("XDG_DATA_HOME", filepath.Join(t.TempDir(), "data"))
+			t.Setenv("XDG_CACHE_HOME", filepath.Join(t.TempDir(), "cache"))
+			args := []string{"doctor"}
+			if jsonMode {
+				args = append(args, "--json")
+			}
+			var stdout, stderr bytes.Buffer
+			code := Execute(context.Background(), NewRoot(), args, Streams{Out: &stdout, ErrOut: &stderr})
+			if code != int(ExitFailure) {
+				t.Fatalf("exit = %d, want %d", code, ExitFailure)
+			}
+			combined := stdout.String() + stderr.String()
+			if strings.Count(combined, "Camp doctor:")+strings.Count(combined, `"kind": "doctor"`) != 1 {
+				t.Fatalf("aggregate report count != 1; stdout=%q stderr=%q", stdout.String(), stderr.String())
+			}
+			if strings.Contains(combined, "error [") || strings.Contains(combined, `"kind":"failure"`) {
+				t.Fatalf("blocked report was followed by duplicate failure: %q", combined)
+			}
+		})
 	}
 }
 
