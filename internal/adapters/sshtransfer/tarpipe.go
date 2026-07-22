@@ -8,11 +8,13 @@ import (
 )
 
 type TarPipeSpec struct {
-	SSHExecutable string
-	TarExecutable string
-	WorkspaceID   string
-	RemoteRoot    string
-	LocalRoot     string
+	SSHExecutable    string
+	DevPodExecutable string
+	DevPodContext    string
+	TarExecutable    string
+	WorkspaceID      string
+	RemoteRoot       string
+	LocalRoot        string
 }
 
 // TarPipe describes two directly connected processes. Callers must connect the
@@ -23,8 +25,8 @@ type TarPipe struct {
 }
 
 func BuildTarPipe(spec TarPipeSpec) (TarPipe, error) {
-	if spec.SSHExecutable == "" || spec.TarExecutable == "" {
-		return TarPipe{}, errors.New("ssh and tar executables are required")
+	if (spec.SSHExecutable == "" && spec.DevPodExecutable == "") || spec.TarExecutable == "" {
+		return TarPipe{}, errors.New("remote transport and tar executables are required")
 	}
 	host, err := DevPodHost(spec.WorkspaceID)
 	if err != nil {
@@ -33,15 +35,17 @@ func BuildTarPipe(spec TarPipeSpec) (TarPipe, error) {
 	if !validAbsoluteRoot(spec.RemoteRoot) || !validAbsoluteRoot(spec.LocalRoot) {
 		return TarPipe{}, errors.New("tar roots must be clean absolute paths")
 	}
+	remoteCommand := "tar --create --file=- --directory=" + remoteShellQuote(spec.RemoteRoot) +
+		" --exclude='./.camp/build' --exclude='./.camp/runtime' ."
+	producer := ports.Command{Executable: spec.SSHExecutable, Argv: []string{host, remoteCommand}}
+	if spec.DevPodExecutable != "" {
+		if spec.DevPodContext == "" {
+			return TarPipe{}, errors.New("DevPod context is required")
+		}
+		producer = ports.Command{Executable: spec.DevPodExecutable, Argv: []string{"ssh", "--context", spec.DevPodContext, "--start-services=false", "--command", remoteCommand, spec.WorkspaceID}}
+	}
 	return TarPipe{
-		Producer: ports.Command{
-			Executable: spec.SSHExecutable,
-			Argv: []string{
-				host,
-				"tar --create --file=- --directory=" + remoteShellQuote(spec.RemoteRoot) +
-					" --exclude='./.camp/build' --exclude='./.camp/runtime' .",
-			},
-		},
+		Producer: producer,
 		Consumer: ports.Command{
 			Executable: spec.TarExecutable,
 			Argv: []string{

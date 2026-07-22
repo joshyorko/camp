@@ -29,6 +29,28 @@ func TestMachineIdentityFallbackIsStableAndFailsClosed(t *testing.T) {
 	}
 }
 
+func TestResolveProductionProviderSelectsConfiguredRemoteProvider(t *testing.T) {
+	t.Setenv("CAMP_DEVPOD_PROVIDER", "room-of-requirement")
+	provider, local, err := resolveProductionProvider()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if provider != "room-of-requirement" || local {
+		t.Fatalf("provider=%q local=%t", provider, local)
+	}
+}
+
+func TestResolveProductionProviderKeepsDockerDefaultLocal(t *testing.T) {
+	t.Setenv("CAMP_DEVPOD_PROVIDER", "")
+	provider, local, err := resolveProductionProvider()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if provider != "" || !local {
+		t.Fatalf("provider=%q local=%t", provider, local)
+	}
+}
+
 func TestStartSessionSupervisorUsesHiddenCommandAndWaitsForClaim(t *testing.T) {
 	t.Parallel()
 

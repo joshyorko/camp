@@ -7,6 +7,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -235,9 +236,10 @@ func TestCheckpointPublisherUploadsCASesAndAdvancesBaselineOnlyThroughFact(t *te
 		OriginalTags: []string{"example.test/app:v1"}, CapturedReference: "127.0.0.1:45001/camp/app:captured", CapturedManifestDigest: digest,
 		Platform: domain.Platform{OS: "linux", Architecture: "amd64"}, Source: domain.ImageSourceRegistry,
 	}}
-	fakes.seal.result = registryadapter.Snapshot{Root: filepath.Join(root, ".camp", "build", "registry-cut-43"), References: []ports.RegistryReference{{
-		Repository: "manual/tool", Tag: "latest", ManifestDigest: "sha256:eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
-	}}}
+	fakes.seal.result = registryadapter.Snapshot{Root: filepath.Join(root, ".camp", "build", "registry-cut-43"), References: []ports.RegistryReference{
+		{Repository: "manual/tool", Tag: "latest", ManifestDigest: "sha256:eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"},
+		{Repository: "hauler/brain.tar.zst", Tag: "sha256-internal", ManifestDigest: "sha256:ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"},
+	}}
 	refreshedChild := domain.ProcessIdentity{PID: 902, BootID: "boot-refreshed", StartTicks: 92}
 	fakes.refresh.after = func(ctx context.Context, request ServingRefreshRequest) error {
 		refreshed, _, err := log.Load(ctx, request.SessionID)
@@ -854,6 +856,23 @@ func TestCheckpointPublisherResumesExactPendingRootSnapshotWithoutRepeatingEarli
 	}
 	if len(builder.inventory.Images) != 1 || builder.inventory.Images[0].CapturedReference != "127.0.0.1:45001/manual/direct:v1" {
 		t.Fatalf("resumed build inventory = %#v", builder.inventory)
+	}
+}
+
+func TestNormalizeRegistrySealSnapshotAcceptsJSONEquivalentImageInventory(t *testing.T) {
+	t.Parallel()
+	expected := domain.JournalSnapshot{Images: domain.ImageInventory{SchemaVersion: domain.SchemaVersion, Images: []domain.Image{{
+		OriginalTags: []string{"example.test/app:v1"}, OriginalRepoDigests: nil, CapturedReference: "127.0.0.1:5000/camp/app:captured",
+	}}}}
+	durable := expected
+	durable.Images.Images = append([]domain.Image(nil), expected.Images.Images...)
+	durable.Images.Images[0].OriginalRepoDigests = []string{}
+	if reflect.DeepEqual(expected.Images, durable.Images) {
+		t.Fatal("test fixture must differ in Go representation")
+	}
+	normalized := normalizeRegistrySealSnapshot(durable, expected)
+	if !reflect.DeepEqual(normalized, expected) {
+		t.Fatalf("normalized snapshot = %#v, want %#v", normalized, expected)
 	}
 }
 

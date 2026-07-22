@@ -67,3 +67,17 @@ func TestTarPipeQuotesNonstandardRemoteRootForOpenSSHRemoteShell(t *testing.T) {
 		t.Fatalf("remote argv = %#v, want safely quoted command %q", got.Producer.Argv, want)
 	}
 }
+
+func TestTarPipeCanUseDevPodWithoutSSHConfigAlias(t *testing.T) {
+	got, err := BuildTarPipe(TarPipeSpec{
+		DevPodExecutable: "/opt/devpod", DevPodContext: "default", TarExecutable: "/usr/bin/tar", WorkspaceID: "camp",
+		RemoteRoot: "/workspaces/camp", LocalRoot: "/tmp/stage",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := []string{"ssh", "--context", "default", "--start-services=false", "--command", "tar --create --file=- --directory='/workspaces/camp' --exclude='./.camp/build' --exclude='./.camp/runtime' .", "camp"}
+	if got.Producer.Executable != "/opt/devpod" || !reflect.DeepEqual(got.Producer.Argv, want) {
+		t.Fatalf("producer = %#v", got.Producer)
+	}
+}

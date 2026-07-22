@@ -225,7 +225,7 @@ func (c *Client) Up(ctx context.Context, options UpOptions) (ports.Result, error
 }
 
 func (c *Client) EnsureProvider(ctx context.Context, devpodContext, provider string) error {
-	if c == nil || c.runner == nil || strings.TrimSpace(devpodContext) == "" || provider != "docker" {
+	if c == nil || c.runner == nil || strings.TrimSpace(devpodContext) == "" || strings.TrimSpace(provider) == "" {
 		return errors.New("unsupported or incomplete DevPod provider request")
 	}
 	providers, err := c.listProviders(ctx, devpodContext)
@@ -233,6 +233,12 @@ func (c *Client) EnsureProvider(ctx context.Context, devpodContext, provider str
 		return err
 	}
 	configured, exists := providers[provider]
+	if provider != "docker" {
+		if !exists || !configured.State.Initialized {
+			return fmt.Errorf("configured DevPod provider identity %q was not verified as initialized", provider)
+		}
+		return nil
+	}
 	if !exists {
 		if _, err := c.run(ctx, []string{"provider", "add", provider, "--context", devpodContext, "--use"}); err != nil {
 			return fmt.Errorf("add DevPod provider %q: %w", provider, err)
@@ -254,6 +260,9 @@ func (c *Client) EnsureProvider(ctx context.Context, devpodContext, provider str
 
 type providerState struct {
 	Default bool `json:"default"`
+	State   struct {
+		Initialized bool `json:"initialized"`
+	} `json:"state"`
 }
 
 func (c *Client) listProviders(ctx context.Context, devpodContext string) (map[string]providerState, error) {

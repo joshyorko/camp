@@ -631,10 +631,20 @@ func (f *openForwarders) Start(_ context.Context, request domain.ForwardingReque
 
 func (f *openForwarders) Stop(context.Context, domain.ForwardingRecord) error { return nil }
 
-type openServices struct{ events *[]string }
+type openServices struct {
+	events   *[]string
+	registry bool
+}
 
 func (s *openServices) Start(_ context.Context, snapshot domain.JournalSnapshot) (domain.JournalSnapshot, error) {
 	*s.events = append(*s.events, "services")
+	if s.registry {
+		snapshot.Services = append(snapshot.Services, domain.ServiceUnitRecord{
+			Name: "registry", DesiredState: domain.RuntimeDesiredRunning, ObservedState: domain.RuntimeObservedReady,
+			Mapping: domain.EndpointMapping{HostAddress: "127.0.0.1", HostPort: 5000},
+			Child:   domain.ProcessRecord{Argv: []string{"hauler", "store", "serve", "registry", "--directory", "/tmp/camp-registry"}},
+		})
+	}
 	return snapshot, nil
 }
 

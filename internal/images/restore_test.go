@@ -40,6 +40,9 @@ func TestRestorerPullsDigestVerifiesAndRetagsEveryOriginalName(t *testing.T) {
 	if result.Restored != 1 || result.Tags != 2 {
 		t.Fatalf("result = %#v", result)
 	}
+	if !reflect.DeepEqual(catalog.calls, []ports.RegistryReference{{Repository: repository, Tag: digest}}) {
+		t.Fatalf("registry resolution = %#v, want immutable digest lookup", catalog.calls)
+	}
 	want := [][]string{
 		{"docker", "image", "pull", "--platform", "linux/amd64", pulled},
 		{"docker", "image", "inspect", pulled},

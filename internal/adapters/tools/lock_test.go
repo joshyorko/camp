@@ -44,7 +44,7 @@ func TestCommittedDistributionToolLock(t *testing.T) {
 		})
 	}
 
-	if lock.Fixtures.Room.Repository != "joshyorko/room-of-requirement" || lock.Fixtures.Room.Version != "v1.18.0" || lock.Fixtures.Room.Commit != "0aabf18ad291c590498bd8e904a7d09f66378b85" {
+	if lock.Fixtures.Room.Repository != "joshyorko/room-of-requirement" || lock.Fixtures.Room.Version != "v1.18.3" || lock.Fixtures.Room.Commit != "3d675a1fbc4c2c494730722e6396a42416a35e22" {
 		t.Fatalf("room fixture mismatch: %#v", lock.Fixtures.Room)
 	}
 }

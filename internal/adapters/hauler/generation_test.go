@@ -130,3 +130,16 @@ spec:
 		t.Fatalf("invalid generation remains at %q: %v", output, statErr)
 	}
 }
+
+func TestValidateGenerationInfoAcceptsPlatformResolvedDigestPinnedReference(t *testing.T) {
+	t.Parallel()
+	indexDigest := "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+	childDigest := "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+	err := validateGenerationInfo(
+		generationExpectations{Images: []expectedGenerationImage{{Digest: indexDigest, Platform: "linux/amd64"}}},
+		[]generationInfoEntry{{Reference: "127.0.0.1:5000/camp/app@" + indexDigest, Type: "image", Platform: "linux/amd64", Digest: childDigest}},
+	)
+	if err != nil {
+		t.Fatalf("validateGenerationInfo() error = %v", err)
+	}
+}
