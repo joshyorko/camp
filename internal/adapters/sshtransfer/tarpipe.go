@@ -50,7 +50,6 @@ func BuildTarPipe(spec TarPipeSpec) (TarPipe, error) {
 			Executable: spec.TarExecutable,
 			Argv: []string{
 				"--extract", "--file=-", "--directory=" + spec.LocalRoot,
-				"--same-permissions", "--delay-directory-restore",
 			},
 		},
 	}, nil

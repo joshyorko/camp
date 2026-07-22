@@ -34,7 +34,6 @@ func TestTarPipeFallbackIsStructured(t *testing.T) {
 			Executable: "/usr/bin/tar",
 			Argv: []string{
 				"--extract", "--file=-", "--directory=/var/lib/camp/staging/Second Brain",
-				"--same-permissions", "--delay-directory-restore",
 			},
 		},
 	}
