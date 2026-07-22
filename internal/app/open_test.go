@@ -618,15 +618,37 @@ func (*localOpenLeases) AcquireBranchFrom(context.Context, string, domain.Lineag
 	return coordination.LeaseToken{}, errors.New("local lease unexpectedly acquired from branch")
 }
 
-type openForwarders struct{ events *[]string }
+type openForwarders struct {
+	events     *[]string
+	records    map[string]domain.ForwardingRecord
+	observeErr error
+}
 
 func (f *openForwarders) Start(_ context.Context, request domain.ForwardingRequest) (domain.ForwardingRecord, error) {
 	*f.events = append(*f.events, "forward:"+request.Name)
-	return domain.ForwardingRecord{
+	record := domain.ForwardingRecord{
 		Name: request.Name, LocalEndpoint: request.LocalEndpoint, WorkspaceEndpoint: request.WorkspaceEndpoint,
+		EvidencePath: request.EvidencePath, EvidenceDevice: 1, EvidenceInode: uint64(len(request.Name) + 1),
 		Process:      domain.ProcessRecord{Identity: domain.ProcessIdentity{PID: len(request.Name) + 100, BootID: "boot", StartTicks: 10}},
 		DesiredState: domain.RuntimeDesiredRunning, ObservedState: domain.RuntimeObservedReady,
-	}, nil
+	}
+	if f.records == nil {
+		f.records = make(map[string]domain.ForwardingRecord)
+	}
+	f.records[request.Name] = record
+	return record, nil
+}
+
+func (f *openForwarders) Observe(_ context.Context, request domain.ForwardingRequest) (domain.ForwardingRecord, error) {
+	*f.events = append(*f.events, "observe-forward:"+request.Name)
+	if f.observeErr != nil {
+		return domain.ForwardingRecord{}, f.observeErr
+	}
+	record, ok := f.records[request.Name]
+	if !ok || record.EvidencePath != request.EvidencePath {
+		return domain.ForwardingRecord{}, errors.New("exact durable forwarder evidence is unavailable")
+	}
+	return record, nil
 }
 
 func (f *openForwarders) Stop(context.Context, domain.ForwardingRecord) error { return nil }

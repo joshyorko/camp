@@ -1,13 +1,20 @@
 package lifecycle
 
 import (
+	"bytes"
 	"context"
+	"crypto/rand"
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net"
 	"net/url"
+	"os"
+	"path/filepath"
+	"reflect"
 	"strconv"
 	"strings"
 	"time"
@@ -15,7 +22,15 @@ import (
 	"github.com/joshyorko/camp/internal/adapters/devpod"
 	"github.com/joshyorko/camp/internal/domain"
 	"github.com/joshyorko/camp/internal/ports"
+	"golang.org/x/sys/unix"
 )
+
+const maxForwardingEvidenceBytes = 64 << 10
+
+type forwardingEvidenceIdentity struct {
+	device uint64
+	inode  uint64
+}
 
 type forwardDevPod interface {
 	SSHCommand(devpod.SSHOptions) (ports.Command, error)
@@ -29,23 +44,26 @@ type forwardProcesses interface {
 }
 
 type ForwarderManager struct {
-	devpod    forwardDevPod
-	processes forwardProcesses
+	devpod            forwardDevPod
+	processes         forwardProcesses
+	resolveExecutable func(string) (string, error)
 }
 
 func NewForwarderManager(client forwardDevPod, processes forwardProcesses) *ForwarderManager {
-	return &ForwarderManager{devpod: client, processes: processes}
+	return &ForwarderManager{devpod: client, processes: processes, resolveExecutable: canonicalForwardingExecutable}
 }
 
 func (m *ForwarderManager) Start(ctx context.Context, request domain.ForwardingRequest) (domain.ForwardingRecord, error) {
-	if m == nil || m.devpod == nil || m.processes == nil || request.Name == "" || request.WorkspaceID == "" || request.LogPath == "" {
+	if m == nil || m.devpod == nil || m.processes == nil {
 		return domain.ForwardingRecord{}, errors.New("workspace forwarder dependencies or request are incomplete")
 	}
-	if err := validateForwardEndpoint(request.LocalEndpoint); err != nil {
+	if err := validateForwardingRequest(request); err != nil {
 		return domain.ForwardingRecord{}, err
 	}
-	if request.WorkspaceEndpoint != request.LocalEndpoint {
-		return domain.ForwardingRecord{}, errors.New("workspace forwarder endpoints must use the same loopback port")
+	if _, err := os.Lstat(request.EvidencePath); err == nil {
+		return domain.ForwardingRecord{}, fmt.Errorf("workspace forwarder evidence already exists: %s", request.EvidencePath)
+	} else if !errors.Is(err, os.ErrNotExist) {
+		return domain.ForwardingRecord{}, err
 	}
 	binding := request.WorkspaceEndpoint + ":" + request.LocalEndpoint
 	options := devpod.SSHOptions{
@@ -60,14 +78,26 @@ func (m *ForwarderManager) Start(ctx context.Context, request domain.ForwardingR
 	if err != nil {
 		return domain.ForwardingRecord{}, err
 	}
-	cleanup := func(cause error) (domain.ForwardingRecord, error) {
-		stopErr := m.processes.Stop(context.WithoutCancel(ctx), identity, 5*time.Second)
-		return domain.ForwardingRecord{}, errors.Join(cause, stopErr)
-	}
 	status, err := m.processes.Inspect(ctx, identity)
 	if err != nil || !status.Running {
-		return cleanup(errors.Join(err, errors.New("workspace forwarder exited before readiness")))
+		return m.cleanupStartedProcess(ctx, identity, errors.Join(err, errors.New("workspace forwarder exited before readiness")))
 	}
+	expectedExecutable, err := m.expectedExecutable(command.Executable)
+	if err != nil {
+		return m.cleanupStartedProcess(ctx, identity, err)
+	}
+	record, err := newForwardingRecord(request, command, expectedExecutable, identity, status)
+	if err != nil {
+		return m.cleanupStartedProcess(ctx, identity, err)
+	}
+	evidenceIdentity, err := writeForwardingEvidence(request.EvidencePath, record)
+	if err != nil {
+		// Publication may have failed because another inode won the no-replace
+		// race. Never remove a path this attempt cannot prove it created.
+		return m.cleanupStartedProcess(ctx, identity, err)
+	}
+	record.EvidenceDevice = evidenceIdentity.device
+	record.EvidenceInode = evidenceIdentity.inode
 	probeURL := "http://" + request.WorkspaceEndpoint + "/"
 	if request.Name == "registry" {
 		probeURL += "v2/"
@@ -80,33 +110,78 @@ func (m *ForwarderManager) Start(ctx context.Context, request domain.ForwardingR
 		}
 		status, inspectErr := m.processes.Inspect(ctx, identity)
 		if inspectErr != nil || !status.Running {
-			return cleanup(errors.Join(err, inspectErr, errors.New("workspace forwarder exited during readiness")))
+			return m.cleanupForwarder(ctx, record, errors.Join(err, inspectErr, errors.New("workspace forwarder exited during readiness")))
 		}
 		if !time.Now().Before(deadline) {
-			return cleanup(fmt.Errorf("workspace endpoint %s did not become ready: %w", request.WorkspaceEndpoint, err))
+			return m.cleanupForwarder(ctx, record, fmt.Errorf("workspace endpoint %s did not become ready: %w", request.WorkspaceEndpoint, err))
 		}
 		select {
 		case <-ctx.Done():
-			return cleanup(ctx.Err())
+			return m.cleanupForwarder(ctx, record, ctx.Err())
 		case <-time.After(100 * time.Millisecond):
 		}
 	}
-	digest := sha256.Sum256([]byte(strings.Join(status.Argv, "\x00")))
-	return domain.ForwardingRecord{
-		Name: request.Name, LocalEndpoint: request.LocalEndpoint, WorkspaceEndpoint: request.WorkspaceEndpoint,
-		Process: domain.ProcessRecord{
-			Identity: identity, DesiredExecutable: command.Executable, ObservedExecutable: status.Executable,
-			Argv: append([]string(nil), status.Argv...), ArgvSHA256: hex.EncodeToString(digest[:]),
-			ParentPID: status.ParentPID, PGID: status.PGID, SID: status.SID, NetNS: status.NetNS,
-		}, DesiredState: domain.RuntimeDesiredRunning, ObservedState: domain.RuntimeObservedReady,
-	}, nil
+	record.ObservedState = domain.RuntimeObservedReady
+	return record, nil
 }
 
 func (m *ForwarderManager) Stop(ctx context.Context, record domain.ForwardingRecord) error {
 	if m == nil || m.processes == nil || record.Process.Identity.PID <= 0 {
 		return errors.New("workspace forwarder identity is incomplete")
 	}
-	return m.processes.Stop(ctx, record.Process.Identity, 5*time.Second)
+	if err := m.processes.Stop(ctx, record.Process.Identity, 5*time.Second); err != nil {
+		return err
+	}
+	if record.EvidencePath != "" {
+		if err := removeForwardingEvidence(record); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func (m *ForwarderManager) Observe(ctx context.Context, request domain.ForwardingRequest) (domain.ForwardingRecord, error) {
+	if m == nil || m.devpod == nil || m.processes == nil {
+		return domain.ForwardingRecord{}, errors.New("workspace forwarder dependencies or request are incomplete")
+	}
+	if err := validateForwardingRequest(request); err != nil {
+		return domain.ForwardingRecord{}, err
+	}
+	record, err := readForwardingEvidence(request.EvidencePath)
+	if err != nil {
+		return domain.ForwardingRecord{}, err
+	}
+	if record.Name != request.Name || record.LocalEndpoint != request.LocalEndpoint || record.WorkspaceEndpoint != request.WorkspaceEndpoint || record.EvidencePath != request.EvidencePath {
+		return domain.ForwardingRecord{}, errors.New("workspace forwarder evidence does not match request")
+	}
+	options := devpod.SSHOptions{
+		WorkspaceID: request.WorkspaceID, Context: request.Context, ReverseForwards: []string{request.WorkspaceEndpoint + ":" + request.LocalEndpoint},
+		StartServices: true, ForwardedArgv: []string{"--command", "sleep 2147483647"},
+	}
+	command, err := m.devpod.SSHCommand(options)
+	if err != nil {
+		return domain.ForwardingRecord{}, err
+	}
+	expectedExecutable, err := m.expectedExecutable(command.Executable)
+	if err != nil {
+		return domain.ForwardingRecord{}, err
+	}
+	status, err := m.processes.Inspect(ctx, record.Process.Identity)
+	if err != nil || !status.Running {
+		return domain.ForwardingRecord{}, errors.Join(err, errors.New("workspace forwarder is not running"))
+	}
+	if err := validateForwardingRecord(command, expectedExecutable, record, status); err != nil {
+		return domain.ForwardingRecord{}, err
+	}
+	probeURL := "http://" + request.WorkspaceEndpoint + "/"
+	if request.Name == "registry" {
+		probeURL += "v2/"
+	}
+	if _, err = m.devpod.Execute(ctx, ports.WorkspaceCommand{WorkspaceID: request.WorkspaceID, Context: request.Context, Argv: []string{"curl", "--fail", "--silent", "--show-error", "--max-time", "5", probeURL}}); err != nil {
+		return domain.ForwardingRecord{}, err
+	}
+	record.ObservedState = domain.RuntimeObservedReady
+	return record, nil
 }
 
 func validateForwardEndpoint(value string) error {
@@ -122,4 +197,260 @@ func validateForwardEndpoint(value string) error {
 		return errors.New("workspace forwarder endpoint is invalid")
 	}
 	return nil
+}
+
+func validateForwardingRequest(request domain.ForwardingRequest) error {
+	if request.Name == "" || request.WorkspaceID == "" || request.Context == "" || request.LogPath == "" || request.EvidencePath == "" {
+		return errors.New("workspace forwarder request is incomplete")
+	}
+	if !filepath.IsAbs(request.LogPath) || !filepath.IsAbs(request.EvidencePath) || filepath.Dir(request.LogPath) != filepath.Dir(request.EvidencePath) || request.LogPath == request.EvidencePath {
+		return errors.New("workspace forwarder log and evidence paths must be distinct absolute siblings")
+	}
+	if err := validateForwardEndpoint(request.LocalEndpoint); err != nil {
+		return err
+	}
+	if request.WorkspaceEndpoint != request.LocalEndpoint {
+		return errors.New("workspace forwarder endpoints must use the same loopback port")
+	}
+	return nil
+}
+
+func newForwardingRecord(request domain.ForwardingRequest, command ports.Command, expectedExecutable string, identity domain.ProcessIdentity, status ports.ProcessStatus) (domain.ForwardingRecord, error) {
+	record := domain.ForwardingRecord{
+		Name: request.Name, LocalEndpoint: request.LocalEndpoint, WorkspaceEndpoint: request.WorkspaceEndpoint, EvidencePath: request.EvidencePath,
+		Process: domain.ProcessRecord{
+			Identity: identity, DesiredExecutable: command.Executable, ObservedExecutable: status.Executable,
+			Argv: append([]string(nil), status.Argv...), ArgvSHA256: forwardingArgvDigest(status.Argv),
+			ParentPID: status.ParentPID, PGID: status.PGID, SID: status.SID, NetNS: status.NetNS,
+		}, DesiredState: domain.RuntimeDesiredRunning, ObservedState: domain.RuntimeObservedPending,
+	}
+	if err := validateForwardingRecord(command, expectedExecutable, record, status); err != nil {
+		return domain.ForwardingRecord{}, err
+	}
+	return record, nil
+}
+
+func validateForwardingRecord(command ports.Command, expectedExecutable string, record domain.ForwardingRecord, status ports.ProcessStatus) error {
+	expectedArgv := append([]string{command.Executable}, command.Argv...)
+	identity := record.Process.Identity
+	if identity.PID <= 0 || identity.BootID == "" || identity.StartTicks == 0 || status.Identity != identity || !status.Running ||
+		record.DesiredState != domain.RuntimeDesiredRunning || record.ObservedState != domain.RuntimeObservedPending ||
+		record.Process.DesiredExecutable != command.Executable || record.Process.ObservedExecutable != expectedExecutable || status.Executable != expectedExecutable ||
+		!reflect.DeepEqual(record.Process.Argv, expectedArgv) || !reflect.DeepEqual(status.Argv, expectedArgv) || record.Process.ArgvSHA256 != forwardingArgvDigest(expectedArgv) ||
+		status.PGID != record.Process.PGID || status.SID != record.Process.SID || status.NetNS != record.Process.NetNS ||
+		status.PGID != identity.PID || status.SID != identity.PID || status.NetNS == "" {
+		return errors.New("workspace forwarder evidence does not match the expected live process")
+	}
+	return nil
+}
+
+func (m *ForwarderManager) expectedExecutable(path string) (string, error) {
+	if m.resolveExecutable == nil {
+		return "", errors.New("workspace forwarder executable resolver is incomplete")
+	}
+	return m.resolveExecutable(path)
+}
+
+func canonicalForwardingExecutable(path string) (string, error) {
+	resolved, err := filepath.EvalSymlinks(path)
+	if err != nil {
+		return "", fmt.Errorf("resolve workspace forwarder executable: %w", err)
+	}
+	info, err := os.Stat(resolved)
+	if err != nil || !info.Mode().IsRegular() || info.Mode().Perm()&0o111 == 0 {
+		return "", fmt.Errorf("validate workspace forwarder executable: %w", errors.Join(err, errors.New("not an executable regular file")))
+	}
+	return resolved, nil
+}
+
+func forwardingArgvDigest(argv []string) string {
+	digest := sha256.Sum256([]byte(strings.Join(argv, "\x00")))
+	return hex.EncodeToString(digest[:])
+}
+
+func writeForwardingEvidence(path string, record domain.ForwardingRecord) (forwardingEvidenceIdentity, error) {
+	if record.EvidenceDevice != 0 || record.EvidenceInode != 0 {
+		return forwardingEvidenceIdentity{}, errors.New("workspace forwarder evidence identity must be empty before publication")
+	}
+	body, err := json.Marshal(record)
+	if err != nil {
+		return forwardingEvidenceIdentity{}, err
+	}
+	if len(body) == 0 || len(body) > maxForwardingEvidenceBytes {
+		return forwardingEvidenceIdentity{}, errors.New("workspace forwarder evidence exceeds the size bound")
+	}
+	directory := filepath.Dir(path)
+	file, err := os.CreateTemp(directory, ".forwarding-evidence-*")
+	if err != nil {
+		return forwardingEvidenceIdentity{}, err
+	}
+	temporary := file.Name()
+	installed := false
+	defer func() {
+		if !installed {
+			_ = os.Remove(temporary)
+		}
+	}()
+	if err := file.Chmod(0o600); err != nil {
+		_ = file.Close()
+		return forwardingEvidenceIdentity{}, err
+	}
+	if written, err := file.Write(body); err != nil || written != len(body) {
+		_ = file.Close()
+		return forwardingEvidenceIdentity{}, errors.Join(err, io.ErrShortWrite)
+	}
+	if err := file.Sync(); err != nil {
+		_ = file.Close()
+		return forwardingEvidenceIdentity{}, err
+	}
+	var stat unix.Stat_t
+	if err := unix.Fstat(int(file.Fd()), &stat); err != nil {
+		_ = file.Close()
+		return forwardingEvidenceIdentity{}, err
+	}
+	if err := file.Close(); err != nil {
+		return forwardingEvidenceIdentity{}, err
+	}
+	if err := unix.Renameat2(unix.AT_FDCWD, temporary, unix.AT_FDCWD, path, unix.RENAME_NOREPLACE); err != nil {
+		return forwardingEvidenceIdentity{}, err
+	}
+	installed = true
+	if err := syncParentDirectory(path); err != nil {
+		return forwardingEvidenceIdentity{}, err
+	}
+	return forwardingEvidenceIdentity{device: uint64(stat.Dev), inode: stat.Ino}, nil
+}
+
+func readForwardingEvidence(path string) (domain.ForwardingRecord, error) {
+	fd, err := unix.Open(path, unix.O_RDONLY|unix.O_CLOEXEC|unix.O_NOFOLLOW, 0)
+	if err != nil {
+		return domain.ForwardingRecord{}, err
+	}
+	file := os.NewFile(uintptr(fd), path)
+	if file == nil {
+		_ = unix.Close(fd)
+		return domain.ForwardingRecord{}, errors.New("open workspace forwarder evidence")
+	}
+	defer file.Close()
+	var before unix.Stat_t
+	if err := unix.Fstat(fd, &before); err != nil {
+		return domain.ForwardingRecord{}, err
+	}
+	if before.Mode&unix.S_IFMT != unix.S_IFREG || before.Mode&0o7777 != 0o600 || before.Nlink != 1 || before.Uid != uint32(os.Geteuid()) || before.Size <= 0 || before.Size > maxForwardingEvidenceBytes {
+		return domain.ForwardingRecord{}, errors.New("workspace forwarder evidence shape, ownership, permissions, link count, or size is invalid")
+	}
+	body, err := io.ReadAll(io.LimitReader(file, maxForwardingEvidenceBytes+1))
+	if err != nil {
+		return domain.ForwardingRecord{}, err
+	}
+	var after unix.Stat_t
+	if err := unix.Fstat(fd, &after); err != nil {
+		return domain.ForwardingRecord{}, err
+	}
+	if len(body) != int(before.Size) || len(body) > maxForwardingEvidenceBytes || !sameForwardingEvidenceStat(before, after) {
+		return domain.ForwardingRecord{}, errors.New("workspace forwarder evidence changed while being read")
+	}
+	var record domain.ForwardingRecord
+	decoder := json.NewDecoder(bytes.NewReader(body))
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(&record); err != nil {
+		return domain.ForwardingRecord{}, err
+	}
+	if err := ensureForwardingEvidenceEOF(decoder); err != nil {
+		return domain.ForwardingRecord{}, err
+	}
+	if record.EvidencePath != path {
+		return domain.ForwardingRecord{}, errors.New("workspace forwarder evidence path does not match record")
+	}
+	if record.EvidenceDevice != 0 || record.EvidenceInode != 0 {
+		return domain.ForwardingRecord{}, errors.New("workspace forwarder evidence contains an untrusted inode identity")
+	}
+	record.EvidenceDevice = uint64(before.Dev)
+	record.EvidenceInode = before.Ino
+	return record, nil
+}
+
+func sameForwardingEvidenceStat(left, right unix.Stat_t) bool {
+	return left.Dev == right.Dev && left.Ino == right.Ino && left.Mode == right.Mode && left.Nlink == right.Nlink && left.Uid == right.Uid && left.Size == right.Size && left.Mtim == right.Mtim && left.Ctim == right.Ctim
+}
+
+func ensureForwardingEvidenceEOF(decoder *json.Decoder) error {
+	var extra any
+	if err := decoder.Decode(&extra); !errors.Is(err, io.EOF) {
+		if err == nil {
+			return errors.New("workspace forwarder evidence contains trailing JSON")
+		}
+		return err
+	}
+	return nil
+}
+
+func syncParentDirectory(path string) error {
+	return syncDirectory(filepath.Dir(path))
+}
+
+func syncDirectory(path string) error {
+	dir, err := os.Open(path)
+	if err != nil {
+		return err
+	}
+	defer dir.Close()
+	return dir.Sync()
+}
+
+func removeForwardingEvidence(record domain.ForwardingRecord) error {
+	if !filepath.IsAbs(record.EvidencePath) || record.EvidenceDevice == 0 || record.EvidenceInode == 0 {
+		return errors.New("workspace forwarder evidence removal identity is incomplete")
+	}
+	directory := filepath.Dir(record.EvidencePath)
+	name := filepath.Base(record.EvidencePath)
+	dirFD, err := unix.Open(directory, unix.O_RDONLY|unix.O_DIRECTORY|unix.O_CLOEXEC|unix.O_NOFOLLOW, 0)
+	if err != nil {
+		return err
+	}
+	defer unix.Close(dirFD)
+	nonce := make([]byte, 12)
+	if _, err := rand.Read(nonce); err != nil {
+		return err
+	}
+	quarantine := "." + name + ".remove-" + hex.EncodeToString(nonce)
+	if err := unix.Renameat2(dirFD, name, dirFD, quarantine, unix.RENAME_NOREPLACE); err != nil {
+		if errors.Is(err, unix.ENOENT) {
+			return nil
+		}
+		return err
+	}
+	fd, err := unix.Openat(dirFD, quarantine, unix.O_RDONLY|unix.O_CLOEXEC|unix.O_NOFOLLOW, 0)
+	if err != nil {
+		_ = unix.Renameat2(dirFD, quarantine, dirFD, name, unix.RENAME_NOREPLACE)
+		return err
+	}
+	var stat unix.Stat_t
+	statErr := unix.Fstat(fd, &stat)
+	_ = unix.Close(fd)
+	if statErr != nil || uint64(stat.Dev) != record.EvidenceDevice || stat.Ino != record.EvidenceInode {
+		restoreErr := unix.Renameat2(dirFD, quarantine, dirFD, name, unix.RENAME_NOREPLACE)
+		return errors.Join(statErr, restoreErr, errors.New("workspace forwarder evidence inode changed before removal"))
+	}
+	if err := unix.Unlinkat(dirFD, quarantine, 0); err != nil {
+		return err
+	}
+	return unix.Fsync(dirFD)
+}
+
+func (m *ForwarderManager) cleanupForwarder(ctx context.Context, record domain.ForwardingRecord, cause error) (domain.ForwardingRecord, error) {
+	if stopErr := m.processes.Stop(context.WithoutCancel(ctx), record.Process.Identity, 5*time.Second); stopErr != nil {
+		return domain.ForwardingRecord{}, errors.Join(cause, stopErr)
+	}
+	if err := removeForwardingEvidence(record); err != nil {
+		return domain.ForwardingRecord{}, errors.Join(cause, err)
+	}
+	return domain.ForwardingRecord{}, cause
+}
+
+func (m *ForwarderManager) cleanupStartedProcess(ctx context.Context, identity domain.ProcessIdentity, cause error) (domain.ForwardingRecord, error) {
+	if stopErr := m.processes.Stop(context.WithoutCancel(ctx), identity, 5*time.Second); stopErr != nil {
+		return domain.ForwardingRecord{}, errors.Join(cause, stopErr)
+	}
+	return domain.ForwardingRecord{}, cause
 }
