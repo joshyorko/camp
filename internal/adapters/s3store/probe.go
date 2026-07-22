@@ -57,6 +57,17 @@ func (s *Store) ProbeWriter(ctx context.Context, prefix string) (resultErr error
 	}
 
 	replaced, err := s.PutConditional(ctx, key, secondBody, ports.WriteCondition{MatchRevision: created.Revision})
+	if err != nil && !errors.Is(err, ports.ErrConflict) {
+		observed, observeErr := s.Head(ctx, key)
+		switch {
+		case observeErr == nil && observed.Revision == created.Revision:
+			replaced, err = s.PutConditional(ctx, key, secondBody, ports.WriteCondition{MatchRevision: created.Revision})
+		case observeErr == nil:
+			if verifyErr := s.verifyProbeReadback(ctx, key, secondBody, observed.Revision); verifyErr == nil {
+				replaced, err = observed, nil
+			}
+		}
+	}
 	if err != nil {
 		return fmt.Errorf("S3 writer probe conditional replace: %w", err)
 	}
