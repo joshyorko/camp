@@ -91,6 +91,12 @@ func readWorkflow(t *testing.T, name string) string {
 
 func assertActionsPinned(t *testing.T, workflow string) {
 	t.Helper()
+	if strings.Contains(workflow, "actions/checkout@") && !strings.Contains(workflow, "# v5") {
+		t.Error("checkout must use the Node.js 24 v5 action")
+	}
+	if strings.Contains(workflow, "actions/setup-go@") && !strings.Contains(workflow, "# v6") {
+		t.Error("setup-go must use the Node.js 24 v6 action")
+	}
 	uses := regexp.MustCompile(`(?m)^\s*-?\s*uses:\s*([^\s#]+)`).FindAllStringSubmatch(workflow, -1)
 	if len(uses) == 0 {
 		t.Fatal("workflow contains no actions")
