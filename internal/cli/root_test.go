@@ -50,6 +50,8 @@ func TestLifecycleCommandsDelegateWithStrictArgumentsAndInheritedMode(t *testing
 		want string
 	}{
 		{name: "init", args: []string{"--json", "init", "/brain"}, want: "init:/brain:json"},
+		{name: "configured init", args: []string{"init", "--source", "/brain", "--backend", "file:///srv/camp", "--capsule", "brain", "--devpod-provider", "room-of-requirement", "--devpod-context", "ror"}, want: "init:/brain:file:///srv/camp:brain:room-of-requirement:ror:human"},
+		{name: "setup", args: []string{"setup"}, want: "setup::human"},
 		{name: "open", args: []string{"open", "memoryd"}, want: "open:memoryd:human"},
 		{name: "sync", args: []string{"sync"}, want: "sync::human"},
 		{name: "close", args: []string{"close"}, want: "close::human"},
@@ -69,7 +71,7 @@ func TestLifecycleCommandsDelegateWithStrictArgumentsAndInheritedMode(t *testing
 		})
 	}
 
-	for _, args := range [][]string{{"init", "a", "b"}, {"open", "a", "b"}, {"sync", "x"}, {"close", "x"}, {"reopen", "a", "b"}, {"recover", "a", "b"}, {"supervise", "a", "b"}} {
+	for _, args := range [][]string{{"init", "a", "b"}, {"open", "a", "b"}, {"sync", "x"}, {"close", "x"}, {"reopen", "a", "b"}, {"recover", "a", "b"}, {"doctor", "x"}, {"supervise", "a", "b"}} {
 		var stderr bytes.Buffer
 		if code := Execute(context.Background(), NewRootWithLifecycle(lifecycle), args, Streams{ErrOut: &stderr}); code != int(ExitUsage) {
 			t.Fatalf("Execute(%q) = %d, want usage; stderr=%q", args, code, stderr.String())
@@ -79,8 +81,45 @@ func TestLifecycleCommandsDelegateWithStrictArgumentsAndInheritedMode(t *testing
 
 type recordingLifecycle struct{ calls []string }
 
-func (r *recordingLifecycle) Init(_ context.Context, value string, mode OutputMode, _ io.Writer) error {
-	r.calls = append(r.calls, "init:"+value+":"+string(mode))
+func (r *recordingLifecycle) Init(_ context.Context, request InitRequest, mode OutputMode, _ io.Writer) error {
+	if request.Source == "" && request.Backend == "" && request.Capsule == "" && request.DevPodProvider == "" {
+		r.calls = append(r.calls, "init:"+request.Root+":"+string(mode))
+		return nil
+	}
+	r.calls = append(r.calls, "init:"+request.Source+":"+request.Backend+":"+request.Capsule+":"+request.DevPodProvider+":"+request.DevPodContext+":"+string(mode))
+	return nil
+}
+func TestInitPersistentFlagsAreAllRequiredTogether(t *testing.T) {
+	t.Parallel()
+	for _, args := range [][]string{
+		{"init", "--source", "/brain"},
+		{"init", "--source", "/brain", "--backend", "file:///srv/camp", "--capsule", "brain"},
+		{"init", "--devpod-context", "ror"},
+	} {
+		var stderr bytes.Buffer
+		code := Execute(context.Background(), NewRootWithLifecycle(&recordingLifecycle{}), args, Streams{ErrOut: &stderr})
+		if code != int(ExitUsage) || !strings.Contains(stderr.String(), "must be provided together") {
+			t.Fatalf("Execute(%q) code=%d stderr=%q, want grouped persistent flag usage failure", args, code, stderr.String())
+		}
+	}
+}
+
+func TestInitPersistentFlagsRejectEmptyValuesAndConflictingRoot(t *testing.T) {
+	t.Parallel()
+	for _, args := range [][]string{
+		{"init", "--source", "", "--backend", "file:///srv/camp", "--capsule", "brain", "--devpod-provider", "docker"},
+		{"init", "/other", "--source", "/brain", "--backend", "file:///srv/camp", "--capsule", "brain", "--devpod-provider", "docker"},
+	} {
+		var stderr bytes.Buffer
+		code := Execute(context.Background(), NewRootWithLifecycle(&recordingLifecycle{}), args, Streams{ErrOut: &stderr})
+		if code != int(ExitUsage) {
+			t.Fatalf("Execute(%q) code=%d stderr=%q, want usage failure", args, code, stderr.String())
+		}
+	}
+}
+
+func (r *recordingLifecycle) Setup(_ context.Context, mode OutputMode, _ io.Writer) error {
+	r.calls = append(r.calls, "setup::"+string(mode))
 	return nil
 }
 func (r *recordingLifecycle) Open(_ context.Context, value string, mode OutputMode, _ io.Writer) error {
@@ -106,6 +145,28 @@ func (r *recordingLifecycle) Recover(_ context.Context, value string, mode Outpu
 func (r *recordingLifecycle) Supervise(_ context.Context, value string, mode OutputMode, _ io.Writer) error {
 	r.calls = append(r.calls, "supervise:"+value+":"+string(mode))
 	return nil
+}
+
+func (r *recordingLifecycle) Doctor(_ context.Context, mode OutputMode, output io.Writer) error {
+	r.calls = append(r.calls, "doctor:"+string(mode))
+	_, _ = io.WriteString(output, "doctor output\n")
+	return nil
+}
+
+func TestDoctorCommandUsesInheritedOutputModeAndRejectsArguments(t *testing.T) {
+	lifecycle := &recordingLifecycle{}
+	var stdout, stderr bytes.Buffer
+	if code := Execute(context.Background(), NewRootWithLifecycle(lifecycle), []string{"doctor", "--json"}, Streams{Out: &stdout, ErrOut: &stderr}); code != int(ExitSuccess) {
+		t.Fatalf("exit = %d, stderr = %q", code, stderr.String())
+	}
+	if got := strings.Join(lifecycle.calls, ","); got != "doctor:json" || stdout.String() != "doctor output\n" {
+		t.Fatalf("calls = %q, stdout = %q", got, stdout.String())
+	}
+	stdout.Reset()
+	stderr.Reset()
+	if code := Execute(context.Background(), NewRootWithLifecycle(lifecycle), []string{"doctor", "extra"}, Streams{Out: &stdout, ErrOut: &stderr}); code != int(ExitUsage) {
+		t.Fatalf("argument exit = %d, stdout = %q, stderr = %q", code, stdout.String(), stderr.String())
+	}
 }
 
 func TestExecuteRejectsInvalidCompletionArguments(t *testing.T) {
@@ -455,9 +516,25 @@ func TestRootHelpIsDeterministic(t *testing.T) {
 	if first != second {
 		t.Fatalf("help changed between identical roots:\nfirst:\n%s\nsecond:\n%s", first, second)
 	}
-	want := "Recoverable capsule workspaces\n\nUsage:\n  camp [flags]\n  camp [command]\n\nAvailable Commands:\n  close       Publish a checkpoint and close\n  completion  Generate shell completion\n  help        Help about any command\n  init        Initialize a capsule root\n  open        Open a capsule workspace\n  recover     Recover an interrupted lifecycle\n  reopen      Reopen a closed capsule workspace\n  sync        Publish a checkpoint and remain open\n\nFlags:\n  -h, --help   help for camp\n      --json   emit stable JSON output\n\nUse \"camp [command] --help\" for more information about a command.\n"
+	want := "Recoverable capsule workspaces\n\nUsage:\n  camp [flags]\n  camp [command]\n\nAvailable Commands:\n  close       Publish a checkpoint and close\n  completion  Generate shell completion\n  doctor      Diagnose required host capabilities\n  help        Help about any command\n  init        Initialize a capsule root\n  open        Open a capsule workspace\n  recover     Recover an interrupted lifecycle\n  reopen      Reopen a closed capsule workspace\n  setup       Install or reuse pinned DevPod and Hauler tools\n  sync        Publish a checkpoint and remain open\n\nFlags:\n  -h, --help   help for camp\n      --json   emit stable JSON output\n\nUse \"camp [command] --help\" for more information about a command.\n"
 	if first != want {
 		t.Fatalf("help:\n%s\nwant:\n%s", first, want)
+	}
+}
+
+func TestInitHelpTruthfullyListsPersistentFirstRunFlags(t *testing.T) {
+	t.Parallel()
+	root := NewRootWithLifecycle(&recordingLifecycle{})
+	var output bytes.Buffer
+	root.SetOut(&output)
+	root.SetErr(&output)
+	root.SetArgs([]string{"init", "--help"})
+	if err := root.Execute(); err != nil {
+		t.Fatal(err)
+	}
+	want := "Initialize a capsule root\n\nUsage:\n  camp init [root] [flags]\n\nFlags:\n      --backend string           persist the default backend URL\n      --capsule string           persist the default capsule name\n      --devpod-context string    persist the DevPod context (default \"default\")\n      --devpod-provider string   persist the default DevPod provider\n  -h, --help                     help for init\n      --source string            persist the default source path\n\nGlobal Flags:\n      --json   emit stable JSON output\n"
+	if output.String() != want {
+		t.Fatalf("init help:\n%s\nwant:\n%s", output.String(), want)
 	}
 }
 

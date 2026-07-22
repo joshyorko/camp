@@ -140,10 +140,8 @@ func TestSuperviseReloadsDurableSnapshotUnderOperationLock(t *testing.T) {
 	case <-time.After(time.Second):
 		t.Fatal("first heartbeat did not renew")
 	}
-	wantFirstHeartbeat := []string{"acquire", "load", "acquire", "load", "renew", "fact", "release"}
-	if !events.waitForSequence(wantFirstHeartbeat, time.Second) {
-		got := events.snapshot()
-		t.Fatalf("events after first heartbeat = %#v", got)
+	if !events.waitForSequence(t, []string{"acquire", "load", "acquire", "load", "renew", "fact", "release"}) {
+		t.Fatalf("events after first heartbeat = %#v", events.snapshot())
 	}
 
 	log.mutate(func(snapshot *domain.JournalSnapshot) {
@@ -323,14 +321,19 @@ func (l *strictOperationLocker) Release(_ context.Context, _ ports.OperationToke
 func (l *strictOperationLocker) events() []string { return l.log.snapshot() }
 
 func (l *strictOperationLocker) waitForSequence(t *testing.T, want []string) bool {
+	return l.log.waitForSequence(t, want)
+}
+
+func (l *heartbeatEventLog) waitForSequence(t *testing.T, want []string) bool {
+	t.Helper()
 	deadline := time.After(time.Second)
 	for {
-		if containsAllInOrder(l.log.snapshot(), want) {
+		if containsAllInOrder(l.snapshot(), want) {
 			return true
 		}
 		select {
 		case <-deadline:
-			t.Logf("events so far: %#v", l.log.snapshot())
+			t.Logf("events so far: %#v", l.snapshot())
 			return false
 		case <-time.After(10 * time.Millisecond):
 		}
@@ -433,17 +436,4 @@ func (l *heartbeatEventLog) snapshot() []string {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	return append([]string(nil), l.events...)
-}
-
-func (l *heartbeatEventLog) waitForSequence(want []string, timeout time.Duration) bool {
-	deadline := time.Now().Add(timeout)
-	for {
-		if containsAllInOrder(l.snapshot(), want) {
-			return true
-		}
-		if time.Now().After(deadline) {
-			return false
-		}
-		time.Sleep(time.Millisecond)
-	}
 }
