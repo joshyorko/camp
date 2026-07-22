@@ -113,7 +113,7 @@ func (r *productionPastaRuntime) Start(ctx context.Context) (doctor.PastaInstanc
 		_ = r.processes.Stop(context.WithoutCancel(ctx), helper, time.Second)
 		return doctor.PastaInstance{}, err
 	}
-	helperStatus, err := r.processes.Inspect(ctx, helper)
+	hostNetNS, err := os.Readlink("/proc/self/ns/net")
 	if err != nil {
 		_ = r.processes.Stop(context.WithoutCancel(ctx), helper, time.Second)
 		return doctor.PastaInstance{}, err
@@ -127,7 +127,7 @@ func (r *productionPastaRuntime) Start(ctx context.Context) (doctor.PastaInstanc
 	return doctor.PastaInstance{
 		HelperIdentity: key, ChildIdentity: processIdentityKey(child.Identity),
 		HostEndpoint: net.JoinHostPort("127.0.0.1", strconv.Itoa(hostPort)),
-		HostNetNS:    helperStatus.NetNS, ChildNetNS: child.NetNS,
+		HostNetNS:    hostNetNS, ChildNetNS: child.NetNS,
 	}, nil
 }
 

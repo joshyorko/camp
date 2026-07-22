@@ -60,6 +60,7 @@ func TestSafeSingleLineRedactsCommonCredentialFormsBeforeTruncation(t *testing.T
 		"Authorization: Bearer bearer-secret",
 		"https://user:pass@example.test/path",
 		"https://example.test/path?token=query-secret&safe=yes",
+		"unconfined_u:unconfined_r:unconfined_t:s0\x00",
 		strings.Repeat("x", 240) + " CAMP_PASSWORD=" + strings.Repeat("s", 300),
 	}
 	for _, input := range tests {
@@ -71,6 +72,9 @@ func TestSafeSingleLineRedactsCommonCredentialFormsBeforeTruncation(t *testing.T
 		}
 		if len(got) > 256 {
 			t.Fatalf("safeSingleLine length = %d, want <= 256", len(got))
+		}
+		if strings.ContainsRune(got, '\x00') {
+			t.Fatalf("safeSingleLine retained NUL from %q: %q", input, got)
 		}
 	}
 }

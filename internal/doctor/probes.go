@@ -225,6 +225,12 @@ func safeSingleLine(value string) string {
 			break
 		}
 	}
+	line = strings.Map(func(value rune) rune {
+		if value < 0x20 || value == 0x7f {
+			return -1
+		}
+		return value
+	}, line)
 	line = identityURLCredentials.ReplaceAllString(line, "://[REDACTED]@")
 	line = identityAssignmentSecret.ReplaceAllString(line, "$1=[REDACTED]")
 	line = identityBearerSecret.ReplaceAllString(line, "$1[REDACTED]")
