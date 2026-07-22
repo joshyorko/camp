@@ -21,6 +21,7 @@ type Lifecycle interface {
 	Close(context.Context, OutputMode, io.Writer) error
 	Reopen(context.Context, string, OutputMode, io.Writer) error
 	Recover(context.Context, string, OutputMode, io.Writer) error
+	Supervise(context.Context, string, OutputMode, io.Writer) error
 }
 
 func NewRootWithLifecycle(lifecycle Lifecycle) *cobra.Command {
@@ -50,6 +51,7 @@ func NewRootWithLifecycle(lifecycle Lifecycle) *cobra.Command {
 		noArgumentCommand("close", "Publish a checkpoint and close", lifecycle.Close),
 		optionalArgumentCommand("reopen", "Reopen a closed capsule workspace", lifecycle.Reopen),
 		optionalArgumentCommand("recover", "Recover an interrupted lifecycle", lifecycle.Recover),
+		hiddenRequiredArgumentCommand("supervise", lifecycle.Supervise),
 	)
 	return root
 }
@@ -71,6 +73,17 @@ func noArgumentCommand(use, short string, run func(context.Context, OutputMode, 
 	return &cobra.Command{Use: use, Short: short, Args: usageArgs(cobra.NoArgs), RunE: func(command *cobra.Command, _ []string) error {
 		return run(command.Context(), OutputModeFrom(command), command.OutOrStdout())
 	}}
+}
+
+func hiddenRequiredArgumentCommand(use string, run func(context.Context, string, OutputMode, io.Writer) error) *cobra.Command {
+	return &cobra.Command{
+		Use:    use + " [session]",
+		Hidden: true,
+		Args:   usageArgs(cobra.ExactArgs(1)),
+		RunE: func(command *cobra.Command, args []string) error {
+			return run(command.Context(), args[0], OutputModeFrom(command), command.OutOrStdout())
+		},
+	}
 }
 
 func usageArgs(validate cobra.PositionalArgs) cobra.PositionalArgs {
