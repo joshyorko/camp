@@ -138,8 +138,8 @@ func TestSuperviseReloadsDurableSnapshotUnderOperationLock(t *testing.T) {
 	case <-time.After(time.Second):
 		t.Fatal("first heartbeat did not renew")
 	}
-	if got := events.snapshot(); !containsAllInOrder(got, []string{"acquire", "load", "acquire", "load", "renew", "fact", "release"}) {
-		t.Fatalf("events after first heartbeat = %#v", got)
+	if !events.waitForSequence(t, []string{"acquire", "load", "acquire", "load", "renew", "fact", "release"}) {
+		t.Fatalf("events after first heartbeat = %#v", events.snapshot())
 	}
 
 	log.mutate(func(snapshot *domain.JournalSnapshot) {
@@ -287,9 +287,9 @@ func (l *recordingOperationLocker) Release(_ context.Context, _ ports.OperationT
 }
 
 type strictOperationLocker struct {
-	mu     sync.Mutex
-	held   bool
-	log    heartbeatEventLog
+	mu   sync.Mutex
+	held bool
+	log  heartbeatEventLog
 }
 
 func (l *strictOperationLocker) Acquire(_ context.Context, _ ports.OperationOwner) (ports.OperationToken, error) {
@@ -317,14 +317,19 @@ func (l *strictOperationLocker) Release(_ context.Context, _ ports.OperationToke
 func (l *strictOperationLocker) events() []string { return l.log.snapshot() }
 
 func (l *strictOperationLocker) waitForSequence(t *testing.T, want []string) bool {
+	return l.log.waitForSequence(t, want)
+}
+
+func (l *heartbeatEventLog) waitForSequence(t *testing.T, want []string) bool {
+	t.Helper()
 	deadline := time.After(time.Second)
 	for {
-		if containsAllInOrder(l.log.snapshot(), want) {
+		if containsAllInOrder(l.snapshot(), want) {
 			return true
 		}
 		select {
 		case <-deadline:
-			t.Logf("events so far: %#v", l.log.snapshot())
+			t.Logf("events so far: %#v", l.snapshot())
 			return false
 		case <-time.After(10 * time.Millisecond):
 		}

@@ -202,7 +202,7 @@ func ownershipMarkerNamedMatches(directory *os.File, name string, want ownership
 	if err := unix.Fstat(pathFD, &stat); err != nil {
 		return false, fmt.Errorf("inspect ownership marker: %w", errors.Join(err, ErrOwnershipMismatch))
 	}
-	if stat.Mode&unix.S_IFMT != unix.S_IFREG || stat.Mode&0o7777 != 0o600 || stat.Nlink != expectedLinks {
+	if stat.Mode&unix.S_IFMT != unix.S_IFREG || stat.Mode&0o7777 != 0o600 || uint64(stat.Nlink) != expectedLinks {
 		return false, fmt.Errorf("ownership marker is not a regular file: %w", ErrOwnershipMismatch)
 	}
 	readFD, err := unix.Open(fmt.Sprintf("/proc/self/fd/%d", pathFD), unix.O_RDONLY|unix.O_CLOEXEC, 0)
@@ -225,7 +225,7 @@ func ownershipMarkerNamedMatches(directory *os.File, name string, want ownership
 		return false, fmt.Errorf("read ownership marker: %w", ErrOwnershipMismatch)
 	}
 	var namedStat unix.Stat_t
-	if err := unix.Fstatat(int(directory.Fd()), name, &namedStat, unix.AT_SYMLINK_NOFOLLOW); err != nil || uint64(namedStat.Dev) != uint64(stat.Dev) || namedStat.Ino != stat.Ino || namedStat.Mode&unix.S_IFMT != unix.S_IFREG || namedStat.Mode&0o7777 != 0o600 || namedStat.Nlink != expectedLinks {
+	if err := unix.Fstatat(int(directory.Fd()), name, &namedStat, unix.AT_SYMLINK_NOFOLLOW); err != nil || uint64(namedStat.Dev) != uint64(stat.Dev) || namedStat.Ino != stat.Ino || namedStat.Mode&unix.S_IFMT != unix.S_IFREG || namedStat.Mode&0o7777 != 0o600 || uint64(namedStat.Nlink) != expectedLinks {
 		return false, fmt.Errorf("revalidate ownership marker name: %w", errors.Join(err, ErrOwnershipMismatch))
 	}
 	got, err := decodeOwnershipMarker(body)

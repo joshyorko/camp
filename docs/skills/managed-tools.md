@@ -11,6 +11,12 @@ Use this note when changing `tools.lock.yaml` or `internal/adapters/tools`.
 - `pasta` is an `external-host-capability`, not a managed distribution tool. It must stay out of `tools.lock.yaml`; Camp discovers it on PATH and probes the required option surface but never downloads it or invokes a host package manager.
 - The initial `camp doctor` tool probe resolves and canonicalizes the PATH executable, enforces a regular executable size bound, records its SHA-256, and runs a bounded identity command. That is observed identity, not supported-lock identity: until issue #10 composes lock-backed managed resolution, doctor must report both DevPod and Hauler as degraded and must not claim the version string or observed digest matches `tools.lock.yaml`. Doctor never downloads or repairs a tool.
 
+## User-visible setup
+
+`camp setup` compiles the repository-root `tools.lock.yaml` into the Camp binary, resolves the current Linux architecture, and calls the same identity-safe installer for DevPod and Hauler under `$XDG_DATA_HOME/camp` (or `~/.local/share/camp`). It does not execute either tool and does not inspect, install, or package-layer `pasta`.
+
+An executable already on PATH is reused only when the installer proves its authoritative binary digest. Otherwise setup reports the verified managed path and prints an exact shell-local `export PATH="...:$PATH"`; Camp does not silently edit shell startup files. `camp setup --json` returns the path, managed/PATH decision, repository, version, commit, platform, locked asset digest, derived binary digest, and PATH export in the versioned success envelope. Repeating setup re-verifies and reuses the atomically published identity directory without another download.
+
 ## Pin review
 
 For a DevPod or Hauler update, review the upstream repository, tag, and commit together; update both Linux amd64 and arm64 assets; independently calculate each asset SHA-256; and rerun the focused and race tests plus real binaries on both architectures. Review raw-versus-archive shape before changing the installer. A checksum committed beside a mutable release source proves that retrieved bytes match the reviewed pin; it is not publisher-authenticity evidence by itself. A skipped real-binary or architecture gate is not proof.
@@ -27,6 +33,7 @@ The focused verification commands are:
 
 ```text
 go test ./internal/adapters/tools -count=1
+go test ./internal/cli -run 'TestRun(Managed|Production)ToolSetup' -count=1
 go test -race ./internal/adapters/tools -count=1
 CAMP_TEST_REAL_TOOLS=1 go test ./internal/adapters/tools -run TestInstallerCleanInstallsRealPinnedTools -count=1 -v
 ```

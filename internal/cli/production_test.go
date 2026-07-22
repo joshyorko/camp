@@ -12,6 +12,16 @@ import (
 	"github.com/joshyorko/camp/internal/ports"
 )
 
+func TestProductionRootRegistersSetupCommand(t *testing.T) {
+	command, _, err := NewRoot().Find([]string{"setup"})
+	if err != nil {
+		t.Fatalf("Find(setup): %v", err)
+	}
+	if command.Name() != "setup" {
+		t.Fatalf("Find(setup) = %q, want setup", command.Name())
+	}
+}
+
 func TestMachineIdentityFallbackIsStableAndFailsClosed(t *testing.T) {
 	t.Parallel()
 	missing := func(context.Context) (string, error) { return "", errors.New("no machine-id") }
