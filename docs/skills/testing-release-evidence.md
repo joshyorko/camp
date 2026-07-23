@@ -13,6 +13,24 @@ git diff --check
 
 Report passed, failed, and skipped gates separately. Installed-tool tests may skip without pinned DevPod, Hauler, or `pasta`; those skips leave the real lifecycle unproved. A package test, commit, push, merge, packaged artifact, and deployed release are distinct evidence states.
 
+## Generated documentation gate
+
+Generate the command reference, deterministic command transcripts, versioned
+presentation examples, and bash/zsh/fish completions from the production Cobra
+tree with `go run ./cmd/camp-docs`. Never hand-edit `docs/generated/`.
+
+`go test ./internal/docsgen ./docs -count=1` compares every checked-in generated
+artifact byte-for-byte, excludes hidden commands, requires an effect-free
+dispatch marker for every visible lifecycle command, executes completion
+generation, rejects non-public command mentions in operator docs, and verifies
+operator-index links. The command reference must initialize and render Cobra's
+built-in help flag for every public command. An exit-zero transcript without the
+exact command-specific fixture marker is insufficient dispatch evidence. The
+transcript lifecycle proves Cobra parsing
+and handler dispatch only; it is not DevPod, Hauler, backend, lifecycle, or
+release evidence. When the public tree changes, regenerate and review
+`git diff -- docs/generated/commands.md` before accepting the change.
+
 When a stacked PR's base merges, restack the child directly onto the resulting `master` commit and compare `master...HEAD` before pushing. The post-rebase diff must contain only the child scope; record the old and new head SHAs, then force-push with a lease pinned to the observed old remote head so concurrent updates fail instead of being overwritten.
 
 Named acceptance gates require discovery evidence before execution evidence. `go test -run` exits zero even when no matching test exists, so first require the exact test name from `go test -list`, then run with `-v` and retain the matching `=== RUN` and `--- PASS` lines. A package-level `PASS` accompanied by `[no tests to run]` is not acceptance evidence.
@@ -22,7 +40,7 @@ go test ./integration -list '^TestNamedAcceptanceGate$'
 go test -v ./integration -run '^TestNamedAcceptanceGate$' -count=1
 ```
 
-This guard currently matters for `TestLocalLifecycleVertical` and `TestLocalLifecycleCrashMatrix`: neither name is present, while both focused `-run` commands still exit zero with `testing: warning: no tests to run`. Treat both gates as missing, not passed, until discovery lists them and their runs emit the named `RUN`/`PASS` pair.
+Discovery currently lists `TestLocalLifecycleVertical` and its focused real-tool gate has recorded evidence in the local-lifecycle guide. It does not list `TestLocalLifecycleCrashMatrix` or a mounted-file-backend parity test. Treat those two gates as missing, not passed, until discovery lists their exact names and their runs emit the named `RUN`/`PASS` pair; the vertical does not substitute for either missing gate.
 
 For filesystem-dependent safety tests, prove determinism with repeated focused execution when practical. The ownership-marker temporary-name substitution test requires injection of the named fallback because a Linux filesystem may support `O_TMPFILE`; the focused test passed 50 repetitions after that injection, and `go test ./internal/capsule -count=1` passed 52 tests.
 

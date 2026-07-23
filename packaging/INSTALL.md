@@ -14,3 +14,5 @@ checksum-verified DevPod and Hauler binaries under the XDG data directory. Camp
 passes those verified executable paths directly to its adapters, so no PATH export
 or shell-startup edit is required. `camp setup` remains available to
 prewarm and inspect the same managed installation before a lifecycle command.
+The generic archive does not bundle those tools, and archive smoke tests do not
+prove that downloads or a real lifecycle work on the installation host.
