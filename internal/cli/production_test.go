@@ -11,8 +11,10 @@ import (
 	"testing"
 	"time"
 
+	"github.com/joshyorko/camp/internal/adapters/supervisor"
 	"github.com/joshyorko/camp/internal/config"
 	"github.com/joshyorko/camp/internal/domain"
+	journalstore "github.com/joshyorko/camp/internal/journal"
 	"github.com/joshyorko/camp/internal/ports"
 )
 
@@ -162,7 +164,7 @@ func TestStartSessionSupervisorUsesHiddenCommandAndWaitsForClaim(t *testing.T) {
 		Supervisor:    domain.SupervisorRecord{},
 	}}
 	processes := &recordingProcessManager{journal: journal, identity: domain.ProcessIdentity{PID: 321, BootID: "boot", StartTicks: 9}}
-	composition := productionComposition{paths: config.XDGPaths{DataRoot: t.TempDir()}, journal: journal}
+	composition := productionComposition{productionBase: productionBase{paths: config.XDGPaths{DataRoot: t.TempDir()}, journal: journal}}
 
 	if err := startSessionSupervisor(context.Background(), composition, processes, "session-1"); err != nil {
 		t.Fatalf("startSessionSupervisor() error = %v", err)
@@ -182,8 +184,221 @@ func TestStartSessionSupervisorUsesHiddenCommandAndWaitsForClaim(t *testing.T) {
 	}
 }
 
+func TestStartSessionSupervisorReusesExactRunningOwnerOnReentry(t *testing.T) {
+	t.Parallel()
+
+	owner := domain.ProcessIdentity{PID: 301, BootID: "boot-owner", StartTicks: 19}
+	journal := &recordingJournal{snapshot: domain.JournalSnapshot{
+		SchemaVersion: domain.SchemaVersion,
+		SessionID:     "session-reentry",
+		Supervisor: domain.SupervisorRecord{
+			Identity: owner,
+			Desired:  domain.RuntimeDesiredRunning,
+			Observed: domain.RuntimeObservedReady,
+		},
+	}}
+	processes := &recordingProcessManager{
+		journal:  journal,
+		identity: domain.ProcessIdentity{PID: 302, BootID: "boot-new", StartTicks: 20},
+		statuses: map[domain.ProcessIdentity]ports.ProcessStatus{owner: {Identity: owner, Running: true}},
+	}
+	composition := productionComposition{productionBase: productionBase{paths: config.XDGPaths{DataRoot: t.TempDir()}, journal: journal}}
+
+	if err := startSessionSupervisor(context.Background(), composition, processes, "session-reentry"); err != nil {
+		t.Fatalf("startSessionSupervisor(reentry) error = %v", err)
+	}
+	if processes.startCalls != 0 {
+		t.Fatalf("ProcessManager.Start calls = %d, want 0", processes.startCalls)
+	}
+	if journal.snapshot.Supervisor.Identity != owner {
+		t.Fatalf("durable owner changed on reentry = %#v", journal.snapshot.Supervisor)
+	}
+}
+
+func TestStartSessionSupervisorWaitsForExactRunningPendingOwner(t *testing.T) {
+	t.Parallel()
+
+	owner := domain.ProcessIdentity{PID: 331, BootID: "boot-pending", StartTicks: 21}
+	journal := &recordingJournal{snapshot: domain.JournalSnapshot{
+		SchemaVersion: domain.SchemaVersion,
+		SessionID:     "session-pending-owner",
+		Supervisor: domain.SupervisorRecord{
+			Identity: owner,
+			Desired:  domain.RuntimeDesiredRunning,
+			Observed: domain.RuntimeObservedPending,
+		},
+	}}
+	processes := &recordingProcessManager{
+		journal:  journal,
+		statuses: map[domain.ProcessIdentity]ports.ProcessStatus{owner: {Identity: owner, Running: true}},
+		onInspect: func(identity domain.ProcessIdentity) {
+			if identity == owner {
+				journal.snapshot.Supervisor.Observed = domain.RuntimeObservedReady
+			}
+		},
+	}
+	composition := productionComposition{productionBase: productionBase{paths: config.XDGPaths{DataRoot: t.TempDir()}, journal: journal}}
+
+	if err := startSessionSupervisor(context.Background(), composition, processes, "session-pending-owner"); err != nil {
+		t.Fatalf("startSessionSupervisor(pending owner) error = %v", err)
+	}
+	if processes.startCalls != 0 {
+		t.Fatalf("ProcessManager.Start calls = %d, want 0", processes.startCalls)
+	}
+}
+
+func TestStartSessionSupervisorDoesNotReuseOwnerWithPendingClaimRecovery(t *testing.T) {
+	t.Parallel()
+
+	owner := domain.ProcessIdentity{PID: 351, BootID: "boot-owner", StartTicks: 24}
+	replacement := domain.ProcessIdentity{PID: 352, BootID: "boot-replacement", StartTicks: 25}
+	journal := &recordingJournal{
+		snapshot: domain.JournalSnapshot{
+			SchemaVersion: domain.SchemaVersion,
+			SessionID:     "session-pending-claim",
+			Supervisor: domain.SupervisorRecord{
+				Identity: owner,
+				Desired:  domain.RuntimeDesiredRunning,
+				Observed: domain.RuntimeObservedReady,
+			},
+		},
+		pending: []ports.PendingIntent{{Intent: ports.IntentRecord{ID: "pending-replacement", SessionID: "session-pending-claim", Transition: "SupervisorClaimed", Attempt: 1, Timestamp: time.Unix(10, 0)}}},
+	}
+	processes := &recordingProcessManager{
+		journal:  journal,
+		identity: replacement,
+		statuses: map[domain.ProcessIdentity]ports.ProcessStatus{owner: {Identity: owner, Running: true}},
+	}
+	composition := productionComposition{productionBase: productionBase{paths: config.XDGPaths{DataRoot: t.TempDir()}, journal: journal}}
+
+	if err := startSessionSupervisor(context.Background(), composition, processes, "session-pending-claim"); err != nil {
+		t.Fatalf("startSessionSupervisor(pending claim) error = %v", err)
+	}
+	if processes.startCalls != 1 {
+		t.Fatalf("ProcessManager.Start calls = %d, want replacement claimant", processes.startCalls)
+	}
+}
+
+func TestStartSessionSupervisorReplacesReusedPIDWithoutStoppingUnexpectedProcess(t *testing.T) {
+	t.Parallel()
+
+	staleOwner := domain.ProcessIdentity{PID: 401, BootID: "old-boot", StartTicks: 29}
+	replacement := domain.ProcessIdentity{PID: 402, BootID: "new-boot", StartTicks: 30}
+	journal := &recordingJournal{snapshot: domain.JournalSnapshot{
+		SchemaVersion: domain.SchemaVersion,
+		SessionID:     "session-pid-reuse",
+		Supervisor: domain.SupervisorRecord{
+			Identity: staleOwner,
+			Desired:  domain.RuntimeDesiredRunning,
+			Observed: domain.RuntimeObservedReady,
+		},
+	}}
+	processes := &recordingProcessManager{
+		journal:     journal,
+		identity:    replacement,
+		inspectErrs: map[domain.ProcessIdentity]error{staleOwner: supervisor.ErrProcessIdentity},
+	}
+	composition := productionComposition{productionBase: productionBase{paths: config.XDGPaths{DataRoot: t.TempDir()}, journal: journal}}
+
+	if err := startSessionSupervisor(context.Background(), composition, processes, "session-pid-reuse"); err != nil {
+		t.Fatalf("startSessionSupervisor(PID reuse) error = %v", err)
+	}
+	if processes.startCalls != 1 || processes.stopCalls != 0 {
+		t.Fatalf("process calls start=%d stop=%d, want start=1 stop=0", processes.startCalls, processes.stopCalls)
+	}
+	if journal.snapshot.Supervisor.Identity != replacement {
+		t.Fatalf("replacement owner = %#v", journal.snapshot.Supervisor)
+	}
+}
+
+func TestRunSupervisorClaimsBeforeHeartbeatComposition(t *testing.T) {
+	root := t.TempDir()
+	t.Setenv("XDG_CONFIG_HOME", filepath.Join(root, "config"))
+	t.Setenv("XDG_DATA_HOME", filepath.Join(root, "data"))
+	t.Setenv("XDG_CACHE_HOME", filepath.Join(root, "cache"))
+	t.Setenv("CAMP_BACKEND", "file://"+filepath.Join(root, "backend"))
+	t.Setenv("CAMP_CAPSULE", "default")
+	sessionID := "session-1"
+	journalRoot := filepath.Join(root, "data", "camp")
+	journal, err := journalstore.NewStore(journalRoot)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := journal.Create(context.Background(), domain.JournalSnapshot{
+		SchemaVersion: domain.SchemaVersion,
+		SessionID:     sessionID,
+		Capsule:       "default",
+		Lineage:       domain.Lineage{Branch: "main"},
+		Mode:          domain.SessionReadWrite,
+		State:         domain.SessionOpen,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	sentinel := errors.New("heartbeat composer reached")
+	err = runSupervisor(context.Background(), sessionID, func(ctx context.Context, base productionBase) (supervisorHeartbeat, error) {
+		loaded, _, loadErr := base.journal.Load(ctx, sessionID)
+		if loadErr != nil {
+			return supervisorHeartbeat{}, loadErr
+		}
+		if loaded.Supervisor.Identity == (domain.ProcessIdentity{}) || loaded.Supervisor.Desired != domain.RuntimeDesiredRunning || loaded.Supervisor.Observed != domain.RuntimeObservedPending {
+			t.Fatalf("supervisor claim not recorded before heartbeat composition: %#v", loaded.Supervisor)
+		}
+		return supervisorHeartbeat{}, sentinel
+	})
+	if !errors.Is(err, sentinel) {
+		t.Fatalf("runSupervisor() error = %v, want %v", err, sentinel)
+	}
+}
+
+func TestRunSupervisorHeartbeatFailureLeavesClaimPending(t *testing.T) {
+	root := t.TempDir()
+	t.Setenv("XDG_CONFIG_HOME", filepath.Join(root, "config"))
+	t.Setenv("XDG_DATA_HOME", filepath.Join(root, "data"))
+	t.Setenv("XDG_CACHE_HOME", filepath.Join(root, "cache"))
+	t.Setenv("CAMP_BACKEND", "file://"+filepath.Join(root, "backend"))
+	t.Setenv("CAMP_CAPSULE", "default")
+	sessionID := "session-2"
+	journalRoot := filepath.Join(root, "data", "camp")
+	journal, err := journalstore.NewStore(journalRoot)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := journal.Create(context.Background(), domain.JournalSnapshot{
+		SchemaVersion: domain.SchemaVersion,
+		SessionID:     sessionID,
+		Capsule:       "default",
+		Lineage:       domain.Lineage{Branch: "main"},
+		Mode:          domain.SessionReadWrite,
+		State:         domain.SessionOpen,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	sentinel := errors.New("heartbeat composer failed")
+	err = runSupervisor(context.Background(), sessionID, func(ctx context.Context, base productionBase) (supervisorHeartbeat, error) {
+		loaded, _, loadErr := base.journal.Load(ctx, sessionID)
+		if loadErr != nil {
+			return supervisorHeartbeat{}, loadErr
+		}
+		if loaded.Supervisor.Identity == (domain.ProcessIdentity{}) || loaded.Supervisor.Observed != domain.RuntimeObservedPending {
+			t.Fatalf("supervisor claim not pending before heartbeat composition failure: %#v", loaded.Supervisor)
+		}
+		return supervisorHeartbeat{}, sentinel
+	})
+	if !errors.Is(err, sentinel) {
+		t.Fatalf("runSupervisor() error = %v, want %v", err, sentinel)
+	}
+	loaded, _, err := journal.Load(context.Background(), sessionID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if loaded.Supervisor.Observed != domain.RuntimeObservedPending {
+		t.Fatalf("supervisor after heartbeat failure = %#v", loaded.Supervisor)
+	}
+}
+
 type recordingJournal struct {
 	snapshot domain.JournalSnapshot
+	pending  []ports.PendingIntent
 }
 
 func (r *recordingJournal) Create(context.Context, domain.JournalSnapshot) error   { return nil }
@@ -192,17 +407,23 @@ func (r *recordingJournal) RecordFact(context.Context, ports.FactRecord, domain.
 	return nil
 }
 func (r *recordingJournal) Load(context.Context, string) (domain.JournalSnapshot, []ports.PendingIntent, error) {
-	return r.snapshot, nil, nil
+	return r.snapshot, r.pending, nil
 }
 func (r *recordingJournal) List(context.Context) ([]domain.JournalSnapshot, error) { return nil, nil }
 
 type recordingProcessManager struct {
-	journal  *recordingJournal
-	identity domain.ProcessIdentity
-	lastSpec ports.ProcessSpec
+	journal     *recordingJournal
+	identity    domain.ProcessIdentity
+	lastSpec    ports.ProcessSpec
+	statuses    map[domain.ProcessIdentity]ports.ProcessStatus
+	inspectErrs map[domain.ProcessIdentity]error
+	startCalls  int
+	stopCalls   int
+	onInspect   func(domain.ProcessIdentity)
 }
 
 func (r *recordingProcessManager) Start(_ context.Context, spec ports.ProcessSpec) (domain.ProcessIdentity, error) {
+	r.startCalls++
 	r.lastSpec = spec
 	r.journal.snapshot.Supervisor = domain.SupervisorRecord{
 		Identity: r.identity,
@@ -211,8 +432,19 @@ func (r *recordingProcessManager) Start(_ context.Context, spec ports.ProcessSpe
 	}
 	return r.identity, nil
 }
-func (r *recordingProcessManager) Inspect(context.Context, domain.ProcessIdentity) (ports.ProcessStatus, error) {
-	return ports.ProcessStatus{}, nil
+func (r *recordingProcessManager) Inspect(_ context.Context, identity domain.ProcessIdentity) (ports.ProcessStatus, error) {
+	if r.onInspect != nil {
+		r.onInspect(identity)
+	}
+	if err := r.inspectErrs[identity]; err != nil {
+		return ports.ProcessStatus{}, err
+	}
+	if r.statuses != nil {
+		if status, ok := r.statuses[identity]; ok {
+			return status, nil
+		}
+	}
+	return ports.ProcessStatus{Identity: r.identity, Running: true}, nil
 }
 func (r *recordingProcessManager) InspectPID(context.Context, int) (ports.ProcessStatus, error) {
 	return ports.ProcessStatus{}, nil
@@ -224,5 +456,6 @@ func (r *recordingProcessManager) Group(context.Context, int) ([]ports.ProcessSt
 	return nil, nil
 }
 func (r *recordingProcessManager) Stop(context.Context, domain.ProcessIdentity, time.Duration) error {
+	r.stopCalls++
 	return nil
 }

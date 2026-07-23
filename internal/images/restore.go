@@ -53,7 +53,7 @@ func (r *Restorer) Restore(ctx context.Context, request RestoreRequest) (Restore
 		if image.CapturedManifestDigest == "" {
 			return result, errors.New("captured image lacks verified digest")
 		}
-		rewritten, err := RewriteRegistryAuthority(image.CapturedReference, request.RegistryAuthority)
+		rewritten, err := RewriteRegistryAuthority(preferredServedReference(image), request.RegistryAuthority)
 		if err != nil {
 			return result, err
 		}
@@ -124,6 +124,24 @@ func (r *Restorer) Restore(ctx context.Context, request RestoreRequest) (Restore
 		result.Tags += len(tags)
 	}
 	return result, nil
+}
+
+func preferredServedReference(image domain.Image) string {
+	preferred := ""
+	parts := strings.SplitN(image.CapturedReference, "/", 2)
+	if len(parts) != 2 {
+		return image.CapturedReference
+	}
+	for _, original := range image.OriginalTags {
+		originalParts := strings.SplitN(original, "/", 2)
+		if len(originalParts) == 2 && originalParts[0] == parts[0] && (preferred == "" || original < preferred) {
+			preferred = original
+		}
+	}
+	if preferred == "" {
+		return image.CapturedReference
+	}
+	return preferred
 }
 
 type restoreInspection struct {

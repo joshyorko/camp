@@ -399,7 +399,7 @@ func (s *Store) PutConditional(ctx context.Context, key string, body []byte, con
 	}
 	response, err := s.do(request)
 	if err != nil {
-		return ports.ObjectMeta{}, err
+		return ports.ObjectMeta{}, fmt.Errorf("%v: %w", err, ports.ErrAmbiguous)
 	}
 	defer response.Body.Close()
 	if response.StatusCode < 200 || response.StatusCode >= 300 {

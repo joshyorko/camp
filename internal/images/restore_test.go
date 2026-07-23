@@ -156,3 +156,28 @@ func TestRestorerRejectsCatalogDigestMismatchBeforePull(t *testing.T) {
 		t.Fatalf("pull ran after digest mismatch: %#v", executor.commands)
 	}
 }
+
+func TestPreferredServedReferenceKeepsCaptureIdentitySeparateFromServingName(t *testing.T) {
+	t.Parallel()
+	image := domain.Image{
+		CapturedReference: "127.0.0.1:5000/camp/captured:v1",
+		OriginalTags:      []string{"example.test/team/app:v1", "127.0.0.1:5000/camp-acceptance:named"},
+	}
+	if got := preferredServedReference(image); got != "127.0.0.1:5000/camp-acceptance:named" {
+		t.Fatalf("preferredServedReference() = %q", got)
+	}
+	if image.CapturedReference != "127.0.0.1:5000/camp/captured:v1" {
+		t.Fatalf("capture identity mutated: %#v", image)
+	}
+}
+
+func TestPreferredServedReferencePrefersSameRegistryOriginalBeforeCaptureName(t *testing.T) {
+	t.Parallel()
+	image := domain.Image{
+		CapturedReference: "127.0.0.1:5000/a-capture/internal:v1",
+		OriginalTags:      []string{"example.test/team/app:v1", "127.0.0.1:5000/team/app:v1"},
+	}
+	if got := preferredServedReference(image); got != "127.0.0.1:5000/team/app:v1" {
+		t.Fatalf("preferredServedReference() = %q", got)
+	}
+}

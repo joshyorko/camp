@@ -44,9 +44,10 @@ type imagesSpec struct {
 }
 
 type manifestImage struct {
-	Name     string `yaml:"name"`
-	Platform string `yaml:"platform,omitempty"`
-	Local    bool   `yaml:"local,omitempty"`
+	Name           string `yaml:"name"`
+	Platform       string `yaml:"platform,omitempty"`
+	ExpectedDigest string `yaml:"x-camp-digest,omitempty"`
+	Local          bool   `yaml:"local,omitempty"`
 }
 
 var manifestDigestPattern = regexp.MustCompile(`^sha256:[a-f0-9]{64}$`)
@@ -61,14 +62,14 @@ func RenderManifest(capsule string, inventory domain.ImageInventory) ([]byte, er
 		if image.CapturedReference == "" {
 			return nil, errors.New("image inventory entry lacks reference")
 		}
-		name := image.CapturedReference
+		name := preferredRegistryReference(image)
 		switch image.Source {
 		case domain.ImageSourceRegistry:
-			var err error
-			name, err = immutableImageReference(image.CapturedReference, image.CapturedManifestDigest)
+			immutableName, err := immutableImageReference(name, image.CapturedManifestDigest)
 			if err != nil {
 				return nil, err
 			}
+			name = immutableName
 		case domain.ImageSourceDaemon:
 		default:
 			return nil, fmt.Errorf("unknown image source %q", image.Source)
@@ -90,7 +91,7 @@ func RenderManifest(capsule string, inventory domain.ImageInventory) ([]byte, er
 			return nil, fmt.Errorf("duplicate manifest image %q", name)
 		}
 		seen[key] = struct{}{}
-		images = append(images, manifestImage{Name: name, Platform: platform, Local: image.Source == domain.ImageSourceDaemon})
+		images = append(images, manifestImage{Name: name, Platform: platform, ExpectedDigest: image.CapturedManifestDigest, Local: image.Source == domain.ImageSourceDaemon})
 	}
 	sort.Slice(images, func(i, j int) bool {
 		if images[i].Name == images[j].Name {
@@ -119,6 +120,24 @@ func RenderManifest(capsule string, inventory domain.ImageInventory) ([]byte, er
 		return nil, err
 	}
 	return output.Bytes(), nil
+}
+
+func preferredRegistryReference(image domain.Image) string {
+	preferred := ""
+	parts := strings.SplitN(image.CapturedReference, "/", 2)
+	if len(parts) != 2 {
+		return image.CapturedReference
+	}
+	for _, original := range image.OriginalTags {
+		originalParts := strings.SplitN(original, "/", 2)
+		if len(originalParts) == 2 && originalParts[0] == parts[0] && (preferred == "" || original < preferred) {
+			preferred = original
+		}
+	}
+	if preferred == "" {
+		return image.CapturedReference
+	}
+	return preferred
 }
 
 func immutableImageReference(reference, digest string) (string, error) {

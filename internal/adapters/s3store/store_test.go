@@ -281,6 +281,78 @@ func TestProbeWriterAcceptsVerifiedConditionalEndpointAndCleansUp(t *testing.T) 
 	}
 }
 
+func TestProbeWriterReconcilesLostConditionalReplaceRequest(t *testing.T) {
+	serverState := newMemoryS3()
+	server := httptest.NewServer(serverState)
+	t.Cleanup(server.Close)
+	transport := &oneShotPutEOF{base: server.Client().Transport, failAt: 3}
+	store, err := s3store.New(s3store.Config{
+		Endpoint: server.URL, Bucket: "bucket", PathStyle: true, HTTPClient: &http.Client{Transport: transport},
+		Signer: s3store.SignFunc(func(request *http.Request) error { return nil }),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.ProbeWriter(context.Background(), "camp-probes/"); err != nil {
+		t.Fatal(err)
+	}
+	if !transport.failed {
+		t.Fatal("transport did not lose the conditional replace request")
+	}
+}
+
+func TestProbeWriterDoesNotReconcileMissingRevisionIntegrityFailure(t *testing.T) {
+	serverState := newMemoryS3()
+	server := httptest.NewServer(serverState)
+	t.Cleanup(server.Close)
+	transport := &oneShotMissingETag{base: server.Client().Transport, stripAt: 3}
+	store, err := s3store.New(s3store.Config{
+		Endpoint: server.URL, Bucket: "bucket", PathStyle: true, HTTPClient: &http.Client{Transport: transport},
+		Signer: s3store.SignFunc(func(request *http.Request) error { return nil }),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.ProbeWriter(context.Background(), "camp-probes/"); err == nil {
+		t.Fatal("ProbeWriter() reconciled a successful replace response without a revision")
+	}
+}
+
+type oneShotMissingETag struct {
+	base    http.RoundTripper
+	stripAt int
+	puts    int
+}
+
+func (t *oneShotMissingETag) RoundTrip(request *http.Request) (*http.Response, error) {
+	response, err := t.base.RoundTrip(request)
+	if request.Method == http.MethodPut {
+		t.puts++
+		if err == nil && t.puts == t.stripAt {
+			response.Header.Del("ETag")
+		}
+	}
+	return response, err
+}
+
+type oneShotPutEOF struct {
+	base   http.RoundTripper
+	failAt int
+	puts   int
+	failed bool
+}
+
+func (t *oneShotPutEOF) RoundTrip(request *http.Request) (*http.Response, error) {
+	if request.Method == http.MethodPut {
+		t.puts++
+		if t.puts == t.failAt {
+			t.failed = true
+			return nil, io.ErrUnexpectedEOF
+		}
+	}
+	return t.base.RoundTrip(request)
+}
+
 func TestProbeWriterFailsClosedWhenEndpointIgnoresConditions(t *testing.T) {
 	server := newMemoryS3()
 	server.ignorePrecondition = true

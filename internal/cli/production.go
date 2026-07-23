@@ -286,18 +286,7 @@ func resolveProductionProvider(provider string) (string, bool, error) {
 }
 
 func (p *ProductionLifecycle) Supervise(ctx context.Context, sessionID string, mode OutputMode, out io.Writer) error {
-	c, err := composeLifecycle(ctx)
-	if err != nil {
-		return err
-	}
-	snapshot, err := app.SelectActiveSession(ctx, c.base.journal, app.SessionSelector{Capsule: c.base.runtime.Capsule, Branch: "main", SessionID: sessionID})
-	if err != nil {
-		return err
-	}
-	if err := app.NewSupervise(c.base.journal, c.leases, c.locks, c.base.clock, time.Minute, host.NewIdentity()).Run(ctx, snapshot.SessionID); err != nil {
-		return err
-	}
-	return nil
+	return runSupervisor(ctx, sessionID, composeSupervisorHeartbeat)
 }
 
 func productionMachineID(ctx context.Context) (string, error) {
@@ -397,6 +386,24 @@ type lifecycleComposition struct {
 	recover   *app.Recover
 }
 
+type supervisorBootstrap struct {
+	base  productionBase
+	locks *journalstore.OperationLocker
+}
+
+type supervisorHeartbeat struct {
+	leases *coordination.LeaseRepository
+}
+
+type productionBase struct {
+	paths     config.XDGPaths
+	runtime   config.Runtime
+	backend   config.Backend
+	journal   ports.Journal
+	ownership *capsule.Ownership
+	clock     *host.Clock
+}
+
 type cleanupReconciler struct {
 	journal ports.Journal
 	close   *app.Close
@@ -459,14 +466,9 @@ func composeLifecycle(ctx context.Context) (lifecycleComposition, error) {
 }
 
 type productionComposition struct {
-	paths            config.XDGPaths
-	runtime          config.Runtime
-	backend          config.Backend
-	journal          ports.Journal
-	ownership        *capsule.Ownership
+	productionBase
 	initializer      *capsule.Initializer
 	runner           *subprocess.Runner
-	clock            *host.Clock
 	devpod           *devpod.Client
 	devpodExecutable string
 	haulerExecutable string
@@ -489,6 +491,13 @@ type serviceBundle struct {
 }
 
 func startSessionSupervisor(ctx context.Context, composition productionComposition, processes ports.ProcessManager, sessionID string) error {
+	reused, err := reuseRunningSessionSupervisor(ctx, composition.journal, processes, sessionID)
+	if err != nil {
+		return err
+	}
+	if reused {
+		return nil
+	}
 	campBinary, err := os.Executable()
 	if err != nil {
 		return err
@@ -513,14 +522,44 @@ func startSessionSupervisor(ctx context.Context, composition productionCompositi
 	if err != nil {
 		return err
 	}
-	if err := waitForSupervisorClaim(ctx, composition.journal, sessionID, identity); err != nil {
+	if err := waitForSupervisorClaim(ctx, composition.journal, processes, sessionID, identity); err != nil {
 		_ = processes.Stop(context.WithoutCancel(ctx), identity, 5*time.Second)
 		return err
 	}
 	return nil
 }
 
-func waitForSupervisorClaim(ctx context.Context, journal ports.Journal, sessionID string, identity domain.ProcessIdentity) error {
+func reuseRunningSessionSupervisor(ctx context.Context, journal ports.Journal, processes ports.ProcessManager, sessionID string) (bool, error) {
+	snapshot, pending, err := journal.Load(ctx, sessionID)
+	if err != nil {
+		return false, err
+	}
+	if len(pending) != 0 {
+		return false, nil
+	}
+	record := snapshot.Supervisor
+	if record.Identity.PID <= 0 || record.Identity.BootID == "" || record.Identity.StartTicks == 0 || record.Desired != domain.RuntimeDesiredRunning || record.Observed != domain.RuntimeObservedReady && record.Observed != domain.RuntimeObservedPending {
+		return false, nil
+	}
+	status, err := processes.Inspect(ctx, record.Identity)
+	if err != nil {
+		if errors.Is(err, supervisor.ErrProcessIdentity) {
+			return false, nil
+		}
+		return false, err
+	}
+	if !status.Running || status.Identity != record.Identity {
+		return false, nil
+	}
+	if record.Observed == domain.RuntimeObservedPending {
+		if err := waitForSupervisorClaim(ctx, journal, processes, sessionID, record.Identity); err != nil {
+			return false, err
+		}
+	}
+	return true, nil
+}
+
+func waitForSupervisorClaim(ctx context.Context, journal ports.Journal, processes ports.ProcessManager, sessionID string, identity domain.ProcessIdentity) error {
 	deadline := time.Now().Add(15 * time.Second)
 	for {
 		snapshot, _, err := journal.Load(ctx, sessionID)
@@ -529,6 +568,13 @@ func waitForSupervisorClaim(ctx context.Context, journal ports.Journal, sessionI
 		}
 		if snapshot.Supervisor.Identity == identity && snapshot.Supervisor.Desired == domain.RuntimeDesiredRunning && snapshot.Supervisor.Observed == domain.RuntimeObservedReady {
 			return nil
+		}
+		status, inspectErr := processes.Inspect(ctx, identity)
+		if inspectErr != nil {
+			return inspectErr
+		}
+		if !status.Running {
+			return fmt.Errorf("session supervisor exited before readiness was recorded for %s", sessionID)
 		}
 		if time.Now().After(deadline) {
 			return fmt.Errorf("session supervisor claim was not recorded for %s", sessionID)
@@ -552,12 +598,51 @@ func composeServiceBundle(composition productionComposition) (serviceBundle, err
 	return serviceBundle{starter: lifecycleadapter.NewServiceStarter(confinement, supervisor.NewPortAllocator(), units, haulerPath, composition.hauler), units: units, processes: processes}, nil
 }
 
-func composeProduction(ctx context.Context) (productionComposition, error) {
+func composeSupervisorBootstrap(ctx context.Context) (supervisorBootstrap, error) {
+	base, err := composeProductionBase(ctx)
+	if err != nil {
+		return supervisorBootstrap{}, err
+	}
+	locks, err := journalstore.NewOperationLocker(base.paths.DataRoot, host.NewIdentity())
+	if err != nil {
+		return supervisorBootstrap{}, err
+	}
+	return supervisorBootstrap{base: base, locks: locks}, nil
+}
+
+func composeSupervisorHeartbeat(ctx context.Context, base productionBase) (supervisorHeartbeat, error) {
+	store, err := objectstore.NewWriter(ctx, base.backend, objectstore.Options{})
+	if err != nil {
+		return supervisorHeartbeat{}, err
+	}
+	return supervisorHeartbeat{leases: coordination.NewLeaseRepository(store)}, nil
+}
+
+func runSupervisor(ctx context.Context, sessionID string, composeHeartbeat func(context.Context, productionBase) (supervisorHeartbeat, error)) error {
+	bootstrap, err := composeSupervisorBootstrap(ctx)
+	if err != nil {
+		return err
+	}
+	claimed := app.NewSupervise(bootstrap.base.journal, nil, bootstrap.locks, bootstrap.base.clock, time.Minute, host.NewIdentity())
+	if err := claimed.Claim(ctx, sessionID); err != nil {
+		return err
+	}
+	heartbeat, err := composeHeartbeat(ctx, bootstrap.base)
+	if err != nil {
+		return err
+	}
+	if err := claimed.MarkReady(ctx, sessionID); err != nil {
+		return err
+	}
+	return app.NewSupervise(bootstrap.base.journal, heartbeat.leases, bootstrap.locks, bootstrap.base.clock, time.Minute, host.NewIdentity()).RunClaimed(ctx, sessionID)
+}
+
+func composeProductionBase(ctx context.Context) (productionBase, error) {
 	settings, err := resolveProductionSettings()
 	if err != nil {
-		return productionComposition{}, err
+		return productionBase{}, err
 	}
-	return composeProductionWithSettings(ctx, settings)
+	return composeProductionBaseWithSettings(settings)
 }
 
 func resolveProductionSettings() (productionSettings, error) {
@@ -584,15 +669,41 @@ func resolveProductionSettings() (productionSettings, error) {
 	return productionSettings{paths: paths, runtime: runtime, backend: backend}, nil
 }
 
-func composeProductionWithSettings(ctx context.Context, settings productionSettings) (productionComposition, error) {
+func composeProductionBaseWithSettings(settings productionSettings) (productionBase, error) {
 	paths, runtime, backend := settings.paths, settings.runtime, settings.backend
+	journal, err := journalstore.NewStore(paths.DataRoot)
+	if err != nil {
+		return productionBase{}, err
+	}
+	ownership, err := capsule.NewOwnership(paths.DataRoot)
+	if err != nil {
+		return productionBase{}, err
+	}
+	clock := host.NewClock()
+	return productionBase{paths: paths, runtime: runtime, backend: backend, journal: journal, ownership: ownership, clock: clock}, nil
+}
+
+func composeProduction(ctx context.Context) (productionComposition, error) {
+	settings, err := resolveProductionSettings()
+	if err != nil {
+		return productionComposition{}, err
+	}
+	return composeProductionWithSettings(ctx, settings)
+}
+
+func composeProductionWithSettings(ctx context.Context, settings productionSettings) (productionComposition, error) {
+	base, err := composeProductionBaseWithSettings(settings)
+	if err != nil {
+		return productionComposition{}, err
+	}
+	runner := subprocess.NewRunner()
 	ensurer := settings.toolEnsurer
 	if ensurer == nil {
 		lock, err := tooladapter.ParseLock(bytes.NewReader(campcontract.DistributionToolLock()))
 		if err != nil {
 			return productionComposition{}, err
 		}
-		ensurer, err = tooladapter.NewInstaller(lock, paths.DataRoot)
+		ensurer, err = tooladapter.NewInstaller(lock, base.paths.DataRoot)
 		if err != nil {
 			return productionComposition{}, err
 		}
@@ -608,22 +719,12 @@ func composeProductionWithSettings(ctx context.Context, settings productionSetti
 	if err != nil {
 		return productionComposition{}, err
 	}
-	journal, err := journalstore.NewStore(paths.DataRoot)
-	if err != nil {
-		return productionComposition{}, err
-	}
-	ownership, err := capsule.NewOwnership(paths.DataRoot)
-	if err != nil {
-		return productionComposition{}, err
-	}
-	runner := subprocess.NewRunner()
-	clock := host.NewClock()
 	devpodPath := toolPaths.devpod
 	haulerPath := toolPaths.hauler
 	return productionComposition{
-		paths: paths, runtime: runtime, backend: backend, journal: journal, ownership: ownership,
-		initializer: capsule.NewInitializer(clock, capsule.NewCommandDigestResolver("docker", runner)),
-		runner:      runner, clock: clock, devpod: devpod.NewClient(devpodPath, runner), devpodExecutable: devpodPath,
+		productionBase: base,
+		initializer:    capsule.NewInitializer(base.clock, capsule.NewCommandDigestResolver("docker", runner)),
+		runner:         runner, devpod: devpod.NewClient(devpodPath, runner), devpodExecutable: devpodPath,
 		haulerExecutable: haulerPath, hauler: hauler.NewClient(haulerPath, runner),
 	}, nil
 }
