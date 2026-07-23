@@ -76,6 +76,7 @@ type Invocation struct {
 func DocumentedInvocations() []Invocation {
 	return []Invocation{
 		{CommandPath: "camp", Args: []string{"--help"}},
+		{CommandPath: "camp attach", Args: []string{"attach", "memoryd"}},
 		{CommandPath: "camp close", Args: []string{"close"}},
 		{CommandPath: "camp completion", Args: []string{"completion", "bash"}},
 		{CommandPath: "camp doctor", Args: []string{"doctor"}},
@@ -123,6 +124,9 @@ func (transcriptLifecycle) Init(_ context.Context, _ cli.InitRequest, _ cli.Outp
 func (transcriptLifecycle) Open(_ context.Context, _ string, _ cli.OutputMode, output io.Writer) error {
 	return fixtureDispatch(output, "open")
 }
+func (transcriptLifecycle) Attach(_ context.Context, _ cli.AttachRequest, _ cli.OutputMode, output io.Writer) error {
+	return fixtureDispatch(output, "attach")
+}
 func (transcriptLifecycle) Sync(_ context.Context, _ cli.OutputMode, output io.Writer) error {
 	return fixtureDispatch(output, "sync")
 }
@@ -157,6 +161,7 @@ func commandReference(root *cobra.Command) ([]byte, error) {
 		output.WriteString("## `" + command.CommandPath() + "`\n\n")
 		output.WriteString(command.Short + "\n\n")
 		output.WriteString("```text\nUsage:\n  " + command.UseLine() + "\n")
+		command.InitDefaultHelpFlag()
 		flags := command.NonInheritedFlags()
 		if flags.HasAvailableFlags() {
 			output.WriteString("\nFlags:\n")

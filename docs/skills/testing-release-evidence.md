@@ -23,8 +23,10 @@ tree with `go run ./cmd/camp-docs`. Never hand-edit `docs/generated/`.
 artifact byte-for-byte, excludes hidden commands, requires an effect-free
 dispatch marker for every visible lifecycle command, executes completion
 generation, rejects non-public command mentions in operator docs, and verifies
-operator-index links. An exit-zero transcript without handler output is
-insufficient dispatch evidence. The transcript lifecycle proves Cobra parsing
+operator-index links. The command reference must initialize and render Cobra's
+built-in help flag for every public command. An exit-zero transcript without the
+exact command-specific fixture marker is insufficient dispatch evidence. The
+transcript lifecycle proves Cobra parsing
 and handler dispatch only; it is not DevPod, Hauler, backend, lifecycle, or
 release evidence. When the public tree changes, regenerate and review
 `git diff -- docs/generated/commands.md` before accepting the change.

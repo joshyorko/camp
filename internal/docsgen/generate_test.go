@@ -3,6 +3,7 @@ package docsgen
 import (
 	"bytes"
 	"context"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -32,10 +33,35 @@ func TestDocumentedInvocationsExecute(t *testing.T) {
 			if code != 0 {
 				t.Fatalf("%v exited %d\nstdout:\n%s\nstderr:\n%s", invocation.Args, code, stdout.String(), stderr.String())
 			}
-			if invocation.CommandPath != "camp" && stdout.Len() == 0 {
-				t.Fatalf("%v did not emit dispatch or generated-output evidence", invocation.Args)
+			if invocation.CommandPath != "camp" && invocation.CommandPath != "camp completion" {
+				marker := fmt.Sprintf("effect-free docs fixture: %s dispatched; external effects disabled", strings.TrimPrefix(invocation.CommandPath, "camp "))
+				if !strings.Contains(stdout.String(), marker) {
+					t.Fatalf("%v did not emit dispatch marker %q\nstdout:\n%s", invocation.Args, marker, stdout.String())
+				}
 			}
 		})
+	}
+}
+
+func TestGeneratedReferenceIncludesHelpFlags(t *testing.T) {
+	generated, err := Generate(cli.NewRoot())
+	if err != nil {
+		t.Fatal(err)
+	}
+	reference := generated["docs/generated/commands.md"]
+	for _, command := range visibleCommands(cli.NewRoot()) {
+		heading := []byte("## `" + command.CommandPath() + "`\n")
+		start := bytes.Index(reference, heading)
+		if start == -1 {
+			t.Fatalf("generated reference lacks %q", command.CommandPath())
+		}
+		section := reference[start+len(heading):]
+		if end := bytes.Index(section, []byte("\n## `")); end >= 0 {
+			section = section[:end]
+		}
+		if !bytes.Contains(section, []byte("-h, --help")) {
+			t.Errorf("generated reference for %q lacks Cobra help flag", command.CommandPath())
+		}
 	}
 }
 

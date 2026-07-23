@@ -130,4 +130,3 @@ Usage:
 Global flags:
       --json   emit stable JSON output
 ```
-

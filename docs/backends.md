@@ -10,6 +10,6 @@ The file backend requires an absolute `file:///` URL. Package and integration te
 
 ## S3 and MinIO
 
-An S3 identity contains only bucket and prefix. Endpoint, region, path-style mode, and explicit insecure-local policy are non-secret settings; credentials come from the standard AWS runtime credential chain. Insecure HTTP is limited to loopback endpoints.
+An S3 identity contains only bucket and prefix. Endpoint, region, path-style mode, and explicit insecure-transport policy are non-secret settings; credentials come from the standard AWS runtime credential chain. Plaintext HTTP endpoints require explicit insecure opt-in; this policy is not limited to loopback hosts.
 
 The credential-free MinIO integration fixture exercises immutable object creation and read-back against a disposable local container. It does not prove an external S3 account, production credentials, IAM policy, networking, or cleanup. External credential-gated smoke remains unproved unless its exact command, target class, and result are attached to release evidence.

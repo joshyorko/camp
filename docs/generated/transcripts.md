@@ -95,4 +95,3 @@ effect-free docs fixture: setup dispatched; external effects disabled
 $ camp sync
 effect-free docs fixture: sync dispatched; external effects disabled
 ```
-

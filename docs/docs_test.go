@@ -68,3 +68,17 @@ func TestOperatorDocsMentionOnlyPublicCommands(t *testing.T) {
 		}
 	}
 }
+
+func TestBackendDocsDescribeExplicitInsecureHTTPPolicy(t *testing.T) {
+	contents, err := os.ReadFile("backends.md")
+	if err != nil {
+		t.Fatal(err)
+	}
+	text := string(contents)
+	if strings.Contains(text, "Insecure HTTP is limited to loopback endpoints") {
+		t.Fatal("backend docs incorrectly limit explicit insecure HTTP to loopback endpoints")
+	}
+	if !strings.Contains(text, "Plaintext HTTP endpoints require explicit insecure opt-in; this policy is not limited to loopback hosts.") {
+		t.Fatal("backend docs do not describe the explicit insecure HTTP policy")
+	}
+}
