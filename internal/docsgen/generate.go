@@ -109,7 +109,7 @@ func transcriptReference() ([]byte, error) {
 		output.Write(stderr.Bytes())
 		output.WriteString("```\n\n")
 	}
-	return output.Bytes(), nil
+	return bytes.TrimSuffix(output.Bytes(), []byte("\n")), nil
 }
 
 type transcriptLifecycle struct{}
@@ -173,7 +173,7 @@ func commandReference(root *cobra.Command) ([]byte, error) {
 		}
 		output.WriteString("```\n\n")
 	}
-	return output.Bytes(), nil
+	return bytes.TrimSuffix(output.Bytes(), []byte("\n")), nil
 }
 
 func visibleCommands(root *cobra.Command) []*cobra.Command {

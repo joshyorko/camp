@@ -13,6 +13,38 @@ Usage:
   camp
 
 Flags:
+  -h, --help   help for camp
+      --json   emit stable JSON output
+```
+
+## `camp attach`
+
+Attach to an open capsule workspace
+
+```text
+Usage:
+  camp attach [target] [flags]
+
+Flags:
+      --agent-forwarding                forward the SSH agent
+      --devpod-arg strings              append one raw DevPod SSH argument
+  -L, --forward-ports strings           forward a local port through DevPod SSH
+      --forward-ports-timeout string    DevPod forward-port timeout
+      --git-ssh-signing-key string      Git SSH signing key path
+      --gpg-agent-forwarding            forward the GPG agent
+  -h, --help                            help for attach
+      --ide string                      entry mode: none, vscode, vscode-insiders, or t3-code (default "none")
+      --insiders                        alias for --ide=vscode-insiders
+      --install-terminfo                install local terminal information
+  -R, --reverse-forward-ports strings   reverse-forward a port through DevPod SSH
+      --send-env strings                send an environment variable through DevPod SSH
+      --set-env strings                 set an environment variable in DevPod SSH
+      --ssh-keepalive-interval string   SSH keepalive interval
+      --stdio                           attach SSH to standard I/O
+      --term-mode string                terminal mode
+      --user string                     SSH user
+
+Global flags:
       --json   emit stable JSON output
 ```
 
@@ -23,6 +55,9 @@ Publish a checkpoint and close
 ```text
 Usage:
   camp close
+
+Flags:
+  -h, --help   help for close
 
 Global flags:
       --json   emit stable JSON output
@@ -36,6 +71,9 @@ Generate shell completion
 Usage:
   camp completion [bash|zsh|fish]
 
+Flags:
+  -h, --help   help for completion
+
 Global flags:
       --json   emit stable JSON output
 ```
@@ -47,6 +85,9 @@ Diagnose required host capabilities
 ```text
 Usage:
   camp doctor
+
+Flags:
+  -h, --help   help for doctor
 
 Global flags:
       --json   emit stable JSON output
@@ -65,6 +106,7 @@ Flags:
       --capsule string           persist the default capsule name
       --devpod-context string    persist the DevPod context (default "default")
       --devpod-provider string   persist the default DevPod provider
+  -h, --help                     help for init
       --source string            persist the default source path
 
 Global flags:
@@ -79,6 +121,9 @@ Open a capsule workspace
 Usage:
   camp open [target]
 
+Flags:
+  -h, --help   help for open
+
 Global flags:
       --json   emit stable JSON output
 ```
@@ -90,6 +135,9 @@ Recover an interrupted lifecycle
 ```text
 Usage:
   camp recover [target]
+
+Flags:
+  -h, --help   help for recover
 
 Global flags:
       --json   emit stable JSON output
@@ -103,6 +151,9 @@ Reopen a closed capsule workspace
 Usage:
   camp reopen [target]
 
+Flags:
+  -h, --help   help for reopen
+
 Global flags:
       --json   emit stable JSON output
 ```
@@ -115,6 +166,9 @@ Install or reuse pinned DevPod and Hauler tools
 Usage:
   camp setup
 
+Flags:
+  -h, --help   help for setup
+
 Global flags:
       --json   emit stable JSON output
 ```
@@ -126,6 +180,9 @@ Publish a checkpoint and remain open
 ```text
 Usage:
   camp sync
+
+Flags:
+  -h, --help   help for sync
 
 Global flags:
       --json   emit stable JSON output

@@ -40,7 +40,7 @@ go test ./integration -list '^TestNamedAcceptanceGate$'
 go test -v ./integration -run '^TestNamedAcceptanceGate$' -count=1
 ```
 
-This guard currently matters for `TestLocalLifecycleVertical` and `TestLocalLifecycleCrashMatrix`: neither name is present, while both focused `-run` commands still exit zero with `testing: warning: no tests to run`. Treat both gates as missing, not passed, until discovery lists them and their runs emit the named `RUN`/`PASS` pair.
+Discovery currently lists `TestLocalLifecycleVertical` and its focused real-tool gate has recorded evidence in the local-lifecycle guide. It does not list `TestLocalLifecycleCrashMatrix` or a mounted-file-backend parity test. Treat those two gates as missing, not passed, until discovery lists their exact names and their runs emit the named `RUN`/`PASS` pair; the vertical does not substitute for either missing gate.
 
 For filesystem-dependent safety tests, prove determinism with repeated focused execution when practical. The ownership-marker temporary-name substitution test requires injection of the named fallback because a Linux filesystem may support `O_TMPFILE`; the focused test passed 50 repetitions after that injection, and `go test ./internal/capsule -count=1` passed 52 tests.
 

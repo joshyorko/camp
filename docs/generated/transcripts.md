@@ -15,6 +15,7 @@ Usage:
   camp [command]
 
 Available Commands:
+  attach      Attach to an open capsule workspace
   close       Publish a checkpoint and close
   completion  Generate shell completion
   doctor      Diagnose required host capabilities
@@ -31,6 +32,13 @@ Flags:
       --json   emit stable JSON output
 
 Use "camp [command] --help" for more information about a command.
+```
+
+## `camp attach memoryd`
+
+```console
+$ camp attach memoryd
+effect-free docs fixture: attach dispatched; external effects disabled
 ```
 
 ## `camp close`
