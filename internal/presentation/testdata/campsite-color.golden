@@ -1,11 +1,16 @@
-<ESC>[38;2;78;163;235m        ·          ✦                ·            ✦          ·<ESC>[0m
-<ESC>[38;2;69;119;74m      /\       /\          /\        /\       /\<ESC>[0m
-<ESC>[38;2;102;214;86m  ✓ TOOLCHAIN        ✓ RUNTIME        ✓ CAPSULE        ✓ STORAGE<ESC>[0m
-<ESC>[38;2;238;215;169m  DevPod v0.26.1 · Hauler v2.0.2<ESC>[0m
-<ESC>[38;2;238;215;169m  ror · remote DevPod · context work<ESC>[0m
-<ESC>[38;2;238;215;169m  brain · /home/josh/brain<ESC>[0m
-<ESC>[38;2;238;215;169m  s3 backend · s3://camp/brain · generation 42<ESC>[0m
-<ESC>[38;2;255;171;45m  ━━━━━━━━◆━━━━━━━━━━◆━━━━━━━━━━◆━━━━━━━━━━🔥<ESC>[0m
 
-<ESC>[38;2;255;171;45m                 CAMP IS READY<ESC>[0m
-<ESC>[38;2;56;155;255m                 > camp open /home/josh/brain<ESC>[0m
+                                                         <ESC>[38;2;238;215;169m⛺ CAMP<ESC>[0m
+                                                    <ESC>[38;2;110;118;129mtrailhead setup<ESC>[0m
+
+            <ESC>[38;2;108;178;235m         ·                  ✦                  ·                  ✦                  ·          <ESC>[0m
+                     <ESC>[38;2;58;110;70m▲<ESC>[0m                  <ESC>[38;2;58;110;70m▲<ESC>[0m                  <ESC>[38;2;238;215;169m▲<ESC>[0m                  <ESC>[38;2;58;110;70m▲<ESC>[0m                  <ESC>[38;2;58;110;70m▲<ESC>[0m
+
+               <ESC>[38;2;102;214;86m✓ TOOLCHAIN<ESC>[0m      <ESC>[38;2;102;214;86m✓ RUNTIME<ESC>[0m             <ESC>[38;2;102;214;86m✓ CAPSULE<ESC>[0m          <ESC>[38;2;102;214;86m✓ STORAGE<ESC>[0m
+               <ESC>[38;2;238;215;169mDevPod v0.26.1<ESC>[0m   <ESC>[38;2;238;215;169mror · remote DevPod<ESC>[0m   <ESC>[38;2;238;215;169mbrain<ESC>[0m              <ESC>[38;2;238;215;169ms3 backend<ESC>[0m
+               <ESC>[38;2;238;215;169mHauler v2.0.2<ESC>[0m    <ESC>[38;2;238;215;169mcontext work<ESC>[0m          <ESC>[38;2;238;215;169m/home/josh/brain<ESC>[0m   <ESC>[38;2;238;215;169ms3://camp/brain · generation 42<ESC>[0m
+
+            <ESC>[38;2;255;171;45m────────────✓───────────────────────✓───────────────────────✓───────────────────────✓───────────🔥<ESC>[0m
+
+                                                     <ESC>[38;2;255;171;45mCAMP IS READY<ESC>[0m
+
+                                              <ESC>[38;2;56;155;255m> camp open /home/josh/brain<ESC>[0m

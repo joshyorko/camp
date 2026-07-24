@@ -6,6 +6,13 @@ import (
 	"testing"
 )
 
+func TestScreenSizeFieldsAreIndependentOfColorOptions(t *testing.T) {
+	options := CampsiteOptions{Color: true, Width: 120, Height: 40}
+	if options.Width != 120 || options.Height != 40 {
+		t.Fatalf("options = %#v", options)
+	}
+}
+
 func TestRenderCampsitePlainUsesAuthoritativeValuesWithoutControlSequences(t *testing.T) {
 	model := CampsiteModel{
 		DevPod:      ToolIdentity{Name: "DevPod", Version: "v0.26.1"},

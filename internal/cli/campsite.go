@@ -5,7 +5,6 @@ import (
 	"context"
 	"fmt"
 	"io"
-	"os"
 	"strings"
 
 	tooladapter "github.com/joshyorko/camp/internal/adapters/tools"
@@ -15,7 +14,7 @@ import (
 	"github.com/joshyorko/camp/internal/presentation"
 )
 
-func renderProductionSetupCampsite(ctx context.Context, out io.Writer, lockBytes []byte) error {
+func renderProductionSetupCampsite(ctx context.Context, out io.Writer, lockBytes []byte, experience presentation.TerminalExperience, width, height int) error {
 	lock, err := tooladapter.ParseLock(bytes.NewReader(lockBytes))
 	if err != nil {
 		return err
@@ -24,7 +23,6 @@ func renderProductionSetupCampsite(ctx context.Context, out io.Writer, lockBytes
 	if err != nil {
 		return err
 	}
-	experience := resolveTerminalExperience(ModeHuman, out, environmentMap(os.Environ()), probeTerminal)
 	if settings.runtime.Source == "" {
 		return writeLifecycleEvents(out, experience, "setup",
 			presentation.LifecycleEvent{Stage: presentation.StageToolReady, Message: "locked tools are ready"},
@@ -43,7 +41,7 @@ func renderProductionSetupCampsite(ctx context.Context, out io.Writer, lockBytes
 	if err != nil {
 		return err
 	}
-	animator, err := presentation.NewSetupAnimator(out, experience, model)
+	animator, err := presentation.NewSetupAnimator(out, experience, model, presentation.ScreenSize{Width: width, Height: height})
 	if err != nil {
 		return err
 	}

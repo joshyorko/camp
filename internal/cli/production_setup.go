@@ -16,6 +16,7 @@ import (
 	tooladapter "github.com/joshyorko/camp/internal/adapters/tools"
 	"github.com/joshyorko/camp/internal/config"
 	"github.com/joshyorko/camp/internal/doctor"
+	journalstore "github.com/joshyorko/camp/internal/journal"
 	"github.com/joshyorko/camp/internal/presentation"
 )
 
@@ -85,6 +86,7 @@ func (p *ProductionLifecycle) Setup(ctx context.Context, mode OutputMode, in io.
 	if err != nil {
 		return err
 	}
+	experience, width, height := resolveTerminalExperience(mode, out, environment, probeTerminal)
 	if mode == ModeHuman {
 		if _, statErr := os.Stat(paths.ConfigPath); statErr != nil {
 			if !os.IsNotExist(statErr) {
@@ -96,7 +98,7 @@ func (p *ProductionLifecycle) Setup(ctx context.Context, mode OutputMode, in io.
 			}
 			request, err := promptSetupRequest(in, out, setupPromptDefaults{
 				Source: source, Backend: "file://" + filepath.Join(paths.DataRoot, "backend"),
-			})
+			}, experience, presentation.ScreenSize{Width: width, Height: height})
 			if err != nil {
 				return err
 			}
@@ -106,7 +108,6 @@ func (p *ProductionLifecycle) Setup(ctx context.Context, mode OutputMode, in io.
 		}
 	}
 	lockBytes := campcontract.DistributionToolLock()
-	experience := resolveTerminalExperience(mode, out, environment, probeTerminal)
 	completed := func(name string, resolution tooladapter.Resolution) error {
 		return writeLifecycleEvents(out, experience, "setup", presentation.LifecycleEvent{Stage: presentation.StageToolReady, Message: fmt.Sprintf("%s %s is ready", name, resolution.Version)})
 	}
@@ -114,9 +115,43 @@ func (p *ProductionLifecycle) Setup(ctx context.Context, mode OutputMode, in io.
 		completed = nil
 	}
 	if err := runProductionToolSetupWithEvents(ctx, mode, out, lockBytes, "", environment, runtime.GOOS, runtime.GOARCH, completed); err != nil || mode == ModeJSON {
+		if err != nil && mode == ModeHuman {
+			_ = renderProductionSetupFailure(ctx, out, lockBytes, experience, width, height, err)
+		}
 		return err
 	}
-	return renderProductionSetupCampsite(ctx, out, lockBytes)
+	return renderProductionSetupCampsite(ctx, out, lockBytes, experience, width, height)
+}
+
+func renderProductionSetupFailure(ctx context.Context, out io.Writer, lockBytes []byte, experience presentation.TerminalExperience, width, height int, cause error) error {
+	lock, err := tooladapter.ParseLock(bytes.NewReader(lockBytes))
+	if err != nil {
+		return err
+	}
+	settings, err := resolveProductionSettings()
+	if err != nil {
+		return err
+	}
+	if settings.runtime.Source == "" {
+		return nil
+	}
+	j, err := journalstore.NewStore(settings.paths.DataRoot)
+	if err != nil {
+		return err
+	}
+	sessions, err := j.List(ctx)
+	if err != nil {
+		return err
+	}
+	model, err := buildCampsiteModel(lock, settings.runtime, settings.backend, sessions)
+	if err != nil {
+		return err
+	}
+	animator, err := presentation.NewSetupAnimator(out, experience, model, presentation.ScreenSize{Width: width, Height: height})
+	if err != nil {
+		return err
+	}
+	return animator.Fail(ctx, presentation.SetupToolchain, cause, "camp setup")
 }
 
 func runProductionToolSetup(ctx context.Context, mode OutputMode, out io.Writer, lockBytes []byte, home string, environment map[string]string, goos, arch string, options ...tooladapter.InstallerOption) error {

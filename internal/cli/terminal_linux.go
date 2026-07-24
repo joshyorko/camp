@@ -13,28 +13,29 @@ import (
 	"golang.org/x/sys/unix"
 )
 
-type terminalProbe func(uintptr) (bool, int)
+type terminalProbe func(uintptr) (bool, int, int)
 
-func resolveTerminalExperience(mode OutputMode, out io.Writer, environment map[string]string, probe terminalProbe) presentation.TerminalExperience {
+func resolveTerminalExperience(mode OutputMode, out io.Writer, environment map[string]string, probe terminalProbe) (presentation.TerminalExperience, int, int) {
 	file, ok := out.(*os.File)
 	if !ok {
-		return presentation.TerminalPlain
+		return presentation.TerminalPlain, 0, 0
 	}
-	tty, width := probe(file.Fd())
+	tty, width, height := probe(file.Fd())
 	_, noColor := environment["NO_COLOR"]
 	ci := strings.TrimSpace(environment["CI"])
-	return presentation.SelectTerminalExperience(presentation.TerminalInput{
+	experience := presentation.SelectTerminalExperience(presentation.TerminalInput{
 		TTY: tty, Width: width, TERM: environment["TERM"], COLORTERM: environment["COLORTERM"],
 		JSON: mode == ModeJSON, NoColor: noColor, CI: ci != "" && !strings.EqualFold(ci, "false") && ci != "0",
 	})
+	return experience, width, height
 }
 
-func probeTerminal(fd uintptr) (bool, int) {
+func probeTerminal(fd uintptr) (bool, int, int) {
 	winsize, err := unix.IoctlGetWinsize(int(fd), unix.TIOCGWINSZ)
 	if err != nil || winsize.Col == 0 {
-		return false, 0
+		return false, 0, 0
 	}
-	return true, int(winsize.Col)
+	return true, int(winsize.Col), int(winsize.Row)
 }
 
 func writeLifecycleEvents(out io.Writer, experience presentation.TerminalExperience, operation string, events ...presentation.LifecycleEvent) error {
@@ -51,7 +52,7 @@ func writeHumanLifecycleResult(out io.Writer, mode OutputMode, operation string,
 	if mode != ModeHuman {
 		return nil
 	}
-	experience := resolveTerminalExperience(mode, out, environmentMap(os.Environ()), probeTerminal)
+	experience, _, _ := resolveTerminalExperience(mode, out, environmentMap(os.Environ()), probeTerminal)
 	if len(events) == 0 {
 		_, err := io.WriteString(out, legacy)
 		return err
