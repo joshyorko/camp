@@ -53,7 +53,7 @@ run_fixture() {
       cmp /tmp/_camp /usr/share/zsh/site-functions/_camp
       camp completion fish > /tmp/camp.fish
       cmp /tmp/camp.fish /usr/share/fish/vendor_completions.d/camp.fish
-      camp setup
+      camp setup --json
       test -x /state/data/camp/tools/devpod/*/linux-amd64/*/devpod
       test -x /state/data/camp/tools/hauler/*/linux-amd64/*/hauler
       $upgrade /new/$new_package
