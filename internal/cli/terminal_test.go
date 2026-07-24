@@ -41,6 +41,24 @@ func TestResolveTerminalExperienceReturnsProbedHeightAlongsideWidth(t *testing.T
 	}
 }
 
+func TestCanUseRichSetupRequires80x20Floor(t *testing.T) {
+	if !canUseRichSetup(presentation.TerminalColor, 80, 20) {
+		t.Fatal("80x20 should be enough for rich mode")
+	}
+	if canUseRichSetup(presentation.TerminalColor, 79, 20) {
+		t.Fatal("79-column terminal should not enable rich mode")
+	}
+	if canUseRichSetup(presentation.TerminalColor, 80, 19) {
+		t.Fatal("19-row terminal should not enable rich mode")
+	}
+}
+
+func TestCanUseRichSetupRejectsNonRichTerminalExperience(t *testing.T) {
+	if canUseRichSetup(presentation.TerminalPlain, 120, 40) {
+		t.Fatal("plain terminal should not enable rich mode")
+	}
+}
+
 func TestResolveTerminalExperienceTreatsNonFilesAndFallbackSignalsAsPlain(t *testing.T) {
 	tests := []struct {
 		name string

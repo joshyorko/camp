@@ -5,11 +5,13 @@ package cli
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"os"
 	"path/filepath"
 	"runtime"
+	"sync"
 
 	tea "charm.land/bubbletea/v2"
 	"golang.org/x/sys/unix"
@@ -51,23 +53,27 @@ func (p *ProductionLifecycle) runRichSetup(ctx context.Context, in io.Reader, ou
 	if err != nil {
 		return false, nil
 	}
-	pipeline := richSetupPipeline{lifecycle: p, ctx: ctx}
-	result, err := setupui.Run(ctx, in, out, setupui.DefaultPalette(), sprites, map[string]string{
+	pipelineCtx, pipelineCancel := context.WithCancel(ctx)
+	pipeline := newRichSetupPipeline(p, pipelineCtx)
+	result, err := setupui.RunWithExit(ctx, in, out, setupui.DefaultPalette(), sprites, map[string]string{
 		"source":   defaults.Source,
 		"capsule":  filepathBase(defaults.Source),
 		"backend":  defaults.Backend,
 		"provider": "docker",
 		"context":  "default",
-	}, pipeline)
+	}, pipeline, pipelineCancel)
+	pipelineCancel()
+	pipeline.markDoneIfNotStarted()
+	<-pipeline.Done()
 	if err != nil {
 		// Terminal program failed to run at all: fall back rather than error.
 		return false, nil
 	}
 	switch {
 	case result.Canceled:
-		return true, context.Canceled
+		return true, nil
 	case result.Failed:
-		return true, fmt.Errorf("%s", result.FailMsg)
+		return true, lifecycleFailure(errors.New(result.FailMsg), result.Recovery)
 	default:
 		return true, nil
 	}
@@ -80,25 +86,63 @@ func (p *ProductionLifecycle) runRichSetup(ctx context.Context, in io.Reader, ou
 type richSetupPipeline struct {
 	lifecycle *ProductionLifecycle
 	ctx       context.Context
+	done      chan struct{}
+	doneOnce  sync.Once
+	startMu   sync.Mutex
+	started   bool
+}
+
+func (p *richSetupPipeline) markDone() {
+	p.doneOnce.Do(func() { close(p.done) })
+}
+
+func (p *richSetupPipeline) markDoneIfNotStarted() {
+	p.startMu.Lock()
+	defer p.startMu.Unlock()
+	if !p.started {
+		p.markDone()
+	}
+}
+
+func newRichSetupPipeline(lifecycle *ProductionLifecycle, ctx context.Context) *richSetupPipeline {
+	return &richSetupPipeline{lifecycle: lifecycle, ctx: ctx, done: make(chan struct{})}
+}
+
+// Done reports when the pipeline has reached terminal states and no further
+// presentation-driving events can be produced.
+func (p *richSetupPipeline) Done() <-chan struct{} {
+	return p.done
 }
 
 // Start persists the config, resolves the toolchain, and reads the resulting
 // authoritative campsite facts, emitting one message per real milestone. It
 // returns immediately; work runs on a goroutine and the channel closes when
 // provisioning ends.
-func (p richSetupPipeline) Start(values map[string]string) <-chan tea.Msg {
+func (p *richSetupPipeline) Start(values map[string]string) <-chan tea.Msg {
 	out := make(chan tea.Msg, 8)
+	p.startMu.Lock()
+	p.started = true
+	p.startMu.Unlock()
 	go func() {
 		defer close(out)
+		defer p.markDone()
 		p.run(values, out)
 	}()
 	return out
 }
 
-func (p richSetupPipeline) run(values map[string]string, out chan<- tea.Msg) {
+func (p *richSetupPipeline) run(values map[string]string, out chan<- tea.Msg) {
+	emit := func(msg tea.Msg) bool {
+		select {
+		case out <- msg:
+			return true
+		case <-p.ctx.Done():
+			return false
+		}
+	}
 	fail := func(stage setupui.Stage, err error, recovery string) {
 		msg := setupui.SafeText(err.Error(), "setup failed")
-		out <- setupui.WaypointFailedMsg{Stage: stage, Message: msg, Recovery: setupui.SafeText(recovery, "camp setup")}
+		emit(setupui.WaypointFailedMsg{Stage: stage, Message: msg, Recovery: setupui.SafeText(recovery, "camp setup")})
 	}
 
 	request := InitRequest{
@@ -146,14 +190,6 @@ func (p richSetupPipeline) run(values map[string]string, out chan<- tea.Msg) {
 		return
 	}
 
-	// Publish the full set of waypoint facts up front so labels/metadata/next
-	// command are correct as each stage lights up.
-	out <- setupui.ConfigAcceptedMsg{
-		Waypoints: waypointsFromModel(model),
-		NextCmd:   model.NextCommand,
-		ReadyLine: fmt.Sprintf("%s · %s · %s backend", model.Capsule, model.Provider, model.BackendKind),
-	}
-
 	// Toolchain: resolve DevPod and Hauler for real.
 	environment := environmentMap(os.Environ())
 	completed := func(name string, resolution tooladapter.Resolution) error { return nil }
@@ -161,20 +197,38 @@ func (p richSetupPipeline) run(values map[string]string, out chan<- tea.Msg) {
 		fail(setupui.StageToolchain, err, "camp setup")
 		return
 	}
-	out <- setupui.WaypointCompletedMsg{Stage: setupui.StageToolchain, Meta: []string{
+	// Publish toolchain completion and persisted factset after DevPod/Hauler are
+	// actually ready so the UI does not claim completion before the real setup is
+	// done.
+	if !emit(setupui.WaypointCompletedMsg{Stage: setupui.StageToolchain, Meta: []string{
 		fmt.Sprintf("%s %s", model.DevPod.Name, model.DevPod.Version),
 		fmt.Sprintf("%s %s", model.Hauler.Name, model.Hauler.Version),
-	}}
+	}}) {
+		return
+	}
+	if !emit(setupui.ConfigAcceptedMsg{
+		Waypoints: waypointsFromModel(model),
+		NextCmd:   model.NextCommand,
+		ReadyLine: fmt.Sprintf("%s · %s · %s backend", model.Capsule, model.Provider, model.BackendKind),
+	}) {
+		return
+	}
 
 	// Runtime, Capsule, Storage are authoritative facts derived from the
 	// persisted configuration; emit them in order once established.
-	out <- setupui.WaypointCompletedMsg{Stage: setupui.StageRuntime, Meta: []string{
+	if !emit(setupui.WaypointCompletedMsg{Stage: setupui.StageRuntime, Meta: []string{
 		fmt.Sprintf("%s · %s", model.Provider, model.RuntimeKind),
 		"context " + model.Context,
-	}}
-	out <- setupui.WaypointCompletedMsg{Stage: setupui.StageCapsule, Meta: []string{model.Capsule, model.Source}}
-	out <- setupui.WaypointCompletedMsg{Stage: setupui.StageStorage, Meta: []string{model.BackendKind + " backend", model.Storage}}
-	out <- setupui.AllReadyMsg{}
+	}}) {
+		return
+	}
+	if !emit(setupui.WaypointCompletedMsg{Stage: setupui.StageCapsule, Meta: []string{model.Capsule, model.Source}}) {
+		return
+	}
+	if !emit(setupui.WaypointCompletedMsg{Stage: setupui.StageStorage, Meta: []string{model.BackendKind + " backend", model.Storage}}) {
+		return
+	}
+	emit(setupui.AllReadyMsg{})
 }
 
 func waypointsFromModel(model presentation.CampsiteModel) [4]setupui.Waypoint {

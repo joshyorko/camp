@@ -1,6 +1,7 @@
 package setupui
 
 import (
+	"path/filepath"
 	"strings"
 
 	"charm.land/bubbles/v2/textinput"
@@ -29,6 +30,7 @@ type ConfigForm struct {
 	compact bool
 	errText string
 	pal     Palette
+	capsuleEdited bool
 }
 
 // NewConfigForm builds the form with Camp's setup fields and their defaults.
@@ -89,6 +91,11 @@ func (f ConfigForm) Values() map[string]string {
 		}
 		out[fld.Key] = v
 	}
+	if !f.capsuleEdited {
+		if source, ok := out["source"]; ok && source != "" {
+			out["capsule"] = filepath.Base(filepath.Clean(source))
+		}
+	}
 	return out
 }
 
@@ -134,8 +141,16 @@ func (f ConfigForm) Update(msg tea.Msg) (ConfigForm, tea.Cmd) {
 		}
 	}
 	f.errText = ""
+	focusedKey := f.fields[f.focus].Key
 	var cmd tea.Cmd
+	before := ""
+	if focusedKey == "capsule" {
+		before = f.fields[f.focus].input.Value()
+	}
 	f.fields[f.focus].input, cmd = f.fields[f.focus].input.Update(msg)
+	if focusedKey == "capsule" && before != f.fields[f.focus].input.Value() {
+		f.capsuleEdited = true
+	}
 	return f, cmd
 }
 

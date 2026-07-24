@@ -80,8 +80,10 @@ type Model struct {
 	// relays those messages, so no lifecycle logic lives in presentation.
 	pipeline Pipeline
 	events   <-chan tea.Msg
-	// done signals the program is exiting (canceled/finished).
-	done bool
+	// done indicates terminal teardown was requested and suppresses duplicate
+	// teardown callbacks.
+	done   bool
+	onExit func()
 }
 
 // Pipeline runs the real first-run setup. Start is called with the accepted
@@ -90,6 +92,7 @@ type Model struct {
 // The channel is closed when provisioning ends.
 type Pipeline interface {
 	Start(values map[string]string) <-chan tea.Msg
+	Done() <-chan struct{}
 }
 
 // NewModel constructs the setup model with landmarks assigned to waypoints.
@@ -111,6 +114,21 @@ func NewModel(pal Palette, sprites map[string]Sprite, defaults map[string]string
 		guard:     NewSizeGuard(80, 20),
 		pipeline:  pipeline,
 	}
+}
+
+func (m Model) OnExit(fn func()) Model {
+	m.onExit = fn
+	return m
+}
+
+func (m Model) withExit() Model {
+	if m.done || m.onExit == nil {
+		m.done = true
+		return m
+	}
+	m.done = true
+	m.onExit()
+	return m
 }
 
 // listen reads the next pipeline event. Re-issued after each relayed message so
@@ -147,13 +165,13 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case tea.KeyPressMsg:
 		if msg.String() == "ctrl+c" {
 			m.phase = PhaseCanceled
-			m.done = true
+			m = m.withExit()
 			return m, tea.Quit
 		}
 		if m.phase == PhaseReady || m.phase == PhaseFailed {
 			// Any key dismisses the terminal states.
 			if msg.String() == "enter" || msg.String() == "q" || msg.String() == "esc" {
-				m.done = true
+				m = m.withExit()
 				return m, tea.Quit
 			}
 		}
@@ -169,7 +187,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case FormCancelMsg:
 		m.phase = PhaseCanceled
-		m.done = true
+		m = m.withExit()
 		return m, tea.Quit
 
 	case ConfigAcceptedMsg:
@@ -204,11 +222,11 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.phase = PhaseFailed
 		m.failMsg = msg.Message
 		m.recovery = msg.Recovery
-		return m, m.listen()
+		return m, nil
 
 	case AllReadyMsg:
 		m.phase = PhaseReady
-		return m, m.listen()
+		return m, nil
 	}
 
 	if m.phase == PhaseConfigure {

@@ -22,6 +22,10 @@ type CampsiteFacts struct {
 // callers print it directly, so the same terminal-native scene represents both
 // a freshly finished setup and a re-run over existing configuration.
 func RenderReadyCampsite(facts CampsiteFacts, w, h int, pal Palette, sprites map[string]Sprite) string {
+	renderHeight := h
+	if renderHeight > 1 {
+		renderHeight = h - 1
+	}
 	data := SceneData{
 		Title:    "⌂ CAMP",
 		Subtitle: "trailhead setup",
@@ -35,5 +39,5 @@ func RenderReadyCampsite(facts CampsiteFacts, w, h int, pal Palette, sprites map
 		ReadyLine:   facts.Capsule + " · " + facts.Provider + " · " + facts.BackendKind + " backend",
 		NextCommand: facts.NextCommand,
 	}
-	return Compose(data, w, h, pal, sprites)
+	return Compose(data, w, renderHeight, pal, sprites)
 }

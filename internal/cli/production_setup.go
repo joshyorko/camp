@@ -96,11 +96,12 @@ func (p *ProductionLifecycle) Setup(ctx context.Context, mode OutputMode, in io.
 			if err != nil {
 				return err
 			}
-			// Rich interactive path: a truecolor TTY with a real keyboard runs
-			// the full-screen Trailhead scene from the first prompt through
-			// CAMP IS READY. Everything else (plain, JSON, non-TTY, NO_COLOR,
-			// piped input) keeps the deterministic line-based flow below.
-			if experience == presentation.TerminalColor && inputIsTTY(in) {
+			// Rich interactive path: a truecolor TTY with a real keyboard and
+			// minimum dimensions runs the full-screen Trailhead scene from the
+			// first prompt through CAMP IS READY. Everything else (plain, JSON,
+			// non-TTY, NO_COLOR, piped input, undersized terminals) keeps the
+			// deterministic line-based flow below.
+			if canUseRichSetup(experience, width, height) && inputIsTTY(in) {
 				handled, err := p.runRichSetup(ctx, in, out, setupPromptDefaults{
 					Source: source, Backend: "file://" + filepath.Join(paths.DataRoot, "backend"),
 				})
@@ -133,6 +134,10 @@ func (p *ProductionLifecycle) Setup(ctx context.Context, mode OutputMode, in io.
 		return err
 	}
 	return renderProductionSetupCampsite(ctx, out, lockBytes, experience, width, height)
+}
+
+func canUseRichSetup(experience presentation.TerminalExperience, width, height int) bool {
+	return experience == presentation.TerminalColor && width >= 80 && height >= 20
 }
 
 func renderProductionSetupFailure(ctx context.Context, out io.Writer, lockBytes []byte, experience presentation.TerminalExperience, width, height int, cause error) error {

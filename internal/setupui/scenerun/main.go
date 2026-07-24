@@ -19,6 +19,7 @@ import (
 	"flag"
 	"fmt"
 	"os"
+	"sync"
 	"time"
 
 	tea "charm.land/bubbletea/v2"
@@ -43,8 +44,14 @@ func main() {
 		"provider": "docker",
 		"context":  "default",
 	}
-	result, err := setupui.Run(context.Background(), os.Stdin, os.Stdout,
-		setupui.DefaultPalette(), sprites, defaults, scriptedPipeline{mode: *mode, step: *step})
+	uiCtx := context.Background()
+	workerCtx, workerCancel := context.WithCancel(uiCtx)
+	pipeline := newScriptedPipeline(workerCtx, *mode, *step)
+	result, err := setupui.RunWithExit(uiCtx, os.Stdin, os.Stdout,
+		setupui.DefaultPalette(), sprites, defaults, &pipeline, workerCancel)
+	workerCancel()
+	pipeline.markDoneIfNotStarted()
+	<-pipeline.Done()
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "scenerun: %v\n", err)
 		os.Exit(1)
@@ -63,13 +70,38 @@ func main() {
 
 // scriptedPipeline satisfies setupui.Pipeline with deterministic sample events.
 type scriptedPipeline struct {
-	mode string
-	step time.Duration
+	mode     string
+	step     time.Duration
+	ctx      context.Context
+	done     chan struct{}
+	doneOnce sync.Once
+	startMu  sync.Mutex
+	started  bool
 }
 
-func (p scriptedPipeline) Start(values map[string]string) <-chan tea.Msg {
+func newScriptedPipeline(ctx context.Context, mode string, step time.Duration) scriptedPipeline {
+	return scriptedPipeline{ctx: ctx, mode: mode, step: step, done: make(chan struct{})}
+}
+
+func (p *scriptedPipeline) Done() <-chan struct{} {
+	return p.done
+}
+
+func (p *scriptedPipeline) markDoneIfNotStarted() {
+	p.startMu.Lock()
+	defer p.startMu.Unlock()
+	if !p.started {
+		p.doneOnce.Do(func() { close(p.done) })
+	}
+}
+
+func (p *scriptedPipeline) Start(values map[string]string) <-chan tea.Msg {
 	out := make(chan tea.Msg, 8)
+	p.startMu.Lock()
+	p.started = true
+	p.startMu.Unlock()
 	go func() {
+		defer p.doneOnce.Do(func() { close(p.done) })
 		defer close(out)
 		emit := func(m tea.Msg) {
 			time.Sleep(p.step)
@@ -89,7 +121,7 @@ func (p scriptedPipeline) Start(values map[string]string) <-chan tea.Msg {
 		switch p.mode {
 		case "hold":
 			// Stay at RUNTIME active until the process is canceled.
-			select {}
+			<-p.ctx.Done()
 		case "failure":
 			emit(setupui.WaypointFailedMsg{
 				Stage:    setupui.StageRuntime,

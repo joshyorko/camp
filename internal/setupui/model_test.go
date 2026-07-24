@@ -1,17 +1,41 @@
 package setupui
 
 import (
+	"sync"
 	"testing"
 
 	tea "charm.land/bubbletea/v2"
 )
 
-type stubPipeline struct{ started map[string]string }
+type stubPipeline struct {
+	started map[string]string
+	done    chan struct{}
+	once    sync.Once
+}
+
+func (s *stubPipeline) Done() <-chan struct{} {
+	if s.done == nil {
+		s.done = make(chan struct{})
+	}
+	return s.done
+}
+
+func (s *stubPipeline) closeDone() {
+	if s.done == nil {
+		s.done = make(chan struct{})
+	}
+	s.once.Do(func() {
+		close(s.done)
+	})
+}
 
 func (s *stubPipeline) Start(values map[string]string) <-chan tea.Msg {
 	s.started = values
 	ch := make(chan tea.Msg)
-	close(ch)
+	go func() {
+		defer close(ch)
+		defer s.closeDone()
+	}()
 	return ch
 }
 
@@ -44,6 +68,21 @@ func TestModelSubmitStartsPipelineAndActivatesToolchain(t *testing.T) {
 	}
 }
 
+func TestModelOnExitCallbackRunsAtMostOnce(t *testing.T) {
+	p := &stubPipeline{}
+	m := newTestModel(t, p)
+	calls := 0
+	m = m.OnExit(func() { calls++ })
+	next, _ := m.Update(tea.KeyPressMsg{Code: 'c', Mod: tea.ModCtrl})
+	m = next.(Model)
+	next, _ = m.Update(tea.KeyPressMsg{Code: 'c', Mod: tea.ModCtrl})
+	m = next.(Model)
+	if calls != 1 {
+		t.Fatalf("onExit calls = %d, want 1", calls)
+	}
+	_ = m
+}
+
 func TestModelWaypointCompletionAdvancesNext(t *testing.T) {
 	m := newTestModel(t, &stubPipeline{})
 	sub, _ := m.Update(FormSubmitMsg{Values: nil})
@@ -71,6 +110,46 @@ func TestModelFailureStopsAndPreservesCause(t *testing.T) {
 	if m.waypoints[StageRuntime].State != WaypointFailed {
 		t.Fatal("runtime should be failed")
 	}
+}
+
+func TestModelReadyDismissRunsOnExitOnce(t *testing.T) {
+	m := newTestModel(t, &stubPipeline{})
+	calls := 0
+	m = m.OnExit(func() { calls++ })
+	ready, _ := m.Update(AllReadyMsg{})
+	m = ready.(Model)
+	done, _ := m.Update(tea.KeyPressMsg{Code: tea.KeyEnter})
+	m = done.(Model)
+	if calls != 1 {
+		t.Fatalf("ready dismiss onExit calls = %d, want 1", calls)
+	}
+	if m.Canceled() {
+		t.Fatal("ready dismiss should not mark canceled")
+	}
+	_, _ = m.Update(tea.KeyPressMsg{Code: 'q', Text: "q"})
+	if calls != 1 {
+		t.Fatalf("ready dismiss onExit calls after extra key = %d, want 1", calls)
+	}
+}
+
+func TestModelFailureDismissRunsOnExitOnce(t *testing.T) {
+	m := newTestModel(t, &stubPipeline{})
+	calls := 0
+	m = m.OnExit(func() { calls++ })
+	sub, _ := m.Update(FormSubmitMsg{Values: nil})
+	m = sub.(Model)
+	failed, _ := m.Update(WaypointFailedMsg{Stage: StageRuntime, Message: "boom", Recovery: "camp setup"})
+	m = failed.(Model)
+	done, _ := m.Update(tea.KeyPressMsg{Code: tea.KeyEsc})
+	m = done.(Model)
+	if calls != 1 {
+		t.Fatalf("failure dismiss onExit calls = %d, want 1", calls)
+	}
+	_, _ = m.Update(tea.KeyPressMsg{Code: tea.KeyEnter})
+	if calls != 1 {
+		t.Fatalf("failure dismiss onExit calls after extra key = %d, want 1", calls)
+	}
+	_ = m
 }
 
 func TestModelCtrlCCancels(t *testing.T) {

@@ -26,7 +26,15 @@ type Result struct {
 // The pipeline supplies real setup operations; this function contains no
 // lifecycle logic. out/in are the program's TTY.
 func Run(ctx context.Context, in io.Reader, out io.Writer, pal Palette, sprites map[string]Sprite, defaults map[string]string, pipeline Pipeline) (Result, error) {
-	model := NewModel(pal, sprites, defaults, pipeline)
+	return RunWithExit(ctx, in, out, pal, sprites, defaults, pipeline, nil)
+}
+
+// RunWithExit is the same as Run with an additional user-exit callback. The
+// model invokes it once when cancellation or terminal-state dismissal requests
+// shutdown; callers still perform unconditional cleanup after RunWithExit
+// returns to cover terminal initialization errors.
+func RunWithExit(ctx context.Context, in io.Reader, out io.Writer, pal Palette, sprites map[string]Sprite, defaults map[string]string, pipeline Pipeline, onExit func()) (Result, error) {
+	model := NewModel(pal, sprites, defaults, pipeline).OnExit(onExit)
 	opts := []tea.ProgramOption{
 		tea.WithContext(ctx),
 		tea.WithOutput(out),

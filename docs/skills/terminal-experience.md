@@ -28,12 +28,21 @@ A `SizeGuard` shows a legible "terminal too small" prompt if a live resize shrin
 ## Terminal lifecycle and restoration
 
 The rich path runs in the alternate screen. Bubble Tea restores the terminal — leaves the alternate screen and shows the cursor — on every exit path: normal quit, error, EOF, Ctrl-C, and a panic inside the program. The shell is never left with the scene above the prompt or a hidden cursor. The cursor is visible only while a configuration field is focused (the focused text input is the visible focus indicator); provisioning, ready, and failure frames show no cursor. Cancellation writes no partial configuration.
+Static ready renders (for deterministic re-runs) are intentionally printed with one trailing row left for the shell and terminate with a trailing newline so the prompt and cursor appear cleanly on the next line.
 
 ## Fallback boundary
 
 Terminal selection is fail-closed. The rich interactive path is entered only for human output on an actual true-color TTY with a real keyboard (`COLORTERM=truecolor`/`24bit`, non-dumb `TERM`, readable width ≥ 80, no `CI`/`NO_COLOR`, and input that is itself a terminal). Every other path keeps the deterministic, control-free, line-based output byte-for-byte: JSON, redirected output, non-TTY, piped input, `NO_COLOR`, `TERM=dumb`, `CI`, and terminals below the supported size. Rich-mode ambition never weakens plain-mode reliability or lifecycle truth.
 
 Presentation metadata is untrusted at the rendering boundary. Reject control characters and credential-bearing URLs before writing any bytes (`setupui.SafeText`, mirrored by the campsite sanitizer). Render only already-sanitized backend/source identities; never display credentials, raw access tokens, secret query values, or environment contents. On failure, preserve the exact sanitized cause and print exactly one sanitized recovery command; never both a readiness claim and a failure.
+
+The rich path requires the minimum terminal floor of `80 × 20`; smaller screens do not engage rich mode and must fall back to deterministic plain output.
+
+Rich-mode cancellation is terminal-normal: the shell is restored without failure semantics, and no recovery command is emitted.
+
+When rich-mode provisioning fails, `camp setup` maps to the same lifecycle failure shape as the line-mode flow and reports exactly one recovery command.
+
+The Bubble Tea UI context and provisioning-worker context are separate. User exit cancels provisioning without killing Bubble Tea's restoration path, and the CLI does not return until a started worker has actually exited; cancellation before submission closes the never-started completion path explicitly.
 
 ## Lifecycle transcripts (non-setup)
 
