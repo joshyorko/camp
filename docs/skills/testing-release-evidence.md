@@ -26,10 +26,13 @@ generation, rejects non-public command mentions in operator docs, and verifies
 operator-index links. The command reference must initialize and render Cobra's
 built-in help flag for every public command. An exit-zero transcript without the
 exact command-specific fixture marker is insufficient dispatch evidence. The
-transcript lifecycle proves Cobra parsing
-and handler dispatch only; it is not DevPod, Hauler, backend, lifecycle, or
-release evidence. When the public tree changes, regenerate and review
-`git diff -- docs/generated/commands.md` before accepting the change.
+transcript lifecycle proves Cobra parsing and handler dispatch only; it is not DevPod,
+Hauler, backend, lifecycle, or release evidence. When the public tree changes,
+regenerate and review `git diff -- docs/generated/commands.md` before accepting
+the change.
+For `setup` dispatch, the fixture must keep the same Setup signature as
+`internal/cli` (`func(context.Context, OutputMode, io.Reader, io.Writer)`), even
+when docs execution does not supply stdin.
 
 When a stacked PR's base merges, restack the child directly onto the resulting `master` commit and compare `master...HEAD` before pushing. The post-rebase diff must contain only the child scope; record the old and new head SHAs, then force-push with a lease pinned to the observed old remote head so concurrent updates fail instead of being overwritten.
 

@@ -59,7 +59,7 @@ type doctorLifecycle interface {
 }
 
 type Setup interface {
-	Setup(context.Context, OutputMode, io.Writer) error
+	Setup(context.Context, OutputMode, io.Reader, io.Writer) error
 }
 
 func NewRootWithLifecycle(lifecycle Lifecycle) *cobra.Command {
@@ -86,7 +86,7 @@ func NewRootWithLifecycle(lifecycle Lifecycle) *cobra.Command {
 		root.AddCommand(noArgumentCommand("doctor", "Diagnose required host capabilities", diagnostics.Doctor))
 	}
 	if setup, ok := lifecycle.(Setup); ok {
-		root.AddCommand(noArgumentCommand("setup", "Install or reuse pinned DevPod and Hauler tools", setup.Setup))
+		root.AddCommand(setupCommand(setup.Setup))
 	}
 	root.AddCommand(
 		newInitCommand(lifecycle.Init),
@@ -99,6 +99,15 @@ func NewRootWithLifecycle(lifecycle Lifecycle) *cobra.Command {
 		hiddenRequiredArgumentCommand("supervise", lifecycle.Supervise),
 	)
 	return root
+}
+
+func setupCommand(run func(context.Context, OutputMode, io.Reader, io.Writer) error) *cobra.Command {
+	return &cobra.Command{
+		Use: "setup", Short: "Install or reuse pinned DevPod and Hauler tools", Args: usageArgs(cobra.NoArgs),
+		RunE: func(command *cobra.Command, _ []string) error {
+			return run(command.Context(), OutputModeFrom(command), command.InOrStdin(), command.OutOrStdout())
+		},
+	}
 }
 
 func newAttachCommand(run func(context.Context, AttachRequest, OutputMode, io.Writer) error) *cobra.Command {

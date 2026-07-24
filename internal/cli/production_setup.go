@@ -79,16 +79,41 @@ func resolveManagedToolPaths(ctx context.Context, ensurer toolEnsurer, goos, arc
 	return managedToolPaths{devpod: devpodResolution.Path, hauler: haulerResolution.Path}, nil
 }
 
-func (p *ProductionLifecycle) Setup(ctx context.Context, mode OutputMode, out io.Writer) error {
+func (p *ProductionLifecycle) Setup(ctx context.Context, mode OutputMode, in io.Reader, out io.Writer) error {
+	environment := environmentMap(os.Environ())
+	paths, err := config.ResolveXDGPaths(config.XDGInput{Environment: environment})
+	if err != nil {
+		return err
+	}
+	if mode == ModeHuman {
+		if _, statErr := os.Stat(paths.ConfigPath); statErr != nil {
+			if !os.IsNotExist(statErr) {
+				return statErr
+			}
+			source, err := os.Getwd()
+			if err != nil {
+				return err
+			}
+			request, err := promptSetupRequest(in, out, setupPromptDefaults{
+				Source: source, Backend: "file://" + filepath.Join(paths.DataRoot, "backend"),
+			})
+			if err != nil {
+				return err
+			}
+			if err := p.Init(ctx, request, mode, io.Discard); err != nil {
+				return err
+			}
+		}
+	}
 	lockBytes := campcontract.DistributionToolLock()
-	experience := resolveTerminalExperience(mode, out, environmentMap(os.Environ()), probeTerminal)
+	experience := resolveTerminalExperience(mode, out, environment, probeTerminal)
 	completed := func(name string, resolution tooladapter.Resolution) error {
 		return writeLifecycleEvents(out, experience, "setup", presentation.LifecycleEvent{Stage: presentation.StageToolReady, Message: fmt.Sprintf("%s %s is ready", name, resolution.Version)})
 	}
 	if mode == ModeJSON {
 		completed = nil
 	}
-	if err := runProductionToolSetupWithEvents(ctx, mode, out, lockBytes, "", environmentMap(os.Environ()), runtime.GOOS, runtime.GOARCH, completed); err != nil || mode == ModeJSON {
+	if err := runProductionToolSetupWithEvents(ctx, mode, out, lockBytes, "", environment, runtime.GOOS, runtime.GOARCH, completed); err != nil || mode == ModeJSON {
 		return err
 	}
 	return renderProductionSetupCampsite(ctx, out, lockBytes)
@@ -140,16 +165,6 @@ func runManagedToolSetupWithEvents(ctx context.Context, mode OutputMode, out io.
 	}
 	if mode == ModeJSON {
 		return writeSuccess(out, mode, "setup", result, "")
-	}
-	for index, name := range []string{"devpod", "hauler"} {
-		resolution := result.Tools[index]
-		if _, err := fmt.Fprintf(out, "%s %s ready at %s (asset sha256 %s; binary sha256 %s)\n", name, resolution.Version, resolution.Path, resolution.AssetSHA256, resolution.BinarySHA256); err != nil {
-			return err
-		}
-	}
-	if result.PATHExport != "" {
-		_, err := fmt.Fprintf(out, "Add managed tools to PATH for this shell:\n%s\n", result.PATHExport)
-		return err
 	}
 	return nil
 }

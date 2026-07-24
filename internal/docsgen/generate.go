@@ -139,14 +139,14 @@ func (transcriptLifecycle) Reopen(_ context.Context, _ string, _ cli.OutputMode,
 func (transcriptLifecycle) Recover(_ context.Context, _ string, _ cli.OutputMode, output io.Writer) error {
 	return fixtureDispatch(output, "recover")
 }
+func (transcriptLifecycle) Setup(_ context.Context, _ cli.OutputMode, _ io.Reader, output io.Writer) error {
+	return fixtureDispatch(output, "setup")
+}
 func (transcriptLifecycle) Supervise(_ context.Context, _ string, _ cli.OutputMode, output io.Writer) error {
 	return fixtureDispatch(output, "supervise")
 }
 func (transcriptLifecycle) Doctor(_ context.Context, _ cli.OutputMode, output io.Writer) error {
 	return fixtureDispatch(output, "doctor")
-}
-func (transcriptLifecycle) Setup(_ context.Context, _ cli.OutputMode, output io.Writer) error {
-	return fixtureDispatch(output, "setup")
 }
 
 func transcriptRoot() *cobra.Command { return cli.NewRootWithLifecycle(transcriptLifecycle{}) }
