@@ -3,7 +3,6 @@ package presentation
 import (
 	"strings"
 	"testing"
-	"unicode/utf8"
 )
 
 func testSceneModel() CampsiteModel {
@@ -73,7 +72,7 @@ func TestComposeSceneNeverExceedsRequestedWidthOrHeight(t *testing.T) {
 		}
 		for _, line := range lines {
 			visible := ansiEscapePattern.ReplaceAllString(line, "")
-			if width := utf8.RuneCountInString(visible); width > size.Width {
+			if width := visibleWidth(line); width > size.Width {
 				t.Fatalf("size %+v: line %q has visible width %d, exceeds terminal width", size, visible, width)
 			}
 		}
@@ -119,6 +118,17 @@ func TestWaypointTableTruncatesLongMetadataInsteadOfOverflowing(t *testing.T) {
 	for _, row := range rows {
 		if width := visibleWidth(row); width > 76 {
 			t.Fatalf("row %q has visible width %d, exceeds 76", row, width)
+		}
+	}
+}
+
+func TestReadyBandTruncatesLongNextCommandToSceneWidth(t *testing.T) {
+	model := testSceneModel()
+	model.NextCommand = "camp open " + strings.Repeat("deep/", 40) + "界"
+	got := composeScene(model, waypointStatuses(4, -1), ScreenSize{Width: 80, Height: 24}, true, nil)
+	for _, line := range strings.Split(strings.TrimSuffix(got, "\n"), "\n") {
+		if width := visibleWidth(line); width > 80 {
+			t.Fatalf("line %q has visible width %d, exceeds terminal width", ansiEscapePattern.ReplaceAllString(line, ""), width)
 		}
 	}
 }

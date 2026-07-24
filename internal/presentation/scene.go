@@ -7,17 +7,32 @@ import (
 
 const sceneMaxWidth = 96
 const compactHeightThreshold = 20
+const minCompactSceneHeight = 13
 const maxMetadataCellWidth = 32
 
 func truncateMetadataCell(value string) string {
-	if visibleWidth(value) <= maxMetadataCellWidth {
+	return truncateVisible(value, maxMetadataCellWidth)
+}
+
+func truncateVisible(value string, maxWidth int) string {
+	if maxWidth <= 0 || visibleWidth(value) <= maxWidth {
 		return value
 	}
-	runes := []rune(value)
-	if maxMetadataCellWidth <= 1 {
-		return string(runes[:maxMetadataCellWidth])
+	if maxWidth == 1 {
+		return "…"
 	}
-	return string(runes[:maxMetadataCellWidth-1]) + "…"
+	limit := maxWidth - 1
+	width := 0
+	var out strings.Builder
+	for _, character := range value {
+		charWidth := runeCellWidth(character)
+		if width+charWidth > limit {
+			break
+		}
+		out.WriteRune(character)
+		width += charWidth
+	}
+	return out.String() + "…"
 }
 
 type sceneFailure struct {
@@ -208,14 +223,14 @@ func readyBand(nextCommand string, width int) []string {
 	return []string{
 		centerLine(colorAmber+"CAMP IS READY"+colorReset, width),
 		"",
-		centerLine(colorBlue+"> "+nextCommand+colorReset, width),
+		centerLine(colorBlue+truncateVisible("> "+nextCommand, width)+colorReset, width),
 	}
 }
 
 func failureBand(failure sceneFailure, width int) []string {
 	return []string{
-		centerLine(colorRed+"stopped: "+failure.Message+colorReset, width),
-		centerLine(colorRed+"next: "+failure.Recovery+colorReset, width),
+		centerLine(colorRed+truncateVisible("stopped: "+failure.Message, width)+colorReset, width),
+		centerLine(colorRed+truncateVisible("next: "+failure.Recovery, width)+colorReset, width),
 	}
 }
 

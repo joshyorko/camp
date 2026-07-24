@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"strings"
 )
 
 type SetupWaypoint string
@@ -44,7 +45,7 @@ func (a *SetupAnimator) Advance(ctx context.Context, waypoint SetupWaypoint) err
 	}
 	completed := a.next + 1
 	var output string
-	if a.experience == TerminalColor {
+	if canRenderColorScene(a.experience == TerminalColor, a.size) {
 		statuses := waypointStatuses(completed, -1)
 		ready := completed == len(setupWaypoints)
 		output = "\x1b[2J\x1b[H" + composeScene(a.model, statuses, a.size, ready, nil)
@@ -69,8 +70,13 @@ func (a *SetupAnimator) Fail(ctx context.Context, waypoint SetupWaypoint, cause 
 	if index == -1 || index != a.next {
 		return fmt.Errorf("setup failure waypoint %q is out of order", waypoint)
 	}
-	message := cause.Error()
-	if a.experience == TerminalColor {
+	message := "setup failed"
+	if cause != nil {
+		message = cause.Error()
+	}
+	message = safeFailureText(message, "unsafe failure text omitted")
+	recovery = safeFailureText(recovery, "rerun camp setup")
+	if canRenderColorScene(a.experience == TerminalColor, a.size) {
 		statuses := waypointStatuses(index, index)
 		failure := &sceneFailure{Waypoint: waypoint, Message: message, Recovery: recovery}
 		_, err := io.WriteString(a.writer, "\x1b[2J\x1b[H"+composeScene(a.model, statuses, a.size, false, failure))
@@ -78,6 +84,13 @@ func (a *SetupAnimator) Fail(ctx context.Context, waypoint SetupWaypoint, cause 
 	}
 	_, err := fmt.Fprintf(a.writer, "setup: stopped: %s\nsetup: recover: %s\n", message, recovery)
 	return err
+}
+
+func safeFailureText(value, replacement string) string {
+	if strings.TrimSpace(value) == "" || unsafeCampsiteValue(value) {
+		return replacement
+	}
+	return value
 }
 
 func indexOfWaypoint(waypoint SetupWaypoint) int {

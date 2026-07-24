@@ -3,13 +3,46 @@ package presentation
 import (
 	"regexp"
 	"strings"
-	"unicode/utf8"
+	"unicode"
 )
 
 var ansiEscapePattern = regexp.MustCompile("\x1b\\[[0-9;]*m")
 
 func visibleWidth(s string) int {
-	return utf8.RuneCountInString(ansiEscapePattern.ReplaceAllString(s, ""))
+	width := 0
+	for _, character := range ansiEscapePattern.ReplaceAllString(s, "") {
+		width += runeCellWidth(character)
+	}
+	return width
+}
+
+func runeCellWidth(character rune) int {
+	switch {
+	case character == 0:
+		return 0
+	case character < 32 || (character >= 0x7f && character < 0xa0):
+		return 0
+	case unicode.Is(unicode.Mn, character), unicode.Is(unicode.Me, character), unicode.Is(unicode.Cf, character):
+		return 0
+	case isWideRune(character):
+		return 2
+	default:
+		return 1
+	}
+}
+
+func isWideRune(character rune) bool {
+	return (character >= 0x1100 && character <= 0x115f) ||
+		(character >= 0x2329 && character <= 0x232a) ||
+		(character >= 0x2e80 && character <= 0xa4cf) ||
+		(character >= 0xac00 && character <= 0xd7a3) ||
+		(character >= 0xf900 && character <= 0xfaff) ||
+		(character >= 0xfe10 && character <= 0xfe19) ||
+		(character >= 0xfe30 && character <= 0xfe6f) ||
+		(character >= 0xff00 && character <= 0xff60) ||
+		(character >= 0xffe0 && character <= 0xffe6) ||
+		(character >= 0x1f300 && character <= 0x1faff) ||
+		(character >= 0x20000 && character <= 0x3fffd)
 }
 
 func padRight(s string, width int) string {

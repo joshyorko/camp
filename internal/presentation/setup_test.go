@@ -76,3 +76,45 @@ func TestSetupAnimatorFailPlainPreservesExistingFailureShape(t *testing.T) {
 		t.Fatalf("output = %q, want %q", got, want)
 	}
 }
+
+func TestSetupAnimatorFailSanitizesUnsafeCauseAndRecovery(t *testing.T) {
+	model := CampsiteModel{
+		DevPod: ToolIdentity{Name: "DevPod", Version: "v0.26.1"}, Hauler: ToolIdentity{Name: "Hauler", Version: "v2.0.2"},
+		Provider: "docker", RuntimeKind: "local DevPod", Context: "default", Capsule: "brain", Source: "/brain",
+		BackendKind: "file", Storage: "no committed generation", NextCommand: "camp open /brain",
+	}
+	var output bytes.Buffer
+	animator, err := NewSetupAnimator(&output, TerminalPlain, model, ScreenSize{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := animator.Fail(context.Background(), SetupToolchain, errors.New("download failed \x1b[31m"), "https://user:secret@example.invalid/recover"); err != nil {
+		t.Fatal(err)
+	}
+	got := output.String()
+	if strings.Contains(got, "\x1b") || strings.Contains(got, "user:secret") {
+		t.Fatalf("unsafe failure output was not sanitized: %q", got)
+	}
+	if !strings.Contains(got, "unsafe failure text omitted") || !strings.Contains(got, "rerun camp setup") {
+		t.Fatalf("sanitized failure output missing replacements: %q", got)
+	}
+}
+
+func TestSetupAnimatorFallsBackToPlainOnVeryShortColorTerminal(t *testing.T) {
+	model := CampsiteModel{
+		DevPod: ToolIdentity{Name: "DevPod", Version: "v0.26.1"}, Hauler: ToolIdentity{Name: "Hauler", Version: "v2.0.2"},
+		Provider: "docker", RuntimeKind: "local DevPod", Context: "default", Capsule: "brain", Source: "/brain",
+		BackendKind: "file", Storage: "no committed generation", NextCommand: "camp open /brain",
+	}
+	var output bytes.Buffer
+	animator, err := NewSetupAnimator(&output, TerminalColor, model, ScreenSize{Width: 80, Height: 12})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := animator.Advance(context.Background(), SetupToolchain); err != nil {
+		t.Fatal(err)
+	}
+	if got := output.String(); strings.Contains(got, "\x1b[2J") || !strings.Contains(got, "setup: toolchain:") {
+		t.Fatalf("short color terminal did not fall back to plain output: %q", got)
+	}
+}

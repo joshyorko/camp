@@ -131,3 +131,9 @@ func TestOverlayGlyphsReturnsEmptyForNonPositiveWidth(t *testing.T) {
 		t.Fatalf("overlayGlyphs(-1) = %q, want empty", got)
 	}
 }
+
+func TestVisibleWidthCountsWideGlyphTerminalCells(t *testing.T) {
+	if got := visibleWidth("界🙂a"); got != 5 {
+		t.Fatalf("visibleWidth with wide glyphs = %d, want 5", got)
+	}
+}

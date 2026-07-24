@@ -41,7 +41,7 @@ func RenderCampsite(writer io.Writer, model CampsiteModel, options CampsiteOptio
 	if err := validateCampsiteModel(model); err != nil {
 		return err
 	}
-	if options.Color && options.Width >= 80 {
+	if canRenderColorScene(options.Color, ScreenSize{Width: options.Width, Height: options.Height}) {
 		_, err := io.WriteString(writer, renderColorCampsite(model, ScreenSize{Width: options.Width, Height: options.Height}))
 		return err
 	}
@@ -100,6 +100,10 @@ func unsafeCampsiteValue(value string) bool {
 		}
 	}
 	return false
+}
+
+func canRenderColorScene(color bool, size ScreenSize) bool {
+	return color && size.Width >= 80 && (size.Height == 0 || size.Height >= minCompactSceneHeight)
 }
 
 func renderPlainCampsite(model CampsiteModel) string {
