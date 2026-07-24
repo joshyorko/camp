@@ -1,0 +1,27 @@
+{
+  "name": "crate",
+  "legend": {
+    "L": "crate_light",
+    "M": "crate_mid",
+    "D": "crate_dark",
+    "G": "amber"
+  },
+  "glyphs": [
+    "╔════════╤══╗",
+    "║████████│▓▓║",
+    "╟────────┼──╢",
+    "║███⊛████│▓▓║",
+    "║████████│▓▓║",
+    "║████████│▓▓║",
+    "╚════════╧══╝"
+  ],
+  "colors": [
+    "LLLLLLLLLLLLL",
+    "LLLLLLLLLLDDL",
+    "LLLLLLLLLLDDL",
+    "LMMMGMMMMLDDL",
+    "LMMMMMMMMLDDL",
+    "LMMMMMMMMLDDL",
+    "LLLLLLLLLLLLL"
+  ]
+}

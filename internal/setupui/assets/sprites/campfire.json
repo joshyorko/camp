@@ -1,0 +1,25 @@
+{
+  "name": "campfire",
+  "legend": {
+    "Y": "fire_yellow",
+    "O": "fire_orange",
+    "R": "fire_red",
+    "L": "fire_log"
+  },
+  "glyphs": [
+    "  ·  ▲  ·  ",
+    "   ▲ ▲ ▲   ",
+    "   █████   ",
+    "  ███████  ",
+    " ▄███████▄ ",
+    " ╲▄▄▄╳▄▄▄╱ "
+  ],
+  "colors": [
+    "  Y  Y  Y  ",
+    "   O Y O   ",
+    "   OYYYO   ",
+    "  OOYYYOO  ",
+    " ROOOYOOOR ",
+    " LLLLLLLLL "
+  ]
+}

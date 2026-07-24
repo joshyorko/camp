@@ -1,0 +1,16 @@
+{
+  "name": "pine_small",
+  "legend": { "L": "pine_light", "M": "pine_mid", "D": "pine_dark", "T": "trunk" },
+  "glyphs": [
+    "  ▲  ",
+    " ╱█╲ ",
+    "╱███╲",
+    "  │  "
+  ],
+  "colors": [
+    "  L  ",
+    " LMD ",
+    "LMMMD",
+    "  T  "
+  ]
+}

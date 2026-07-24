@@ -2,3 +2,8 @@
 .serena
 .tokensave
 .superpowers
+
+# Python tooling caches
+__pycache__/
+*.pyc
+.scene-captures/*.ansi
