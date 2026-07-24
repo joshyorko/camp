@@ -110,7 +110,7 @@ func TestSetupAnimatorRedrawsColorSceneOnlyFromOrderedWaypoints(t *testing.T) {
 		BackendKind: "s3", Storage: "s3://camp/brain · generation 42", NextCommand: "camp open /brain",
 	}
 	var output bytes.Buffer
-	animator, err := NewSetupAnimator(&output, TerminalColor, model)
+	animator, err := NewSetupAnimator(&output, TerminalColor, model, ScreenSize{Width: 120, Height: 40})
 	if err != nil {
 		t.Fatalf("NewSetupAnimator: %v", err)
 	}
@@ -138,7 +138,7 @@ func TestSetupAnimatorRejectsSkippedOrRepeatedWaypointBeforeWriting(t *testing.T
 		BackendKind: "s3", Storage: "s3://camp/brain · generation 42", NextCommand: "camp open /brain",
 	}
 	var output bytes.Buffer
-	animator, err := NewSetupAnimator(&output, TerminalPlain, model)
+	animator, err := NewSetupAnimator(&output, TerminalPlain, model, ScreenSize{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -157,7 +157,7 @@ func TestSetupAnimatorPlainFallbackIsStableAndControlFree(t *testing.T) {
 		BackendKind: "s3", Storage: "s3://camp/brain · generation 42", NextCommand: "camp open /brain",
 	}
 	var output bytes.Buffer
-	animator, err := NewSetupAnimator(&output, TerminalPlain, model)
+	animator, err := NewSetupAnimator(&output, TerminalPlain, model, ScreenSize{})
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -41,7 +41,7 @@ func renderProductionSetupCampsite(ctx context.Context, out io.Writer, lockBytes
 	if err != nil {
 		return err
 	}
-	animator, err := presentation.NewSetupAnimator(out, experience, model)
+	animator, err := presentation.NewSetupAnimator(out, experience, model, presentation.ScreenSize{Width: width, Height: height})
 	if err != nil {
 		return err
 	}

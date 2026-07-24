@@ -42,7 +42,7 @@ func RenderCampsite(writer io.Writer, model CampsiteModel, options CampsiteOptio
 		return err
 	}
 	if options.Color && options.Width >= 80 {
-		_, err := io.WriteString(writer, renderColorCampsite(model))
+		_, err := io.WriteString(writer, renderColorCampsite(model, ScreenSize{Width: options.Width, Height: options.Height}))
 		return err
 	}
 	_, err := io.WriteString(writer, renderPlainCampsite(model))
@@ -118,36 +118,6 @@ func renderPlainCampsite(model CampsiteModel) string {
 	)
 }
 
-func renderColorCampsite(model CampsiteModel) string {
-	const (
-		reset  = "\x1b[0m"
-		sky    = "\x1b[38;2;78;163;235m"
-		pine   = "\x1b[38;2;69;119;74m"
-		canvas = "\x1b[38;2;238;215;169m"
-		amber  = "\x1b[38;2;255;171;45m"
-		green  = "\x1b[38;2;102;214;86m"
-		blue   = "\x1b[38;2;56;155;255m"
-	)
-	return fmt.Sprintf(
-		"%s        ·          ✦                ·            ✦          ·%s\n"+
-			"%s      /\\       /\\          /\\        /\\       /\\%s\n"+
-			"%s  ✓ TOOLCHAIN        ✓ RUNTIME        ✓ CAPSULE        ✓ STORAGE%s\n"+
-			"%s  %s %s · %s %s%s\n"+
-			"%s  %s · %s · context %s%s\n"+
-			"%s  %s · %s%s\n"+
-			"%s  %s backend · %s%s\n"+
-			"%s  ━━━━━━━━◆━━━━━━━━━━◆━━━━━━━━━━◆━━━━━━━━━━🔥%s\n\n"+
-			"%s                 CAMP IS READY%s\n"+
-			"%s                 > %s%s\n",
-		sky, reset,
-		pine, reset,
-		green, reset,
-		canvas, model.DevPod.Name, model.DevPod.Version, model.Hauler.Name, model.Hauler.Version, reset,
-		canvas, model.Provider, model.RuntimeKind, model.Context, reset,
-		canvas, model.Capsule, model.Source, reset,
-		canvas, model.BackendKind, model.Storage, reset,
-		amber, reset,
-		amber, reset,
-		blue, model.NextCommand, reset,
-	)
+func renderColorCampsite(model CampsiteModel, size ScreenSize) string {
+	return composeScene(model, waypointStatuses(len(setupWaypoints), -1), size, true, nil)
 }
