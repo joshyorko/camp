@@ -89,3 +89,36 @@ func TestComposeSceneHasNoTrailingWhitespacePerLine(t *testing.T) {
 		}
 	}
 }
+
+func TestWaypointTableAlignsTwoRowFallbackGroupsToOneSharedMargin(t *testing.T) {
+	model := testSceneModel()
+	rows := waypointTable(model, waypointStatuses(4, -1), 76)
+	// The fallback only engages when the single-row table doesn't fit; assert
+	// alignment holds whichever layout was chosen by checking every non-blank
+	// row starts at the same visible left margin as the first non-blank row.
+	firstMargin := -1
+	for _, row := range rows {
+		if row == "" {
+			continue
+		}
+		margin := len(row) - len(strings.TrimLeft(row, " "))
+		if firstMargin == -1 {
+			firstMargin = margin
+			continue
+		}
+		if margin != firstMargin {
+			t.Fatalf("row %q has margin %d, want %d (misaligned)", row, margin, firstMargin)
+		}
+	}
+}
+
+func TestWaypointTableTruncatesLongMetadataInsteadOfOverflowing(t *testing.T) {
+	model := testSceneModel()
+	model.Source = strings.Repeat("a", 200)
+	rows := waypointTable(model, waypointStatuses(4, -1), 76)
+	for _, row := range rows {
+		if width := visibleWidth(row); width > 76 {
+			t.Fatalf("row %q has visible width %d, exceeds 76", row, width)
+		}
+	}
+}

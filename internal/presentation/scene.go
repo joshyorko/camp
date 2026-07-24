@@ -7,6 +7,18 @@ import (
 
 const sceneMaxWidth = 96
 const compactHeightThreshold = 20
+const maxMetadataCellWidth = 32
+
+func truncateMetadataCell(value string) string {
+	if visibleWidth(value) <= maxMetadataCellWidth {
+		return value
+	}
+	runes := []rune(value)
+	if maxMetadataCellWidth <= 1 {
+		return string(runes[:maxMetadataCellWidth])
+	}
+	return string(runes[:maxMetadataCellWidth-1]) + "…"
+}
 
 type sceneFailure struct {
 	Waypoint SetupWaypoint
@@ -104,7 +116,7 @@ func waypointTable(model CampsiteModel, statuses [4]WaypointStatus, width int) [
 	for i, label := range labels {
 		column := []string{statuses[i].paint(label)}
 		for _, line := range metadata[i] {
-			column = append(column, colorCanvas+line+colorReset)
+			column = append(column, colorCanvas+truncateMetadataCell(line)+colorReset)
 		}
 		columns[i] = column
 	}
@@ -124,15 +136,23 @@ func waypointTable(model CampsiteModel, statuses [4]WaypointStatus, width int) [
 	// overflowing the requested width.
 	var rows []string
 	groups := [][][]string{columns[:2], columns[2:]}
+	groupRows := make([][]string, len(groups))
+	maxGroupWidth := 0
 	for i, group := range groups {
-		groupRows := columnBlock(group, gap)
-		if groupWidth := columnBlockWidth(group, gap); groupWidth < width {
-			groupRows = indentBlock(groupRows, (width-groupWidth)/2)
+		groupRows[i] = columnBlock(group, gap)
+		if w := columnBlockWidth(group, gap); w > maxGroupWidth {
+			maxGroupWidth = w
 		}
+	}
+	sharedMargin := 0
+	if maxGroupWidth < width {
+		sharedMargin = (width - maxGroupWidth) / 2
+	}
+	for i, rowsForGroup := range groupRows {
 		if i > 0 {
 			rows = append(rows, "")
 		}
-		rows = append(rows, groupRows...)
+		rows = append(rows, indentBlock(rowsForGroup, sharedMargin)...)
 	}
 	return rows
 }
