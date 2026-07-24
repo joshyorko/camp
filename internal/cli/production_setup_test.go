@@ -17,6 +17,7 @@ import (
 
 	tooladapter "github.com/joshyorko/camp/internal/adapters/tools"
 	"github.com/joshyorko/camp/internal/config"
+	"github.com/joshyorko/camp/internal/presentation"
 )
 
 func TestRunProductionToolSetupInstallsLockedFixturesUnderXDGData(t *testing.T) {
@@ -129,6 +130,34 @@ func TestRunManagedToolSetupEmitsOnlyCompletedToolEvents(t *testing.T) {
 	}
 	if got := strings.Join(events, ","); got != "devpod v0.26.1,hauler v2.0.2" {
 		t.Fatalf("events = %q", got)
+	}
+}
+
+func TestRunManagedToolSetupHumanComposesVerifiedEventsWithoutMachineDetails(t *testing.T) {
+	ensurer := &recordingToolEnsurer{resolutions: map[string]tooladapter.Resolution{
+		"devpod": {Path: "/camp/devpod/bin/devpod", Managed: true, Version: "v0.26.1", AssetSHA256: strings.Repeat("a", 64), BinarySHA256: strings.Repeat("b", 64)},
+		"hauler": {Path: "/camp/hauler/bin/hauler", Managed: true, Version: "v2.0.2", AssetSHA256: strings.Repeat("c", 64), BinarySHA256: strings.Repeat("d", 64)},
+	}}
+	var output bytes.Buffer
+	completed := func(name string, resolution tooladapter.Resolution) error {
+		return writeLifecycleEvents(&output, presentation.TerminalPlain, "setup", presentation.LifecycleEvent{
+			Stage:   presentation.StageToolReady,
+			Message: fmt.Sprintf("%s %s is ready", name, resolution.Version),
+		})
+	}
+
+	if err := runManagedToolSetupWithEvents(context.Background(), ModeHuman, &output, ensurer, "linux", "amd64", completed); err != nil {
+		t.Fatalf("runManagedToolSetupWithEvents: %v", err)
+	}
+	for _, want := range []string{"devpod v0.26.1 is ready", "hauler v2.0.2 is ready"} {
+		if !strings.Contains(output.String(), want) {
+			t.Fatalf("output = %q, want verified event %q", output.String(), want)
+		}
+	}
+	for _, forbidden := range []string{"ready at", "/camp/", "sha256", "export PATH"} {
+		if strings.Contains(output.String(), forbidden) {
+			t.Fatalf("output = %q, must not contain %q", output.String(), forbidden)
+		}
 	}
 }
 
