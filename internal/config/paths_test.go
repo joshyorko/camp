@@ -22,12 +22,12 @@ func TestResolveXDGPathsUsesDisjointConventionalLocations(t *testing.T) {
 	}
 
 	overridden, err := ResolveXDGPaths(XDGInput{Home: "/home/josh", Environment: map[string]string{
-		"XDG_CONFIG_HOME": "/config", "XDG_DATA_HOME": "/data", "XDG_CACHE_HOME": "/cache",
+		"XDG_CONFIG_HOME": "/config", "XDG_DATA_HOME": "/data", "XDG_CACHE_HOME": "/cache", "XDG_RUNTIME_DIR": "/run/user/1000",
 	}})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if overridden.ConfigPath != "/config/camp/config.yaml" || overridden.WorkRoot != "/data/camp/work" || overridden.CacheRoot != "/cache/camp" {
+	if overridden.ConfigPath != "/config/camp/config.yaml" || overridden.WorkRoot != "/data/camp/work" || overridden.CacheRoot != "/cache/camp" || overridden.RuntimeRoot != "/run/user/1000/camp" {
 		t.Fatalf("overridden XDG paths = %#v", overridden)
 	}
 
@@ -35,6 +35,7 @@ func TestResolveXDGPathsUsesDisjointConventionalLocations(t *testing.T) {
 		"relative override": {Home: "/home/josh", Environment: map[string]string{"XDG_DATA_HOME": "relative"}},
 		"overlapping roots": {Home: "/home/josh", Environment: map[string]string{"XDG_CONFIG_HOME": "/shared", "XDG_DATA_HOME": "/shared"}},
 		"root data home":    {Home: "/home/josh", Environment: map[string]string{"XDG_DATA_HOME": "/"}},
+		"relative runtime":  {Home: "/home/josh", Environment: map[string]string{"XDG_RUNTIME_DIR": "relative"}},
 	} {
 		t.Run(name, func(t *testing.T) {
 			if _, err := ResolveXDGPaths(input); err == nil {
