@@ -2,6 +2,7 @@
 .serena
 .tokensave
 .superpowers
+.worktrees/
 
 # Python tooling caches
 __pycache__/
