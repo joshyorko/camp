@@ -74,6 +74,12 @@ func layoutFor(w, h int) Layout {
 
 // Compose builds the full-screen frame for the scene at the given size.
 func Compose(data SceneData, w, h int, pal Palette, sprites map[string]Sprite) string {
+	field := NewStarfield(0xCA37)
+	field.Resize(w, layoutFor(w, h).SkyRows)
+	return composeWithStarfield(data, w, h, pal, sprites, field)
+}
+
+func composeWithStarfield(data SceneData, w, h int, pal Palette, sprites map[string]Sprite, field *Starfield) string {
 	if w < 1 || h < 1 {
 		return ""
 	}
@@ -81,7 +87,9 @@ func Compose(data SceneData, w, h int, pal Palette, sprites map[string]Sprite) s
 	lay := layoutFor(w, h)
 
 	// --- Background layers (painter's order, back to front) ---
-	NewStarfield(0xCA37).Paint(c, lay.SkyRows, pal)
+	if field != nil {
+		field.Paint(c, lay.SkyRows, pal)
+	}
 	PaintMountains(c, lay.Horizon, pal)
 
 	// Trail geometry + anchors first so forest/labels can avoid them.

@@ -74,6 +74,7 @@ type Model struct {
 	pal     Palette
 	sprites map[string]Sprite
 	guard   SizeGuard
+	starfield *Starfield
 
 	// pipeline drives the real setup operations. Start launches provisioning on
 	// its own goroutine and returns a channel of typed messages; the model only
@@ -112,6 +113,7 @@ func NewModel(pal Palette, sprites map[string]Sprite, defaults map[string]string
 		pal:       pal,
 		sprites:   sprites,
 		guard:     NewSizeGuard(MinWidth, MinHeight),
+		starfield: NewStarfield(0xCA37),
 		pipeline:  pipeline,
 	}
 }
@@ -148,7 +150,7 @@ func (m Model) listen() tea.Cmd {
 	}
 }
 
-func (m Model) Init() tea.Cmd { return m.form.Init() }
+func (m Model) Init() tea.Cmd { return tea.Batch(m.form.Init(), m.starfield.Init()) }
 
 // Update is the single event loop. Window sizing is handled continuously;
 // ctrl+c cancels from any phase with a clean exit; the form drives PhaseConfigure
@@ -160,7 +162,11 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.guard = m.guard.Update(msg.Width, msg.Height)
 		m.form.SetWidth(min(msg.Width-10, 72))
 		m.form.SetCompact(msg.Height < 30)
+		m.starfield.Resize(msg.Width, layoutFor(msg.Width, msg.Height).SkyRows)
 		return m, nil
+
+	case starfieldTickMsg:
+		return m, m.starfield.Update(msg)
 
 	case tea.KeyPressMsg:
 		if msg.String() == "ctrl+c" {
@@ -244,7 +250,7 @@ func (m Model) View() tea.View {
 	if !m.guard.OK() {
 		content = m.guard.View(m.pal)
 	} else {
-		content = Compose(m.sceneData(), m.width, m.height, m.pal, m.sprites)
+		content = composeWithStarfield(m.sceneData(), m.width, m.height, m.pal, m.sprites, m.starfield)
 	}
 	v := tea.NewView(content)
 	v.AltScreen = true
