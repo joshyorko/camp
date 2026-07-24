@@ -23,6 +23,7 @@ type XDGPaths struct {
 	StoreRoot   string `json:"storeRoot" yaml:"storeRoot"`
 	SessionRoot string `json:"sessionRoot" yaml:"sessionRoot"`
 	CacheRoot   string `json:"cacheRoot" yaml:"cacheRoot"`
+	RuntimeRoot string `json:"runtimeRoot" yaml:"runtimeRoot"`
 }
 
 type FileBackend struct {
@@ -72,6 +73,14 @@ func ResolveXDGPaths(input XDGInput) (XDGPaths, error) {
 		}
 	}
 	dataRoot := filepath.Join(filepath.Clean(dataHome), "camp")
+	runtimeRoot := filepath.Join(dataRoot, "runtime")
+	if value, ok := input.Environment["XDG_RUNTIME_DIR"]; ok && strings.TrimSpace(value) != "" {
+		runtimeHome := strings.TrimSpace(value)
+		if err := validateXDGRoot("runtime", runtimeHome); err != nil {
+			return XDGPaths{}, err
+		}
+		runtimeRoot = filepath.Join(filepath.Clean(runtimeHome), "camp")
+	}
 	return XDGPaths{
 		ConfigPath:  filepath.Join(filepath.Clean(configHome), "camp", "config.yaml"),
 		DataRoot:    dataRoot,
@@ -79,6 +88,7 @@ func ResolveXDGPaths(input XDGInput) (XDGPaths, error) {
 		StoreRoot:   filepath.Join(dataRoot, "stores"),
 		SessionRoot: filepath.Join(dataRoot, "sessions"),
 		CacheRoot:   filepath.Join(filepath.Clean(cacheHome), "camp"),
+		RuntimeRoot: runtimeRoot,
 	}, nil
 }
 

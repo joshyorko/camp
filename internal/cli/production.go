@@ -55,7 +55,7 @@ func (p *ProductionLifecycle) Doctor(ctx context.Context, mode OutputMode, out i
 	}
 	runner := subprocess.NewRunner()
 	confinement := supervisor.NewConfinementResolver(runner, exec.LookPath, func() string { return "host" })
-	pastaRuntime, err := newProductionPastaRuntime(confinement, paths.DataRoot)
+	pastaRuntime, err := newProductionPastaRuntime(confinement, paths.RuntimeRoot)
 	if err != nil {
 		return err
 	}

@@ -825,6 +825,10 @@ func (o *Open) create(ctx context.Context, request OpenRequest) (OpenResult, err
 	request.SessionID = sessionID
 	paths := o.deps.Paths
 	sessionRoot := filepath.Join(paths.SessionRoot, sessionID)
+	sessionRuntimeRoot := filepath.Join(sessionRoot, "runtime")
+	if paths.RuntimeRoot != "" {
+		sessionRuntimeRoot = filepath.Join(paths.RuntimeRoot, sessionID)
+	}
 	backend := o.effectiveBackend(request)
 	runtime := request.Runtime
 	runtime.Capsule = request.Capsule
@@ -842,7 +846,7 @@ func (o *Open) create(ctx context.Context, request OpenRequest) (OpenResult, err
 		Recovery: domain.RecoveryRecord{
 			Objective:     domain.RecoveryObjectiveOpen,
 			Configuration: config.DurableBackendConfiguration(runtime, backend, paths),
-			Session:       domain.SessionArtifactPaths{Root: sessionRoot, RuntimeRoot: filepath.Join(sessionRoot, "runtime"), HaulPath: filepath.Join(sessionRoot, "generation.tar.zst"), RegistryOverlay: filepath.Join(sessionRoot, "registry")},
+			Session:       domain.SessionArtifactPaths{Root: sessionRoot, RuntimeRoot: sessionRuntimeRoot, HaulPath: filepath.Join(sessionRoot, "generation.tar.zst"), RegistryOverlay: filepath.Join(sessionRoot, "registry")},
 			Entry:         domain.EntryRequestRecord{Mode: request.EntryMode, Target: entryTarget},
 			Cleanup:       domain.CleanupPolicy{WorkspaceAction: domain.WorkspaceCleanupDelete, RemoveSessionArtifacts: true},
 		},

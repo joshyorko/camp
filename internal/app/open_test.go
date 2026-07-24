@@ -268,6 +268,8 @@ func TestOpenRejectsRequestFileBackendThatDiffersFromConstructor(t *testing.T) {
 func TestOpenAdoptsRootPreservesOwnershipAndResolvesTargetAfterCommit(t *testing.T) {
 	t.Parallel()
 	environment := newOpenTestEnvironment(t)
+	runtimeRoot := t.TempDir()
+	environment.open.deps.Paths.RuntimeRoot = runtimeRoot
 	root := filepath.Join(t.TempDir(), "SecondBrain")
 	if err := os.MkdirAll(filepath.Join(root, "MemoryD"), 0o700); err != nil {
 		t.Fatal(err)
@@ -289,6 +291,9 @@ func TestOpenAdoptsRootPreservesOwnershipAndResolvesTargetAfterCommit(t *testing
 	}
 	if result.Snapshot.State != domain.SessionOpen || result.Snapshot.Materialization.Mode != domain.MaterializationAdopted || result.Snapshot.Materialization.CleanupPermitted {
 		t.Fatalf("snapshot = %#v", result.Snapshot)
+	}
+	if result.Snapshot.Recovery.Session.RuntimeRoot != filepath.Join(runtimeRoot, "adopted-session") {
+		t.Fatalf("session runtime root = %q", result.Snapshot.Recovery.Session.RuntimeRoot)
 	}
 	if result.Snapshot.Workspace.Provider != "docker" || !result.Snapshot.Workspace.LocalProvider {
 		t.Fatalf("workspace classification = %#v, want default local docker provider", result.Snapshot.Workspace)
