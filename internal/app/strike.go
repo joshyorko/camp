@@ -38,6 +38,7 @@ type StrikeController interface {
 type Strike struct {
 	Sessions   StrikeSessions
 	Controller StrikeController
+	Effects    CloseEffects
 }
 
 func (s Strike) Run(ctx context.Context, request StrikeRequest, plan StrikePlan) (StrikeResult, error) {
@@ -54,7 +55,9 @@ func (s Strike) Run(ctx context.Context, request StrikeRequest, plan StrikePlan)
 	for _, session := range sessions {
 		switch session.State {
 		case domain.SessionOpening, domain.SessionOpen, domain.SessionRecovering:
-			return StrikeResult{}, fmt.Errorf("refusing strike while session %s is %s; close or recover it first", session.SessionID, session.State)
+			if err := s.quiesce(ctx, session); err != nil {
+				return StrikeResult{}, fmt.Errorf("quiesce session %s before strike: %w", session.SessionID, err)
+			}
 		}
 	}
 	if request.Purge {
@@ -68,4 +71,46 @@ func (s Strike) Run(ctx context.Context, request StrikeRequest, plan StrikePlan)
 		return StrikeResult{}, err
 	}
 	return StrikeResult{ArchivedPath: archive}, nil
+}
+
+func (s Strike) quiesce(ctx context.Context, session domain.JournalSnapshot) error {
+	if s.Effects == nil {
+		return errors.New("strike cleanup dependencies are incomplete")
+	}
+	if session.Workspace.ID != "" || session.Workspace.Context != "" {
+		if session.Workspace.ID == "" || session.Workspace.Context == "" {
+			return errors.New("recorded workspace identity is incomplete")
+		}
+		if err := s.Effects.CloseWorkspace(ctx, session, false); err != nil {
+			return err
+		}
+	}
+	if len(session.Recovery.Forwarding) != 0 {
+		if err := s.Effects.StopForwarders(ctx, session); err != nil {
+			return err
+		}
+	}
+	if len(session.Services) != 0 {
+		if err := s.Effects.StopServices(ctx, session); err != nil {
+			return err
+		}
+	}
+	if session.Supervisor.Identity != (domain.ProcessIdentity{}) || session.Supervisor.Desired != "" {
+		if err := s.Effects.StopSupervisor(ctx, session); err != nil {
+			return err
+		}
+	}
+	if session.Materialization.SchemaVersion != 0 {
+		removed, err := s.Effects.RemoveMaterialization(ctx, session)
+		if err != nil {
+			return err
+		}
+		if session.Materialization.Mode == domain.MaterializationCreated && !removed {
+			return errors.New("owned materialization was not removed")
+		}
+		if session.Materialization.Mode == domain.MaterializationAdopted && removed {
+			return errors.New("adopted materialization was removed")
+		}
+	}
+	return nil
 }

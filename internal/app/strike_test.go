@@ -22,11 +22,61 @@ func (c *strikeController) Archive(context.Context, StrikePlan) (string, error) 
 }
 func (c *strikeController) Purge(context.Context, StrikePlan) error { c.called = true; return nil }
 
-func TestStrikeRefusesActiveSession(t *testing.T) {
+type strikeEffects struct {
+	workspace, forwarders, services, supervisor, materialization int
+}
+
+func (e *strikeEffects) CloseWorkspace(context.Context, domain.JournalSnapshot, bool) error {
+	e.workspace++
+	return nil
+}
+func (e *strikeEffects) StopForwarders(context.Context, domain.JournalSnapshot) error {
+	e.forwarders++
+	return nil
+}
+func (e *strikeEffects) StopServices(context.Context, domain.JournalSnapshot) error {
+	e.services++
+	return nil
+}
+func (e *strikeEffects) StopSupervisor(context.Context, domain.JournalSnapshot) error {
+	e.supervisor++
+	return nil
+}
+func (e *strikeEffects) ReleaseLease(context.Context, domain.JournalSnapshot) error { return nil }
+func (e *strikeEffects) RemoveMaterialization(context.Context, domain.JournalSnapshot) (bool, error) {
+	e.materialization++
+	return true, nil
+}
+
+func TestStrikeQuiescesActiveSessionBeforeArchive(t *testing.T) {
 	controller := &strikeController{}
-	_, err := (Strike{Sessions: strikeJournal{sessions: []domain.JournalSnapshot{{State: domain.SessionOpen}}}, Controller: controller}).Run(context.Background(), StrikeRequest{}, StrikePlan{})
-	if err == nil || controller.called {
-		t.Fatal("active session was not rejected before mutation")
+	effects := &strikeEffects{}
+	session := domain.JournalSnapshot{
+		State:           domain.SessionOpen,
+		Workspace:       domain.WorkspaceRecord{ID: "workspace", Context: "default"},
+		Services:        []domain.ServiceUnitRecord{{Name: "registry"}},
+		Recovery:        domain.RecoveryRecord{Forwarding: []domain.ForwardingRecord{{Name: "registry"}}},
+		Supervisor:      domain.SupervisorRecord{Identity: domain.ProcessIdentity{PID: 1, BootID: "boot", StartTicks: 1}},
+		Materialization: domain.Materialization{SchemaVersion: domain.SchemaVersion, Mode: domain.MaterializationCreated, CleanupPermitted: true},
+	}
+	_, err := (Strike{Sessions: strikeJournal{sessions: []domain.JournalSnapshot{session}}, Controller: controller, Effects: effects}).Run(context.Background(), StrikeRequest{}, StrikePlan{BackendSafe: true})
+	if err != nil || !controller.called {
+		t.Fatalf("active session was not quiesced and archived: %v", err)
+	}
+	if effects.workspace != 1 || effects.forwarders != 1 || effects.services != 1 || effects.supervisor != 1 || effects.materialization != 1 {
+		t.Fatalf("cleanup calls = %+v", effects)
+	}
+}
+
+func TestStrikeSkipsIncompleteEffectsForAbandonedOpeningSession(t *testing.T) {
+	controller := &strikeController{}
+	effects := &strikeEffects{}
+	_, err := (Strike{Sessions: strikeJournal{sessions: []domain.JournalSnapshot{{State: domain.SessionOpening}}}, Controller: controller, Effects: effects}).Run(context.Background(), StrikeRequest{}, StrikePlan{BackendSafe: true})
+	if err != nil || !controller.called {
+		t.Fatalf("abandoned opening session blocked strike: %v", err)
+	}
+	if *effects != (strikeEffects{}) {
+		t.Fatalf("incomplete effects were invoked: %+v", effects)
 	}
 }
 

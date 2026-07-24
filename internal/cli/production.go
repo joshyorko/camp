@@ -50,7 +50,12 @@ type ProductionLifecycle struct{}
 func NewProductionLifecycle() *ProductionLifecycle { return &ProductionLifecycle{} }
 
 func (p *ProductionLifecycle) Strike(ctx context.Context, request StrikeRequest, mode OutputMode, out io.Writer) error {
-	base, err := composeProductionBase(ctx)
+	composition, err := composeProduction(ctx)
+	if err != nil {
+		return err
+	}
+	base := composition.productionBase
+	services, err := composeServiceBundle(composition)
 	if err != nil {
 		return err
 	}
@@ -61,7 +66,8 @@ func (p *ProductionLifecycle) Strike(ctx context.Context, request StrikeRequest,
 	for _, name := range names {
 		targets = append(targets, filepath.Join(base.paths.DataRoot, name))
 	}
-	usecase := app.Strike{Sessions: base.journal, Controller: strikeadapter.NewController(time.Now)}
+	effects := lifecycleadapter.NewCloseEffects(composition.devpod, services.processes, services.units, nil, base.ownership)
+	usecase := app.Strike{Sessions: base.journal, Controller: strikeadapter.NewController(time.Now), Effects: effects}
 	result, err := usecase.Run(ctx, app.StrikeRequest{Purge: request.Purge, Yes: request.Yes}, app.StrikePlan{
 		DataRoot: base.paths.DataRoot, Targets: targets, BackendSafe: backendSafe,
 	})
