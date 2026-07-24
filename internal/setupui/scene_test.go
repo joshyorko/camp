@@ -118,6 +118,76 @@ func TestConfigureStateShowsFormAndSuppressesCallouts(t *testing.T) {
 	}
 }
 
+// The last row belongs to the help line: no foreground block (ready band,
+// command box, failure band) may reach it at any supported size.
+func TestHelpRowIsNeverOverdrawnByForeground(t *testing.T) {
+	sprites := loadForTest(t)
+	pal := DefaultPalette()
+	sizes := [][2]int{{80, 24}, {120, 40}, {160, 48}}
+	for _, st := range []string{"ready", "failure"} {
+		for _, sz := range sizes {
+			w, h := sz[0], sz[1]
+			frame := SampleFrame(st, w, h, pal, sprites)
+			lines := strings.Split(frame, "\n")
+			last := ansi.Strip(lines[len(lines)-1])
+			if !strings.Contains(last, "enter to exit") {
+				t.Fatalf("%s %dx%d: help line missing from last row: %q", st, w, h, last)
+			}
+			for _, corner := range []string{"╰", "╯", "─╮", "╭"} {
+				if strings.Contains(last, corner) {
+					t.Fatalf("%s %dx%d: foreground block bleeds into the help row: %q", st, w, h, last)
+				}
+			}
+		}
+	}
+}
+
+// Waypoint labels must stay intact over terrain: the badge, the space, and the
+// label text may never be interleaved with ridge/forest glyphs.
+func TestWaypointLabelsAreNotCorruptedByTerrain(t *testing.T) {
+	sprites := loadForTest(t)
+	pal := DefaultPalette()
+	sizes := [][2]int{{80, 24}, {120, 40}, {160, 48}, {200, 60}}
+	for _, st := range []string{"progress", "ready", "failure"} {
+		for _, sz := range sizes {
+			plain := ansi.Strip(SampleFrame(st, sz[0], sz[1], pal, sprites))
+			for _, label := range []string{"TOOLCHAIN", "RUNTIME", "CAPSULE", "STORAGE"} {
+				found := false
+				for _, badge := range []string{"✓ ", "◈ ", "✗ ", "○ "} {
+					if strings.Contains(plain, badge+label) {
+						found = true
+						break
+					}
+				}
+				if !found {
+					t.Fatalf("%s %dx%d: label %q corrupted or missing (no intact badge+space+label)", st, sz[0], sz[1], label)
+				}
+			}
+		}
+	}
+}
+
+// The compact configure layout must fit fully inside an 80×24 terminal with
+// the help line still visible on the last row.
+func TestCompactConfigureFitsSmallTerminal(t *testing.T) {
+	sprites := loadForTest(t)
+	pal := DefaultPalette()
+	frame := SampleFrame("configure", 80, 24, pal, sprites)
+	lines := strings.Split(frame, "\n")
+	if len(lines) > 24 {
+		t.Fatalf("configure 80x24 renders %d lines", len(lines))
+	}
+	plain := ansi.Strip(frame)
+	for _, want := range []string{"CONFIGURE", "Source path", "DevPod context"} {
+		if !strings.Contains(plain, want) {
+			t.Fatalf("configure 80x24 missing %q", want)
+		}
+	}
+	if !strings.Contains(ansi.Strip(lines[len(lines)-1]), "tab next") {
+		t.Fatal("configure 80x24 help line missing from last row")
+	}
+}
+
 func TestSafeTextRejectsControlAndCredentials(t *testing.T) {
 	cases := []struct {
 		in   string
@@ -137,6 +207,62 @@ func TestSafeTextRejectsControlAndCredentials(t *testing.T) {
 		}
 		if !c.safe && got != "REPLACED" {
 			t.Fatalf("SafeText(%q) did not sanitize unsafe value; got %q", c.in, got)
+		}
+	}
+}
+
+func TestTrailPaintUsesFailColorThroughFailedPlusTwoThenDims(t *testing.T) {
+	width, height := 80, 30
+	pal := DefaultPalette()
+	canvas := NewCanvas(width, height, pal.Bg)
+	trail := NewTrail(width, 14, 3)
+	anchors := trail.Anchors(4, width)
+
+	states := []WaypointState{
+		WaypointCompleted,
+		WaypointFailed,
+		WaypointPending,
+		WaypointPending,
+	}
+	for i := range anchors {
+		anchors[i].State = states[i]
+	}
+	trail.Paint(canvas, states, anchors, pal)
+
+	failedX := anchors[1].X
+	for y := 0; y < height; y++ {
+		if cell := canvas.cells[y*width+failedX]; cell.set && cell.r == '✗' {
+			if !sameColor(cell.fg, pal.Fail) {
+				t.Fatalf("failed node at x=%d y=%d is not fail color", failedX, y)
+			}
+			break
+		}
+	}
+
+	for x := failedX + 1; x <= failedX+2; x++ {
+		found := false
+		for y := 0; y < height; y++ {
+			cell := canvas.cells[y*width+x]
+			if !cell.set || cell.r == '✗' {
+				continue
+			}
+			found = true
+			if !sameColor(cell.fg, pal.Fail) {
+				t.Fatalf("x=%d expects fail color through failed+2", x)
+			}
+		}
+		if !found {
+			t.Fatalf("x=%d has no non-node trail body cell", x)
+		}
+	}
+
+	for y := 0; y < height; y++ {
+		cell := canvas.cells[y*width+failedX+3]
+		if !cell.set || cell.r == '✗' {
+			continue
+		}
+		if !sameColor(cell.fg, pal.TrailDim) {
+			t.Fatalf("x=%d should be dim after failed+2", failedX+3)
 		}
 	}
 }

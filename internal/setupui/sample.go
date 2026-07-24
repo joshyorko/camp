@@ -7,7 +7,7 @@ package setupui
 func SampleFrame(state string, w, h int, pal Palette, sprites map[string]Sprite) string {
 	base := [4]Waypoint{
 		{Label: "TOOLCHAIN", Landmark: "crate", Meta: []string{"DevPod v0.26.1", "Hauler v2.0.2"}},
-		{Label: "RUNTIME", Landmark: "helm", Meta: []string{"room-of-requirement", "context ror"}},
+		{Label: "RUNTIME", Landmark: "helm", Meta: []string{"docker · docker", "context default"}},
 		{Label: "CAPSULE", Landmark: "tent", Meta: []string{"SecondBrain", "~/SecondBrain"}},
 		{Label: "STORAGE", Landmark: "campfire", Meta: []string{"file backend", "generation ready"}},
 	}
@@ -21,13 +21,14 @@ func SampleFrame(state string, w, h int, pal Palette, sprites map[string]Sprite)
 			"source": "~/SecondBrain", "capsule": "SecondBrain",
 			"backend": "file://…", "provider": "docker", "context": "default",
 		})
-		form.SetWidth(min(w-6, 60))
+		form.SetWidth(min(w-10, 72))
+		form.SetCompact(h < 30)
 		for i := range base {
 			base[i].State = WaypointPending
 		}
 		data.Waypoints = base
 		data.Foreground = form.View()
-		data.HelpLine = "tab next · shift+tab prev · enter continue · esc cancel"
+		data.HelpLine = "tab next · shift+tab prev · enter continue · esc cancel · ctrl+c quit"
 	case "progress":
 		base[0].State = WaypointCompleted
 		base[1].State = WaypointActive
@@ -50,7 +51,7 @@ func SampleFrame(state string, w, h int, pal Palette, sprites map[string]Sprite)
 		}
 		data.Waypoints = base
 		data.Ready = true
-		data.ReadyLine = "SecondBrain · room-of-requirement · file backend"
+		data.ReadyLine = "SecondBrain · docker · file backend"
 		data.NextCommand = "camp open ~/SecondBrain"
 		data.HelpLine = "enter to exit · ctrl+c quit"
 	}

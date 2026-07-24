@@ -6,5 +6,6 @@
 # Python tooling caches
 __pycache__/
 *.pyc
-.scene-captures/*.ansi
+.scene-captures/
 .camp/
+/camp

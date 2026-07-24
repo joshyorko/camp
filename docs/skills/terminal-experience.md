@@ -55,13 +55,35 @@ next: camp recover session-1
 
 ## Capture workflow
 
-Visual review is part of acceptance; passing goldens is not visual acceptance. The tooling under `tools/ansishot/` supports the loop:
+Visual review is part of acceptance; passing goldens is not sufficient by itself.
 
-- `spritecheck.py` renders a single sprite JSON to PNG for review against the reference art.
-- `scenedump` (`internal/setupui/scenedump`) renders any scene state from the real `Compose` renderer to ANSI; `ansishot.py` turns that into a PNG.
-- `ptycap.py` runs the real `camp setup` binary in a PTY of a fixed size and captures the byte stream; `vtgrid.py` replays that stream through a minimal terminal emulator to reconstruct the final screen (Bubble Tea renders by cursor-diff, so the stream must be emulated, not concatenated).
+Capture generation is driven by `tools/ansishot/capture.sh` and is development-only:
 
-Reviewed captures at 80×24, 120×40, and widescreen live under `.scene-captures/` and are compared side-by-side against the references before goldens are updated.
+- `capture.sh` builds and runs a development `internal/setupui/scenerun` binary.
+- It exercises `setupui.Run` plus the real `Model`/`Pipeline` composition and terminal lifecycle through a PTY.
+- It does **not** run `ProductionLifecycle` logic or machine/provider config; it only replays scripted interactive steps.
+- There is no tooling-sprite tree used by the capture workflow. Sprite validation/checks receive JSON paths directly from `internal/setupui/assets/sprites/*.json`.
+
+The canonical sprite source for review is `internal/setupui/assets/sprites/`, embedded in the Go compositor and passed directly to review tooling.
+
+Exact tracked capture set: nine PNGs under `docs/assets/setup-scene/`
+`configure-80x24`, `configure-120x40`, `ready-80x24`, `ready-120x40`, `ready-160x48`, `progress-120x40`, `failure-120x40`, `resize-120x40-to-160x48`, `cancel-restored-shell`.
+
+Execution artifacts and scratch files are in `.scene-captures/` (`*.keys`, `*.raw`, and transient renders) and should stay untracked.
+PTY streams are byte artifacts: capture and load them in binary mode. Text-mode universal-newline handling removes carriage returns from CRLF and invalidates cursor replay.
+
+Acceptance steps:
+
+- regenerate all captures end-to-end from `capture.sh`;
+- compare the stable alternate-screen grid against references built from the same fixture facts (reference-row diff for each state capture);
+- **For 80x24 captures, all 24 reconstructed rows must match fresh references from `python3 tools/ansishot/test_vtgrid.py`** (which regenerates configure/ready scene baselines and compares all rows).
+- visually inspect every resulting PNG;
+- verify resize capture retains typed input after the resize sequence;
+- verify the cancel capture shows alt-screen exit, cursor visibility restoration, binary exit (`scenerun exit`), and shell prompt return.
+- `capture.sh` executes `python3 tools/ansishot/test_vtgrid.py` as part of the workflow; a workflow is incomplete if that validator fails.
+
+Prerequisites for reproducible captures: Go, Bash, Python 3, Pillow, PTY tooling, and stable terminal fonts.
+Because fixed sleeps and font/pixel variance can shift raster output, semantic validation is required; do not treat byte-identical PTY replay output as a sufficient pass.
 
 ## Golden coverage
 

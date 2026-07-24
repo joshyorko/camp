@@ -140,7 +140,8 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case tea.WindowSizeMsg:
 		m.width, m.height = msg.Width, msg.Height
 		m.guard = m.guard.Update(msg.Width, msg.Height)
-		m.form.SetWidth(min(msg.Width-6, 60))
+		m.form.SetWidth(min(msg.Width-10, 72))
+		m.form.SetCompact(msg.Height < 30)
 		return m, nil
 
 	case tea.KeyPressMsg:

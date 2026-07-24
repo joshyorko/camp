@@ -6,6 +6,7 @@ import (
 	"charm.land/bubbles/v2/textinput"
 	tea "charm.land/bubbletea/v2"
 	"charm.land/lipgloss/v2"
+	"github.com/charmbracelet/x/ansi"
 )
 
 // FormField is one labeled configuration input with a default value.
@@ -25,6 +26,7 @@ type ConfigForm struct {
 	fields  []FormField
 	focus   int
 	width   int
+	compact bool
 	errText string
 	pal     Palette
 }
@@ -55,16 +57,25 @@ func NewConfigForm(pal Palette, defaults map[string]string) ConfigForm {
 	return f
 }
 
-// SetWidth adjusts input widths to the available panel width.
+// SetWidth adjusts input widths to the available panel width. The budget
+// accounts for the focus marker (2), label column (16), separator (1), and the
+// bordered box frame (4) so a full field row never exceeds the panel and is
+// never wrapped by the panel style.
 func (f *ConfigForm) SetWidth(w int) {
 	f.width = w
-	iw := min(w-8, 48)
+	iw := min(w-23, 48)
 	if iw < 10 {
 		iw = 10
 	}
 	for i := range f.fields {
 		f.fields[i].input.SetWidth(iw)
 	}
+}
+
+// SetCompact switches the form between the bordered field boxes (tall scenes)
+// and single-line fields (short scenes) so the panel stays usable at 80×24.
+func (f *ConfigForm) SetCompact(compact bool) {
+	f.compact = compact
 }
 
 // Values returns the current field values keyed by field key, substituting the
@@ -136,21 +147,26 @@ func (f ConfigForm) advance(delta int) ConfigForm {
 }
 
 // View renders the form panel: a title, each labeled field with the focused one
-// highlighted, and an optional error line.
+// highlighted, and an optional error line. In compact mode each field is a
+// single line; otherwise the input sits in a bordered box joined horizontally
+// with its label so the frame and value stay aligned.
 func (f ConfigForm) View() string {
-	title := lipgloss.NewStyle().Foreground(f.pal.Amber).Bold(true).Render("CONFIGURE  ")
-	var rows []string
-	rows = append(rows, title)
+	title := lipgloss.NewStyle().Foreground(f.pal.Amber).Bold(true).Render("CONFIGURE")
+	rows := []string{title}
 	for i, fld := range f.fields {
+		focused := i == f.focus
 		labelStyle := lipgloss.NewStyle().Foreground(f.pal.Dim)
 		marker := "  "
-		if i == f.focus {
+		if focused {
 			labelStyle = lipgloss.NewStyle().Foreground(f.pal.Active).Bold(true)
 			marker = lipgloss.NewStyle().Foreground(f.pal.Active).Render("❯ ")
 		}
 		label := labelStyle.Render(padLabel(fld.Label))
-		box := f.inputBox(fld, i == f.focus)
-		rows = append(rows, marker+label+" "+box)
+		if f.compact {
+			rows = append(rows, marker+label+" "+fld.input.View())
+			continue
+		}
+		rows = append(rows, lipgloss.JoinHorizontal(lipgloss.Center, marker+label+" ", f.inputBox(fld, focused)))
 	}
 	if f.errText != "" {
 		rows = append(rows, "", lipgloss.NewStyle().Foreground(f.pal.Fail).Render(f.errText))
@@ -171,11 +187,11 @@ func (f ConfigForm) inputBox(fld FormField, focused bool) string {
 }
 
 func padLabel(s string) string {
-	const w = 16
-	if len(s) >= w {
+	const width = 16
+	if ansi.StringWidth(s) >= width {
 		return s
 	}
-	return s + strings.Repeat(" ", w-len(s))
+	return s + strings.Repeat(" ", width-ansi.StringWidth(s))
 }
 
 func min(a, b int) int {

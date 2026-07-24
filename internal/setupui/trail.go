@@ -105,7 +105,12 @@ func (t Trail) Paint(c *Canvas, states []WaypointState, anchors []TrailPoint, pa
 			glyph := trailGlyph(x, y, prevY)
 			col := pal.TrailDim
 			if failed >= 0 && x >= failed {
-				col = pal.Fail
+				// Beyond a failed node the trail is simply unlit; only the
+				// failed node itself (and the break beside it) reads as red so
+				// pending stages are not painted as failures.
+				if x <= failed+2 {
+					col = pal.Fail
+				}
 			} else if x <= litUntilX {
 				// Bright beads punctuate the lit trail.
 				if x%3 == 0 {

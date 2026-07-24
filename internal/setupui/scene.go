@@ -139,12 +139,12 @@ func paintTitle(c *Canvas, data SceneData, pal Palette) {
 	if data.Title != "" {
 		t := data.Title
 		x := (c.Width() - ansi.StringWidth(t)) / 2
-		c.Text(x, 0, t, pal.Amber)
+		c.TextLabel(x, 0, t, pal.Amber)
 	}
 	if data.Subtitle != "" {
 		st := data.Subtitle
 		x := (c.Width() - ansi.StringWidth(st)) / 2
-		c.Text(x, 1, st, pal.Dim)
+		c.TextLabel(x, 1, st, pal.Dim)
 	}
 }
 
@@ -187,12 +187,12 @@ func placeLandmarks(c *Canvas, data SceneData, anchors []TrailPoint, sprites map
 		if !lay.Compact {
 			for j, m := range wp.Meta {
 				mx := a.X - ansi.StringWidth(m)/2
-				c.Text(mx, metaTop+j, m, pal.LabelMeta)
+				c.TextLabel(mx, metaTop+j, m, pal.LabelMeta)
 			}
 		}
 		label := stateBadge(wp.State) + " " + wp.Label
 		lx := a.X - ansi.StringWidth(label)/2
-		c.Text(lx, labelRow, label, stateColor(wp.State, pal))
+		c.TextLabel(lx, labelRow, label, stateColor(wp.State, pal))
 	}
 }
 
@@ -247,14 +247,7 @@ func overlayForeground(frame string, data SceneData, w, h int, lay Layout, pal P
 	case data.Foreground != "":
 		// The interactive form gets an opaque bordered panel centered in the
 		// scene so the landscape reads as a backdrop, not clutter behind text.
-		inner := w*2/3 - 8
-		if inner < 30 {
-			inner = 30
-		}
-		if inner > 72 {
-			inner = 72
-		}
-		block = panel(data.Foreground, pal, inner)
+		block = panel(data.Foreground, pal, w-10)
 		centerPanel = true
 	}
 	lines := strings.Split(frame, "\n")
@@ -268,8 +261,13 @@ func overlayForeground(frame string, data SceneData, w, h int, lay Layout, pal P
 			// Vertically center the form panel in the scene.
 			top = (h - len(blockLines)) / 2
 		}
-		if top+len(blockLines) > h {
-			top = h - len(blockLines) - 1
+		// The last row belongs to the help line; never let the block reach it.
+		bottom := h
+		if data.HelpLine != "" {
+			bottom = h - 1
+		}
+		if top+len(blockLines) > bottom {
+			top = bottom - len(blockLines)
 		}
 		if top < 0 {
 			top = 0
@@ -332,13 +330,26 @@ func centerOnto(base, fg string, w int) string {
 
 // panel wraps content in a rounded, opaque-background bordered box so it fully
 // occludes the landscape behind it. A subtle sky-tinted fill keeps it feeling
-// part of the night scene rather than a flat modal. The content is given a
-// fixed inner width and its background is reapplied after every SGR reset so
-// nested styled fields (labels, inputs) don't punch holes the landscape shows
-// through — the same technique as Basecamp/ONCE's WithBackground.
-func panel(content string, pal Palette, innerWidth int) string {
+// part of the night scene rather than a flat modal. The inner width follows
+// the content's widest line (clamped to maxInner) so form rows never wrap,
+// and the background is reapplied after every SGR reset so nested styled
+// fields (labels, inputs) don't punch holes the landscape shows through — the
+// same technique as Basecamp/ONCE's WithBackground.
+func panel(content string, pal Palette, maxInner int) string {
+	inner := 0
+	for _, line := range strings.Split(content, "\n") {
+		if lw := ansi.StringWidth(line); lw > inner {
+			inner = lw
+		}
+	}
+	if inner > maxInner {
+		inner = maxInner
+	}
+	if inner < 10 {
+		inner = 10
+	}
 	body := lipgloss.NewStyle().
-		Width(innerWidth).
+		Width(inner).
 		Background(pal.Sky[2]).
 		Render(content)
 	body = reapplyBackground(body, pal.Sky[2])

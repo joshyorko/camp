@@ -80,6 +80,20 @@ func (c *Canvas) Text(x, y int, s string, fg color.Color) int {
 	return col
 }
 
+// TextLabel paints s like Text but keeps it legible over terrain: the label's
+// full span plus one clear cell on each side is erased to the background
+// first, so ridge, contour, and forest glyphs never bleed into the text or
+// fill the spaces inside it.
+func (c *Canvas) TextLabel(x, y int, s string, fg color.Color) {
+	w := ansi.StringWidth(s)
+	for cx := x - 1; cx <= x+w; cx++ {
+		if c.inBounds(cx, y) {
+			c.cells[y*c.w+cx] = cell{}
+		}
+	}
+	c.Text(x, y, s, fg)
+}
+
 // DrawSprite composites a sprite with its top-left corner at (x,y).
 func (c *Canvas) DrawSprite(x, y int, s Sprite, pal Palette) {
 	for row := 0; row < len(s.Glyphs); row++ {

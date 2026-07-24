@@ -1,22 +1,24 @@
 #!/usr/bin/env python3
-"""ptycap: run a command in a PTY of a fixed size, send scripted keystrokes,
-and capture the final alternate-screen frame as ANSI.
+"""ptycap: run a command in a PTY and emit the complete raw PTY byte stream.
 
 We spawn the child attached to a real pseudo-terminal so it takes the rich
-interactive path, set the window size via TIOCSWINSZ, drive it with timed key
-sends, then extract the last full frame (everything after the final
-clear/home or alt-screen switch) and print it to stdout.
+interactive path, set the window size via TIOCSWINSZ, execute a scripted send
+file, then print the captured raw byte stream to stdout.
 
 Usage:
   ptycap.py --cols 120 --rows 40 --send-file script.txt -- CMD [ARGS...]
 
-script.txt lines: either "sleep 0.4" or "key <text>" (text sent verbatim;
-use \\r for Enter, \\t for Tab, \\x03 for Ctrl-C, \\x1b for Esc).
+script.txt lines:
+- "sleep <seconds>" to wait (float accepted).
+- "key <text>" to write bytes literally (use \r for Enter, \t for Tab,
+  \x03 for Ctrl-C, \x1b for Esc).
+- "resize <cols> <rows>" to resize the attached PTY mid-capture.
 """
 import argparse
 import os
 import pty
 import select
+import signal
 import struct
 import sys
 import termios
@@ -30,8 +32,11 @@ def set_winsize(fd, rows, cols):
 
 
 def decode_escapes(s):
-    return (s.replace("\\r", "\r").replace("\\n", "\n").replace("\\t", "\t")
-             .replace("\\x03", "\x03").replace("\\x1b", "\x1b"))
+    return (s.replace("\\r", "\r")
+            .replace("\\n", "\n")
+            .replace("\\t", "\t")
+            .replace("\\x03", "\x03")
+            .replace("\\x1b", "\x1b"))
 
 
 def main():
@@ -67,7 +72,12 @@ def main():
 
     pid, fd = pty.fork()
     if pid == 0:
-        # Child: exec the command with the inherited controlling PTY.
+        # Child: size the PTY before exec so the program never observes the
+        # transient 0×0 window pty.fork starts with.
+        try:
+            set_winsize(0, args.rows, args.cols)
+        except OSError:
+            pass
         os.execvpe(cmd[0], cmd, env)
         os._exit(127)
 
@@ -98,21 +108,54 @@ def main():
             payload = decode_escapes(line[4:])
             os.write(fd, payload.encode())
             drain(0.15)
+        elif line.startswith("resize "):
+            _, cols_s, rows_s = line.split()
+            set_winsize(fd, int(rows_s), int(cols_s))
+            try:
+                os.kill(pid, signal.SIGWINCH)
+            except OSError:
+                pass
+            drain(0.4)
     drain(args.settle)
 
+    # End the PTY session and force child exit.
     try:
         os.close(fd)
     except OSError:
         pass
-    try:
-        os.waitpid(pid, os.WNOHANG)
-    except OSError:
-        pass
+
+    deadline = time.time() + 2.0
+    while time.time() < deadline:
+        pid_done, _ = os.waitpid(pid, os.WNOHANG)
+        if pid_done == pid:
+            break
+        time.sleep(0.05)
+    else:
+        try:
+            os.kill(pid, signal.SIGTERM)
+        except OSError:
+            pass
+        deadline = time.time() + 1.0
+        while time.time() < deadline:
+            pid_done, _ = os.waitpid(pid, os.WNOHANG)
+            if pid_done == pid:
+                break
+            time.sleep(0.05)
+        else:
+            try:
+                os.kill(pid, signal.SIGKILL)
+            except OSError:
+                pass
+            try:
+                os.waitpid(pid, 0)
+            except OSError:
+                pass
 
     # Emit the raw byte stream verbatim. Bubble Tea renders via cursor moves and
     # cell rewrites, not full-frame clears, so the stream must be replayed
     # through a terminal emulator (vtgrid.py) to reconstruct the final screen.
-    sys.stdout.write(captured.decode("utf-8", errors="replace"))
+    sys.stdout.buffer.write(captured)
+    sys.stdout.flush()
 
 
 if __name__ == "__main__":
