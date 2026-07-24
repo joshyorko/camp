@@ -16,15 +16,28 @@ func TestResolveTerminalExperienceUsesOutputDescriptorAndEnvironment(t *testing.
 	}
 	defer file.Close()
 
-	probe := func(fd uintptr) (bool, int) {
+	probe := func(fd uintptr) (bool, int, int) {
 		if fd != file.Fd() {
 			t.Fatalf("fd = %d, want %d", fd, file.Fd())
 		}
-		return true, 120
+		return true, 120, 40
 	}
-	got := resolveTerminalExperience(ModeHuman, file, map[string]string{"TERM": "xterm-256color", "COLORTERM": "truecolor"}, probe)
+	got, _, _ := resolveTerminalExperience(ModeHuman, file, map[string]string{"TERM": "xterm-256color", "COLORTERM": "truecolor"}, probe)
 	if got != presentation.TerminalColor {
 		t.Fatalf("resolveTerminalExperience() = %q, want color", got)
+	}
+}
+
+func TestResolveTerminalExperienceReturnsProbedHeightAlongsideWidth(t *testing.T) {
+	file, err := os.CreateTemp(t.TempDir(), "terminal")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer file.Close()
+	probe := func(uintptr) (bool, int, int) { return true, 120, 40 }
+	experience, width, height := resolveTerminalExperience(ModeHuman, file, map[string]string{"TERM": "xterm-256color", "COLORTERM": "truecolor"}, probe)
+	if experience != presentation.TerminalColor || width != 120 || height != 40 {
+		t.Fatalf("resolveTerminalExperience() = %q %d %d, want color 120 40", experience, width, height)
 	}
 }
 
@@ -41,9 +54,9 @@ func TestResolveTerminalExperienceTreatsNonFilesAndFallbackSignalsAsPlain(t *tes
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
-			got := resolveTerminalExperience(test.mode, &bytes.Buffer{}, test.env, func(uintptr) (bool, int) {
+			got, _, _ := resolveTerminalExperience(test.mode, &bytes.Buffer{}, test.env, func(uintptr) (bool, int, int) {
 				t.Fatal("terminal probe called for non-file output")
-				return true, 120
+				return true, 120, 40
 			})
 			if got != presentation.TerminalPlain {
 				t.Fatalf("resolveTerminalExperience() = %q, want plain", got)

@@ -26,9 +26,15 @@ type CampsiteModel struct {
 	NextCommand string
 }
 
+type ScreenSize struct {
+	Width  int
+	Height int
+}
+
 type CampsiteOptions struct {
-	Color bool
-	Width int
+	Color  bool
+	Width  int
+	Height int
 }
 
 func RenderCampsite(writer io.Writer, model CampsiteModel, options CampsiteOptions) error {
