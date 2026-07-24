@@ -68,6 +68,39 @@ func TestRunnerKeepsInteractiveCommandInForegroundProcessGroup(t *testing.T) {
 	}
 }
 
+func TestRunnerPassesInteractiveTerminalDescriptorsDirectly(t *testing.T) {
+	t.Parallel()
+	if runtime.GOOS != "linux" {
+		t.Skip("Camp interactive descriptor handling is Linux-only")
+	}
+
+	stdout, err := os.CreateTemp(t.TempDir(), "stdout")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer stdout.Close()
+	stderr, err := os.CreateTemp(t.TempDir(), "stderr")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer stderr.Close()
+
+	result, err := NewRunner().Run(context.Background(), ports.Command{
+		Executable: "/bin/sh",
+		Argv: []string{"-c", `
+			test "$(readlink /proc/self/fd/1)" = "$CAMP_TEST_STDOUT"
+			test "$(readlink /proc/self/fd/2)" = "$CAMP_TEST_STDERR"
+		`},
+		Environment: map[string]string{"CAMP_TEST_STDOUT": stdout.Name(), "CAMP_TEST_STDERR": stderr.Name()},
+		Stdin:       bytes.NewReader(nil),
+		Stdout:      stdout,
+		Stderr:      stderr,
+	})
+	if err != nil {
+		t.Fatalf("interactive Run() error = %v, result = %#v", err, result)
+	}
+}
+
 func TestRunnerReturnsTypedExitAndHonorsCancellation(t *testing.T) {
 	t.Parallel()
 

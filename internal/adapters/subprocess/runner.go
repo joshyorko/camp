@@ -52,8 +52,13 @@ func (r *Runner) run(ctx context.Context, command ports.Command, started func() 
 	cmd.Env = mergeEnvironment(command.Environment)
 
 	var stdout, stderr bytes.Buffer
-	cmd.Stdout = joinedWriter(&stdout, command.Stdout)
-	cmd.Stderr = joinedWriter(&stderr, command.Stderr)
+	if interactive {
+		cmd.Stdout = command.Stdout
+		cmd.Stderr = command.Stderr
+	} else {
+		cmd.Stdout = joinedWriter(&stdout, command.Stdout)
+		cmd.Stderr = joinedWriter(&stderr, command.Stderr)
+	}
 
 	err := cmd.Start()
 	if err == nil && started != nil {
