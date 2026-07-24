@@ -72,9 +72,9 @@ fixtures:
 	if err != nil {
 		t.Fatalf("runProductionToolSetup: %v", err)
 	}
-	for _, name := range []string{"devpod", "hauler"} {
-		if !strings.Contains(output.String(), filepath.Join(dataHome, "camp", "tools", name)) {
-			t.Fatalf("output = %q, want managed %s path under XDG data", output.String(), name)
+	for _, forbidden := range []string{filepath.Join(dataHome, "camp", "tools"), "sha256", "export PATH", "ready at"} {
+		if strings.Contains(output.String(), forbidden) {
+			t.Fatalf("output = %q, must not contain %q", output.String(), forbidden)
 		}
 	}
 	output.Reset()
@@ -92,7 +92,7 @@ fixtures:
 	}
 }
 
-func TestRunManagedToolSetupReportsLockedIdentityAndPATH(t *testing.T) {
+func TestRunManagedToolSetupHumanOmitsMachineDetails(t *testing.T) {
 	ensurer := &recordingToolEnsurer{resolutions: map[string]tooladapter.Resolution{
 		"devpod": {Path: "/camp/devpod/bin/devpod", Managed: true, Repository: "skevetter/devpod", Version: "v0.26.1", GOOS: "linux", Architecture: "amd64", AssetSHA256: strings.Repeat("a", 64), BinarySHA256: strings.Repeat("a", 64)},
 		"hauler": {Path: "/camp/hauler/bin/hauler", Managed: true, Repository: "hauler-dev/hauler", Version: "v2.0.2", GOOS: "linux", Architecture: "amd64", AssetSHA256: strings.Repeat("b", 64), BinarySHA256: strings.Repeat("c", 64)},
@@ -105,15 +105,9 @@ func TestRunManagedToolSetupReportsLockedIdentityAndPATH(t *testing.T) {
 	if got := strings.Join(ensurer.calls, ","); got != "devpod:linux:amd64,hauler:linux:amd64" {
 		t.Fatalf("Ensure calls = %q", got)
 	}
-	for _, want := range []string{
-		"devpod v0.26.1 ready at /camp/devpod/bin/devpod",
-		"hauler v2.0.2 ready at /camp/hauler/bin/hauler",
-		"asset sha256 " + strings.Repeat("b", 64),
-		"binary sha256 " + strings.Repeat("c", 64),
-		`export PATH="/camp/devpod/bin:/camp/hauler/bin:$PATH"`,
-	} {
-		if !strings.Contains(output.String(), want) {
-			t.Fatalf("output = %q, want %q", output.String(), want)
+	for _, forbidden := range []string{"ready at", "/camp/", "sha256", "export PATH"} {
+		if strings.Contains(output.String(), forbidden) {
+			t.Fatalf("output = %q, must not contain %q", output.String(), forbidden)
 		}
 	}
 }

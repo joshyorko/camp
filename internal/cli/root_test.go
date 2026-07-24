@@ -79,9 +79,25 @@ func TestLifecycleCommandsDelegateWithStrictArgumentsAndInheritedMode(t *testing
 	}
 }
 
+func TestLifecycleCommandsDelegateSetupStdin(t *testing.T) {
+	lifecycle := &recordingLifecycle{}
+	input := strings.NewReader("setup answers")
+	root := NewRootWithLifecycle(lifecycle)
+	root.SetIn(input)
+	root.SetOut(io.Discard)
+	root.SetArgs([]string{"setup"})
+	if err := root.Execute(); err != nil {
+		t.Fatal(err)
+	}
+	if lifecycle.setupInput != input {
+		t.Fatalf("setup input = %#v, want command stdin", lifecycle.setupInput)
+	}
+}
+
 type recordingLifecycle struct {
 	calls          []string
 	attachRequests []AttachRequest
+	setupInput     io.Reader
 }
 
 func (r *recordingLifecycle) Init(_ context.Context, request InitRequest, mode OutputMode, _ io.Writer) error {
@@ -121,7 +137,8 @@ func TestInitPersistentFlagsRejectEmptyValuesAndConflictingRoot(t *testing.T) {
 	}
 }
 
-func (r *recordingLifecycle) Setup(_ context.Context, mode OutputMode, _ io.Writer) error {
+func (r *recordingLifecycle) Setup(_ context.Context, mode OutputMode, in io.Reader, _ io.Writer) error {
+	r.setupInput = in
 	r.calls = append(r.calls, "setup::"+string(mode))
 	return nil
 }
