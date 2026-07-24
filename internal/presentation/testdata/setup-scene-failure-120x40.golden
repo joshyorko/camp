@@ -8,6 +8,10 @@
 
 
 
+
+
+
+
                                                          <ESC>[38;2;238;215;169m⛺ CAMP<ESC>[0m
                                                     <ESC>[38;2;110;118;129mtrailhead setup<ESC>[0m
 
@@ -34,11 +38,11 @@
 
 
 
-
-
-
-
 <ESC>[2J<ESC>[H
+
+
+
+
 
 
 
@@ -61,10 +65,6 @@
 
                                      <ESC>[38;2;233;77;77mstopped: devpod provider docker is unreachable<ESC>[0m
                                                     <ESC>[38;2;233;77;77mnext: camp setup<ESC>[0m
-
-
-
-
 
 
 

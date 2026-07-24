@@ -45,10 +45,13 @@ func composeScene(model CampsiteModel, statuses [4]WaypointStatus, size ScreenSi
 		lines = append(lines, topographyRow(contentWidth))
 		lines = append(lines, "")
 	}
-	lines = append(lines, waypointTable(model, statuses, contentWidth)...)
+	tableRows, usedTwoRowFallback := waypointTable(model, statuses, contentWidth)
+	lines = append(lines, tableRows...)
 	lines = append(lines, "")
-	lines = append(lines, routeRule(statuses, contentWidth))
-	lines = append(lines, "")
+	if !usedTwoRowFallback {
+		lines = append(lines, routeRule(statuses, contentWidth))
+		lines = append(lines, "")
+	}
 	switch {
 	case failure != nil:
 		lines = append(lines, failureBand(*failure, contentWidth)...)
@@ -104,7 +107,7 @@ func topographyRow(width int) string {
 	return strings.TrimRight(out, " ")
 }
 
-func waypointTable(model CampsiteModel, statuses [4]WaypointStatus, width int) []string {
+func waypointTable(model CampsiteModel, statuses [4]WaypointStatus, width int) ([]string, bool) {
 	labels := []string{"TOOLCHAIN", "RUNTIME", "CAPSULE", "STORAGE"}
 	metadata := [][]string{
 		{fmt.Sprintf("%s %s", model.DevPod.Name, model.DevPod.Version), fmt.Sprintf("%s %s", model.Hauler.Name, model.Hauler.Version)},
@@ -126,7 +129,7 @@ func waypointTable(model CampsiteModel, statuses [4]WaypointStatus, width int) [
 		if tableWidth < width {
 			rows = indentBlock(rows, (width-tableWidth)/2)
 		}
-		return rows
+		return rows, false
 	}
 
 	// The four waypoint columns don't fit side by side at this width (this
@@ -136,6 +139,7 @@ func waypointTable(model CampsiteModel, statuses [4]WaypointStatus, width int) [
 	// overflowing the requested width.
 	var rows []string
 	groups := [][][]string{columns[:2], columns[2:]}
+	groupStatuses := [2][2]WaypointStatus{{statuses[0], statuses[1]}, {statuses[2], statuses[3]}}
 	groupRows := make([][]string, len(groups))
 	maxGroupWidth := 0
 	for i, group := range groups {
@@ -153,8 +157,9 @@ func waypointTable(model CampsiteModel, statuses [4]WaypointStatus, width int) [
 			rows = append(rows, "")
 		}
 		rows = append(rows, indentBlock(rowsForGroup, sharedMargin)...)
+		rows = append(rows, indentBlock([]string{miniRouteRule(groupStatuses[i], i == len(groups)-1)}, sharedMargin)...)
 	}
-	return rows
+	return rows, true
 }
 
 func routeRule(statuses [4]WaypointStatus, width int) string {
@@ -168,6 +173,23 @@ func routeRule(statuses [4]WaypointStatus, width int) string {
 		return colorRed + line + colorReset
 	case statuses[len(statuses)-1] == WaypointCompleted:
 		return colorAmber + line + "🔥" + colorReset
+	default:
+		return colorDim + line + colorReset
+	}
+}
+
+func miniRouteRule(pair [2]WaypointStatus, isLastGroup bool) string {
+	glyphs := map[int]string{0: pair[0].glyph(), 6: pair[1].glyph()}
+	line := overlayGlyphs(7, "─", glyphs)
+	switch {
+	case pair[0] == WaypointFailed || pair[1] == WaypointFailed:
+		return colorRed + line + colorReset
+	case pair[0] == WaypointCompleted && pair[1] == WaypointCompleted:
+		suffix := ""
+		if isLastGroup {
+			suffix = "🔥"
+		}
+		return colorAmber + line + suffix + colorReset
 	default:
 		return colorDim + line + colorReset
 	}

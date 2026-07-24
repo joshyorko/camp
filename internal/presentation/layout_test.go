@@ -70,11 +70,11 @@ func TestDistributeVerticallyAddsTopAndBottomMarginsWithoutTrailingWhitespace(t 
 	if len(got) != 8 {
 		t.Fatalf("len = %d, want 8", len(got))
 	}
-	if got[2] != "A" || got[3] != "B" {
+	if got[3] != "A" || got[4] != "B" {
 		t.Fatalf("content misplaced: %#v", got)
 	}
 	for i, line := range got {
-		if i != 2 && i != 3 && line != "" {
+		if i != 3 && i != 4 && line != "" {
 			t.Fatalf("row %d = %q, want blank filler", i, line)
 		}
 	}

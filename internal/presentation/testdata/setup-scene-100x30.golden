@@ -4,6 +4,9 @@
 
 
 
+
+
+
                                                <ESC>[38;2;238;215;169m⛺ CAMP<ESC>[0m
                                           <ESC>[38;2;110;118;129mtrailhead setup<ESC>[0m
 
@@ -25,10 +28,10 @@
 
 
 
-
-
-
 <ESC>[2J<ESC>[H
+
+
+
 
 
 
@@ -55,10 +58,10 @@
 
 
 
-
-
-
 <ESC>[2J<ESC>[H
+
+
+
 
 
 
@@ -85,10 +88,10 @@
 
 
 
-
-
-
 <ESC>[2J<ESC>[H
+
+
+
 
 
 
@@ -108,9 +111,6 @@
                                            <ESC>[38;2;255;171;45mCAMP IS READY<ESC>[0m
 
                                       <ESC>[38;2;56;155;255m> camp open second_brain<ESC>[0m
-
-
-
 
 
 

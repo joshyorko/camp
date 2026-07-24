@@ -121,7 +121,7 @@ func distributeVertically(lines []string, height int) []string {
 		return lines
 	}
 	extra := height - len(lines)
-	top := extra / 3
+	top := extra / 2
 	bottom := extra - top
 	out := make([]string, 0, height)
 	for i := 0; i < top; i++ {
