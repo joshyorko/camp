@@ -12,6 +12,7 @@ import (
 	"github.com/joshyorko/camp/internal/domain"
 	journalstore "github.com/joshyorko/camp/internal/journal"
 	"github.com/joshyorko/camp/internal/presentation"
+	"github.com/joshyorko/camp/internal/setupui"
 )
 
 func renderProductionSetupCampsite(ctx context.Context, out io.Writer, lockBytes []byte, experience presentation.TerminalExperience, width, height int) error {
@@ -41,6 +42,18 @@ func renderProductionSetupCampsite(ctx context.Context, out io.Writer, lockBytes
 	if err != nil {
 		return err
 	}
+	// A truecolor terminal draws the same rich Trailhead scene the interactive
+	// setup ends on, so a re-run over existing configuration shows one visual
+	// language rather than the legacy line renderer. Plain/narrow terminals
+	// keep the deterministic animator frames.
+	if experience == presentation.TerminalColor && width >= 80 && height >= 20 {
+		sprites, spriteErr := setupui.LoadSprites()
+		if spriteErr == nil {
+			frame := setupui.RenderReadyCampsite(campsiteFacts(model), width, height, setupui.DefaultPalette(), sprites)
+			_, writeErr := io.WriteString(out, frame+"\n")
+			return writeErr
+		}
+	}
 	animator, err := presentation.NewSetupAnimator(out, experience, model, presentation.ScreenSize{Width: width, Height: height})
 	if err != nil {
 		return err
@@ -51,6 +64,23 @@ func renderProductionSetupCampsite(ctx context.Context, out io.Writer, lockBytes
 		}
 	}
 	return nil
+}
+
+// campsiteFacts projects the CLI campsite model into the rich renderer's
+// already-sanitized fact contract.
+func campsiteFacts(model presentation.CampsiteModel) setupui.CampsiteFacts {
+	return setupui.CampsiteFacts{
+		DevPod:      model.DevPod.Name + " " + model.DevPod.Version,
+		Hauler:      model.Hauler.Name + " " + model.Hauler.Version,
+		Provider:    model.Provider,
+		RuntimeKind: model.RuntimeKind,
+		Context:     model.Context,
+		Capsule:     model.Capsule,
+		Source:      model.Source,
+		BackendKind: model.BackendKind,
+		Storage:     model.Storage,
+		NextCommand: model.NextCommand,
+	}
 }
 
 func buildCampsiteModel(lock tooladapter.Lock, runtime config.Runtime, backend config.Backend, sessions []domain.JournalSnapshot) (presentation.CampsiteModel, error) {

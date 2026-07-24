@@ -1,0 +1,28 @@
+{
+  "name": "tent",
+  "legend": {
+    "P": "tent_pole",
+    "L": "tent_light",
+    "M": "tent_mid",
+    "D": "tent_dark",
+    "G": "trail_dim"
+  },
+  "glyphs": [
+    "       ▲       ",
+    "   ╱  ╱█╲  ╲   ",
+    "  ╱  ╱███╲  ╲  ",
+    " ╱  ╱█████╲  ╲ ",
+    " ╹ ╱███████╲ ╹ ",
+    "  ╱█████████╲  ",
+    "▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁"
+  ],
+  "colors": [
+    "       P       ",
+    "   G  LPM  G   ",
+    "  G  LLPMM  G  ",
+    " G  LLLPMMM  G ",
+    " G LLLLDMMMM G ",
+    "  LLLLDDDMMMM  ",
+    "GGGGGGGGGGGGGGG"
+  ]
+}
