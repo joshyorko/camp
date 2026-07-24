@@ -69,7 +69,7 @@ func buildCampsiteModel(lock tooladapter.Lock, runtime config.Runtime, backend c
 	if provider == "" || provider == "docker" || provider == "podman" {
 		runtimeKind = "local DevPod"
 	}
-	latest := latestCampsiteSession(sessions)
+	latest := latestCampsiteSession(sessions, runtime.Capsule)
 	if latest != nil {
 		if latest.Workspace.Provider != "" {
 			provider = latest.Workspace.Provider
@@ -100,10 +100,13 @@ func buildCampsiteModel(lock tooladapter.Lock, runtime config.Runtime, backend c
 	return model, nil
 }
 
-func latestCampsiteSession(sessions []domain.JournalSnapshot) *domain.JournalSnapshot {
+func latestCampsiteSession(sessions []domain.JournalSnapshot, capsule string) *domain.JournalSnapshot {
 	var latest *domain.JournalSnapshot
 	for index := range sessions {
 		candidate := &sessions[index]
+		if candidate.Capsule != capsule {
+			continue
+		}
 		if latest == nil || candidate.UpdatedAt.After(latest.UpdatedAt) {
 			latest = candidate
 		}

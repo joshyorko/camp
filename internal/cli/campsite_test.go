@@ -60,3 +60,36 @@ func TestBuildCampsiteModelStatesAbsenceWithoutInventingGeneration(t *testing.T)
 		t.Fatalf("model = %#v", model)
 	}
 }
+
+func TestBuildCampsiteModelIgnoresSessionsForOtherCapsules(t *testing.T) {
+	lock, err := tooladapter.ParseLock(strings.NewReader(string(campcontract.DistributionToolLock())))
+	if err != nil {
+		t.Fatal(err)
+	}
+	generation := domain.GenerationRef{Generation: 99, ArchiveSHA256: strings.Repeat("d", 64)}
+	other := domain.JournalSnapshot{
+		SessionID:   "other-session",
+		Capsule:     "other-capsule",
+		Workspace:   domain.WorkspaceRecord{Provider: "docker", Context: "other", LocalProvider: true},
+		CurrentBase: &generation,
+		State:       domain.SessionClosed,
+	}
+	model, err := buildCampsiteModel(
+		lock,
+		config.Runtime{Bootstrap: config.Bootstrap{
+			Capsule: "brain", Source: "/brain",
+			DevPodProvider: "room-of-requirement", DevPodContext: "default",
+		}},
+		config.Backend{Kind: config.BackendFile, SanitizedURL: "file:///store"},
+		[]domain.JournalSnapshot{other},
+	)
+	if err != nil {
+		t.Fatalf("buildCampsiteModel: %v", err)
+	}
+	if model.Provider != "room-of-requirement" || model.Context != "default" || model.RuntimeKind != "remote DevPod" {
+		t.Fatalf("runtime = provider %q context %q kind %q", model.Provider, model.Context, model.RuntimeKind)
+	}
+	if model.Storage != "file:///store · no committed generation" {
+		t.Fatalf("storage = %q, want no generation from another capsule", model.Storage)
+	}
+}
