@@ -218,3 +218,33 @@ func failureBand(failure sceneFailure, width int) []string {
 		centerLine(colorRed+"next: "+failure.Recovery+colorReset, width),
 	}
 }
+
+type ConfigureAnswer struct {
+	Label string
+	Value string
+}
+
+func ComposeConfigureFrame(answers []ConfigureAnswer, label, defaultValue string, size ScreenSize) string {
+	width := size.Width
+	if width < 80 {
+		width = 80
+	}
+	contentWidth := sceneContentWidth(width, sceneMaxWidth)
+	margin := (width - contentWidth) / 2
+
+	var lines []string
+	lines = append(lines, "")
+	lines = append(lines, centerLine(colorCanvas+"⛺ CAMP"+colorReset, contentWidth))
+	lines = append(lines, centerLine(colorDim+"first-run setup"+colorReset, contentWidth))
+	lines = append(lines, "")
+	lines = append(lines, skyRow(contentWidth))
+	lines = append(lines, topographyRow(contentWidth))
+	lines = append(lines, "")
+	lines = append(lines, centerLine(colorAmber+"CONFIGURE"+colorReset, contentWidth))
+	for _, answer := range answers {
+		lines = append(lines, colorGreen+"✓ "+answer.Label+colorReset+colorCanvas+": "+answer.Value+colorReset)
+	}
+	lines = append(lines, colorAmber+"◐ "+label+colorReset+colorCanvas+" ["+defaultValue+"]: "+colorReset)
+
+	return strings.Join(indentBlock(lines, margin), "\n")
+}

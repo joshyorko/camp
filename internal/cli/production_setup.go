@@ -97,7 +97,7 @@ func (p *ProductionLifecycle) Setup(ctx context.Context, mode OutputMode, in io.
 			}
 			request, err := promptSetupRequest(in, out, setupPromptDefaults{
 				Source: source, Backend: "file://" + filepath.Join(paths.DataRoot, "backend"),
-			})
+			}, experience, presentation.ScreenSize{Width: width, Height: height})
 			if err != nil {
 				return err
 			}
