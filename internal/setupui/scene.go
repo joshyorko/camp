@@ -112,7 +112,11 @@ func Compose(data SceneData, w, h int, pal Palette, sprites map[string]Sprite) s
 	trail.Paint(c, stateSlice(data.Waypoints), anchors, pal)
 
 	// --- Landmarks + labels anchored to the trail ---
-	placeLandmarks(c, data, anchors, sprites, pal, lay)
+	// While the config form owns the foreground and no waypoint has started,
+	// suppress the callout labels/metadata so the landscape stays a quiet
+	// backdrop behind the panel; the landmark sprites still anchor the trail.
+	showCallouts := !(data.Foreground != "" && allPending(data.Waypoints))
+	placeLandmarks(c, data, anchors, sprites, pal, lay, showCallouts)
 
 	// --- Title band (top center) ---
 	paintTitle(c, data, pal)
@@ -148,7 +152,7 @@ func paintTitle(c *Canvas, data SceneData, pal Palette) {
 // its trail node — label, then metadata, then the landmark sprite resting on
 // the path — matching the reference composition. The whole stack is measured
 // bottom-up from one row above the node so nothing collides with the trail.
-func placeLandmarks(c *Canvas, data SceneData, anchors []TrailPoint, sprites map[string]Sprite, pal Palette, lay Layout) {
+func placeLandmarks(c *Canvas, data SceneData, anchors []TrailPoint, sprites map[string]Sprite, pal Palette, lay Layout, showCallouts bool) {
 	for i, a := range anchors {
 		wp := data.Waypoints[i]
 		sp, hasSprite := sprites[wp.Landmark]
@@ -157,7 +161,7 @@ func placeLandmarks(c *Canvas, data SceneData, anchors []TrailPoint, sprites map
 			spriteH = sp.Height()
 		}
 		metaCount := 0
-		if !lay.Compact {
+		if !lay.Compact && showCallouts {
 			metaCount = len(wp.Meta)
 		}
 		// Bottom of the sprite sits one row above the trail node.
@@ -177,6 +181,9 @@ func placeLandmarks(c *Canvas, data SceneData, anchors []TrailPoint, sprites map
 			sx := a.X - sp.Width()/2
 			c.DrawSprite(sx, spriteTop, sp, pal)
 		}
+		if !showCallouts {
+			continue
+		}
 		if !lay.Compact {
 			for j, m := range wp.Meta {
 				mx := a.X - ansi.StringWidth(m)/2
@@ -187,6 +194,17 @@ func placeLandmarks(c *Canvas, data SceneData, anchors []TrailPoint, sprites map
 		lx := a.X - ansi.StringWidth(label)/2
 		c.Text(lx, labelRow, label, stateColor(wp.State, pal))
 	}
+}
+
+// allPending reports whether every waypoint is still pending (used to keep the
+// landscape quiet behind the configuration form).
+func allPending(ws [4]Waypoint) bool {
+	for _, w := range ws {
+		if w.State != WaypointPending {
+			return false
+		}
+	}
+	return true
 }
 
 func stateColor(s WaypointState, pal Palette) color.Color {
@@ -220,22 +238,29 @@ func stateBadge(s WaypointState) string {
 // around it. This keeps configuration and progress inside the same scene.
 func overlayForeground(frame string, data SceneData, w, h int, lay Layout, pal Palette) string {
 	var block string
+	centerPanel := false
 	switch {
 	case data.Failure != "":
 		block = failureBlock(data, w, pal)
 	case data.Ready:
 		block = readyBlock(data, w, pal)
 	case data.Foreground != "":
-		block = data.Foreground
+		// The interactive form gets an opaque bordered panel centered in the
+		// scene so the landscape reads as a backdrop, not clutter behind text.
+		block = panel(data.Foreground, pal)
+		centerPanel = true
 	}
 	lines := strings.Split(frame, "\n")
 	for len(lines) < h {
 		lines = append(lines, "")
 	}
 	if block != "" {
-		// Place the block centered in the lower valley region.
 		blockLines := strings.Split(block, "\n")
 		top := lay.TrailRow + 3
+		if centerPanel {
+			// Vertically center the form panel in the scene.
+			top = (h - len(blockLines)) / 2
+		}
 		if top+len(blockLines) > h {
 			top = h - len(blockLines) - 1
 		}
@@ -296,6 +321,18 @@ func centerOnto(base, fg string, w int) string {
 		left = 0
 	}
 	return spliceLine(base, fg, left, fgW, w)
+}
+
+// panel wraps content in a rounded, opaque-background bordered box so it fully
+// occludes the landscape behind it. A subtle sky-tinted fill keeps it feeling
+// part of the night scene rather than a flat modal.
+func panel(content string, pal Palette) string {
+	return lipgloss.NewStyle().
+		Border(lipgloss.RoundedBorder()).
+		BorderForeground(pal.Amber).
+		Background(pal.Sky[2]).
+		Padding(1, 3).
+		Render(content)
 }
 
 func readyBlock(data SceneData, w int, pal Palette) string {

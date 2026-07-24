@@ -75,15 +75,25 @@ type Model struct {
 	sprites map[string]Sprite
 	guard   SizeGuard
 
-	// submit is invoked with the accepted config values; it returns a command
-	// that drives the real setup pipeline and feeds waypoint messages back.
-	submit func(map[string]string) tea.Cmd
-	// quit signals the program should exit (canceled/finished).
+	// pipeline drives the real setup operations. Start launches provisioning on
+	// its own goroutine and returns a channel of typed messages; the model only
+	// relays those messages, so no lifecycle logic lives in presentation.
+	pipeline Pipeline
+	events   <-chan tea.Msg
+	// done signals the program is exiting (canceled/finished).
 	done bool
 }
 
+// Pipeline runs the real first-run setup. Start is called with the accepted
+// config values and returns a channel that emits ConfigAcceptedMsg, then a
+// WaypointCompletedMsg per stage, then AllReadyMsg — or a WaypointFailedMsg.
+// The channel is closed when provisioning ends.
+type Pipeline interface {
+	Start(values map[string]string) <-chan tea.Msg
+}
+
 // NewModel constructs the setup model with landmarks assigned to waypoints.
-func NewModel(pal Palette, sprites map[string]Sprite, defaults map[string]string, submit func(map[string]string) tea.Cmd) Model {
+func NewModel(pal Palette, sprites map[string]Sprite, defaults map[string]string, pipeline Pipeline) Model {
 	wps := [4]Waypoint{
 		{Label: "TOOLCHAIN", Landmark: "crate", State: WaypointPending},
 		{Label: "RUNTIME", Landmark: "helm", State: WaypointPending},
@@ -99,7 +109,24 @@ func NewModel(pal Palette, sprites map[string]Sprite, defaults map[string]string
 		pal:       pal,
 		sprites:   sprites,
 		guard:     NewSizeGuard(80, 20),
-		submit:    submit,
+		pipeline:  pipeline,
+	}
+}
+
+// listen reads the next pipeline event. Re-issued after each relayed message so
+// the model consumes the whole stream (the ONCE watch-channel pattern). Returns
+// nil when the channel is closed.
+func (m Model) listen() tea.Cmd {
+	ch := m.events
+	if ch == nil {
+		return nil
+	}
+	return func() tea.Msg {
+		msg, ok := <-ch
+		if !ok {
+			return nil
+		}
+		return msg
 	}
 }
 
@@ -133,8 +160,9 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case FormSubmitMsg:
 		m.phase = PhaseProvision
 		m.waypoints[StageToolchain].State = WaypointActive
-		if m.submit != nil {
-			return m, m.submit(msg.Values)
+		if m.pipeline != nil {
+			m.events = m.pipeline.Start(msg.Values)
+			return m, m.listen()
 		}
 		return m, nil
 
@@ -152,7 +180,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		m.nextCmd = msg.NextCmd
 		m.readyLine = msg.ReadyLine
-		return m, nil
+		return m, m.listen()
 
 	case WaypointCompletedMsg:
 		i := int(msg.Stage)
@@ -165,7 +193,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.waypoints[i+1].State = WaypointActive
 			}
 		}
-		return m, nil
+		return m, m.listen()
 
 	case WaypointFailedMsg:
 		i := int(msg.Stage)
@@ -175,11 +203,11 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.phase = PhaseFailed
 		m.failMsg = msg.Message
 		m.recovery = msg.Recovery
-		return m, nil
+		return m, m.listen()
 
 	case AllReadyMsg:
 		m.phase = PhaseReady
-		return m, nil
+		return m, m.listen()
 	}
 
 	if m.phase == PhaseConfigure {
