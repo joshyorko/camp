@@ -63,8 +63,21 @@ func TestStrikeQuiescesActiveSessionBeforeArchive(t *testing.T) {
 	if err != nil || !controller.called {
 		t.Fatalf("active session was not quiesced and archived: %v", err)
 	}
-	if effects.workspace != 1 || effects.forwarders != 1 || effects.services != 1 || effects.supervisor != 1 || effects.materialization != 1 {
+	if effects.workspace != 1 || effects.forwarders != 1 || effects.services != 1 || effects.supervisor != 1 || effects.materialization != 0 {
 		t.Fatalf("cleanup calls = %+v", effects)
+	}
+}
+
+func TestStrikePurgeRequiresOwnedMaterializationRemoval(t *testing.T) {
+	controller := &strikeController{}
+	effects := &strikeEffects{}
+	session := domain.JournalSnapshot{
+		State:           domain.SessionOpen,
+		Materialization: domain.Materialization{SchemaVersion: domain.SchemaVersion, Mode: domain.MaterializationCreated, CleanupPermitted: true},
+	}
+	_, err := (Strike{Sessions: strikeJournal{sessions: []domain.JournalSnapshot{session}}, Controller: controller, Effects: effects}).Run(context.Background(), StrikeRequest{Purge: true, Yes: true}, StrikePlan{BackendSafe: true})
+	if err != nil || !controller.called || effects.materialization != 1 {
+		t.Fatalf("purge did not verify materialization removal: effects=%+v called=%t err=%v", effects, controller.called, err)
 	}
 }
 

@@ -55,7 +55,7 @@ func (s Strike) Run(ctx context.Context, request StrikeRequest, plan StrikePlan)
 	for _, session := range sessions {
 		switch session.State {
 		case domain.SessionOpening, domain.SessionOpen, domain.SessionRecovering:
-			if err := s.quiesce(ctx, session); err != nil {
+			if err := s.quiesce(ctx, session, request.Purge); err != nil {
 				return StrikeResult{}, fmt.Errorf("quiesce session %s before strike: %w", session.SessionID, err)
 			}
 		}
@@ -73,7 +73,7 @@ func (s Strike) Run(ctx context.Context, request StrikeRequest, plan StrikePlan)
 	return StrikeResult{ArchivedPath: archive}, nil
 }
 
-func (s Strike) quiesce(ctx context.Context, session domain.JournalSnapshot) error {
+func (s Strike) quiesce(ctx context.Context, session domain.JournalSnapshot, purge bool) error {
 	if s.Effects == nil {
 		return errors.New("strike cleanup dependencies are incomplete")
 	}
@@ -100,7 +100,7 @@ func (s Strike) quiesce(ctx context.Context, session domain.JournalSnapshot) err
 			return err
 		}
 	}
-	if session.Materialization.SchemaVersion != 0 {
+	if purge && session.Materialization.SchemaVersion != 0 {
 		removed, err := s.Effects.RemoveMaterialization(ctx, session)
 		if err != nil {
 			return err
