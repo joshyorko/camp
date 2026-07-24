@@ -77,8 +77,8 @@ func (s Strike) quiesce(ctx context.Context, session domain.JournalSnapshot) err
 	if s.Effects == nil {
 		return errors.New("strike cleanup dependencies are incomplete")
 	}
-	if session.Workspace.ID != "" || session.Workspace.Context != "" {
-		if session.Workspace.ID == "" || session.Workspace.Context == "" {
+	if session.Workspace.ID != "" {
+		if session.Workspace.Context == "" {
 			return errors.New("recorded workspace identity is incomplete")
 		}
 		if err := s.Effects.CloseWorkspace(ctx, session, false); err != nil {

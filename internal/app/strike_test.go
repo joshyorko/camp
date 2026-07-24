@@ -71,7 +71,8 @@ func TestStrikeQuiescesActiveSessionBeforeArchive(t *testing.T) {
 func TestStrikeSkipsIncompleteEffectsForAbandonedOpeningSession(t *testing.T) {
 	controller := &strikeController{}
 	effects := &strikeEffects{}
-	_, err := (Strike{Sessions: strikeJournal{sessions: []domain.JournalSnapshot{{State: domain.SessionOpening}}}, Controller: controller, Effects: effects}).Run(context.Background(), StrikeRequest{}, StrikePlan{BackendSafe: true})
+	abandoned := domain.JournalSnapshot{State: domain.SessionOpening, Workspace: domain.WorkspaceRecord{Context: "default"}}
+	_, err := (Strike{Sessions: strikeJournal{sessions: []domain.JournalSnapshot{abandoned}}, Controller: controller, Effects: effects}).Run(context.Background(), StrikeRequest{}, StrikePlan{BackendSafe: true})
 	if err != nil || !controller.called {
 		t.Fatalf("abandoned opening session blocked strike: %v", err)
 	}
