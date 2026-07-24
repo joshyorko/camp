@@ -81,10 +81,12 @@ func DocumentedInvocations() []Invocation {
 		{CommandPath: "camp completion", Args: []string{"completion", "bash"}},
 		{CommandPath: "camp doctor", Args: []string{"doctor"}},
 		{CommandPath: "camp init", Args: []string{"init", "/tmp/camp-docs-capsule"}},
+		{CommandPath: "camp list", Args: []string{"list"}},
 		{CommandPath: "camp open", Args: []string{"open", "memoryd"}},
 		{CommandPath: "camp recover", Args: []string{"recover", "memoryd"}},
 		{CommandPath: "camp reopen", Args: []string{"reopen", "memoryd"}},
 		{CommandPath: "camp setup", Args: []string{"setup"}},
+		{CommandPath: "camp strike", Args: []string{"strike"}},
 		{CommandPath: "camp sync", Args: []string{"sync"}},
 	}
 }
@@ -147,6 +149,12 @@ func (transcriptLifecycle) Supervise(_ context.Context, _ string, _ cli.OutputMo
 }
 func (transcriptLifecycle) Doctor(_ context.Context, _ cli.OutputMode, output io.Writer) error {
 	return fixtureDispatch(output, "doctor")
+}
+func (transcriptLifecycle) List(_ context.Context, _ cli.OutputMode, output io.Writer) error {
+	return fixtureDispatch(output, "list")
+}
+func (transcriptLifecycle) Strike(_ context.Context, _ cli.StrikeRequest, _ cli.OutputMode, output io.Writer) error {
+	return fixtureDispatch(output, "strike")
 }
 
 func transcriptRoot() *cobra.Command { return cli.NewRootWithLifecycle(transcriptLifecycle{}) }

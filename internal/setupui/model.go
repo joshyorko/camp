@@ -71,9 +71,9 @@ type Model struct {
 	failMsg   string
 	recovery  string
 
-	pal     Palette
-	sprites map[string]Sprite
-	guard   SizeGuard
+	pal       Palette
+	sprites   map[string]Sprite
+	guard     SizeGuard
 	starfield *Starfield
 
 	// pipeline drives the real setup operations. Start launches provisioning on

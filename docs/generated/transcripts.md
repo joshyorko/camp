@@ -21,10 +21,12 @@ Available Commands:
   doctor      Diagnose required host capabilities
   help        Help about any command
   init        Initialize a capsule root
+  list        List stored camps
   open        Open a capsule workspace
   recover     Recover an interrupted lifecycle
   reopen      Reopen a closed capsule workspace
   setup       Install or reuse pinned DevPod and Hauler tools
+  strike      Archive local Camp state and start fresh
   sync        Publish a checkpoint and remain open
 
 Flags:
@@ -69,6 +71,13 @@ $ camp init /tmp/camp-docs-capsule
 effect-free docs fixture: init dispatched; external effects disabled
 ```
 
+## `camp list`
+
+```console
+$ camp list
+effect-free docs fixture: list dispatched; external effects disabled
+```
+
 ## `camp open memoryd`
 
 ```console
@@ -95,6 +104,13 @@ effect-free docs fixture: reopen dispatched; external effects disabled
 ```console
 $ camp setup
 effect-free docs fixture: setup dispatched; external effects disabled
+```
+
+## `camp strike`
+
+```console
+$ camp strike
+effect-free docs fixture: strike dispatched; external effects disabled
 ```
 
 ## `camp sync`

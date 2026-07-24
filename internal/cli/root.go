@@ -70,6 +70,15 @@ type CampLister interface {
 	List(context.Context, OutputMode, io.Writer) error
 }
 
+type StrikeRequest struct {
+	Purge bool
+	Yes   bool
+}
+
+type CampStriker interface {
+	Strike(context.Context, StrikeRequest, OutputMode, io.Writer) error
+}
+
 func NewRootWithLifecycle(lifecycle Lifecycle) *cobra.Command {
 	root := &cobra.Command{
 		Use:           "camp",
@@ -99,6 +108,9 @@ func NewRootWithLifecycle(lifecycle Lifecycle) *cobra.Command {
 	if camps, ok := lifecycle.(CampLister); ok {
 		root.AddCommand(noArgumentCommand("list", "List stored camps", camps.List))
 	}
+	if striker, ok := lifecycle.(CampStriker); ok {
+		root.AddCommand(newStrikeCommand(striker.Strike))
+	}
 	root.AddCommand(
 		newInitCommand(lifecycle.Init),
 		optionalArgumentCommand("open", "Open a capsule workspace", lifecycle.Open),
@@ -110,6 +122,19 @@ func NewRootWithLifecycle(lifecycle Lifecycle) *cobra.Command {
 		hiddenRequiredArgumentCommand("supervise", lifecycle.Supervise),
 	)
 	return root
+}
+
+func newStrikeCommand(run func(context.Context, StrikeRequest, OutputMode, io.Writer) error) *cobra.Command {
+	request := StrikeRequest{}
+	command := &cobra.Command{
+		Use: "strike", Short: "Archive local Camp state and start fresh", Args: usageArgs(cobra.NoArgs),
+		RunE: func(command *cobra.Command, _ []string) error {
+			return run(command.Context(), request, OutputModeFrom(command), command.OutOrStdout())
+		},
+	}
+	command.Flags().BoolVar(&request.Purge, "purge", false, "permanently remove verified local Camp state")
+	command.Flags().BoolVar(&request.Yes, "yes", false, "confirm permanent purge")
+	return command
 }
 
 func newCloseCommand(run func(context.Context, CloseRequest, OutputMode, io.Writer) error) *cobra.Command {

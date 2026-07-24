@@ -38,12 +38,12 @@ type SceneData struct {
 
 // Layout describes the responsive geometry for a given terminal size.
 type Layout struct {
-	Compact  bool
-	SkyRows  int
-	Horizon  int
+	Compact    bool
+	SkyRows    int
+	Horizon    int
 	ForestBand int
-	TrailRow int
-	TrailAmp float64
+	TrailRow   int
+	TrailAmp   float64
 }
 
 // layoutFor picks a composition tuned to the terminal size. There is no fixed

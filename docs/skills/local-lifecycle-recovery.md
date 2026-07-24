@@ -10,6 +10,10 @@ Local workspace return is accepted only when the provider is marked local and th
 
 ## Recovery rules
 
+- The operator surface also includes `camp list` and `camp strike`. `camp list` derives stored camps from validated latest-pointer objects plus journal history and sorts the merged inventory deterministically by capsule and branch.
+- Human `sync` and `close` output streams typed milestones only after each durable effect completes; JSON mode remains one non-streamed success envelope. Progress is stage-based and never fabricates percentages.
+- `camp strike` is the recoverable local reset. It refuses opening, open, or recovering sessions and refuses S3 or an external file backend. With Camp's managed file backend it archives verified controller-owned data-root children to a timestamped sibling, preserving the configuration file, configured source, and managed `tools` directory. `camp strike --purge --yes` permanently removes only the same verified targets; `--purge` without `--yes` is rejected. Targets must be real direct-child directories and are revalidated immediately before rename or removal, so symlinks and path substitution fail closed.
+
 - Treat a pending journal intent as reconciliation work, not permission to repeat a side effect.
 - A pending `WorkspaceMirrored` intent blocks another checkpoint because its side-effect outcome is unknown. An ambiguous mirror fact does not block a later checkpoint: preserve its returned attempt ID/root as evidence, then allocate the next logical attempt and a fresh attempt-specific staging destination. Do not stop/delete the provider workspace or remove controller staging when mirroring or pointer CAS fails.
 - `WorkspaceRecord.mirror` is a required value object in serialized snapshots; an empty `{}` truthfully means no mirror attempt has been recorded. Completed and ambiguous facts carry the durable logical-attempt number used to allocate the next unique checkpoint attempt after restart.

@@ -101,6 +101,26 @@ type recordingLifecycle struct {
 	setupInput     io.Reader
 }
 
+type recordingStriker struct {
+	*recordingLifecycle
+	request StrikeRequest
+}
+
+func (r *recordingStriker) Strike(_ context.Context, request StrikeRequest, _ OutputMode, _ io.Writer) error {
+	r.request = request
+	return nil
+}
+
+func TestStrikeCommandMapsPurgeConfirmation(t *testing.T) {
+	lifecycle := &recordingStriker{recordingLifecycle: &recordingLifecycle{}}
+	if code := Execute(context.Background(), NewRootWithLifecycle(lifecycle), []string{"strike", "--purge", "--yes"}, Streams{Out: io.Discard, ErrOut: io.Discard}); code != int(ExitSuccess) {
+		t.Fatalf("strike exit = %d", code)
+	}
+	if !lifecycle.request.Purge || !lifecycle.request.Yes {
+		t.Fatalf("strike request = %+v", lifecycle.request)
+	}
+}
+
 func (r *recordingLifecycle) Init(_ context.Context, request InitRequest, mode OutputMode, _ io.Writer) error {
 	if request.Source == "" && request.Backend == "" && request.Capsule == "" && request.DevPodProvider == "" {
 		r.calls = append(r.calls, "init:"+request.Root+":"+string(mode))
@@ -542,7 +562,7 @@ func TestRootHelpIsDeterministic(t *testing.T) {
 	if first != second {
 		t.Fatalf("help changed between identical roots:\nfirst:\n%s\nsecond:\n%s", first, second)
 	}
-	want := "Recoverable capsule workspaces\n\nUsage:\n  camp [flags]\n  camp [command]\n\nAvailable Commands:\n  attach      Attach to an open capsule workspace\n  close       Publish a checkpoint and close\n  completion  Generate shell completion\n  doctor      Diagnose required host capabilities\n  help        Help about any command\n  init        Initialize a capsule root\n  list        List stored camps\n  open        Open a capsule workspace\n  recover     Recover an interrupted lifecycle\n  reopen      Reopen a closed capsule workspace\n  setup       Install or reuse pinned DevPod and Hauler tools\n  sync        Publish a checkpoint and remain open\n\nFlags:\n  -h, --help   help for camp\n      --json   emit stable JSON output\n\nUse \"camp [command] --help\" for more information about a command.\n"
+	want := "Recoverable capsule workspaces\n\nUsage:\n  camp [flags]\n  camp [command]\n\nAvailable Commands:\n  attach      Attach to an open capsule workspace\n  close       Publish a checkpoint and close\n  completion  Generate shell completion\n  doctor      Diagnose required host capabilities\n  help        Help about any command\n  init        Initialize a capsule root\n  list        List stored camps\n  open        Open a capsule workspace\n  recover     Recover an interrupted lifecycle\n  reopen      Reopen a closed capsule workspace\n  setup       Install or reuse pinned DevPod and Hauler tools\n  strike      Archive local Camp state and start fresh\n  sync        Publish a checkpoint and remain open\n\nFlags:\n  -h, --help   help for camp\n      --json   emit stable JSON output\n\nUse \"camp [command] --help\" for more information about a command.\n"
 	if first != want {
 		t.Fatalf("help:\n%s\nwant:\n%s", first, want)
 	}

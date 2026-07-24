@@ -54,10 +54,11 @@ Publish a checkpoint and close
 
 ```text
 Usage:
-  camp close
+  camp close [flags]
 
 Flags:
-  -h, --help   help for close
+      --discard   close without publishing the open session
+  -h, --help      help for close
 
 Global flags:
       --json   emit stable JSON output
@@ -108,6 +109,21 @@ Flags:
       --devpod-provider string   persist the default DevPod provider
   -h, --help                     help for init
       --source string            persist the default source path
+
+Global flags:
+      --json   emit stable JSON output
+```
+
+## `camp list`
+
+List stored camps
+
+```text
+Usage:
+  camp list
+
+Flags:
+  -h, --help   help for list
 
 Global flags:
       --json   emit stable JSON output
@@ -168,6 +184,23 @@ Usage:
 
 Flags:
   -h, --help   help for setup
+
+Global flags:
+      --json   emit stable JSON output
+```
+
+## `camp strike`
+
+Archive local Camp state and start fresh
+
+```text
+Usage:
+  camp strike [flags]
+
+Flags:
+  -h, --help    help for strike
+      --purge   permanently remove verified local Camp state
+      --yes     confirm permanent purge
 
 Global flags:
       --json   emit stable JSON output

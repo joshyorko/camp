@@ -26,6 +26,7 @@ import (
 	lifecycleadapter "github.com/joshyorko/camp/internal/adapters/lifecycle"
 	"github.com/joshyorko/camp/internal/adapters/objectstore"
 	"github.com/joshyorko/camp/internal/adapters/sshtransfer"
+	strikeadapter "github.com/joshyorko/camp/internal/adapters/strike"
 	"github.com/joshyorko/camp/internal/adapters/subprocess"
 	"github.com/joshyorko/camp/internal/adapters/supervisor"
 	tooladapter "github.com/joshyorko/camp/internal/adapters/tools"
@@ -47,6 +48,36 @@ import (
 type ProductionLifecycle struct{}
 
 func NewProductionLifecycle() *ProductionLifecycle { return &ProductionLifecycle{} }
+
+func (p *ProductionLifecycle) Strike(ctx context.Context, request StrikeRequest, mode OutputMode, out io.Writer) error {
+	base, err := composeProductionBase(ctx)
+	if err != nil {
+		return err
+	}
+	managedBackend := filepath.Join(base.paths.DataRoot, "backend")
+	backendSafe := base.backend.Kind == config.BackendFile && base.backend.File != nil && filepath.Clean(base.backend.File.Root) == managedBackend
+	names := []string{"backend", "camp", "doctor", "locks", "mirrors", "quarantine", "sessions", "stores", "supervisors"}
+	targets := make([]string, 0, len(names))
+	for _, name := range names {
+		targets = append(targets, filepath.Join(base.paths.DataRoot, name))
+	}
+	usecase := app.Strike{Sessions: base.journal, Controller: strikeadapter.NewController(time.Now)}
+	result, err := usecase.Run(ctx, app.StrikeRequest{Purge: request.Purge, Yes: request.Yes}, app.StrikePlan{
+		DataRoot: base.paths.DataRoot, Targets: targets, BackendSafe: backendSafe,
+	})
+	if err != nil {
+		return err
+	}
+	if mode == ModeJSON {
+		return writeSuccess(out, mode, "strike", result, "")
+	}
+	if result.Purged {
+		_, err = fmt.Fprintln(out, "strike: permanently removed verified local Camp state\nnext: camp open")
+		return err
+	}
+	_, err = fmt.Fprintf(out, "strike: archived local Camp state at %s\nnext: camp open\n", result.ArchivedPath)
+	return err
+}
 
 func (p *ProductionLifecycle) List(ctx context.Context, mode OutputMode, out io.Writer) error {
 	base, err := composeProductionBase(ctx)
