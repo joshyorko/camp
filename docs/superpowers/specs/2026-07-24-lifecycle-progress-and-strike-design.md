@@ -27,6 +27,10 @@ Close will additionally report each cleanup boundary: workspace, forwarders, ser
 
 Progress delivery is best-effort presentation. A terminal write failure cancels the operation through its context and returns an error; a slow renderer must not create concurrent lifecycle mutation. Event messages contain bounded, sanitized metadata such as generation number, image count, and archive size, never secrets or raw subprocess output.
 
+## ONCE-style starfield
+
+Camp's rich setup scene will replace its static decorative glyph scatter with an adaptation of Basecamp/ONCE's MIT-licensed animated Braille starfield. The long-lived setup model owns the star state, advances depth projection on 33-millisecond tick messages, recomputes the grid after resize, and paints bright or dim Braille cells behind Camp's landscape layers. Interactive true-color TTY setup animates; deterministic scene captures use a fixed seed and fixed frame; plain, JSON, CI, `NO_COLOR`, and size-guard fallbacks do not start animation. The adaptation preserves Camp's palette and compositing boundaries while matching ONCE's star count, projection, speed, depth range, and subcell mapping.
+
 ## `camp strike`
 
 `camp strike` means “strike camp and return to the trailhead.” It:
@@ -61,6 +65,7 @@ camp open
 Tests will prove:
 
 - progress events are ordered by real checkpoint and cleanup effects;
+- the starfield matches ONCE's projection constants and Braille mapping, advances on ticks, resizes safely, remains behind foreground layers, and produces deterministic capture frames;
 - no progress is emitted for stages skipped during recovery;
 - human output streams before completion while JSON remains valid;
 - strike refuses active sessions and unsafe or external paths without mutation;
