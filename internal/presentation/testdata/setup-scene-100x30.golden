@@ -1,0 +1,120 @@
+<ESC>[2J<ESC>[H
+
+
+
+
+
+                                               <ESC>[38;2;238;215;169m⛺ CAMP<ESC>[0m
+                                          <ESC>[38;2;110;118;129mtrailhead setup<ESC>[0m
+
+  <ESC>[38;2;108;178;235m         ·                  ✦                  ·                  ✦                  ·          <ESC>[0m
+           <ESC>[38;2;58;110;70m▲<ESC>[0m                  <ESC>[38;2;58;110;70m▲<ESC>[0m                  <ESC>[38;2;238;215;169m▲<ESC>[0m                  <ESC>[38;2;58;110;70m▲<ESC>[0m                  <ESC>[38;2;58;110;70m▲<ESC>[0m
+
+     <ESC>[38;2;102;214;86m✓ TOOLCHAIN<ESC>[0m      <ESC>[38;2;255;171;45m◐ RUNTIME<ESC>[0m               <ESC>[38;2;110;118;129m○ CAPSULE<ESC>[0m                 <ESC>[38;2;110;118;129m○ STORAGE<ESC>[0m
+     <ESC>[38;2;238;215;169mDevPod v0.26.1<ESC>[0m   <ESC>[38;2;238;215;169mdocker · local DevPod<ESC>[0m   <ESC>[38;2;238;215;169msecond_brain<ESC>[0m              <ESC>[38;2;238;215;169mfile backend<ESC>[0m
+     <ESC>[38;2;238;215;169mHauler v2.0.2<ESC>[0m    <ESC>[38;2;238;215;169mcontext default<ESC>[0m         <ESC>[38;2;238;215;169m/home/josh/second_brain<ESC>[0m   <ESC>[38;2;238;215;169mno committed generation<ESC>[0m
+
+  <ESC>[38;2;110;118;129m────────────✓───────────────────────◐───────────────────────○───────────────────────○───────────<ESC>[0m
+
+
+
+
+
+
+
+
+
+
+
+
+
+<ESC>[2J<ESC>[H
+
+
+
+
+
+                                               <ESC>[38;2;238;215;169m⛺ CAMP<ESC>[0m
+                                          <ESC>[38;2;110;118;129mtrailhead setup<ESC>[0m
+
+  <ESC>[38;2;108;178;235m         ·                  ✦                  ·                  ✦                  ·          <ESC>[0m
+           <ESC>[38;2;58;110;70m▲<ESC>[0m                  <ESC>[38;2;58;110;70m▲<ESC>[0m                  <ESC>[38;2;238;215;169m▲<ESC>[0m                  <ESC>[38;2;58;110;70m▲<ESC>[0m                  <ESC>[38;2;58;110;70m▲<ESC>[0m
+
+     <ESC>[38;2;102;214;86m✓ TOOLCHAIN<ESC>[0m      <ESC>[38;2;102;214;86m✓ RUNTIME<ESC>[0m               <ESC>[38;2;255;171;45m◐ CAPSULE<ESC>[0m                 <ESC>[38;2;110;118;129m○ STORAGE<ESC>[0m
+     <ESC>[38;2;238;215;169mDevPod v0.26.1<ESC>[0m   <ESC>[38;2;238;215;169mdocker · local DevPod<ESC>[0m   <ESC>[38;2;238;215;169msecond_brain<ESC>[0m              <ESC>[38;2;238;215;169mfile backend<ESC>[0m
+     <ESC>[38;2;238;215;169mHauler v2.0.2<ESC>[0m    <ESC>[38;2;238;215;169mcontext default<ESC>[0m         <ESC>[38;2;238;215;169m/home/josh/second_brain<ESC>[0m   <ESC>[38;2;238;215;169mno committed generation<ESC>[0m
+
+  <ESC>[38;2;110;118;129m────────────✓───────────────────────✓───────────────────────◐───────────────────────○───────────<ESC>[0m
+
+
+
+
+
+
+
+
+
+
+
+
+
+<ESC>[2J<ESC>[H
+
+
+
+
+
+                                               <ESC>[38;2;238;215;169m⛺ CAMP<ESC>[0m
+                                          <ESC>[38;2;110;118;129mtrailhead setup<ESC>[0m
+
+  <ESC>[38;2;108;178;235m         ·                  ✦                  ·                  ✦                  ·          <ESC>[0m
+           <ESC>[38;2;58;110;70m▲<ESC>[0m                  <ESC>[38;2;58;110;70m▲<ESC>[0m                  <ESC>[38;2;238;215;169m▲<ESC>[0m                  <ESC>[38;2;58;110;70m▲<ESC>[0m                  <ESC>[38;2;58;110;70m▲<ESC>[0m
+
+     <ESC>[38;2;102;214;86m✓ TOOLCHAIN<ESC>[0m      <ESC>[38;2;102;214;86m✓ RUNTIME<ESC>[0m               <ESC>[38;2;102;214;86m✓ CAPSULE<ESC>[0m                 <ESC>[38;2;255;171;45m◐ STORAGE<ESC>[0m
+     <ESC>[38;2;238;215;169mDevPod v0.26.1<ESC>[0m   <ESC>[38;2;238;215;169mdocker · local DevPod<ESC>[0m   <ESC>[38;2;238;215;169msecond_brain<ESC>[0m              <ESC>[38;2;238;215;169mfile backend<ESC>[0m
+     <ESC>[38;2;238;215;169mHauler v2.0.2<ESC>[0m    <ESC>[38;2;238;215;169mcontext default<ESC>[0m         <ESC>[38;2;238;215;169m/home/josh/second_brain<ESC>[0m   <ESC>[38;2;238;215;169mno committed generation<ESC>[0m
+
+  <ESC>[38;2;110;118;129m────────────✓───────────────────────✓───────────────────────✓───────────────────────◐───────────<ESC>[0m
+
+
+
+
+
+
+
+
+
+
+
+
+
+<ESC>[2J<ESC>[H
+
+
+
+
+                                               <ESC>[38;2;238;215;169m⛺ CAMP<ESC>[0m
+                                          <ESC>[38;2;110;118;129mtrailhead setup<ESC>[0m
+
+  <ESC>[38;2;108;178;235m         ·                  ✦                  ·                  ✦                  ·          <ESC>[0m
+           <ESC>[38;2;58;110;70m▲<ESC>[0m                  <ESC>[38;2;58;110;70m▲<ESC>[0m                  <ESC>[38;2;238;215;169m▲<ESC>[0m                  <ESC>[38;2;58;110;70m▲<ESC>[0m                  <ESC>[38;2;58;110;70m▲<ESC>[0m
+
+     <ESC>[38;2;102;214;86m✓ TOOLCHAIN<ESC>[0m      <ESC>[38;2;102;214;86m✓ RUNTIME<ESC>[0m               <ESC>[38;2;102;214;86m✓ CAPSULE<ESC>[0m                 <ESC>[38;2;102;214;86m✓ STORAGE<ESC>[0m
+     <ESC>[38;2;238;215;169mDevPod v0.26.1<ESC>[0m   <ESC>[38;2;238;215;169mdocker · local DevPod<ESC>[0m   <ESC>[38;2;238;215;169msecond_brain<ESC>[0m              <ESC>[38;2;238;215;169mfile backend<ESC>[0m
+     <ESC>[38;2;238;215;169mHauler v2.0.2<ESC>[0m    <ESC>[38;2;238;215;169mcontext default<ESC>[0m         <ESC>[38;2;238;215;169m/home/josh/second_brain<ESC>[0m   <ESC>[38;2;238;215;169mno committed generation<ESC>[0m
+
+  <ESC>[38;2;255;171;45m────────────✓───────────────────────✓───────────────────────✓───────────────────────✓───────────🔥<ESC>[0m
+
+                                           <ESC>[38;2;255;171;45mCAMP IS READY<ESC>[0m
+
+                                      <ESC>[38;2;56;155;255m> camp open second_brain<ESC>[0m
+
+
+
+
+
+
+
+
+
+
