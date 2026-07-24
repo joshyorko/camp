@@ -49,5 +49,7 @@ contract does not implement signature verification.
 
 - `internal/campkit/manifest_test.go` defines the schema, canonical-byte,
   completeness, safety, lineage, and trust-status acceptance tests.
+- `internal/campkit/manifest.go` owns validation, strict canonical decoding,
+  and copy-based sorting; verify it with `go test ./internal/campkit -count=1`.
 - Git history preserves the initial failing test checkpoint before the
   production implementation.
