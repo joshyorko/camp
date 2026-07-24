@@ -73,7 +73,7 @@ func validateSourceRoot(path string) (string, bool, error) {
 		return "", false, fmt.Errorf("source root %q must be a real directory: %w", absolute, ErrUnsafeSource)
 	}
 	canonical, err := filepath.EvalSymlinks(absolute)
-	if err != nil || canonical != absolute {
+	if err != nil {
 		return "", false, fmt.Errorf("source root %q has unexplained symlink resolution: %w", absolute, ErrUnsafeSource)
 	}
 	metadata := filepath.Join(canonical, ".camp", "capsule.yaml")

@@ -111,7 +111,7 @@ func NewModel(pal Palette, sprites map[string]Sprite, defaults map[string]string
 		subtitle:  "trailhead setup",
 		pal:       pal,
 		sprites:   sprites,
-		guard:     NewSizeGuard(80, 20),
+		guard:     NewSizeGuard(MinWidth, MinHeight),
 		pipeline:  pipeline,
 	}
 }

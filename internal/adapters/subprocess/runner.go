@@ -27,12 +27,19 @@ func (r *Runner) RunStarted(ctx context.Context, command ports.Command, started 
 
 func (r *Runner) run(ctx context.Context, command ports.Command, started func() error) (ports.Result, error) {
 	cmd := exec.CommandContext(ctx, command.Executable, command.Argv...)
-	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	interactive := command.Stdin != nil && command.Stdout != nil && command.Stderr != nil
+	if !interactive {
+		cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	}
 	cmd.Cancel = func() error {
 		if cmd.Process == nil {
 			return os.ErrProcessDone
 		}
-		if err := syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL); err != nil {
+		pid := cmd.Process.Pid
+		if !interactive {
+			pid = -pid
+		}
+		if err := syscall.Kill(pid, syscall.SIGKILL); err != nil {
 			if err == syscall.ESRCH {
 				return os.ErrProcessDone
 			}

@@ -19,7 +19,8 @@ The interactive rich path is a single [Bubble Tea](https://charm.land) program (
 
 The scene always uses the full terminal width; there is no fixed column ceiling. Height selects a composition tuned to the space:
 
-- **80×24** — compact but still recognizable: the mountains, forest, trail, tent, fire, and four-stage journey remain legible; decorative metadata callouts are trimmed to fit.
+- **69×20** — narrow integrated-terminal floor: the full scene remains bounded and recognizable, with decorative metadata trimmed to fit.
+- **80×24** — compact layout with more room for the mountains, forest, trail, tent, fire, and four-stage journey.
 - **120×40** — the full primary experience.
 - **160×48 and wider** — the extra width is spent on a longer, more sinuous trail and denser landscape, never a small island surrounded by dead space.
 
@@ -32,11 +33,11 @@ Static ready renders (for deterministic re-runs) are intentionally printed with 
 
 ## Fallback boundary
 
-Terminal selection is fail-closed. The rich interactive path is entered only for human output on an actual true-color TTY with a real keyboard (`COLORTERM=truecolor`/`24bit`, non-dumb `TERM`, readable width ≥ 80, no `CI`/`NO_COLOR`, and input that is itself a terminal). Every other path keeps the deterministic, control-free, line-based output byte-for-byte: JSON, redirected output, non-TTY, piped input, `NO_COLOR`, `TERM=dumb`, `CI`, and terminals below the supported size. Rich-mode ambition never weakens plain-mode reliability or lifecycle truth.
+Terminal selection is fail-closed. The rich interactive path is entered only for human output on an actual true-color TTY with a real keyboard (`COLORTERM=truecolor`/`24bit`, non-dumb `TERM`, readable size ≥ 69×20, no `CI`/`NO_COLOR`, and input that is itself a terminal). Every other path keeps the deterministic, control-free, line-based output byte-for-byte: JSON, redirected output, non-TTY, piped input, `NO_COLOR`, `TERM=dumb`, `CI`, and terminals below the supported size. Rich-mode ambition never weakens plain-mode reliability or lifecycle truth.
 
 Presentation metadata is untrusted at the rendering boundary. Reject control characters and credential-bearing URLs before writing any bytes (`setupui.SafeText`, mirrored by the campsite sanitizer). Render only already-sanitized backend/source identities; never display credentials, raw access tokens, secret query values, or environment contents. On failure, preserve the exact sanitized cause and print exactly one sanitized recovery command; never both a readiness claim and a failure.
 
-The rich path requires the minimum terminal floor of `80 × 20`; smaller screens do not engage rich mode and must fall back to deterministic plain output.
+The rich path requires the minimum terminal floor of `69 × 20`; smaller screens do not engage rich mode and must fall back to deterministic plain output. This floor covers common split and integrated terminals, including the verified `69 × 23` VS Code terminal case.
 
 Rich-mode cancellation is terminal-normal: the shell is restored without failure semantics, and no recovery command is emitted.
 

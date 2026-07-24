@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -42,6 +43,28 @@ func TestRunnerExecutesStructuredCommandWithoutShellExpansion(t *testing.T) {
 	}
 	if got := string(result.Stdout); got != want {
 		t.Fatalf("captured stdout = %q, want %q", got, want)
+	}
+}
+
+func TestRunnerKeepsInteractiveCommandInForegroundProcessGroup(t *testing.T) {
+	t.Parallel()
+	if runtime.GOOS != "linux" {
+		t.Skip("Camp interactive process-group handling is Linux-only")
+	}
+
+	result, err := NewRunner().Run(context.Background(), ports.Command{
+		Executable: "/bin/sh",
+		Argv: []string{"-c", `
+			parent=$(ps -o pgid= -p "$PPID" | tr -d ' ')
+			self=$(ps -o pgid= -p "$$" | tr -d ' ')
+			test "$self" = "$parent"
+		`},
+		Stdin:  bytes.NewReader(nil),
+		Stdout: io.Discard,
+		Stderr: io.Discard,
+	})
+	if err != nil {
+		t.Fatalf("interactive Run() error = %v, result = %#v", err, result)
 	}
 }
 

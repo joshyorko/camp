@@ -41,7 +41,7 @@ func TestSpritesAreRectangularAndNonEmpty(t *testing.T) {
 func TestComposeNeverExceedsRequestedSize(t *testing.T) {
 	sprites := loadForTest(t)
 	pal := DefaultPalette()
-	sizes := [][2]int{{80, 24}, {100, 30}, {120, 40}, {160, 48}, {200, 60}}
+	sizes := [][2]int{{69, 20}, {69, 23}, {80, 24}, {100, 30}, {120, 40}, {160, 48}, {200, 60}}
 	for _, st := range []string{"configure", "progress", "ready", "failure"} {
 		for _, sz := range sizes {
 			w, h := sz[0], sz[1]

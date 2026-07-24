@@ -43,3 +43,24 @@ func TestResolveSourceRejectsUnexplainedOrSymlinkedRootsAndAmbiguity(t *testing.
 		t.Fatalf("no-source error = %v, want exact camp init recovery", err)
 	}
 }
+
+func TestResolveSourceAcceptsRealDirectoryThroughSymlinkedAncestor(t *testing.T) {
+	t.Parallel()
+	realParent := filepath.Join(t.TempDir(), "var", "home", "josh")
+	root := filepath.Join(realParent, "brain")
+	if err := os.MkdirAll(root, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	home := filepath.Join(t.TempDir(), "home")
+	if err := os.Symlink(realParent, home); err != nil {
+		t.Fatal(err)
+	}
+
+	resolved, err := ResolveSource(SourceRequest{Capsule: "brain", ExplicitPath: filepath.Join(home, "brain")})
+	if err != nil {
+		t.Fatalf("ResolveSource() error = %v", err)
+	}
+	if resolved.Kind != SourceAdopted || resolved.Root != root {
+		t.Fatalf("source = %#v, want adopted root %q", resolved, root)
+	}
+}

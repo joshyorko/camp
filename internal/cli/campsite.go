@@ -46,7 +46,7 @@ func renderProductionSetupCampsite(ctx context.Context, out io.Writer, lockBytes
 	// setup ends on, so a re-run over existing configuration shows one visual
 	// language rather than the legacy line renderer. Plain/narrow terminals
 	// keep the deterministic animator frames.
-	if experience == presentation.TerminalColor && width >= 80 && height >= 20 {
+	if experience == presentation.TerminalColor && width >= setupui.MinWidth && height >= setupui.MinHeight {
 		sprites, spriteErr := setupui.LoadSprites()
 		if spriteErr == nil {
 			frame := setupui.RenderReadyCampsite(campsiteFacts(model), width, height, setupui.DefaultPalette(), sprites)

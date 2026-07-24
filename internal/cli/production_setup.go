@@ -18,6 +18,7 @@ import (
 	"github.com/joshyorko/camp/internal/doctor"
 	journalstore "github.com/joshyorko/camp/internal/journal"
 	"github.com/joshyorko/camp/internal/presentation"
+	"github.com/joshyorko/camp/internal/setupui"
 )
 
 type toolEnsurer interface {
@@ -137,7 +138,7 @@ func (p *ProductionLifecycle) Setup(ctx context.Context, mode OutputMode, in io.
 }
 
 func canUseRichSetup(experience presentation.TerminalExperience, width, height int) bool {
-	return experience == presentation.TerminalColor && width >= 80 && height >= 20
+	return experience == presentation.TerminalColor && width >= setupui.MinWidth && height >= setupui.MinHeight
 }
 
 func renderProductionSetupFailure(ctx context.Context, out io.Writer, lockBytes []byte, experience presentation.TerminalExperience, width, height int, cause error) error {

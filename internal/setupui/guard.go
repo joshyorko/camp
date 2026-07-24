@@ -6,6 +6,11 @@ import (
 	"charm.land/lipgloss/v2"
 )
 
+const (
+	MinWidth  = 69
+	MinHeight = 20
+)
+
 // SizeGuard enforces the supported-size boundary for the rich scene. Below the
 // minimum the caller should not have entered rich mode at all, but if a live
 // resize shrinks the window we show a legible prompt instead of a clipped
