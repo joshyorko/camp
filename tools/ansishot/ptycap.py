@@ -109,14 +109,10 @@ def main():
     except OSError:
         pass
 
-    text = captured.decode("utf-8", errors="replace")
-    # Keep everything after the last full clear so we capture the final frame.
-    for marker in ("\x1b[2J\x1b[H", "\x1b[2J", "\x1b[H"):
-        idx = text.rfind(marker)
-        if idx != -1:
-            text = text[idx + len(marker):]
-            break
-    sys.stdout.write(text)
+    # Emit the raw byte stream verbatim. Bubble Tea renders via cursor moves and
+    # cell rewrites, not full-frame clears, so the stream must be replayed
+    # through a terminal emulator (vtgrid.py) to reconstruct the final screen.
+    sys.stdout.write(captured.decode("utf-8", errors="replace"))
 
 
 if __name__ == "__main__":

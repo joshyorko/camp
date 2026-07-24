@@ -247,7 +247,14 @@ func overlayForeground(frame string, data SceneData, w, h int, lay Layout, pal P
 	case data.Foreground != "":
 		// The interactive form gets an opaque bordered panel centered in the
 		// scene so the landscape reads as a backdrop, not clutter behind text.
-		block = panel(data.Foreground, pal)
+		inner := w*2/3 - 8
+		if inner < 30 {
+			inner = 30
+		}
+		if inner > 72 {
+			inner = 72
+		}
+		block = panel(data.Foreground, pal, inner)
 		centerPanel = true
 	}
 	lines := strings.Split(frame, "\n")
@@ -325,14 +332,38 @@ func centerOnto(base, fg string, w int) string {
 
 // panel wraps content in a rounded, opaque-background bordered box so it fully
 // occludes the landscape behind it. A subtle sky-tinted fill keeps it feeling
-// part of the night scene rather than a flat modal.
-func panel(content string, pal Palette) string {
+// part of the night scene rather than a flat modal. The content is given a
+// fixed inner width and its background is reapplied after every SGR reset so
+// nested styled fields (labels, inputs) don't punch holes the landscape shows
+// through — the same technique as Basecamp/ONCE's WithBackground.
+func panel(content string, pal Palette, innerWidth int) string {
+	body := lipgloss.NewStyle().
+		Width(innerWidth).
+		Background(pal.Sky[2]).
+		Render(content)
+	body = reapplyBackground(body, pal.Sky[2])
 	return lipgloss.NewStyle().
 		Border(lipgloss.RoundedBorder()).
 		BorderForeground(pal.Amber).
 		Background(pal.Sky[2]).
 		Padding(1, 3).
-		Render(content)
+		Render(body)
+}
+
+// reapplyBackground re-emits the panel background after each SGR reset in the
+// content so inner elements that reset styling don't reveal the scene behind
+// the panel. Trailing resets with no following visible text are left alone.
+func reapplyBackground(content string, bg color.Color) string {
+	bgSeq := lipgloss.NewStyle().Background(bg).Render("")
+	// bgSeq is "<set-bg><reset>"; take just the set-bg prefix before the reset.
+	if i := strings.Index(bgSeq, ansi.ResetStyle); i > 0 {
+		bgSeq = bgSeq[:i]
+	}
+	lines := strings.Split(content, "\n")
+	for i, line := range lines {
+		lines[i] = strings.ReplaceAll(line, ansi.ResetStyle, ansi.ResetStyle+bgSeq)
+	}
+	return strings.Join(lines, "\n")
 }
 
 func readyBlock(data SceneData, w int, pal Palette) string {
