@@ -865,7 +865,16 @@ func (o *Open) create(ctx context.Context, request OpenRequest) (OpenResult, err
 	var root string
 	var observedPointer *coordination.PointerRecord
 	var fetchLineage = lineage
-	if source.Kind == capsule.SourceAdopted {
+	if source.Kind == capsule.SourceAdopted && o.deps.Pointers != nil {
+		pointer, err := o.deps.Pointers.Read(ctx, request.Capsule, lineage)
+		switch {
+		case err == nil:
+			observedPointer = &pointer
+		case !errors.Is(err, ports.ErrNotFound):
+			return OpenResult{}, err
+		}
+	}
+	if source.Kind == capsule.SourceAdopted && observedPointer == nil {
 		root = source.Root
 		materialization, err := o.deps.Ownership.Adopt(root)
 		if err != nil {
@@ -882,7 +891,7 @@ func (o *Open) create(ctx context.Context, request OpenRequest) (OpenResult, err
 			return OpenResult{}, err
 		}
 		if request.Mode == domain.SessionReadWrite {
-			lease, err := o.acquireLocalLease(ctx, request, lineage, journal)
+			lease, err := o.acquireLocalLease(ctx, request, lineage, nil, journal)
 			if err != nil {
 				return OpenResult{}, err
 			}
@@ -892,14 +901,18 @@ func (o *Open) create(ctx context.Context, request OpenRequest) (OpenResult, err
 		if o.deps.Pointers == nil || o.deps.Generations == nil || o.deps.Hydrator == nil {
 			return OpenResult{}, errors.New("remote open dependencies are incomplete")
 		}
-		pointer, sourcePointer, err := o.observeRemote(ctx, request, lineage, journal)
-		if err != nil {
-			return OpenResult{}, err
+		var sourcePointer *coordination.PointerRecord
+		if observedPointer == nil {
+			pointer, resolvedSourcePointer, err := o.observeRemote(ctx, request, lineage, journal)
+			if err != nil {
+				return OpenResult{}, err
+			}
+			observedPointer = pointer
+			sourcePointer = resolvedSourcePointer
 		}
-		if pointer == nil && sourcePointer == nil {
+		if observedPointer == nil && sourcePointer == nil {
 			return OpenResult{}, errors.New("remote capsule has no committed generation")
 		}
-		observedPointer = pointer
 		if sourcePointer != nil {
 			observedPointer = sourcePointer
 			fetchLineage = sourcePointer.Pointer.Lineage
@@ -1594,18 +1607,18 @@ func (o *Open) acquireRemoteLease(ctx context.Context, request OpenRequest, line
 	return token, nil
 }
 
-func (o *Open) acquireLocalLease(ctx context.Context, request OpenRequest, lineage domain.Lineage, log *openJournal) (coordination.LeaseToken, error) {
+func (o *Open) acquireLocalLease(ctx context.Context, request OpenRequest, lineage domain.Lineage, observed *coordination.PointerRecord, log *openJournal) (coordination.LeaseToken, error) {
 	if o.deps.Leases == nil {
 		return coordination.LeaseToken{}, errors.New("local writer lease dependency is incomplete")
 	}
 	owner := coordination.LeaseOwner{SessionID: request.SessionID, Machine: request.Machine}
 	now := o.deps.Clock.Now().UTC()
-	input := openLeaseAcquisitionInput{Capsule: request.Capsule, Lineage: lineage, Owner: owner, Now: now, LeaseTTL: request.LeaseTTL}
+	input := openLeaseAcquisitionInput{Capsule: request.Capsule, Lineage: lineage, Owner: owner, Observed: observed, Now: now, LeaseTTL: request.LeaseTTL}
 	var token coordination.LeaseToken
 	receipt := openLeaseReceipt{}
 	if err := log.phase(ctx, "LocalLeaseAcquisition", input, &receipt, func() error {
 		var err error
-		token, err = o.deps.Leases.Acquire(ctx, request.Capsule, lineage, owner, nil, now, request.LeaseTTL)
+		token, err = o.deps.Leases.Acquire(ctx, request.Capsule, lineage, owner, observed, now, request.LeaseTTL)
 		if err != nil {
 			return err
 		}

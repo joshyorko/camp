@@ -16,7 +16,7 @@ import (
 )
 
 var (
-	ErrOperationLocked    = errors.New("session operation is already locked")
+	ErrOperationLocked    = ports.ErrOperationLocked
 	ErrOperationOwnership = errors.New("operation lock ownership changed")
 )
 

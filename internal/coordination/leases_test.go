@@ -287,6 +287,27 @@ func TestLeaseRepositoryRejectsHeartbeatClockRollback(t *testing.T) {
 	}
 }
 
+func TestLeaseRepositoryRenewsExpiredExactTokenWhenNoWriterReplacedIt(t *testing.T) {
+	store := newObjectStore(t)
+	leases := coordination.NewLeaseRepository(store)
+	now := time.Date(2026, 7, 14, 12, 0, 0, 0, time.UTC)
+	token, err := leases.Acquire(context.Background(), "second-brain", domain.Lineage{Branch: "main"}, coordination.LeaseOwner{SessionID: "session", Machine: "bluefin"}, nil, now, time.Minute)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	renewed, err := leases.Renew(context.Background(), token, now.Add(2*time.Minute), 30*time.Minute)
+	if err != nil {
+		t.Fatalf("renew exact expired token: %v", err)
+	}
+	if renewed.Revision == token.Revision || !renewed.Lease.HeartbeatAt.Equal(now.Add(2*time.Minute)) || !renewed.Lease.ExpiresAt.Equal(now.Add(32*time.Minute)) {
+		t.Fatalf("renewed token = %#v", renewed)
+	}
+	if err := leases.Revalidate(context.Background(), renewed, now.Add(2*time.Minute)); err != nil {
+		t.Fatalf("revalidate reclaimed token: %v", err)
+	}
+}
+
 func TestLeaseRepositoryRejectsBackdatedRevalidation(t *testing.T) {
 	store := newObjectStore(t)
 	leases := coordination.NewLeaseRepository(store)

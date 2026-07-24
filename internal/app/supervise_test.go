@@ -274,6 +274,96 @@ func TestSuperviseReleasesInitialLoadLockBeforeHeartbeat(t *testing.T) {
 	}
 }
 
+func TestSuperviseKeepsRunningWhenHeartbeatContendsWithSessionOperation(t *testing.T) {
+	t.Parallel()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	now := time.Unix(100, 0).UTC()
+	supervisorIdentity := domain.ProcessIdentity{PID: 905, BootID: "boot", StartTicks: 49}
+	log := &recordingSupervisorJournal{snapshot: domain.JournalSnapshot{
+		SchemaVersion: domain.SchemaVersion,
+		SessionID:     "session-d",
+		State:         domain.SessionOpen,
+		Mode:          domain.SessionReadWrite,
+		Supervisor:    domain.SupervisorRecord{Identity: supervisorIdentity, Desired: domain.RuntimeDesiredRunning, Observed: domain.RuntimeObservedReady},
+		Lease:         domain.LeaseRecord{Lease: &domain.WriterLease{SessionID: "session-d", HeartbeatAt: now, ExpiresAt: now.Add(time.Minute)}, Revision: "r1"},
+	}}
+	nextLease := *log.snapshot.Lease.Lease
+	nextLease.HeartbeatAt = now.Add(40 * time.Second)
+	nextLease.ExpiresAt = now.Add(100 * time.Second)
+	keeper := &fakeLeaseKeeper{renewed: make(chan coordination.LeaseToken, 1), next: coordination.LeaseToken{Lease: nextLease, Revision: "r2"}}
+	ticker := &controlledTicker{channel: make(chan time.Time, 2)}
+	clock := &controlledClock{now: now, ticker: ticker}
+	locker := &contendedHeartbeatLocker{contended: make(chan struct{}, 1)}
+	supervisor := NewSupervise(log, keeper, locker, clock, time.Minute, fakeHostIdentity{process: supervisorIdentity})
+
+	done := make(chan error, 1)
+	go func() { done <- supervisor.Run(ctx, log.snapshot.SessionID) }()
+	ticker.channel <- now.Add(20 * time.Second)
+	select {
+	case <-locker.contended:
+	case <-time.After(time.Second):
+		t.Fatal("heartbeat did not encounter the session operation")
+	}
+	select {
+	case err := <-done:
+		t.Fatalf("supervisor exited on expected operation contention: %v", err)
+	default:
+	}
+
+	ticker.channel <- now.Add(40 * time.Second)
+	select {
+	case <-keeper.renewed:
+	case err := <-done:
+		t.Fatalf("supervisor exited before the next heartbeat: %v", err)
+	case <-time.After(time.Second):
+		t.Fatal("heartbeat did not resume after operation contention")
+	}
+	cancel()
+	if err := <-done; err != nil {
+		t.Fatalf("Run() after cancel error = %v", err)
+	}
+}
+
+func TestSuperviseImmediatelyRenewsAnExpiredExactLease(t *testing.T) {
+	t.Parallel()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	now := time.Unix(200, 0).UTC()
+	supervisorIdentity := domain.ProcessIdentity{PID: 906, BootID: "boot", StartTicks: 50}
+	lease := domain.WriterLease{SessionID: "session-expired", HeartbeatAt: now.Add(-2 * time.Minute), ExpiresAt: now.Add(-time.Minute)}
+	log := &recordingSupervisorJournal{snapshot: domain.JournalSnapshot{
+		SchemaVersion: domain.SchemaVersion,
+		SessionID:     lease.SessionID,
+		State:         domain.SessionOpen,
+		Mode:          domain.SessionReadWrite,
+		Supervisor:    domain.SupervisorRecord{Identity: supervisorIdentity, Desired: domain.RuntimeDesiredRunning, Observed: domain.RuntimeObservedReady},
+		Lease:         domain.LeaseRecord{Lease: &lease, Revision: "r1"},
+	}}
+	nextLease := lease
+	nextLease.HeartbeatAt = now
+	nextLease.ExpiresAt = now.Add(30 * time.Minute)
+	keeper := &fakeLeaseKeeper{renewed: make(chan coordination.LeaseToken, 1), next: coordination.LeaseToken{Lease: nextLease, Revision: "r2"}}
+	clock := &controlledClock{now: now, ticker: &controlledTicker{channel: make(chan time.Time)}}
+	supervisor := NewSupervise(log, keeper, &recordingOperationLocker{}, clock, 30*time.Minute, fakeHostIdentity{process: supervisorIdentity})
+
+	done := make(chan error, 1)
+	go func() { done <- supervisor.Run(ctx, lease.SessionID) }()
+	select {
+	case <-keeper.renewed:
+	case err := <-done:
+		t.Fatalf("supervisor exited before reclaiming exact expired lease: %v", err)
+	case <-time.After(time.Second):
+		t.Fatal("supervisor did not immediately renew the expired lease")
+	}
+	cancel()
+	if err := <-done; err != nil {
+		t.Fatalf("Run() after cancel error = %v", err)
+	}
+}
+
 func containsAllInOrder(values, want []string) bool {
 	index := 0
 	for _, value := range values {
@@ -344,6 +434,27 @@ func (l *strictOperationLocker) events() []string { return l.log.snapshot() }
 
 func (l *strictOperationLocker) waitForSequence(t *testing.T, want []string) bool {
 	return l.log.waitForSequence(t, want)
+}
+
+type contendedHeartbeatLocker struct {
+	mu        sync.Mutex
+	acquires  int
+	contended chan struct{}
+}
+
+func (l *contendedHeartbeatLocker) Acquire(_ context.Context, owner ports.OperationOwner) (ports.OperationToken, error) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	l.acquires++
+	if l.acquires == 4 {
+		l.contended <- struct{}{}
+		return ports.OperationToken{}, journal.ErrOperationLocked
+	}
+	return ports.OperationToken{ID: "token", Owner: owner, Identity: domain.ProcessIdentity{PID: 1, BootID: "boot", StartTicks: 1}}, nil
+}
+
+func (l *contendedHeartbeatLocker) Release(_ context.Context, _ ports.OperationToken) error {
+	return nil
 }
 
 func (l *heartbeatEventLog) waitForSequence(t *testing.T, want []string) bool {

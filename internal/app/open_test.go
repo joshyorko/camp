@@ -329,6 +329,51 @@ func TestOpenAdoptsRootPreservesOwnershipAndResolvesTargetAfterCommit(t *testing
 	}
 }
 
+func TestOpenAdoptedRootUsesCommittedPointerAsLeaseBaseline(t *testing.T) {
+	t.Parallel()
+	environment := newOpenTestEnvironment(t)
+	root := filepath.Join(t.TempDir(), "SecondBrain")
+	if err := os.MkdirAll(root, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	ref := domain.GenerationRef{Generation: 2, ArchiveSHA256: strings.Repeat("a", 64)}
+	pointer := coordination.PointerRecord{
+		Pointer: domain.LatestPointer{
+			SchemaVersion: domain.SchemaVersion, Capsule: "brain", Lineage: domain.Lineage{Branch: "main"},
+			Generation: ref, ObjectKey: "brain/generations/2-" + ref.ArchiveSHA256 + ".tar.zst",
+			Size: 1, CreatedAt: time.Unix(90, 0).UTC(), SessionID: "closed-session",
+		},
+		Revision: "pointer-r2",
+	}
+	leases := &observedLocalOpenLeases{}
+	hydrator := &recordingOpenHydrator{events: environment.events, ownership: environment.ownership}
+	environment.open.deps.Pointers = fixedOpenPointers{record: pointer}
+	environment.open.deps.Leases = leases
+	environment.open.deps.Generations = fixedOpenGenerationReader{metadata: domain.GenerationMetadata{
+		SchemaVersion: domain.SchemaVersion, Capsule: "brain", Lineage: domain.Lineage{Branch: "main"},
+		Generation: ref, ObjectKey: pointer.Pointer.ObjectKey, Size: pointer.Pointer.Size,
+	}}
+	environment.open.deps.Hydrator = hydrator
+
+	result, err := environment.open.Run(context.Background(), OpenRequest{
+		SessionID: "adopted-reopen", Capsule: "brain", Branch: "main", Mode: domain.SessionReadWrite,
+		ExplicitRoot: root, EntryMode: domain.EntryTerminal, Runtime: environment.runtime, Backend: environment.backend,
+	})
+	if err != nil {
+		t.Fatalf("Open() error = %v", err)
+	}
+	if leases.observed == nil || leases.observed.Revision != pointer.Revision {
+		t.Fatalf("lease baseline = %#v, want committed pointer %#v", leases.observed, pointer)
+	}
+	if hydrator.calls != 1 || result.Snapshot.Materialization.Mode != domain.MaterializationCreated || result.Snapshot.Materialization.CanonicalPath == root {
+		t.Fatalf("committed generation was not hydrated into a fresh materialization: calls=%d materialization=%#v", hydrator.calls, result.Snapshot.Materialization)
+	}
+	if result.Snapshot.CurrentBase == nil || *result.Snapshot.CurrentBase != ref || result.Snapshot.CurrentPointer == nil ||
+		result.Snapshot.CurrentPointer.Generation != ref || result.Snapshot.ExpectedPointerRevision != string(pointer.Revision) {
+		t.Fatalf("committed baseline was not persisted: %#v", result.Snapshot)
+	}
+}
+
 func TestOpenUsesRuntimeDevcontainerPathAsSingleSourceOfTruth(t *testing.T) {
 	t.Parallel()
 	environment := newOpenTestEnvironment(t)
@@ -621,6 +666,52 @@ func (*localOpenLeases) Acquire(_ context.Context, capsule string, lineage domai
 }
 func (*localOpenLeases) AcquireBranchFrom(context.Context, string, domain.Lineage, coordination.LeaseOwner, coordination.PointerRecord, time.Time, time.Duration) (coordination.LeaseToken, error) {
 	return coordination.LeaseToken{}, errors.New("local lease unexpectedly acquired from branch")
+}
+
+type observedLocalOpenLeases struct {
+	observed *coordination.PointerRecord
+}
+
+func (*observedLocalOpenLeases) Read(context.Context, string, domain.Lineage) (coordination.LeaseToken, error) {
+	return coordination.LeaseToken{}, ports.ErrNotFound
+}
+
+func (l *observedLocalOpenLeases) Acquire(_ context.Context, capsule string, lineage domain.Lineage, owner coordination.LeaseOwner, observed *coordination.PointerRecord, now time.Time, ttl time.Duration) (coordination.LeaseToken, error) {
+	l.observed = observed
+	if observed == nil {
+		return coordination.LeaseToken{}, errors.New("local lease did not receive the committed pointer")
+	}
+	return coordination.LeaseToken{Lease: domain.WriterLease{
+		SchemaVersion: domain.SchemaVersion, Capsule: capsule, Lineage: lineage, SessionID: owner.SessionID, Machine: owner.Machine,
+		OpenedGeneration: cloneGeneration(&observed.Pointer.Generation), CreatedAt: now, HeartbeatAt: now, ExpiresAt: now.Add(ttl),
+	}, Revision: "local-lease-r2"}, nil
+}
+
+func (*observedLocalOpenLeases) AcquireBranchFrom(context.Context, string, domain.Lineage, coordination.LeaseOwner, coordination.PointerRecord, time.Time, time.Duration) (coordination.LeaseToken, error) {
+	return coordination.LeaseToken{}, errors.New("local lease unexpectedly acquired from branch")
+}
+
+type fixedOpenPointers struct {
+	record coordination.PointerRecord
+}
+
+func (p fixedOpenPointers) Read(context.Context, string, domain.Lineage) (coordination.PointerRecord, error) {
+	return p.record, nil
+}
+
+func (p fixedOpenPointers) Revalidate(_ context.Context, record coordination.PointerRecord) error {
+	if record.Revision != p.record.Revision {
+		return coordination.ErrPointerChanged
+	}
+	return nil
+}
+
+type fixedOpenGenerationReader struct {
+	metadata domain.GenerationMetadata
+}
+
+func (r fixedOpenGenerationReader) ReadMetadata(context.Context, string, domain.Lineage, domain.GenerationRef) (domain.GenerationMetadata, ports.ObjectMeta, error) {
+	return r.metadata, ports.ObjectMeta{}, nil
 }
 
 type openForwarders struct {

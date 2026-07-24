@@ -113,6 +113,42 @@ func (r *PointerRepository) CompareAndSwap(ctx context.Context, expected Pointer
 	return PointerRecord{Pointer: next, Revision: meta.Revision}, nil
 }
 
+func (r *PointerRepository) SelectHistorical(ctx context.Context, expected PointerRecord, historical domain.LatestPointer) (PointerRecord, error) {
+	if err := validatePointer(expected.Pointer, expected.Pointer.Capsule, expected.Pointer.Lineage); err != nil {
+		return PointerRecord{}, err
+	}
+	if expected.Revision == "" {
+		return PointerRecord{}, fmt.Errorf("pointer has empty expected revision: %w", ErrInvalidDocument)
+	}
+	if err := validatePointer(historical, expected.Pointer.Capsule, expected.Pointer.Lineage); err != nil {
+		return PointerRecord{}, err
+	}
+	if historical.Generation.Generation >= expected.Pointer.Generation.Generation {
+		return PointerRecord{}, fmt.Errorf("historical generation %d does not precede current generation %d: %w", historical.Generation.Generation, expected.Pointer.Generation.Generation, ErrInvalidDocument)
+	}
+	if err := r.Revalidate(ctx, expected); err != nil {
+		return PointerRecord{}, err
+	}
+	body, err := json.Marshal(historical)
+	if err != nil {
+		return PointerRecord{}, fmt.Errorf("marshal historical pointer: %w", err)
+	}
+	key, _ := historical.Lineage.PointerKey(historical.Capsule)
+	meta, err := r.store.PutConditional(ctx, key, body, ports.WriteCondition{MatchRevision: expected.Revision})
+	if err != nil {
+		if errors.Is(err, ports.ErrAmbiguous) {
+			if reconciled, readErr := r.Read(ctx, historical.Capsule, historical.Lineage); readErr == nil && documentsEqual(reconciled.Pointer, historical) {
+				return reconciled, nil
+			}
+		}
+		if errors.Is(err, ports.ErrConflict) || errors.Is(err, ports.ErrNotFound) {
+			return PointerRecord{}, fmt.Errorf("select historical pointer %q: %w", key, ErrPointerChanged)
+		}
+		return PointerRecord{}, err
+	}
+	return PointerRecord{Pointer: historical, Revision: meta.Revision}, nil
+}
+
 func (r *PointerRepository) Revalidate(ctx context.Context, observed PointerRecord) error {
 	current, err := r.Read(ctx, observed.Pointer.Capsule, observed.Pointer.Lineage)
 	if err != nil {

@@ -2,9 +2,12 @@ package ports
 
 import (
 	"context"
+	"errors"
 
 	"github.com/joshyorko/camp/internal/domain"
 )
+
+var ErrOperationLocked = errors.New("session operation is already locked")
 
 type OperationOwner struct {
 	SessionID string `json:"sessionId"`

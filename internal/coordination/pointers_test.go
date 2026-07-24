@@ -181,6 +181,31 @@ func TestPointerRepositoryRejectsNonForwardGenerationCAS(t *testing.T) {
 	}
 }
 
+func TestPointerRepositorySelectsHistoricalGenerationWithExactCAS(t *testing.T) {
+	store := newObjectStore(t)
+	repository := coordination.NewPointerRepository(store)
+	ctx := context.Background()
+	now := time.Date(2026, 7, 14, 12, 0, 0, 0, time.UTC)
+	historicalRef := generationRef(41, "a")
+	currentRef := generationRef(42, "b")
+	current, err := repository.Create(ctx, pointerFixture("second-brain", domain.Lineage{Branch: "main"}, currentRef, &historicalRef, now))
+	if err != nil {
+		t.Fatal(err)
+	}
+	historical := pointerFixture("second-brain", current.Pointer.Lineage, historicalRef, nil, now.Add(-time.Minute))
+
+	selected, err := repository.SelectHistorical(ctx, current, historical)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if selected.Pointer != historical || selected.Revision == current.Revision {
+		t.Fatalf("selected = %#v, current revision = %q", selected, current.Revision)
+	}
+	if _, err := repository.SelectHistorical(ctx, current, historical); !errors.Is(err, coordination.ErrPointerChanged) {
+		t.Fatalf("stale historical selection error = %v, want pointer changed", err)
+	}
+}
+
 func TestPointerBaselineAdvancesCurrentWithoutErasingOpenedGeneration(t *testing.T) {
 	store := newObjectStore(t)
 	repository := coordination.NewPointerRepository(store)

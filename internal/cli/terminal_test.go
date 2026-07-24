@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"errors"
 	"os"
+	"reflect"
 	"testing"
 
 	"github.com/joshyorko/camp/internal/presentation"
@@ -103,6 +104,17 @@ func TestWriteLifecycleEventsUsesCompletedOpenSyncAndCloseState(t *testing.T) {
 				t.Fatalf("output = %q, want %q", got, test.want)
 			}
 		})
+	}
+}
+
+func TestCloseDiscardTerminalEventsDoNotClaimPublication(t *testing.T) {
+	got := closeDiscardTerminalEvents()
+	want := []presentation.LifecycleEvent{
+		{Stage: presentation.StageCleanupComplete, Message: "cleanup complete"},
+		{Stage: presentation.StageComplete, Message: "session discarded and closed"},
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("events = %#v, want %#v", got, want)
 	}
 }
 

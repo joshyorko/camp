@@ -233,8 +233,15 @@ func (r *LeaseRepository) Renew(ctx context.Context, token LeaseToken, now time.
 	if !expiresAt.After(now) {
 		return LeaseToken{}, fmt.Errorf("invalid lease expiry: %w", ErrInvalidDocument)
 	}
-	if err := r.Revalidate(ctx, token, now); err != nil {
+	current, err := r.Read(ctx, token.Lease.Capsule, token.Lease.Lineage)
+	if err != nil {
+		if errors.Is(err, ports.ErrNotFound) {
+			return LeaseToken{}, fmt.Errorf("lease disappeared: %w", ErrLeaseLost)
+		}
 		return LeaseToken{}, err
+	}
+	if current.Revision != token.Revision || !documentsEqual(current.Lease, token.Lease) {
+		return LeaseToken{}, fmt.Errorf("lease token is stale: %w", ErrLeaseLost)
 	}
 	renewed := token.Lease
 	renewed.HeartbeatAt = now

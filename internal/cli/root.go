@@ -20,7 +20,7 @@ type Lifecycle interface {
 	Open(context.Context, string, OutputMode, io.Writer) error
 	Attach(context.Context, AttachRequest, OutputMode, io.Writer) error
 	Sync(context.Context, OutputMode, io.Writer) error
-	Close(context.Context, OutputMode, io.Writer) error
+	Close(context.Context, CloseRequest, OutputMode, io.Writer) error
 	Reopen(context.Context, string, OutputMode, io.Writer) error
 	Recover(context.Context, string, OutputMode, io.Writer) error
 	Supervise(context.Context, string, OutputMode, io.Writer) error
@@ -52,6 +52,10 @@ type InitRequest struct {
 	Capsule        string
 	DevPodProvider string
 	DevPodContext  string
+}
+
+type CloseRequest struct {
+	Discard bool
 }
 
 type doctorLifecycle interface {
@@ -93,12 +97,24 @@ func NewRootWithLifecycle(lifecycle Lifecycle) *cobra.Command {
 		optionalArgumentCommand("open", "Open a capsule workspace", lifecycle.Open),
 		newAttachCommand(lifecycle.Attach),
 		noArgumentCommand("sync", "Publish a checkpoint and remain open", lifecycle.Sync),
-		noArgumentCommand("close", "Publish a checkpoint and close", lifecycle.Close),
+		newCloseCommand(lifecycle.Close),
 		optionalArgumentCommand("reopen", "Reopen a closed capsule workspace", lifecycle.Reopen),
 		optionalArgumentCommand("recover", "Recover an interrupted lifecycle", lifecycle.Recover),
 		hiddenRequiredArgumentCommand("supervise", lifecycle.Supervise),
 	)
 	return root
+}
+
+func newCloseCommand(run func(context.Context, CloseRequest, OutputMode, io.Writer) error) *cobra.Command {
+	request := CloseRequest{}
+	command := &cobra.Command{
+		Use: "close", Short: "Publish a checkpoint and close", Args: usageArgs(cobra.NoArgs),
+		RunE: func(command *cobra.Command, _ []string) error {
+			return run(command.Context(), request, OutputModeFrom(command), command.OutOrStdout())
+		},
+	}
+	command.Flags().BoolVar(&request.Discard, "discard", false, "close without publishing the open session")
+	return command
 }
 
 func setupCommand(run func(context.Context, OutputMode, io.Reader, io.Writer) error) *cobra.Command {

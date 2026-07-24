@@ -130,7 +130,7 @@ func (transcriptLifecycle) Attach(_ context.Context, _ cli.AttachRequest, _ cli.
 func (transcriptLifecycle) Sync(_ context.Context, _ cli.OutputMode, output io.Writer) error {
 	return fixtureDispatch(output, "sync")
 }
-func (transcriptLifecycle) Close(_ context.Context, _ cli.OutputMode, output io.Writer) error {
+func (transcriptLifecycle) Close(_ context.Context, _ cli.CloseRequest, _ cli.OutputMode, output io.Writer) error {
 	return fixtureDispatch(output, "close")
 }
 func (transcriptLifecycle) Reopen(_ context.Context, _ string, _ cli.OutputMode, output io.Writer) error {

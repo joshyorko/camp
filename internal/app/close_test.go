@@ -97,6 +97,34 @@ func TestCloseKeepsOneLockAcrossFinalPublicationAndOrderedCleanup(t *testing.T) 
 	}
 }
 
+func TestCloseDiscardSkipsPublicationAndStillPerformsOwnedCleanup(t *testing.T) {
+	t.Parallel()
+	log, snapshot := newCloseJournal(t, domain.SessionReadWrite, domain.Materialization{Mode: domain.MaterializationCreated, CleanupPermitted: true})
+	events := []string{}
+	locker := &fakeOperationLocker{events: &events, token: ports.OperationToken{ID: "lock"}}
+	publisher := &fakeCheckpointPublisher{events: &events, result: CheckpointResult{Published: true}}
+	effects := &fakeCloseEffects{events: &events}
+
+	result, err := NewClose(log, locker, publisher, effects, fixedAppClock{now: time.Unix(200, 0)}).Run(
+		context.Background(),
+		CloseRequest{SessionID: snapshot.SessionID, Discard: true},
+	)
+	if err != nil {
+		t.Fatalf("Run() error = %v", err)
+	}
+	if result.PublicationSucceeded || !result.CleanupSucceeded || result.Generation != (domain.GenerationRef{}) || result.RecoveryCommand != "" {
+		t.Fatalf("result = %#v", result)
+	}
+	want := []string{"lock:close", "workspace", "forwarders", "services", "supervisor", "lease", "materialization", "unlock:close"}
+	if !reflect.DeepEqual(events, want) {
+		t.Fatalf("events = %#v, want %#v", events, want)
+	}
+	loaded, pending, err := log.Load(context.Background(), snapshot.SessionID)
+	if err != nil || len(pending) != 0 || loaded.State != domain.SessionClosed || loaded.Cleanup.State != domain.CleanupSucceeded || loaded.Checkpoint.PublicationSucceeded {
+		t.Fatalf("closed snapshot = %#v pending=%#v error=%v", loaded, pending, err)
+	}
+}
+
 func TestCloseComposesWithRealCheckpointPublisherWithoutSelfCreatedPendingIntent(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()

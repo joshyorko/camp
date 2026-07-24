@@ -92,6 +92,11 @@ func (u *Supervise) RunClaimed(ctx context.Context, sessionID string) error {
 		return ErrLeaseHeartbeat
 	}
 	token := coordination.LeaseToken{Lease: *snapshot.Lease.Lease, Revision: ports.Revision(snapshot.Lease.Revision)}
+	if !token.Lease.ExpiresAt.After(u.clock.Now()) {
+		if err := u.heartbeat(ctx, sessionID, &token, u.clock.Now()); err != nil {
+			return err
+		}
+	}
 	interval := u.ttl / 3
 	if interval <= 0 {
 		interval = time.Second
@@ -104,6 +109,9 @@ func (u *Supervise) RunClaimed(ctx context.Context, sessionID string) error {
 			return nil
 		case now := <-ticker.C():
 			if err := u.heartbeat(ctx, sessionID, &token, now); err != nil {
+				if errors.Is(err, ports.ErrOperationLocked) {
+					continue
+				}
 				return err
 			}
 		}

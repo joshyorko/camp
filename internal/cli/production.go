@@ -341,7 +341,7 @@ func (p *ProductionLifecycle) Sync(ctx context.Context, mode OutputMode, out io.
 	return writeSuccess(out, mode, "sync", result, fmt.Sprintf("Published checkpoint %d\n", result.Generation.Generation))
 }
 
-func (p *ProductionLifecycle) Close(ctx context.Context, mode OutputMode, out io.Writer) error {
+func (p *ProductionLifecycle) Close(ctx context.Context, request CloseRequest, mode OutputMode, out io.Writer) error {
 	c, err := composeLifecycle(ctx)
 	if err != nil {
 		return err
@@ -350,11 +350,14 @@ func (p *ProductionLifecycle) Close(ctx context.Context, mode OutputMode, out io
 	if err != nil {
 		return err
 	}
-	result, err := c.close.Run(ctx, app.CloseRequest{SessionID: session.SessionID})
+	result, err := c.close.Run(ctx, app.CloseRequest{SessionID: session.SessionID, Discard: request.Discard})
 	if err != nil {
 		return lifecycleFailure(err, result.RecoveryCommand)
 	}
 	if mode == ModeHuman {
+		if request.Discard {
+			return writeHumanLifecycleResult(out, mode, "close", closeDiscardTerminalEvents(), "")
+		}
 		return writeHumanLifecycleResult(out, mode, "close", closeTerminalEvents(result.Generation.Generation, result.CleanupSucceeded), "")
 	}
 	return writeSuccess(out, mode, "close", result, fmt.Sprintf("Closed %s\n", session.SessionID))
@@ -394,6 +397,8 @@ type supervisorBootstrap struct {
 type supervisorHeartbeat struct {
 	leases *coordination.LeaseRepository
 }
+
+const productionWriterLeaseTTL = 30 * time.Minute
 
 type productionBase struct {
 	paths     config.XDGPaths
@@ -623,7 +628,7 @@ func runSupervisor(ctx context.Context, sessionID string, composeHeartbeat func(
 	if err != nil {
 		return err
 	}
-	claimed := app.NewSupervise(bootstrap.base.journal, nil, bootstrap.locks, bootstrap.base.clock, time.Minute, host.NewIdentity())
+	claimed := app.NewSupervise(bootstrap.base.journal, nil, bootstrap.locks, bootstrap.base.clock, productionWriterLeaseTTL, host.NewIdentity())
 	if err := claimed.Claim(ctx, sessionID); err != nil {
 		return err
 	}
@@ -634,7 +639,7 @@ func runSupervisor(ctx context.Context, sessionID string, composeHeartbeat func(
 	if err := claimed.MarkReady(ctx, sessionID); err != nil {
 		return err
 	}
-	return app.NewSupervise(bootstrap.base.journal, heartbeat.leases, bootstrap.locks, bootstrap.base.clock, time.Minute, host.NewIdentity()).RunClaimed(ctx, sessionID)
+	return app.NewSupervise(bootstrap.base.journal, heartbeat.leases, bootstrap.locks, bootstrap.base.clock, productionWriterLeaseTTL, host.NewIdentity()).RunClaimed(ctx, sessionID)
 }
 
 func composeProductionBase(ctx context.Context) (productionBase, error) {

@@ -54,7 +54,8 @@ func TestLifecycleCommandsDelegateWithStrictArgumentsAndInheritedMode(t *testing
 		{name: "setup", args: []string{"setup"}, want: "setup::human"},
 		{name: "open", args: []string{"open", "memoryd"}, want: "open:memoryd:human"},
 		{name: "sync", args: []string{"sync"}, want: "sync::human"},
-		{name: "close", args: []string{"close"}, want: "close::human"},
+		{name: "close", args: []string{"close"}, want: "close:false:human"},
+		{name: "close-discard", args: []string{"close", "--discard"}, want: "close:true:human"},
 		{name: "reopen", args: []string{"reopen", "memoryd"}, want: "reopen:memoryd:human"},
 		{name: "recover", args: []string{"recover", "session-1"}, want: "recover:session-1:human"},
 		{name: "supervise", args: []string{"supervise", "session-1"}, want: "supervise:session-1:human"},
@@ -155,8 +156,8 @@ func (r *recordingLifecycle) Sync(_ context.Context, mode OutputMode, _ io.Write
 	r.calls = append(r.calls, "sync::"+string(mode))
 	return nil
 }
-func (r *recordingLifecycle) Close(_ context.Context, mode OutputMode, _ io.Writer) error {
-	r.calls = append(r.calls, "close::"+string(mode))
+func (r *recordingLifecycle) Close(_ context.Context, request CloseRequest, mode OutputMode, _ io.Writer) error {
+	r.calls = append(r.calls, fmt.Sprintf("close:%t:%s", request.Discard, mode))
 	return nil
 }
 func (r *recordingLifecycle) Reopen(_ context.Context, value string, mode OutputMode, _ io.Writer) error {

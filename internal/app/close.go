@@ -23,6 +23,7 @@ type CloseEffects interface {
 type CloseRequest struct {
 	SessionID     string
 	KeepWorkspace bool
+	Discard       bool
 }
 
 type CloseResult struct {
@@ -89,7 +90,7 @@ func (u *Close) Run(ctx context.Context, request CloseRequest) (result CloseResu
 		sequence++
 		snapshot.Cleanup = domain.Cleanup{State: domain.CleanupRunning}
 
-		if snapshot.Mode == domain.SessionReadWrite {
+		if snapshot.Mode == domain.SessionReadWrite && !request.Discard {
 			published, err := u.publisher.Publish(ctx, token, snapshot.SessionID)
 			if err != nil {
 				return result, err
@@ -110,7 +111,11 @@ func (u *Close) Run(ctx context.Context, request CloseRequest) (result CloseResu
 				return result, err
 			}
 		} else {
-			if err := u.record(ctx, &snapshot, "ReadonlyDiscardRecorded", sequence, now); err != nil {
+			transition := "ReadonlyDiscardRecorded"
+			if request.Discard {
+				transition = "WritableDiscardRecorded"
+			}
+			if err := u.record(ctx, &snapshot, transition, sequence, now); err != nil {
 				return result, err
 			}
 		}
@@ -144,7 +149,7 @@ func (u *Close) Run(ctx context.Context, request CloseRequest) (result CloseResu
 		return result, err
 	}
 	result.CleanupSucceeded = true
-	if snapshot.Mode == domain.SessionReadOnly {
+	if snapshot.Mode == domain.SessionReadOnly || request.Discard {
 		result.RecoveryCommand = ""
 	}
 	return result, nil

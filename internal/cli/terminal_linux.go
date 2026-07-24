@@ -81,3 +81,10 @@ func closeTerminalEvents(generation uint64, cleanupSucceeded bool) []presentatio
 	}
 	return append(events, presentation.LifecycleEvent{Stage: presentation.StageComplete, Message: "session closed"})
 }
+
+func closeDiscardTerminalEvents() []presentation.LifecycleEvent {
+	return []presentation.LifecycleEvent{
+		{Stage: presentation.StageCleanupComplete, Message: "cleanup complete"},
+		{Stage: presentation.StageComplete, Message: "session discarded and closed"},
+	}
+}
