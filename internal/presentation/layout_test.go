@@ -106,3 +106,28 @@ func TestSceneContentWidthCapsToMaxAndRespectsNarrowTerminals(t *testing.T) {
 		t.Fatalf("sceneContentWidth(80) = %d, want 76", got)
 	}
 }
+
+func TestPadRightAddsSpacesToReachWidthAndLeavesWiderStringsUnchanged(t *testing.T) {
+	if got := padRight("A", 4); got != "A   " {
+		t.Fatalf("padRight = %q, want %q", got, "A   ")
+	}
+	if got := padRight("TOOLCHAIN", 4); got != "TOOLCHAIN" {
+		t.Fatalf("padRight = %q, want unchanged", got)
+	}
+}
+
+func TestColumnBlockWidthSumsColumnWidthsPlusGaps(t *testing.T) {
+	columns := [][]string{{"A", "alpha"}, {"BB", "b"}}
+	if got := columnBlockWidth(columns, 2); got != 9 {
+		t.Fatalf("columnBlockWidth = %d, want 9", got)
+	}
+}
+
+func TestOverlayGlyphsReturnsEmptyForNonPositiveWidth(t *testing.T) {
+	if got := overlayGlyphs(0, "-", map[int]string{0: "◆"}); got != "" {
+		t.Fatalf("overlayGlyphs(0) = %q, want empty", got)
+	}
+	if got := overlayGlyphs(-1, "-", map[int]string{0: "◆"}); got != "" {
+		t.Fatalf("overlayGlyphs(-1) = %q, want empty", got)
+	}
+}

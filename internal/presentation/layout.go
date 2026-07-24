@@ -52,6 +52,9 @@ func evenlySpaced(width, count int) []int {
 }
 
 func overlayGlyphs(width int, fill string, glyphs map[int]string) string {
+	if width <= 0 {
+		return ""
+	}
 	cells := make([]string, width)
 	for i := range cells {
 		cells[i] = fill
