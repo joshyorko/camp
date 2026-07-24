@@ -2,11 +2,13 @@ package cli
 
 import (
 	"bytes"
+	"context"
 	"errors"
 	"os"
 	"reflect"
 	"testing"
 
+	"github.com/joshyorko/camp/internal/app"
 	"github.com/joshyorko/camp/internal/presentation"
 )
 
@@ -115,6 +117,32 @@ func TestCloseDiscardTerminalEventsDoNotClaimPublication(t *testing.T) {
 	}
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("events = %#v, want %#v", got, want)
+	}
+}
+
+func TestLifecycleProgressReporterStreamsTruthfulPlainStages(t *testing.T) {
+	var output bytes.Buffer
+	reporter := newLifecycleProgressReporter(ModeHuman, &output, presentation.TerminalPlain, "close")
+	if err := reporter.Report(context.Background(), app.ProgressEvent{Stage: app.ProgressImagesCaptured, ImageCount: 2}); err != nil {
+		t.Fatal(err)
+	}
+	if err := reporter.Report(context.Background(), app.ProgressEvent{Stage: app.ProgressGenerationBuilt, Generation: 3, Bytes: 8078231}); err != nil {
+		t.Fatal(err)
+	}
+	want := "close: captured 2 OCI images\nclose: built generation 3 (7.7 MiB)\n"
+	if output.String() != want {
+		t.Fatalf("output = %q, want %q", output.String(), want)
+	}
+}
+
+func TestLifecycleProgressReporterIsSilentForJSON(t *testing.T) {
+	var output bytes.Buffer
+	reporter := newLifecycleProgressReporter(ModeJSON, &output, presentation.TerminalPlain, "close")
+	if err := reporter.Report(context.Background(), app.ProgressEvent{Stage: app.ProgressGenerationPublished, Generation: 3}); err != nil {
+		t.Fatal(err)
+	}
+	if output.Len() != 0 {
+		t.Fatalf("JSON progress output = %q", output.String())
 	}
 }
 

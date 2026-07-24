@@ -142,6 +142,9 @@ func (u *Close) Run(ctx context.Context, request CloseRequest) (result CloseResu
 		if err := u.journal.RecordFact(context.WithoutCancel(ctx), checkpointFact(intent, now), snapshot); err != nil {
 			return result, err
 		}
+		if err := reportProgress(ctx, closeProgressEvent(step.transition)); err != nil {
+			return result, err
+		}
 	}
 	snapshot.State = domain.SessionClosed
 	snapshot.Cleanup = domain.Cleanup{State: domain.CleanupSucceeded}
@@ -153,6 +156,19 @@ func (u *Close) Run(ctx context.Context, request CloseRequest) (result CloseResu
 		result.RecoveryCommand = ""
 	}
 	return result, nil
+}
+
+func closeProgressEvent(transition string) ProgressEvent {
+	stages := map[string]ProgressStage{
+		"WorkspaceStoppedOrDeleted": ProgressWorkspaceClosed,
+		"ForwardersStopped":         ProgressForwardersStopped,
+		"ServicesStopped":           ProgressServicesStopped,
+		"SupervisorStopped":         ProgressSupervisorStopped,
+		"LeaseReleased":             ProgressLeaseReleased,
+		"MaterializationRemoved":    ProgressMaterializationRemoved,
+		"AdoptedPreserved":          ProgressMaterializationPreserved,
+	}
+	return ProgressEvent{Stage: stages[transition]}
 }
 
 func selectCloseCleanupPending(snapshot domain.JournalSnapshot, pending []ports.PendingIntent) (ports.PendingIntent, int, bool, error) {

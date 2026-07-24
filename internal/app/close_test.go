@@ -125,6 +125,37 @@ func TestCloseDiscardSkipsPublicationAndStillPerformsOwnedCleanup(t *testing.T) 
 	}
 }
 
+func TestCloseReportsCompletedCleanupStagesInEffectOrder(t *testing.T) {
+	t.Parallel()
+	log, snapshot := newCloseJournal(t, domain.SessionReadOnly, domain.Materialization{Mode: domain.MaterializationAdopted})
+	events := []string{}
+	reported := []ProgressStage{}
+	ctx := WithProgressReporter(context.Background(), ProgressFunc(func(_ context.Context, event ProgressEvent) error {
+		reported = append(reported, event.Stage)
+		return nil
+	}))
+	_, err := NewClose(
+		log,
+		&fakeOperationLocker{events: &events, token: ports.OperationToken{ID: "lock"}},
+		&fakeCheckpointPublisher{events: &events},
+		&fakeCloseEffects{events: &events},
+		fixedAppClock{now: time.Unix(200, 0)},
+	).Run(ctx, CloseRequest{SessionID: snapshot.SessionID})
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := []ProgressStage{
+		ProgressWorkspaceClosed,
+		ProgressForwardersStopped,
+		ProgressServicesStopped,
+		ProgressSupervisorStopped,
+		ProgressMaterializationPreserved,
+	}
+	if !reflect.DeepEqual(reported, want) {
+		t.Fatalf("reported = %#v, want %#v", reported, want)
+	}
+}
+
 func TestCloseComposesWithRealCheckpointPublisherWithoutSelfCreatedPendingIntent(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()

@@ -196,6 +196,9 @@ func (p *CheckpointPublisher) Publish(ctx context.Context, operation ports.Opera
 		if err := p.journal.RecordFact(context.WithoutCancel(ctx), checkpointFact(prepared.intent, now), snapshot); err != nil {
 			return CheckpointResult{}, err
 		}
+		if err := reportProgress(ctx, ProgressEvent{Stage: ProgressRegistrySealed, Generation: generation, ImageCount: len(inventory.Images)}); err != nil {
+			return CheckpointResult{}, err
+		}
 		buildIntent = checkpointAttemptIntent(sessionID, attemptID, "RootSnapshotStable", 4, now, struct {
 			Root       string `json:"root"`
 			Generation uint64 `json:"generation"`
@@ -222,6 +225,9 @@ func (p *CheckpointPublisher) Publish(ctx context.Context, operation ports.Opera
 	if err := p.journal.RecordFact(context.WithoutCancel(ctx), checkpointFact(buildIntent, now), snapshot); err != nil {
 		return result, err
 	}
+	if err := reportProgress(ctx, ProgressEvent{Stage: ProgressGenerationBuilt, Generation: generation, ImageCount: len(inventory.Images), Bytes: built.Artifact.Size}); err != nil {
+		return result, err
+	}
 
 	uploadIntent := checkpointAttemptIntent(sessionID, attemptID, "GenerationUploaded", 5, now, struct {
 		ObjectKey string `json:"objectKey"`
@@ -236,6 +242,9 @@ func (p *CheckpointPublisher) Publish(ctx context.Context, operation ports.Opera
 	}
 	snapshot.Checkpoint.State = domain.CheckpointUploaded
 	if err := p.journal.RecordFact(context.WithoutCancel(ctx), checkpointFact(uploadIntent, now), snapshot); err != nil {
+		return result, err
+	}
+	if err := reportProgress(ctx, ProgressEvent{Stage: ProgressGenerationUploaded, Generation: generation, Bytes: built.Metadata.Size}); err != nil {
 		return result, err
 	}
 
@@ -340,6 +349,9 @@ func (p *CheckpointPublisher) commitPointerAndRefresh(ctx context.Context, snaps
 	if err := p.journal.RecordFact(context.WithoutCancel(ctx), fact, snapshot); err != nil {
 		return result, err
 	}
+	if err := reportProgress(ctx, ProgressEvent{Stage: ProgressGenerationPublished, Generation: published.Pointer.Generation.Generation, Bytes: published.Pointer.Size}); err != nil {
+		return result, err
+	}
 	committedGeneration := published.Pointer.Generation
 	committedPointer := published.Pointer
 	snapshot.CurrentBase = &committedGeneration
@@ -372,6 +384,9 @@ func (p *CheckpointPublisher) commitPointerAndRefresh(ctx context.Context, snaps
 		result.RefreshError = err.Error()
 		return result, nil
 	}
+	if err := reportProgress(ctx, ProgressEvent{Stage: ProgressServingRefreshed, Generation: result.Generation.Generation}); err != nil {
+		result.RefreshError = err.Error()
+	}
 	return result, nil
 }
 
@@ -399,6 +414,9 @@ func (p *CheckpointPublisher) resumePendingImageCapture(ctx context.Context, sna
 	}
 	snapshot.Images = inventory
 	if err := p.journal.RecordFact(context.WithoutCancel(ctx), checkpointFact(intent, now), snapshot); err != nil {
+		return preparedRegistrySeal{}, err
+	}
+	if err := reportProgress(ctx, ProgressEvent{Stage: ProgressImagesCaptured, Generation: generation, ImageCount: len(inventory.Images)}); err != nil {
 		return preparedRegistrySeal{}, err
 	}
 	sealRequest := registryadapter.SnapshotRequest{
@@ -628,6 +646,9 @@ func (p *CheckpointPublisher) prepareRegistrySeal(ctx context.Context, snapshot 
 	if err := p.journal.RecordFact(context.WithoutCancel(ctx), checkpointFact(mirrorIntent, now), snapshot); err != nil {
 		return preparedRegistrySeal{}, err
 	}
+	if err := reportProgress(ctx, ProgressEvent{Stage: ProgressWorkspacePrepared, Generation: generation}); err != nil {
+		return preparedRegistrySeal{}, err
+	}
 	captureRequest := images.CaptureRequest{
 		Scope: images.EngineScope{Context: snapshot.Workspace.Context, WorkspaceID: snapshot.Workspace.ID}, Capsule: snapshot.Capsule,
 		RegistryAuthority: runtime.authority, RegistryEndpoint: runtime.endpoint, Previous: snapshot.Images,
@@ -642,6 +663,9 @@ func (p *CheckpointPublisher) prepareRegistrySeal(ctx context.Context, snapshot 
 	}
 	snapshot.Images = inventory
 	if err := p.journal.RecordFact(context.WithoutCancel(ctx), checkpointFact(captureIntent, now), snapshot); err != nil {
+		return preparedRegistrySeal{}, err
+	}
+	if err := reportProgress(ctx, ProgressEvent{Stage: ProgressImagesCaptured, Generation: generation, ImageCount: len(inventory.Images)}); err != nil {
 		return preparedRegistrySeal{}, err
 	}
 	request := registryadapter.SnapshotRequest{

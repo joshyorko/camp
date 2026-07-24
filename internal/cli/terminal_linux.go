@@ -9,11 +9,84 @@ import (
 	"os"
 	"strings"
 
+	"github.com/joshyorko/camp/internal/app"
 	"github.com/joshyorko/camp/internal/presentation"
 	"golang.org/x/sys/unix"
 )
 
 type terminalProbe func(uintptr) (bool, int, int)
+
+type lifecycleProgressReporter struct {
+	mode       OutputMode
+	out        io.Writer
+	experience presentation.TerminalExperience
+	operation  string
+}
+
+func newLifecycleProgressReporter(mode OutputMode, out io.Writer, experience presentation.TerminalExperience, operation string) *lifecycleProgressReporter {
+	return &lifecycleProgressReporter{mode: mode, out: out, experience: experience, operation: operation}
+}
+
+func productionLifecycleProgressReporter(mode OutputMode, out io.Writer, operation string) app.ProgressReporter {
+	experience, _, _ := resolveTerminalExperience(mode, out, environmentMap(os.Environ()), probeTerminal)
+	return newLifecycleProgressReporter(mode, out, experience, operation)
+}
+
+func (r *lifecycleProgressReporter) Report(ctx context.Context, event app.ProgressEvent) error {
+	if r == nil || r.mode != ModeHuman {
+		return nil
+	}
+	message := lifecycleProgressMessage(event)
+	if message == "" {
+		return nil
+	}
+	return presentation.NewTerminalSession(r.out, r.experience, r.operation).Emit(ctx, presentation.LifecycleEvent{
+		Stage: presentation.StageStarted, Message: message,
+	})
+}
+
+func lifecycleProgressMessage(event app.ProgressEvent) string {
+	switch event.Stage {
+	case app.ProgressWorkspacePrepared:
+		return "prepared workspace snapshot"
+	case app.ProgressImagesCaptured:
+		return fmt.Sprintf("captured %d OCI images", event.ImageCount)
+	case app.ProgressRegistrySealed:
+		return "sealed immutable registry snapshot"
+	case app.ProgressGenerationBuilt:
+		return fmt.Sprintf("built generation %d (%s)", event.Generation, formatIECBytes(event.Bytes))
+	case app.ProgressGenerationUploaded:
+		return fmt.Sprintf("verified generation %d in durable storage", event.Generation)
+	case app.ProgressGenerationPublished:
+		return fmt.Sprintf("published generation %d", event.Generation)
+	case app.ProgressServingRefreshed:
+		return "refreshed Hauler serving content"
+	case app.ProgressWorkspaceClosed:
+		return "removed workspace"
+	case app.ProgressForwardersStopped:
+		return "stopped forwarded services"
+	case app.ProgressServicesStopped:
+		return "stopped Hauler services"
+	case app.ProgressSupervisorStopped:
+		return "stopped session supervisor"
+	case app.ProgressLeaseReleased:
+		return "released writer lease"
+	case app.ProgressMaterializationRemoved:
+		return "removed owned materialization"
+	case app.ProgressMaterializationPreserved:
+		return "preserved adopted source"
+	default:
+		return ""
+	}
+}
+
+func formatIECBytes(value int64) string {
+	const mib = 1024 * 1024
+	if value >= mib {
+		return fmt.Sprintf("%.1f MiB", float64(value)/mib)
+	}
+	return fmt.Sprintf("%d B", value)
+}
 
 func resolveTerminalExperience(mode OutputMode, out io.Writer, environment map[string]string, probe terminalProbe) (presentation.TerminalExperience, int, int) {
 	file, ok := out.(*os.File)

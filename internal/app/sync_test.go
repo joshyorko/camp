@@ -41,14 +41,44 @@ func (l *fakeOperationLocker) Release(_ context.Context, token ports.OperationTo
 }
 
 type fakeCheckpointPublisher struct {
-	events *[]string
-	result CheckpointResult
-	err    error
+	events    *[]string
+	result    CheckpointResult
+	err       error
+	onPublish func(context.Context) error
 }
 
-func (p *fakeCheckpointPublisher) Publish(_ context.Context, token ports.OperationToken, sessionID string) (CheckpointResult, error) {
+func (p *fakeCheckpointPublisher) Publish(ctx context.Context, token ports.OperationToken, sessionID string) (CheckpointResult, error) {
 	*p.events = append(*p.events, "publish:"+sessionID+":"+token.Owner.Operation)
+	if p.onPublish != nil {
+		if err := p.onPublish(ctx); err != nil {
+			return CheckpointResult{}, err
+		}
+	}
 	return p.result, p.err
+}
+
+func TestSyncPassesProgressReporterThroughPublisherContext(t *testing.T) {
+	events := []string{}
+	reported := []ProgressStage{}
+	publisher := &fakeCheckpointPublisher{events: &events, result: CheckpointResult{Published: true}}
+	publisher.onPublish = func(ctx context.Context) error {
+		return reportProgress(ctx, ProgressEvent{Stage: ProgressGenerationPublished})
+	}
+	ctx := WithProgressReporter(context.Background(), ProgressFunc(func(_ context.Context, event ProgressEvent) error {
+		reported = append(reported, event.Stage)
+		return nil
+	}))
+	_, err := NewSync(
+		&fakeSyncSessionReader{snapshot: domain.JournalSnapshot{SessionID: "session-a", Mode: domain.SessionReadWrite}},
+		&fakeOperationLocker{events: &events, token: ports.OperationToken{ID: "lock"}},
+		publisher,
+	).Run(ctx, "session-a")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(reported, []ProgressStage{ProgressGenerationPublished}) {
+		t.Fatalf("reported = %#v", reported)
+	}
 }
 
 func TestSyncOwnsOneOperationLockAcrossPublisherAndAlwaysReleases(t *testing.T) {

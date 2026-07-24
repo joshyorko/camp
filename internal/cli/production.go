@@ -327,6 +327,7 @@ func (p *ProductionLifecycle) Sync(ctx context.Context, mode OutputMode, out io.
 	if err != nil {
 		return err
 	}
+	ctx = app.WithProgressReporter(ctx, productionLifecycleProgressReporter(mode, out, "sync"))
 	result, err := app.NewSync(c.base.journal, c.locks, c.publisher).Run(ctx, session.SessionID)
 	if err != nil {
 		recovery := result.RecoveryCommand
@@ -350,6 +351,7 @@ func (p *ProductionLifecycle) Close(ctx context.Context, request CloseRequest, m
 	if err != nil {
 		return err
 	}
+	ctx = app.WithProgressReporter(ctx, productionLifecycleProgressReporter(mode, out, "close"))
 	result, err := c.close.Run(ctx, app.CloseRequest{SessionID: session.SessionID, Discard: request.Discard})
 	if err != nil {
 		return lifecycleFailure(err, result.RecoveryCommand)
