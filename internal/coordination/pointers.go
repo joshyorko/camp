@@ -7,6 +7,8 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"sort"
+	"strings"
 
 	"github.com/joshyorko/camp/internal/domain"
 	"github.com/joshyorko/camp/internal/ports"
@@ -45,6 +47,50 @@ func (r *PointerRepository) Read(ctx context.Context, capsule string, lineage do
 		return PointerRecord{}, err
 	}
 	return PointerRecord{Pointer: pointer, Revision: meta.Revision}, nil
+}
+
+func (r *PointerRepository) List(ctx context.Context) ([]PointerRecord, error) {
+	var records []PointerRecord
+	token := ""
+	for {
+		items, next, err := r.store.List(ctx, "", token)
+		if err != nil {
+			return nil, err
+		}
+		for _, item := range items {
+			capsule, lineage, ok := pointerIdentityFromKey(item.Key)
+			if !ok {
+				continue
+			}
+			record, err := r.Read(ctx, capsule, lineage)
+			if err != nil {
+				return nil, err
+			}
+			records = append(records, record)
+		}
+		if next == "" {
+			break
+		}
+		token = next
+	}
+	sort.Slice(records, func(i, j int) bool {
+		if records[i].Pointer.Capsule != records[j].Pointer.Capsule {
+			return records[i].Pointer.Capsule < records[j].Pointer.Capsule
+		}
+		return records[i].Pointer.Lineage.Branch < records[j].Pointer.Lineage.Branch
+	})
+	return records, nil
+}
+
+func pointerIdentityFromKey(key string) (string, domain.Lineage, bool) {
+	parts := strings.Split(key, "/")
+	if len(parts) == 2 && parts[1] == "latest.json" {
+		return parts[0], domain.Lineage{Branch: "main"}, parts[0] != ""
+	}
+	if len(parts) == 4 && parts[1] == "branches" && parts[3] == "latest.json" {
+		return parts[0], domain.Lineage{Branch: parts[2]}, parts[0] != "" && parts[2] != ""
+	}
+	return "", domain.Lineage{}, false
 }
 
 func (r *PointerRepository) Create(ctx context.Context, next domain.LatestPointer) (PointerRecord, error) {

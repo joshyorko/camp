@@ -66,6 +66,10 @@ type Setup interface {
 	Setup(context.Context, OutputMode, io.Reader, io.Writer) error
 }
 
+type CampLister interface {
+	List(context.Context, OutputMode, io.Writer) error
+}
+
 func NewRootWithLifecycle(lifecycle Lifecycle) *cobra.Command {
 	root := &cobra.Command{
 		Use:           "camp",
@@ -91,6 +95,9 @@ func NewRootWithLifecycle(lifecycle Lifecycle) *cobra.Command {
 	}
 	if setup, ok := lifecycle.(Setup); ok {
 		root.AddCommand(setupCommand(setup.Setup))
+	}
+	if camps, ok := lifecycle.(CampLister); ok {
+		root.AddCommand(noArgumentCommand("list", "List stored camps", camps.List))
 	}
 	root.AddCommand(
 		newInitCommand(lifecycle.Init),

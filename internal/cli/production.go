@@ -13,6 +13,7 @@ import (
 	"path/filepath"
 	runtimepkg "runtime"
 	"strings"
+	"text/tabwriter"
 	"time"
 
 	awsconfig "github.com/aws/aws-sdk-go-v2/config"
@@ -46,6 +47,38 @@ import (
 type ProductionLifecycle struct{}
 
 func NewProductionLifecycle() *ProductionLifecycle { return &ProductionLifecycle{} }
+
+func (p *ProductionLifecycle) List(ctx context.Context, mode OutputMode, out io.Writer) error {
+	base, err := composeProductionBase(ctx)
+	if err != nil {
+		return err
+	}
+	store, err := objectstore.New(ctx, base.backend, objectstore.Options{})
+	if err != nil {
+		return err
+	}
+	rows, err := (app.CampInventory{
+		Sessions: base.journal,
+		Pointers: coordination.NewPointerRepository(store),
+		Backend:  base.backend.SanitizedURL,
+	}).List(ctx)
+	if err != nil {
+		return err
+	}
+	if mode == ModeJSON {
+		return writeSuccess(out, mode, "list", rows, "")
+	}
+	table := tabwriter.NewWriter(out, 0, 4, 2, ' ', 0)
+	_, _ = fmt.Fprintln(table, "CAMP\tBRANCH\tGENERATION\tSTATE\tLAST SESSION\tBACKEND")
+	for _, row := range rows {
+		generation := "-"
+		if row.Generation != 0 {
+			generation = fmt.Sprintf("%d", row.Generation)
+		}
+		_, _ = fmt.Fprintf(table, "%s\t%s\t%s\t%s\t%s\t%s\n", row.Capsule, row.Branch, generation, row.State, row.SessionID, row.Backend)
+	}
+	return table.Flush()
+}
 
 func (p *ProductionLifecycle) Doctor(ctx context.Context, mode OutputMode, out io.Writer) error {
 	environment := environmentMap(os.Environ())

@@ -158,6 +158,28 @@ func TestPointerRepositoryRevalidatesTimeValuesFromTimeNow(t *testing.T) {
 	}
 }
 
+func TestPointerRepositoryListsValidatedLatestPointers(t *testing.T) {
+	store := newObjectStore(t)
+	repository := coordination.NewPointerRepository(store)
+	now := time.Date(2026, 7, 24, 12, 0, 0, 0, time.UTC)
+	main := pointerFixture("alpha", domain.Lineage{Branch: "main"}, generationRef(1, "a"), nil, now)
+	branchParent := generationRef(1, "c")
+	branch := pointerFixture("beta", domain.Lineage{Branch: "feature"}, generationRef(2, "b"), &branchParent, now)
+	if _, err := repository.Create(context.Background(), main); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := repository.Create(context.Background(), branch); err != nil {
+		t.Fatal(err)
+	}
+	got, err := repository.List(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 2 || got[0].Pointer.Capsule != "alpha" || got[1].Pointer.Capsule != "beta" {
+		t.Fatalf("pointers = %#v", got)
+	}
+}
+
 func TestPointerRepositoryRejectsNonForwardGenerationCAS(t *testing.T) {
 	for _, nextRef := range []domain.GenerationRef{generationRef(42, "b"), generationRef(41, "c")} {
 		t.Run(fillForGeneration(nextRef), func(t *testing.T) {
