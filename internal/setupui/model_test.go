@@ -185,3 +185,31 @@ func TestModelHelpToggleAndActivityAreTruthful(t *testing.T) {
 		t.Fatalf("activity advanced a milestone or was lost: activity=%q state=%v", m.activity, m.waypoints[StageToolchain].State)
 	}
 }
+
+func TestWorkflowModelUsesInitFieldsAndWaypoints(t *testing.T) {
+	sprites, err := LoadSprites()
+	if err != nil {
+		t.Fatal(err)
+	}
+	workflow := Workflow{
+		Title: "⌂ CAMP", Subtitle: "camp initialization",
+		Fields: []FormFieldSpec{
+			{Key: "name", Label: "Camp name", Placeholder: "alpha"},
+			{Key: "backend", Label: "Backend", Placeholder: "file://…"},
+		},
+		Waypoints: [4]Waypoint{
+			{Label: "MANIFEST", Landmark: "tent"},
+			{Label: "CAPSULE", Landmark: "crate"},
+			{Label: "RUNTIME", Landmark: "helm"},
+			{Label: "READY", Landmark: "campfire"},
+		},
+	}
+	m := NewWorkflowModel(DefaultPalette(), sprites, map[string]string{"name": "alpha", "backend": "file:///backend"}, &stubPipeline{}, workflow)
+	values := m.form.Values()
+	if len(values) != 2 || values["name"] != "alpha" || values["backend"] != "file:///backend" {
+		t.Fatalf("init form values = %#v", values)
+	}
+	if m.subtitle != "camp initialization" || m.waypoints[0].Label != "MANIFEST" || m.waypoints[3].Label != "READY" {
+		t.Fatalf("init workflow model = subtitle %q waypoints %#v", m.subtitle, m.waypoints)
+	}
+}

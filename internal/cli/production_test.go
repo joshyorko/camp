@@ -60,6 +60,80 @@ func TestResolveInitManifestUsesMachineDefaultsAndExplicitCampName(t *testing.T)
 	}
 }
 
+func TestFirstCampResolutionAutomaticallyMigratesSafeLegacySingleton(t *testing.T) {
+	root := t.TempDir()
+	if err := os.Mkdir(filepath.Join(root, ".camp"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(root, ".camp", "capsule.yaml"), []byte("schemaVersion: 1\nid: alpha\ndefaultBranch: main\ncreatedAt: 2026-07-25T00:00:00Z\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	configHome := t.TempDir()
+	dataHome := t.TempDir()
+	cacheHome := t.TempDir()
+	t.Setenv("XDG_CONFIG_HOME", configHome)
+	t.Setenv("XDG_DATA_HOME", dataHome)
+	t.Setenv("XDG_CACHE_HOME", cacheHome)
+	configPath := filepath.Join(configHome, "camp", "config.yaml")
+	if err := os.MkdirAll(filepath.Dir(configPath), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	backend := "file://" + filepath.Join(t.TempDir(), "backend")
+	legacy := "defaultCapsule: alpha\nsource: " + root + "\nbackend: " + backend + "\ndevpodProvider: docker\ndevpodContext: default\n"
+	if err := os.WriteFile(configPath, []byte(legacy), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	settings, err := resolveProductionSettingsForContext(withCampPath(context.Background(), root))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if settings.runtime.Capsule != "alpha" || settings.runtime.Source != root || settings.runtime.Backend != backend {
+		t.Fatalf("migrated runtime = %#v", settings.runtime)
+	}
+	body, err := os.ReadFile(configPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(body), "defaultCapsule") || strings.Contains(string(body), "source:") {
+		t.Fatalf("migration retained singleton selection:\n%s", body)
+	}
+	if _, err := os.Stat(configPath + ".bak"); err != nil {
+		t.Fatalf("migration backup: %v", err)
+	}
+}
+
+func TestExplicitCampSourceProofRequiresMatchingCurrentManifest(t *testing.T) {
+	root := t.TempDir()
+	backend := "file://" + filepath.Join(t.TempDir(), "backend")
+	snapshot := domain.JournalSnapshot{
+		Capsule: "alpha",
+		Recovery: domain.RecoveryRecord{Configuration: domain.ConfigurationRecord{
+			Source: root, BackendURL: backend,
+		}},
+		Workspace: domain.WorkspaceRecord{Provider: "docker", Context: "default"},
+	}
+	if _, err := proveSelectedCampSource("alpha", snapshot); err == nil || !strings.Contains(err.Error(), "current manifest") {
+		t.Fatalf("missing manifest proof error = %v", err)
+	}
+	if _, err := campconfig.Create(root, campconfig.Manifest{
+		SchemaVersion: 1, ID: "alpha", Source: ".", Backend: backend,
+		Workspace: campconfig.Workspace{Provider: "docker", Context: "default"},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	resolved, err := proveSelectedCampSource("alpha", snapshot)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resolved.Root != root || resolved.Manifest.ID != "alpha" {
+		t.Fatalf("source proof = %#v", resolved)
+	}
+	snapshot.Recovery.Configuration.BackendURL = "file:///different"
+	if _, err := proveSelectedCampSource("alpha", snapshot); err == nil || !strings.Contains(err.Error(), "does not match durable session") {
+		t.Fatalf("backend mismatch error = %v", err)
+	}
+}
+
 func TestPersistInitConfigurationWritesOnlyRequestedFirstRunValues(t *testing.T) {
 	t.Parallel()
 	path := filepath.Join(t.TempDir(), "config", "camp", "config.yaml")

@@ -68,6 +68,33 @@ func (p *ProductionLifecycle) runRichSetup(ctx context.Context, in io.Reader, ou
 	}
 }
 
+func (p *ProductionLifecycle) runRichInit(ctx context.Context, in io.Reader, out io.Writer, request InitRequest, defaultName string) (bool, error) {
+	sprites, err := setupui.LoadSprites()
+	if err != nil {
+		return false, nil
+	}
+	pipelineCtx, pipelineCancel := context.WithCancel(ctx)
+	pipeline := newRichInitPipeline(pipelineCtx, request, p.Init)
+	result, err := setupui.RunWorkflowWithExit(
+		ctx, in, out, setupui.DefaultPalette(), sprites,
+		map[string]string{"name": defaultName}, pipeline, richInitWorkflow(), pipelineCancel,
+	)
+	pipelineCancel()
+	pipeline.markDoneIfNotStarted()
+	<-pipeline.Done()
+	if err != nil {
+		return false, nil
+	}
+	switch {
+	case result.Canceled:
+		return true, nil
+	case result.Failed:
+		return true, lifecycleFailure(errors.New(result.FailMsg), result.Recovery)
+	default:
+		return true, nil
+	}
+}
+
 // richSetupPipeline adapts the real first-run setup operations to the
 // setupui.Pipeline contract. All lifecycle logic (config validation,
 // persistence, tool resolution, journal reads) lives here in the CLI package;

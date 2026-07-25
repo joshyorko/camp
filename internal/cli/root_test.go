@@ -149,14 +149,14 @@ func (r *recordingLifecycle) Init(_ context.Context, request InitRequest, mode O
 func TestInitRequiresNameOutsideMigration(t *testing.T) {
 	t.Parallel()
 	for _, args := range [][]string{
-		{"init"},
-		{"init", "/brain"},
-		{"init", "/brain", "--backend", "file:///srv/camp"},
+		{"--json", "init"},
+		{"--json", "init", "/brain"},
+		{"--json", "init", "/brain", "--backend", "file:///srv/camp"},
 	} {
-		var stderr bytes.Buffer
-		code := Execute(context.Background(), NewRootWithLifecycle(&recordingLifecycle{}), args, Streams{ErrOut: &stderr})
-		if code != int(ExitUsage) || !strings.Contains(stderr.String(), "requires --name") {
-			t.Fatalf("Execute(%q) code=%d stderr=%q, want name requirement", args, code, stderr.String())
+		var output bytes.Buffer
+		code := Execute(context.Background(), NewRootWithLifecycle(&recordingLifecycle{}), args, Streams{Out: &output, ErrOut: &output})
+		if code != int(ExitUsage) || !strings.Contains(output.String(), "requires --name") {
+			t.Fatalf("Execute(%q) code=%d output=%q, want name requirement", args, code, output.String())
 		}
 	}
 }

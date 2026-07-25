@@ -18,6 +18,12 @@ type FormField struct {
 	input       textinput.Model
 }
 
+type FormFieldSpec struct {
+	Key         string
+	Label       string
+	Placeholder string
+}
+
 // ConfigForm collects the five first-run settings inside the scene. It renders
 // as a compact panel overlaid on the valley; the terminal's own cursor (shown
 // only while a field is focused) is the focus indicator, exactly as the
@@ -33,10 +39,17 @@ type ConfigForm struct {
 
 // NewConfigForm builds the form with Camp's setup fields and their defaults.
 func NewConfigForm(pal Palette, defaults map[string]string) ConfigForm {
-	specs := []FormField{
+	return NewConfigFormWithFields(pal, defaults, []FormFieldSpec{
 		{Key: "backend", Label: "Default backend", Placeholder: "file://…"},
 		{Key: "provider", Label: "DevPod provider", Placeholder: "docker"},
 		{Key: "context", Label: "DevPod context", Placeholder: "default"},
+	})
+}
+
+func NewConfigFormWithFields(pal Palette, defaults map[string]string, fields []FormFieldSpec) ConfigForm {
+	specs := make([]FormField, 0, len(fields))
+	for _, field := range fields {
+		specs = append(specs, FormField{Key: field.Key, Label: field.Label, Placeholder: field.Placeholder})
 	}
 	f := ConfigForm{pal: pal}
 	for i := range specs {
@@ -51,7 +64,9 @@ func NewConfigForm(pal Palette, defaults map[string]string) ConfigForm {
 		specs[i].input = ti
 		f.fields = append(f.fields, specs[i])
 	}
-	f.fields[0].input.Focus()
+	if len(f.fields) > 0 {
+		f.fields[0].input.Focus()
+	}
 	return f
 }
 

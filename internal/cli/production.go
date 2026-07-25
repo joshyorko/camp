@@ -229,6 +229,9 @@ func (p *ProductionLifecycle) Init(ctx context.Context, request InitRequest, mod
 	if err != nil {
 		return err
 	}
+	if err := reportInitActivity(ctx, "Camp manifest written."); err != nil {
+		return err
+	}
 	runner := subprocess.NewRunner()
 	initializer := capsule.NewInitializer(host.NewClock(), capsule.NewCommandDigestResolver("docker", runner))
 	if err := reportInitActivity(ctx, "Initializing capsule…"); err != nil {
@@ -236,6 +239,9 @@ func (p *ProductionLifecycle) Init(ctx context.Context, request InitRequest, mod
 	}
 	result, err := initializer.Initialize(ctx, root, manifest.ID)
 	if err != nil {
+		return err
+	}
+	if err := reportInitActivity(ctx, "Capsule initialized."); err != nil {
 		return err
 	}
 	response := struct {
@@ -902,7 +908,25 @@ func resolveProductionSettingsForContext(ctx context.Context) (productionSetting
 		if selected == nil {
 			return productionSettings{}, fmt.Errorf("no matching Camp session; next: camp list")
 		}
+		required, _ := ctx.Value(requireManifestContextKey{}).(bool)
+		if required && selection.Session == "" {
+			resolved, proofErr := proveSelectedCampSource(selection.Camp, *selected)
+			if proofErr != nil {
+				return productionSettings{}, proofErr
+			}
+			return applyManifestSettings(settings, resolved)
+		}
 		return applySnapshotSettings(settings, *selected)
+	}
+	if settings.runtime.Source != "" {
+		migrated, migrateErr := campconfig.Migrate(settings.paths.ConfigPath)
+		if migrateErr != nil {
+			return productionSettings{}, lifecycleFailure(migrateErr, campconfig.MigrationCommand)
+		}
+		if !migrated.Migrated {
+			return productionSettings{}, lifecycleFailure(errors.New("legacy singleton configuration requires migration"), campconfig.MigrationCommand)
+		}
+		return applyManifestSettings(settings, migrated.Manifest)
 	}
 	path, _ := ctx.Value(campPathContextKey{}).(string)
 	if path == "" {
@@ -913,9 +937,6 @@ func resolveProductionSettingsForContext(ctx context.Context) (productionSetting
 	}
 	resolved, err := campconfig.Discover(path)
 	if err != nil {
-		if settings.runtime.Source != "" {
-			return productionSettings{}, lifecycleFailure(errors.New("legacy singleton configuration requires migration"), campconfig.MigrationCommand)
-		}
 		required, _ := ctx.Value(requireManifestContextKey{}).(bool)
 		if required {
 			return productionSettings{}, err
@@ -931,6 +952,31 @@ func resolveProductionSettingsForContext(ctx context.Context) (productionSetting
 		return applySnapshotSettings(settings, active)
 	}
 	return applyManifestSettings(settings, resolved)
+}
+
+func proveSelectedCampSource(camp string, snapshot domain.JournalSnapshot) (campconfig.Resolved, error) {
+	source := snapshot.Recovery.Configuration.Source
+	if source == "" {
+		return campconfig.Resolved{}, fmt.Errorf("camp %q has no proven local source; next: camp status --camp %s", camp, camp)
+	}
+	resolved, err := campconfig.Discover(source)
+	if err != nil {
+		return campconfig.Resolved{}, fmt.Errorf("camp %q source %q has no current manifest: %w; next: camp init %s --name %s", camp, source, err, source, camp)
+	}
+	canonical, err := filepath.EvalSymlinks(source)
+	if err != nil || filepath.Clean(canonical) != filepath.Clean(resolved.Root) {
+		return campconfig.Resolved{}, fmt.Errorf("camp %q current manifest does not own durable source %q", camp, source)
+	}
+	if resolved.Manifest.ID != camp || snapshot.Capsule != camp {
+		return campconfig.Resolved{}, fmt.Errorf("camp %q current manifest identity does not match durable session", camp)
+	}
+	record := snapshot.Recovery.Configuration
+	if record.BackendURL != "" && resolved.Manifest.Backend != record.BackendURL ||
+		snapshot.Workspace.Provider != "" && resolved.Manifest.Workspace.Provider != snapshot.Workspace.Provider ||
+		snapshot.Workspace.Context != "" && resolved.Manifest.Workspace.Context != snapshot.Workspace.Context {
+		return campconfig.Resolved{}, fmt.Errorf("camp %q current manifest does not match durable session settings", camp)
+	}
+	return resolved, nil
 }
 
 func applyManifestSettings(settings productionSettings, resolved campconfig.Resolved) (productionSettings, error) {

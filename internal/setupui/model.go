@@ -103,6 +103,13 @@ type Pipeline interface {
 	Done() <-chan struct{}
 }
 
+type Workflow struct {
+	Title     string
+	Subtitle  string
+	Fields    []FormFieldSpec
+	Waypoints [4]Waypoint
+}
+
 // NewModel constructs the setup model with landmarks assigned to waypoints.
 func NewModel(pal Palette, sprites map[string]Sprite, defaults map[string]string, pipeline Pipeline) Model {
 	wps := [4]Waypoint{
@@ -111,12 +118,24 @@ func NewModel(pal Palette, sprites map[string]Sprite, defaults map[string]string
 		{Label: "CAPSULE", Landmark: "tent", State: WaypointPending},
 		{Label: "STORAGE", Landmark: "campfire", State: WaypointPending},
 	}
+	return NewWorkflowModel(pal, sprites, defaults, pipeline, Workflow{
+		Title: "⌂ CAMP", Subtitle: "trailhead setup",
+		Fields: []FormFieldSpec{
+			{Key: "backend", Label: "Default backend", Placeholder: "file://…"},
+			{Key: "provider", Label: "DevPod provider", Placeholder: "docker"},
+			{Key: "context", Label: "DevPod context", Placeholder: "default"},
+		},
+		Waypoints: wps,
+	})
+}
+
+func NewWorkflowModel(pal Palette, sprites map[string]Sprite, defaults map[string]string, pipeline Pipeline, workflow Workflow) Model {
 	return Model{
 		phase:     PhaseConfigure,
-		form:      NewConfigForm(pal, defaults),
-		waypoints: wps,
-		title:     "⌂ CAMP",
-		subtitle:  "trailhead setup",
+		form:      NewConfigFormWithFields(pal, defaults, workflow.Fields),
+		waypoints: workflow.Waypoints,
+		title:     workflow.Title,
+		subtitle:  workflow.Subtitle,
 		pal:       pal,
 		sprites:   sprites,
 		guard:     NewSizeGuard(MinWidth, MinHeight),

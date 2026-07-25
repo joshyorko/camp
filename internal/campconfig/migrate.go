@@ -8,9 +8,13 @@ import (
 	"path/filepath"
 
 	"github.com/joshyorko/camp/internal/config"
+	"github.com/joshyorko/camp/internal/domain"
+	"gopkg.in/yaml.v3"
 )
 
 const MigrationCommand = "camp init --migrate"
+
+var ErrLegacyMetadata = errors.New("legacy capsule metadata is missing or does not match")
 
 type MigrationResult struct {
 	Manifest Resolved          `json:"manifest"`
@@ -36,6 +40,9 @@ func Migrate(configPath string) (MigrationResult, error) {
 	}
 	if legacy.DefaultCapsule == "" || legacy.Source == "" {
 		return MigrationResult{}, fmt.Errorf("legacy Camp configuration is incomplete; next: %s", MigrationCommand)
+	}
+	if err := validateLegacyMetadata(legacy.Source, legacy.DefaultCapsule); err != nil {
+		return MigrationResult{}, err
 	}
 	provider := legacy.DevPodProvider
 	if provider == "" {
@@ -68,6 +75,30 @@ func Migrate(configPath string) (MigrationResult, error) {
 		return MigrationResult{}, err
 	}
 	return MigrationResult{Manifest: resolved, Defaults: defaults, Backup: backup, Migrated: true}, nil
+}
+
+func validateLegacyMetadata(root, id string) error {
+	path := filepath.Join(root, ".camp", "capsule.yaml")
+	info, err := os.Lstat(path)
+	if err != nil {
+		return fmt.Errorf("%w: %v; next: %s", ErrLegacyMetadata, err, MigrationCommand)
+	}
+	if !info.Mode().IsRegular() || info.Mode()&os.ModeSymlink != 0 {
+		return fmt.Errorf("%w: capsule metadata is not a regular file; next: %s", ErrLegacyMetadata, MigrationCommand)
+	}
+	body, err := os.ReadFile(path)
+	if err != nil {
+		return fmt.Errorf("%w: %v; next: %s", ErrLegacyMetadata, err, MigrationCommand)
+	}
+	var metadata domain.CapsuleMetadata
+	if err := yaml.Unmarshal(body, &metadata); err != nil ||
+		metadata.SchemaVersion != domain.SchemaVersion ||
+		metadata.ID != id ||
+		metadata.DefaultBranch == "" ||
+		metadata.CreatedAt.IsZero() {
+		return fmt.Errorf("%w for %q; next: %s", ErrLegacyMetadata, id, MigrationCommand)
+	}
+	return nil
 }
 
 func createBackup(path string, body []byte) error {

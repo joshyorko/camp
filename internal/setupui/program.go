@@ -34,7 +34,14 @@ func Run(ctx context.Context, in io.Reader, out io.Writer, pal Palette, sprites 
 // shutdown; callers still perform unconditional cleanup after RunWithExit
 // returns to cover terminal initialization errors.
 func RunWithExit(ctx context.Context, in io.Reader, out io.Writer, pal Palette, sprites map[string]Sprite, defaults map[string]string, pipeline Pipeline, onExit func()) (Result, error) {
-	model := NewModel(pal, sprites, defaults, pipeline).OnExit(onExit)
+	return runModel(ctx, in, out, NewModel(pal, sprites, defaults, pipeline).OnExit(onExit))
+}
+
+func RunWorkflowWithExit(ctx context.Context, in io.Reader, out io.Writer, pal Palette, sprites map[string]Sprite, defaults map[string]string, pipeline Pipeline, workflow Workflow, onExit func()) (Result, error) {
+	return runModel(ctx, in, out, NewWorkflowModel(pal, sprites, defaults, pipeline, workflow).OnExit(onExit))
+}
+
+func runModel(ctx context.Context, in io.Reader, out io.Writer, model Model) (Result, error) {
 	opts := []tea.ProgramOption{
 		tea.WithContext(ctx),
 		tea.WithOutput(out),

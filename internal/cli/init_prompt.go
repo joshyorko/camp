@@ -5,6 +5,7 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"os"
 	"path/filepath"
 	"strings"
 )
@@ -20,6 +21,13 @@ func (p *ProductionLifecycle) InitInteractive(ctx context.Context, request InitR
 			return err
 		}
 		request.Root = root
+	}
+	experience, width, height := resolveTerminalExperience(mode, out, environmentMap(os.Environ()), probeTerminal)
+	if canUseRichSetup(experience, width, height) && inputIsTTY(in) {
+		handled, err := p.runRichInit(ctx, in, out, request, filepath.Base(filepath.Clean(root)))
+		if handled {
+			return err
+		}
 	}
 	name, err := promptInitName(in, out, root)
 	if err != nil {
