@@ -157,18 +157,6 @@ func (p *ProductionLifecycle) ImagesList(ctx context.Context, request SessionReq
 	return writeImageResult(out, mode, "images-list", result)
 }
 
-func (p *ProductionLifecycle) ImagesCapture(ctx context.Context, request ImageCaptureRequest, mode OutputMode, out io.Writer) error {
-	operations, err := composeProductionImageOperations(ctx)
-	if err != nil {
-		return err
-	}
-	result, err := operations.Capture(ctx, operationalSelector(request.Session), request.ExcludeTags)
-	if err != nil {
-		return err
-	}
-	return writeImageResult(out, mode, "images-capture", result)
-}
-
 func (p *ProductionLifecycle) ImagesRestore(ctx context.Context, request SessionRequest, mode OutputMode, out io.Writer) error {
 	operations, err := composeProductionImageOperations(ctx)
 	if err != nil {

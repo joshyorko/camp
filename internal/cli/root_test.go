@@ -125,7 +125,6 @@ func (r *recordingLifecycle) Status(ctx context.Context, mode OutputMode, _ io.W
 type recordingOperationalLifecycle struct {
 	*recordingLifecycle
 	imageListRequests    []SessionRequest
-	imageCaptureRequests []ImageCaptureRequest
 	imageRestoreRequests []SessionRequest
 	serveStatusRequests  []ServeRequest
 	serveLogsRequests    []ServeLogsRequest
@@ -136,12 +135,6 @@ type recordingOperationalLifecycle struct {
 func (r *recordingOperationalLifecycle) ImagesList(_ context.Context, request SessionRequest, mode OutputMode, _ io.Writer) error {
 	r.imageListRequests = append(r.imageListRequests, request)
 	r.calls = append(r.calls, "images-list:"+string(mode))
-	return nil
-}
-
-func (r *recordingOperationalLifecycle) ImagesCapture(_ context.Context, request ImageCaptureRequest, mode OutputMode, _ io.Writer) error {
-	r.imageCaptureRequests = append(r.imageCaptureRequests, request)
-	r.calls = append(r.calls, "images-capture:"+string(mode))
 	return nil
 }
 
@@ -185,7 +178,6 @@ func TestOperationalCommandsMapStableBoundaryRequests(t *testing.T) {
 		want string
 	}{
 		{name: "images list", args: []string{"images", "list", "--session", "session-2"}, want: "images-list:human"},
-		{name: "images capture", args: []string{"images", "capture", "--capsule", "brain", "--exclude-tag", "volatile", "--exclude-tag", "scratch"}, want: "images-capture:human"},
 		{name: "images restore", args: []string{"images", "restore", "--branch", "main"}, want: "images-restore:human"},
 		{name: "serve status", args: []string{"serve", "status", "registry", "--session", "session-3"}, want: "serve-status:human"},
 		{name: "serve logs", args: []string{"serve", "logs", "fileserver", "--tail-bytes", "4096"}, want: "serve-logs:human"},
@@ -204,9 +196,6 @@ func TestOperationalCommandsMapStableBoundaryRequests(t *testing.T) {
 		})
 	}
 
-	if got := lifecycle.imageCaptureRequests[0]; got.Session.Capsule != "brain" || strings.Join(got.ExcludeTags, ",") != "volatile,scratch" {
-		t.Fatalf("capture request = %#v", got)
-	}
 	if got := lifecycle.serveLogsRequests[0]; got.Service != "fileserver" || got.TailBytes != 4096 {
 		t.Fatalf("serve logs request = %#v", got)
 	}
@@ -215,12 +204,29 @@ func TestOperationalCommandsMapStableBoundaryRequests(t *testing.T) {
 	}
 }
 
+func TestImagesCaptureFailsWithCheckpointGuidanceBeforeEffects(t *testing.T) {
+	t.Parallel()
+	lifecycle := &recordingOperationalLifecycle{recordingLifecycle: &recordingLifecycle{}}
+	var stderr bytes.Buffer
+
+	code := Execute(context.Background(), NewRootWithLifecycle(lifecycle), []string{"images", "capture", "--session", "session-2"}, Streams{ErrOut: &stderr})
+	if code != int(ExitFailure) {
+		t.Fatalf("Execute(images capture) = %d, stderr=%q; want failure", code, stderr.String())
+	}
+	if want := "camp images capture does not inspect workspace engines; push images through CAMP_REGISTRY, then run camp sync or camp close"; !strings.Contains(stderr.String(), want) {
+		t.Fatalf("stderr = %q, want stable checkpoint guidance %q", stderr.String(), want)
+	}
+	if len(lifecycle.calls) != 0 {
+		t.Fatalf("images capture dispatched effects: %#v", lifecycle.calls)
+	}
+}
+
 func TestOperationalCommandsRejectInvalidRequestsBeforeEffects(t *testing.T) {
 	t.Parallel()
 
 	for _, args := range [][]string{
 		{"status", "extra"},
-		{"images", "capture", "--exclude-tag", ""},
+		{"images", "capture", "--exclude-tag", "volatile"},
 		{"serve", "logs", "registry", "--tail-bytes", "0"},
 		{"serve", "restart", "registry"},
 		{"provider", "update"},

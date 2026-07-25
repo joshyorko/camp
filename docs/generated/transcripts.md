@@ -85,7 +85,7 @@ Usage:
   camp images [command]
 
 Available Commands:
-  capture     Capture workspace images
+  capture     Explain registry-only image capture
   list        List recorded workspace images
   restore     Restore recorded workspace images
 
@@ -102,7 +102,7 @@ Use "camp images [command] --help" for more information about a command.
 
 ```console
 $ camp images capture --session session-docs
-effect-free docs fixture: images capture dispatched; external effects disabled
+error [command_failed]: camp images capture does not inspect workspace engines; push images through CAMP_REGISTRY, then run camp sync or camp close
 ```
 
 ## `camp images list --session session-docs`

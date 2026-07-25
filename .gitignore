@@ -10,3 +10,4 @@ __pycache__/
 .scene-captures/
 .camp/
 /camp
+/build/

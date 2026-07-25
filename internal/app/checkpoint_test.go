@@ -278,8 +278,8 @@ func TestCheckpointPublisherUploadsCASesAndAdvancesBaselineOnlyThroughFact(t *te
 	if !result.Published || result.Generation.Generation != 43 || result.RefreshError != "" || result.RecoveryCommand != "camp recover "+snapshot.SessionID || lockValidator.calls != 1 || leaseValidator.calls != 2 || mirror.calls != 1 || fakes.capture.calls != 1 || fakes.seal.calls != 1 || fakes.refresh.calls != 1 {
 		t.Fatalf("result=%#v calls lock=%d lease=%d mirror=%d", result, lockValidator.calls, leaseValidator.calls, mirror.calls)
 	}
-	if len(builder.inventory.Images) != 2 || builder.inventory.Images[1].CapturedReference != "127.0.0.1:45001/manual/tool:latest" {
-		t.Fatalf("builder bypassed merged sealed inventory: %#v", builder.inventory)
+	if len(builder.inventory.Images) != 1 || builder.inventory.Images[0].CapturedReference != "127.0.0.1:45001/manual/tool:latest" {
+		t.Fatalf("builder inventory was not derived only from the sealed registry cut: %#v", builder.inventory)
 	}
 	if fakes.refresh.request.Generation != result.Generation || fakes.refresh.request.HaulPath == "" || fakes.refresh.request.RegistrySnapshotRoot != fakes.seal.result.Root {
 		t.Fatalf("refresh request = %#v", fakes.refresh.request)

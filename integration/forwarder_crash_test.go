@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -27,26 +28,21 @@ func TestLocalLifecycleCrashMatrix(t *testing.T) {
 			t.Fatalf("required executable %q: %v", name, err)
 		}
 	}
-	assertNoDevPodWorkspaces(t, context.Background())
-
 	root := t.TempDir()
 	source := filepath.Join(root, "mock Second Brain")
 	backend := filepath.Join(root, "backend")
 	controller := filepath.Join(root, "controller")
-	bin := filepath.Join(root, "camp")
+	devPod := newDevPodTestIsolation(root)
+	bin := candidateBinary(t)
 	registryPort, fileserverPort := reserveLoopbackPort(t), reserveLoopbackPort(t)
 	writeLifecycleFixture(t, source)
 	if err := os.MkdirAll(backend, 0o700); err != nil {
 		t.Fatal(err)
 	}
-	build := exec.Command("go", "build", "-o", bin, "../cmd/camp")
-	if output, err := build.CombinedOutput(); err != nil {
-		t.Fatalf("build camp: %v\n%s", err, output)
-	}
-
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Minute)
 	t.Cleanup(cancel)
-	environment := lifecycleEnvironment(controller, source, backend, registryPort, fileserverPort)
+	createdWorkspaces := newCreatedWorkspaceTracker()
+	environment := lifecycleEnvironment(controller, backend, registryPort, fileserverPort, devPod)
 	var opening *exec.Cmd
 	openingWaited := false
 	t.Cleanup(func() {
@@ -59,16 +55,26 @@ func TestLocalLifecycleCrashMatrix(t *testing.T) {
 		defer cleanupCancel()
 		_, _ = runLifecycleCommand(cleanupCtx, environment, bin, "--json", "close")
 		stopRecordedSessionProcesses(cleanupCtx, controller)
-		workspaces, _ := listDevPodWorkspaces(cleanupCtx)
-		for _, workspace := range workspaces {
-			_, _ = runLifecycleCommand(cleanupCtx, nil, "devpod", "delete", "--context", "default", "--ignore-not-found", workspace)
+		if err := createdWorkspaces.TrackController(controller); err != nil {
+			t.Errorf("recover exact workspace IDs from test-owned controller: %v", err)
+		}
+		if err := createdWorkspaces.DeleteAll(func(workspaceID string) error {
+			output, err := runDevPodCommand(cleanupCtx, devPod, "delete", "--ignore-not-found", workspaceID)
+			if err != nil {
+				return fmt.Errorf("%w: %s", err, output)
+			}
+			return nil
+		}); err != nil {
+			t.Errorf("clean exact test-owned DevPod workspaces: %v", err)
 		}
 	})
 
-	mustRunLifecycle(t, ctx, environment, bin, "--json", "init", source)
+	t.Log("bootstrap the Docker provider inside the private DevPod context")
+	mustBootstrapDevPodDockerProvider(t, ctx, devPod)
+	mustRunLifecycle(t, ctx, environment, bin, "--json", "init", source, "--name", "forwarder-crash")
 	var openingOutput bytes.Buffer
 	opening = exec.CommandContext(ctx, bin, "--json", "open", "Projects/Unicode space")
-	opening.Env = append(os.Environ(), environment...)
+	opening.Env = mergeCommandEnvironment(os.Environ(), environment)
 	opening.Stdout = &openingOutput
 	opening.Stderr = &openingOutput
 	if err := opening.Start(); err != nil {
@@ -122,10 +128,11 @@ func TestLocalLifecycleCrashMatrix(t *testing.T) {
 		t.Fatalf("forwarder PPID did not change after controller death: %#v", status)
 	}
 
-	reopened := decodeOpenResult(t, mustRunLifecycle(t, ctx, environment, bin, "--json", "open", "Projects/Unicode space"))
+	reopened := decodeOpenResult(t, mustRunLifecycleAt(t, ctx, environment, source, bin, "--json", "open"))
 	if reopened.SessionID != sessionID || reopened.WorkspaceID == "" {
 		t.Fatalf("recovered open = %#v, want session %q", reopened, sessionID)
 	}
+	createdWorkspaces.Track(reopened.WorkspaceID)
 	reconciled, remaining, err := store.Load(ctx, sessionID)
 	if err != nil {
 		t.Fatal(err)
@@ -141,8 +148,8 @@ func TestLocalLifecycleCrashMatrix(t *testing.T) {
 		t.Fatalf("reconciled forwarders = %#v", reconciled.Recovery.Forwarding)
 	}
 
-	mustRunLifecycle(t, ctx, environment, bin, "--json", "close")
-	assertNoDevPodWorkspaces(t, ctx)
+	mustRunLifecycle(t, ctx, environment, bin, "--json", "close", "--camp", "forwarder-crash")
+	assertDevPodWorkspacesAbsent(t, ctx, devPod, reopened.WorkspaceID)
 	status, err = processes.Inspect(ctx, evidence.Process.Identity)
 	if err == nil && status.Running {
 		t.Fatalf("recovered registry forwarder survived close: %#v", status)

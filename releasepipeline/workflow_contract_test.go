@@ -37,6 +37,26 @@ func TestCIWorkflowIsMandatoryLeastPrivilegeAndForkSafe(t *testing.T) {
 	assertActionsPinned(t, workflow)
 }
 
+func TestCIAddsRCCParityWithoutCachingPrivateRuntimeHomes(t *testing.T) {
+	workflow := readWorkflow(t, "ci.yml")
+	requireContains(t, workflow,
+		"name: RCC local candidate",
+		"name: RCC source gates",
+		"./developer/rccw run -r developer/toolkit.yaml --dev -t local",
+		"./developer/rccw run -r developer/toolkit.yaml --dev -t test",
+		"developer/verify_pr_receipt.py",
+		"build/evidence/candidate.json",
+		"build/evidence/test-gates.json",
+		"if: always()",
+	)
+	if strings.Contains(workflow, "./developer/rccw run -r developer/toolkit.yaml -t robot") {
+		t.Fatal("RCC Robot must not become mandatory CI before its roadmap-gated product evidence passes")
+	}
+	if strings.Contains(workflow, "build/rcc-homes") && strings.Contains(workflow, "actions/cache") {
+		t.Fatal("CI must not cache private RCC homes")
+	}
+}
+
 func TestReleaseWorkflowVerifiesDownloadsBeforeProtectedPublication(t *testing.T) {
 	workflow := readWorkflow(t, "release.yml")
 	requireContains(t, workflow,
@@ -50,6 +70,7 @@ func TestReleaseWorkflowVerifiesDownloadsBeforeProtectedPublication(t *testing.T
 		"download-artifact",
 		"sha256sum --check checksums.txt",
 		"build-release-evidence.sh verify",
+		"./developer/rccw run -r developer/toolkit.yaml --dev -t package",
 		"github.event_name == 'push' || inputs.publish == true",
 		"retention-days:",
 	)

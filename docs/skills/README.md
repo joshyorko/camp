@@ -4,11 +4,14 @@ This directory is the canonical, repository-local operational reference for agen
 
 Current guides:
 
-- [Local lifecycle and recovery](local-lifecycle-recovery.md)
+- [Camp kits](camp-kits.md)
 - [CLI composition](cli-composition.md)
 - [DevPod and Hauler behavior](devpod-hauler.md)
-- [S3 publication](s3-publication.md)
-- [Testing and release evidence](testing-release-evidence.md)
+- [Local lifecycle and recovery](local-lifecycle-recovery.md)
 - [Managed distribution tools](managed-tools.md)
+- [S3 publication](s3-publication.md)
+- [Session selection and presentation](session-selection-and-presentation.md)
+- [Terminal experience](terminal-experience.md)
+- [Testing and release evidence](testing-release-evidence.md)
 
 These files describe current evidence, not the target experience. User-facing generated documentation remains a separate product concern.

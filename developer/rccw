@@ -1,0 +1,84 @@
+#!/usr/bin/env sh
+set -eu
+
+repository_root=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd -P)
+lock_file=${CAMP_RCC_LOCK:-"$repository_root/developer/rcc.lock.yaml"}
+cache_root=${CAMP_RCC_CACHE_ROOT:-"$repository_root/build/tools"}
+host_os=${CAMP_RCC_HOST_OS:-$(uname -s | tr '[:upper:]' '[:lower:]')}
+host_arch=${CAMP_RCC_HOST_ARCH:-$(uname -m)}
+
+case "$host_arch" in
+  x86_64) host_arch=amd64 ;;
+  aarch64) host_arch=arm64 ;;
+esac
+
+if [ "$host_os/$host_arch" != "linux/amd64" ]; then
+  printf 'unsupported RCC factory host: %s/%s\n' "$host_os" "$host_arch" >&2
+  exit 2
+fi
+
+field() {
+  awk -v key="$1" '$1 == key ":" { print $2; exit }' "$lock_file"
+}
+
+version=$(field version)
+commit=$(field commit)
+declared_host=$(field host)
+asset_name=$(field name)
+asset_url=$(field url)
+asset_sha=$(field sha256)
+
+if [ -z "$version" ] || [ -z "$commit" ] || [ -z "$declared_host" ] || [ -z "$asset_name" ] || [ -z "$asset_url" ] || [ -z "$asset_sha" ]; then
+  printf 'invalid RCC lock: %s\n' "$lock_file" >&2
+  exit 2
+fi
+if [ "$declared_host" != "$host_os/$host_arch" ]; then
+  printf 'RCC lock host mismatch: got %s, want %s/%s\n' "$declared_host" "$host_os" "$host_arch" >&2
+  exit 2
+fi
+if ! printf '%s\n' "$commit" | grep -Eq '^[0-9a-f]{40}$'; then
+  printf 'invalid RCC lock commit: %s\n' "$commit" >&2
+  exit 2
+fi
+
+mkdir -p "$cache_root"
+target="$cache_root/rcc-${version}-linux-amd64"
+
+verify_digest() {
+  actual=$(sha256sum "$1" | awk '{print $1}')
+  if [ "$actual" != "$asset_sha" ]; then
+    printf 'RCC digest mismatch: got %s, want %s\n' "$actual" "$asset_sha" >&2
+    return 1
+  fi
+}
+
+if [ -e "$target" ]; then
+  verify_digest "$target"
+else
+  temporary="$cache_root/.${asset_name}.$$"
+  trap 'rm -f "$temporary"' EXIT HUP INT TERM
+  curl --fail --location --proto '=https' --tlsv1.2 --output "$temporary" "$asset_url"
+  verify_digest "$temporary"
+  chmod 0755 "$temporary"
+  mv "$temporary" "$target"
+  trap - EXIT HUP INT TERM
+fi
+
+reported=$("$target" version)
+if [ "$reported" != "$version" ]; then
+  printf 'RCC version mismatch: got %s, want %s\n' "$reported" "$version" >&2
+  exit 1
+fi
+
+rcc_home_root=${CAMP_RCC_HOME_ROOT:-"${XDG_CACHE_HOME:-"$HOME/.cache"}/camp/rcc-homes"}
+mkdir -p "$rcc_home_root"
+rcc_home_root=$(CDPATH= cd -- "$rcc_home_root" && pwd -P)
+case "$rcc_home_root/" in
+  "$repository_root/"*)
+    printf 'CAMP_RCC_HOME_ROOT must remain outside the repository: %s\n' "$rcc_home_root" >&2
+    exit 2
+    ;;
+esac
+rcc_home=$(mktemp -d "$rcc_home_root/camp-rcc-home.XXXXXX")
+trap 'rm -rf "$rcc_home"' EXIT HUP INT TERM
+ROBOCORP_HOME="$rcc_home" CAMP_RCC_VERSION="$version" "$target" "$@"

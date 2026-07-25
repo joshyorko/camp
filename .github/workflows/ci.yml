@@ -105,3 +105,42 @@ jobs:
           path: dist/
           if-no-files-found: error
           retention-days: 14
+
+  rcc-local:
+    name: RCC local candidate
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+      - name: Build exact RCC candidate
+        run: ./developer/rccw run -r developer/toolkit.yaml --dev -t local
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: rcc-candidate-${{ github.sha }}
+          path: |
+            build/camp
+            build/evidence/candidate.json
+          if-no-files-found: error
+          retention-days: 14
+
+  rcc-test:
+    name: RCC source gates
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          fetch-depth: 0
+      - name: Verify pull request evidence receipt
+        if: github.event_name == 'pull_request'
+        run: python3 developer/verify_pr_receipt.py "$GITHUB_EVENT_PATH"
+      - name: Run RCC source gates
+        run: ./developer/rccw run -r developer/toolkit.yaml --dev -t test
+      - name: Upload RCC source evidence
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: rcc-source-evidence-${{ github.sha }}
+          path: build/evidence/test-gates.json
+          if-no-files-found: error
+          retention-days: 30

@@ -1,0 +1,24 @@
+tasks:
+  robot:
+    shell: python call_invoke.py robot
+  robotKubernetes:
+    shell: python call_invoke.py robotKubernetes
+
+devTasks:
+  local:
+    shell: python call_invoke.py local
+  test:
+    shell: python call_invoke.py test
+  package:
+    shell: python call_invoke.py package
+
+environmentConfigs:
+  - setup.yaml
+
+artifactsDir: ../build/evidence
+
+PATH:
+PYTHONPATH:
+
+ignoreFiles:
+  - .gitignore

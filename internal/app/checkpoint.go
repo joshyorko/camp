@@ -186,7 +186,7 @@ func (p *CheckpointPublisher) Publish(ctx context.Context, operation ports.Opera
 			return CheckpointResult{}, fmt.Errorf("registry seal changed unrelated durable session state: %s", strings.Join(fields, ", "))
 		}
 		snapshot = current
-		inventory, err = registryadapter.MergeCatalog(inventory, runtime.authority, sealed.References, now)
+		inventory, err = registryadapter.InventoryFromCatalog(runtime.authority, sealed.References, now)
 		if err != nil {
 			return CheckpointResult{}, err
 		}

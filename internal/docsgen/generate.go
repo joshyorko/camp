@@ -69,6 +69,8 @@ func presentationReference() ([]byte, error) {
 type Invocation struct {
 	CommandPath string
 	Args        []string
+	ExitCode    int
+	Stderr      string
 }
 
 // DocumentedInvocations is the deterministic, effect-free equivalent used to
@@ -82,7 +84,12 @@ func DocumentedInvocations() []Invocation {
 		{CommandPath: "camp doctor", Args: []string{"doctor"}},
 		{CommandPath: "camp init", Args: []string{"init", "/tmp/camp-docs-capsule", "--name", "docs-capsule"}},
 		{CommandPath: "camp images", Args: []string{"images", "--help"}},
-		{CommandPath: "camp images capture", Args: []string{"images", "capture", "--session", "session-docs"}},
+		{
+			CommandPath: "camp images capture",
+			Args:        []string{"images", "capture", "--session", "session-docs"},
+			ExitCode:    int(cli.ExitFailure),
+			Stderr:      "camp images capture does not inspect workspace engines; push images through CAMP_REGISTRY, then run camp sync or camp close",
+		},
 		{CommandPath: "camp images list", Args: []string{"images", "list", "--session", "session-docs"}},
 		{CommandPath: "camp images restore", Args: []string{"images", "restore", "--session", "session-docs"}},
 		{CommandPath: "camp list", Args: []string{"list"}},
@@ -110,8 +117,11 @@ func transcriptReference() ([]byte, error) {
 	for _, invocation := range DocumentedInvocations() {
 		var stdout, stderr bytes.Buffer
 		code := cli.Execute(context.Background(), transcriptRoot(), invocation.Args, cli.Streams{Out: &stdout, ErrOut: &stderr})
-		if code != 0 {
-			return nil, fmt.Errorf("execute %s: exit %d: %s", invocation.CommandPath, code, stderr.String())
+		if code != invocation.ExitCode {
+			return nil, fmt.Errorf("execute %s: exit %d, want %d: %s", invocation.CommandPath, code, invocation.ExitCode, stderr.String())
+		}
+		if invocation.Stderr != "" && !strings.Contains(stderr.String(), invocation.Stderr) {
+			return nil, fmt.Errorf("execute %s: stderr lacks %q: %s", invocation.CommandPath, invocation.Stderr, stderr.String())
 		}
 		output.WriteString("## `" + strings.Join(append([]string{"camp"}, invocation.Args...), " ") + "`\n\n```console\n$ camp " + strings.Join(invocation.Args, " ") + "\n")
 		if invocation.CommandPath == "camp completion" {
@@ -172,9 +182,6 @@ func (transcriptLifecycle) Strike(_ context.Context, _ cli.StrikeRequest, _ cli.
 }
 func (transcriptLifecycle) ImagesList(_ context.Context, _ cli.SessionRequest, _ cli.OutputMode, output io.Writer) error {
 	return fixtureDispatch(output, "images list")
-}
-func (transcriptLifecycle) ImagesCapture(_ context.Context, _ cli.ImageCaptureRequest, _ cli.OutputMode, output io.Writer) error {
-	return fixtureDispatch(output, "images capture")
 }
 func (transcriptLifecycle) ImagesRestore(_ context.Context, _ cli.SessionRequest, _ cli.OutputMode, output io.Writer) error {
 	return fixtureDispatch(output, "images restore")

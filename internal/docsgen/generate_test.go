@@ -30,10 +30,13 @@ func TestDocumentedInvocationsExecute(t *testing.T) {
 		t.Run(strings.ReplaceAll(invocation.CommandPath, " ", "_"), func(t *testing.T) {
 			var stdout, stderr bytes.Buffer
 			code := cli.Execute(context.Background(), transcriptRoot(), invocation.Args, cli.Streams{Out: &stdout, ErrOut: &stderr})
-			if code != 0 {
-				t.Fatalf("%v exited %d\nstdout:\n%s\nstderr:\n%s", invocation.Args, code, stdout.String(), stderr.String())
+			if code != invocation.ExitCode {
+				t.Fatalf("%v exited %d, want %d\nstdout:\n%s\nstderr:\n%s", invocation.Args, code, invocation.ExitCode, stdout.String(), stderr.String())
 			}
-			if invocation.CommandPath != "camp" && invocation.CommandPath != "camp completion" && !containsHelpFlag(invocation.Args) {
+			if invocation.Stderr != "" && !strings.Contains(stderr.String(), invocation.Stderr) {
+				t.Fatalf("%v stderr lacks %q\nstderr:\n%s", invocation.Args, invocation.Stderr, stderr.String())
+			}
+			if invocation.ExitCode == int(cli.ExitSuccess) && invocation.CommandPath != "camp" && invocation.CommandPath != "camp completion" && !containsHelpFlag(invocation.Args) {
 				marker := fmt.Sprintf("effect-free docs fixture: %s dispatched; external effects disabled", strings.TrimPrefix(invocation.CommandPath, "camp "))
 				if !strings.Contains(stdout.String(), marker) {
 					t.Fatalf("%v did not emit dispatch marker %q\nstdout:\n%s", invocation.Args, marker, stdout.String())

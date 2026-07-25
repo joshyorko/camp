@@ -1,0 +1,7 @@
+schemaVersion: 1
+version: v18.17.7
+commit: 2384c4124dadfce48a8eb46cf3fdc3ddebf30e5e
+host: linux/amd64
+name: rcc-linux64
+url: https://github.com/joshyorko/rcc/releases/download/v18.17.7/rcc-linux64
+sha256: b49c5bdf98f55694ca366d715a260a0c54943b835a6dd8571fdf5c3260df17cf

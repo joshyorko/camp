@@ -33,6 +33,14 @@ Every implementation, review, debugging, reconnaissance, and verification task m
 - Replace stale or contradictory guidance when evidence changes. Keep personal preferences out of shared project instructions.
 - Do not create per-run diaries or add cosmetic prose. Keep the change as small as the durable learning permits.
 - Mutating lanes update the relevant canonical guide in their branch or worktree. Read-only lanes propose an exact delta for the root integration agent.
+- Start at [`docs/skills/README.md`](docs/skills/README.md) and keep every canonical
+  guide listed there. Put the guide change in the same commit or pull request as
+  the work that established it so reviewers can inspect the evidence and the
+  resulting instruction together.
+- In the receipt, `Evidence` names the exact code, test, command result,
+  observed failure, or immutable upstream source supporting the learning.
+  `Remaining uncertainty` names any unverified environment or release state;
+  neither field may silently turn a proposal into current behavior.
 
 Every agent dispatch must include:
 

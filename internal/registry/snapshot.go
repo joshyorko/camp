@@ -177,30 +177,16 @@ func registrySnapshotReferences(root string) ([]ports.RegistryReference, error) 
 	return references, nil
 }
 
-func MergeCatalog(inventory domain.ImageInventory, authority string, references []ports.RegistryReference, generatedAt time.Time) (domain.ImageInventory, error) {
-	if inventory.SchemaVersion != 0 && inventory.SchemaVersion != domain.SchemaVersion {
-		return domain.ImageInventory{}, errors.New("image inventory schema is unsupported")
-	}
+func InventoryFromCatalog(authority string, references []ports.RegistryReference, generatedAt time.Time) (domain.ImageInventory, error) {
 	if generatedAt.IsZero() {
 		return domain.ImageInventory{}, errors.New("catalog merge timestamp is empty")
 	}
 	if err := validateAuthority(authority); err != nil {
 		return domain.ImageInventory{}, err
 	}
-	result := domain.ImageInventory{SchemaVersion: domain.SchemaVersion, GeneratedAt: generatedAt.UTC(), Images: append([]domain.Image(nil), inventory.Images...)}
-	seen := make(map[string]string, len(result.Images))
-	byDigest := make(map[string]int, len(result.Images))
-	for index, image := range result.Images {
-		if prior, exists := seen[image.CapturedReference]; exists && prior != image.CapturedManifestDigest {
-			return domain.ImageInventory{}, fmt.Errorf("inventory contains digest drift for %q: %w", image.CapturedReference, ErrRegistryDigestMismatch)
-		}
-		seen[image.CapturedReference] = image.CapturedManifestDigest
-		if image.CapturedManifestDigest != "" {
-			if _, exists := byDigest[image.CapturedManifestDigest]; !exists {
-				byDigest[image.CapturedManifestDigest] = index
-			}
-		}
-	}
+	result := domain.ImageInventory{SchemaVersion: domain.SchemaVersion, GeneratedAt: generatedAt.UTC()}
+	seen := make(map[string]string, len(references))
+	byDigest := make(map[string]int, len(references))
 	for _, reference := range references {
 		if !repositoryPattern.MatchString(reference.Repository) || !tagPattern.MatchString(reference.Tag) || !digestPattern.MatchString(reference.ManifestDigest) {
 			return domain.ImageInventory{}, errors.New("registry catalog contains an invalid reference")

@@ -1,9 +1,14 @@
 package integration
 
 import (
+	"context"
+	"crypto/sha256"
+	"encoding/json"
 	"errors"
 	"fmt"
+	"os"
 	"os/exec"
+	"path/filepath"
 	"reflect"
 	"strings"
 	"testing"
@@ -12,6 +17,37 @@ import (
 type createdWorkspaceTracker struct {
 	ids  []string
 	seen map[string]struct{}
+}
+
+type devPodTestIsolation struct {
+	home    string
+	config  string
+	context string
+}
+
+func newDevPodTestIsolation(root string) devPodTestIsolation {
+	home := filepath.Join(root, "devpod-home")
+	contextDigest := sha256.Sum256([]byte(filepath.Clean(root)))
+	return devPodTestIsolation{
+		home:    home,
+		config:  filepath.Join(home, "config.yaml"),
+		context: fmt.Sprintf("camp-test-%x", contextDigest[:6]),
+	}
+}
+
+func (d devPodTestIsolation) Environment() []string {
+	return []string{
+		"DEVPOD_HOME=" + d.home,
+		"DEVPOD_CONFIG=" + d.config,
+		"DEVPOD_DISABLE_TELEMETRY=true",
+		"SSH_CONFIG_PATH=" + filepath.Join(d.home, "ssh", "config"),
+		"CAMP_DEVPOD_CONTEXT=" + d.context,
+	}
+}
+
+func (d devPodTestIsolation) CommandArgs(command string, argv ...string) []string {
+	result := []string{command, "--context", d.context}
+	return append(result, argv...)
 }
 
 func newCreatedWorkspaceTracker() *createdWorkspaceTracker {
@@ -27,6 +63,29 @@ func (t *createdWorkspaceTracker) Track(id string) {
 	}
 	t.seen[id] = struct{}{}
 	t.ids = append(t.ids, id)
+}
+
+func (t *createdWorkspaceTracker) TrackController(controller string) error {
+	matches, err := filepath.Glob(filepath.Join(controller, "data", "camp", "sessions", "*", "snapshot.json"))
+	if err != nil {
+		return fmt.Errorf("find test-owned controller snapshots: %w", err)
+	}
+	for _, path := range matches {
+		body, err := os.ReadFile(path)
+		if err != nil {
+			return fmt.Errorf("read test-owned controller snapshot %q: %w", path, err)
+		}
+		var snapshot struct {
+			Workspace struct {
+				ID string `json:"id"`
+			} `json:"workspace"`
+		}
+		if err := json.Unmarshal(body, &snapshot); err != nil {
+			return fmt.Errorf("decode test-owned controller snapshot %q: %w", path, err)
+		}
+		t.Track(snapshot.Workspace.ID)
+	}
+	return nil
 }
 
 func (t *createdWorkspaceTracker) DeleteAll(deleteWorkspace func(string) error) error {
@@ -70,6 +129,190 @@ func TestCreatedWorkspaceCleanupDeletesOnlyTrackedExactIDs(t *testing.T) {
 	})
 	if want := []string{"camp-session-b", "camp-session-a"}; !reflect.DeepEqual(deleted, want) {
 		t.Fatalf("deleted workspace IDs = %#v, want %#v", deleted, want)
+	}
+}
+
+func TestCreatedWorkspaceCleanupRecoversExactIDFromOwnedController(t *testing.T) {
+	controller := t.TempDir()
+	session := filepath.Join(controller, "data", "camp", "sessions", "session-test")
+	if err := os.MkdirAll(session, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(
+		filepath.Join(session, "snapshot.json"),
+		[]byte(`{"workspace":{"id":"camp-owned-test"}}`),
+		0o600,
+	); err != nil {
+		t.Fatal(err)
+	}
+	tracker := newCreatedWorkspaceTracker()
+	if err := tracker.TrackController(controller); err != nil {
+		t.Fatal(err)
+	}
+	var deleted []string
+	if err := tracker.DeleteAll(func(id string) error {
+		deleted = append(deleted, id)
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if want := []string{"camp-owned-test"}; !reflect.DeepEqual(deleted, want) {
+		t.Fatalf("deleted workspace IDs = %#v, want %#v", deleted, want)
+	}
+}
+
+func TestDevPodTestIsolationOwnsHomeConfigAndContext(t *testing.T) {
+	root := t.TempDir()
+	isolation := newDevPodTestIsolation(root)
+
+	gotEnvironment := map[string]string{}
+	for _, entry := range isolation.Environment() {
+		name, value, ok := strings.Cut(entry, "=")
+		if ok {
+			gotEnvironment[name] = value
+		}
+	}
+	wantHome := filepath.Join(root, "devpod-home")
+	if gotEnvironment["DEVPOD_HOME"] != wantHome {
+		t.Fatalf("DEVPOD_HOME = %q, want %q", gotEnvironment["DEVPOD_HOME"], wantHome)
+	}
+	if want := filepath.Join(wantHome, "config.yaml"); gotEnvironment["DEVPOD_CONFIG"] != want {
+		t.Fatalf("DEVPOD_CONFIG = %q, want %q", gotEnvironment["DEVPOD_CONFIG"], want)
+	}
+	if want := filepath.Join(wantHome, "ssh", "config"); gotEnvironment["SSH_CONFIG_PATH"] != want {
+		t.Fatalf("SSH_CONFIG_PATH = %q, want %q", gotEnvironment["SSH_CONFIG_PATH"], want)
+	}
+	if gotEnvironment["CAMP_DEVPOD_CONTEXT"] != isolation.context {
+		t.Fatalf("CAMP_DEVPOD_CONTEXT = %q, want %q", gotEnvironment["CAMP_DEVPOD_CONTEXT"], isolation.context)
+	}
+	if gotEnvironment["DEVPOD_DISABLE_TELEMETRY"] != "true" {
+		t.Fatalf("DEVPOD_DISABLE_TELEMETRY = %q, want true", gotEnvironment["DEVPOD_DISABLE_TELEMETRY"])
+	}
+
+	if got, want := isolation.CommandArgs("list", "--output", "json"), []string{"list", "--context", isolation.context, "--output", "json"}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("DevPod command argv = %#v, want %#v", got, want)
+	}
+}
+
+func TestDevPodTestIsolationUsesDistinctValidContexts(t *testing.T) {
+	first := newDevPodTestIsolation("/tmp/camp-isolation-a")
+	second := newDevPodTestIsolation("/tmp/camp-isolation-b")
+	if first.context == second.context {
+		t.Fatalf("distinct scenarios share DevPod context %q", first.context)
+	}
+	for _, contextName := range []string{first.context, second.context} {
+		if !strings.HasPrefix(contextName, "camp-test-") || len(contextName) > 48 {
+			t.Fatalf("invalid private DevPod context %q", contextName)
+		}
+		for _, character := range contextName {
+			isLower := character >= 'a' && character <= 'z'
+			isDigit := character >= '0' && character <= '9'
+			if !isLower && !isDigit && character != '-' {
+				t.Fatalf("private DevPod context %q contains invalid character %q", contextName, character)
+			}
+		}
+	}
+}
+
+func TestBootstrapDevPodDockerProviderUsesPrivateContextBeforeScenarioActivity(t *testing.T) {
+	root := t.TempDir()
+	bin := filepath.Join(root, "bin")
+	if err := os.MkdirAll(bin, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	devPod := filepath.Join(bin, "devpod")
+	if err := os.WriteFile(devPod, []byte(`#!/bin/sh
+set -eu
+printf 'bootstrap\n' >> "$CAMP_TEST_ORDER_LOG"
+printf 'argv'
+for argument in "$@"; do
+	printf ' <%s>' "$argument"
+done
+printf '\nDEVPOD_HOME=<%s>\nDEVPOD_CONFIG=<%s>\nSSH_CONFIG_PATH=<%s>\nCAMP_DEVPOD_CONTEXT=<%s>\n' \
+	"$DEVPOD_HOME" "$DEVPOD_CONFIG" "$SSH_CONFIG_PATH" "$CAMP_DEVPOD_CONTEXT"
+`), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", bin+string(os.PathListSeparator)+os.Getenv("PATH"))
+	orderLog := filepath.Join(root, "order.log")
+	t.Setenv("CAMP_TEST_ORDER_LOG", orderLog)
+
+	isolation := newDevPodTestIsolation(root)
+	output, err := bootstrapDevPodDockerProvider(context.Background(), isolation)
+	if err != nil {
+		t.Fatalf("bootstrap private Docker provider: %v\n%s", err, output)
+	}
+	if body, err := os.ReadFile(orderLog); err != nil || string(body) != "bootstrap\n" {
+		t.Fatalf("order before scenario activity = %q, %v", body, err)
+	}
+	if err := os.WriteFile(orderLog, []byte("bootstrap\nscenario\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	wantOutput := fmt.Sprintf(
+		"argv <provider> <add> <docker> <--context> <%s> <--use> <--silent>\nDEVPOD_HOME=<%s>\nDEVPOD_CONFIG=<%s>\nSSH_CONFIG_PATH=<%s>\nCAMP_DEVPOD_CONTEXT=<%s>\n",
+		isolation.context,
+		filepath.Join(root, "devpod-home"),
+		filepath.Join(root, "devpod-home", "config.yaml"),
+		filepath.Join(root, "devpod-home", "ssh", "config"),
+		isolation.context,
+	)
+	if string(output) != wantOutput {
+		t.Fatalf("bootstrap output = %q, want %q", output, wantOutput)
+	}
+}
+
+func TestPrivateDevPodContextPreservesUnrelatedWorkspace(t *testing.T) {
+	if os.Getenv("CAMP_TEST_REAL_DEVPOD_UNRELATED_WORKSPACE") != "1" {
+		t.Skip("missing real evidence: set CAMP_TEST_REAL_DEVPOD_UNRELATED_WORKSPACE=1 only with a real unrelated-workspace fixture")
+	}
+	t.Fatal("missing real evidence: private Docker-provider bootstrap is available, but this gate must still create an unrelated workspace, run exact scenario-ledger cleanup, prove it survives, then delete only that exact workspace in its own finalizer")
+}
+
+func TestLifecycleEnvironmentIncludesDevPodIsolation(t *testing.T) {
+	root := t.TempDir()
+	controller := filepath.Join(root, "controller")
+	isolation := newDevPodTestIsolation(root)
+	fileEnvironment := lifecycleEnvironment(
+		controller,
+		filepath.Join(root, "backend"),
+		5000,
+		8080,
+		isolation,
+	)
+	minioEnvironment := minioLifecycleEnvironment(
+		controller,
+		"http://127.0.0.1:9000",
+		"access",
+		"secret",
+		5000,
+		8080,
+		isolation,
+	)
+
+	for name, environment := range map[string][]string{
+		"file":  fileEnvironment,
+		"minio": minioEnvironment,
+	} {
+		got := map[string]string{}
+		for _, entry := range environment {
+			key, value, ok := strings.Cut(entry, "=")
+			if ok {
+				got[key] = value
+			}
+		}
+		if got["DEVPOD_HOME"] != filepath.Join(root, "devpod-home") {
+			t.Fatalf("%s lifecycle DEVPOD_HOME = %q", name, got["DEVPOD_HOME"])
+		}
+		if got["DEVPOD_CONFIG"] != filepath.Join(root, "devpod-home", "config.yaml") {
+			t.Fatalf("%s lifecycle DEVPOD_CONFIG = %q", name, got["DEVPOD_CONFIG"])
+		}
+		if got["CAMP_DEVPOD_CONTEXT"] != isolation.context {
+			t.Fatalf("%s lifecycle CAMP_DEVPOD_CONTEXT = %q", name, got["CAMP_DEVPOD_CONTEXT"])
+		}
+		if got["CAMP_DEVPOD_PROVIDER"] != "docker" {
+			t.Fatalf("%s lifecycle CAMP_DEVPOD_PROVIDER = %q, want docker", name, got["CAMP_DEVPOD_PROVIDER"])
+		}
 	}
 }
 

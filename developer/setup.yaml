@@ -1,0 +1,11 @@
+channels:
+  - conda-forge
+dependencies:
+  - python=3.10.15
+  - invoke=2.2.0
+  - robotframework=7.4.2
+  - go=1.26.5
+  - git=2.46.0
+  - gcc_linux-64=15.2.0
+  - docker-cli=29.6.2
+  - passt=2025_06_11.0293c6f

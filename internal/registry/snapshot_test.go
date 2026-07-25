@@ -170,53 +170,70 @@ func TestSnapshotterDerivesDirectPushReferencesFromTheSealedCut(t *testing.T) {
 	}
 }
 
-func TestMergeCatalogRejectsTagDigestDriftAndIsDeterministicAcrossDuplicateTags(t *testing.T) {
+func TestInventoryFromCatalogCapturesExplicitRegistryPush(t *testing.T) {
+	t.Parallel()
+	digest := "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+	inventory, err := InventoryFromCatalog("127.0.0.1:5000", []ports.RegistryReference{{
+		Repository: "manual/direct", Tag: "v1", ManifestDigest: digest,
+	}}, time.Unix(100, 0).UTC())
+	if err != nil {
+		t.Fatalf("InventoryFromCatalog() error = %v", err)
+	}
+	want := []domain.Image{{
+		OriginalTags:           []string{"127.0.0.1:5000/manual/direct:v1"},
+		CapturedReference:      "127.0.0.1:5000/manual/direct:v1",
+		CapturedManifestDigest: digest,
+		Source:                 domain.ImageSourceRegistry,
+		CreatedAt:              time.Unix(100, 0).UTC(),
+	}}
+	if !reflect.DeepEqual(inventory.Images, want) {
+		t.Fatalf("inventory images = %#v, want %#v", inventory.Images, want)
+	}
+}
+
+func TestInventoryFromCatalogRejectsTagDigestDriftAndIsDeterministicAcrossDuplicateTags(t *testing.T) {
 	t.Parallel()
 	digestA := "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
 	digestB := "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
-	base := domain.ImageInventory{SchemaVersion: domain.SchemaVersion, Images: []domain.Image{{
-		CapturedReference: "127.0.0.1:5000/manual/tool:latest", CapturedManifestDigest: digestA, Source: domain.ImageSourceRegistry,
-	}}}
-	_, err := MergeCatalog(base, "127.0.0.1:5000", []ports.RegistryReference{{Repository: "manual/tool", Tag: "latest", ManifestDigest: digestB}}, time.Unix(100, 0))
+	_, err := InventoryFromCatalog("127.0.0.1:5000", []ports.RegistryReference{
+		{Repository: "manual/tool", Tag: "latest", ManifestDigest: digestA},
+		{Repository: "manual/tool", Tag: "latest", ManifestDigest: digestB},
+	}, time.Unix(100, 0))
 	if !errors.Is(err, ErrRegistryDigestMismatch) {
-		t.Fatalf("MergeCatalog(drift) error = %v, want ErrRegistryDigestMismatch", err)
+		t.Fatalf("InventoryFromCatalog(drift) error = %v, want ErrRegistryDigestMismatch", err)
 	}
 	references := []ports.RegistryReference{
 		{Repository: "z/tool", Tag: "stable", ManifestDigest: digestB},
 		{Repository: "a/tool", Tag: "v1", ManifestDigest: digestA},
 		{Repository: "a/tool", Tag: "v1", ManifestDigest: digestA},
 	}
-	first, err := MergeCatalog(domain.ImageInventory{SchemaVersion: domain.SchemaVersion}, "127.0.0.1:5000", references, time.Unix(100, 0))
+	first, err := InventoryFromCatalog("127.0.0.1:5000", references, time.Unix(100, 0))
 	if err != nil {
 		t.Fatal(err)
 	}
-	second, err := MergeCatalog(domain.ImageInventory{SchemaVersion: domain.SchemaVersion}, "127.0.0.1:5000", []ports.RegistryReference{references[2], references[0], references[1]}, time.Unix(100, 0))
+	second, err := InventoryFromCatalog("127.0.0.1:5000", []ports.RegistryReference{references[2], references[0], references[1]}, time.Unix(100, 0))
 	if err != nil || !reflect.DeepEqual(first, second) || len(first.Images) != 2 {
 		t.Fatalf("deterministic merge = %#v / %#v, %v", first, second, err)
 	}
 }
 
-func TestMergeCatalogRetainsDirectPushesWithoutDuplicatingCapturedImages(t *testing.T) {
+func TestInventoryFromCatalogCoalescesExplicitTagsForOneDigest(t *testing.T) {
 	t.Parallel()
 	digestA := "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
 	digestB := "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
-	inventory := domain.ImageInventory{SchemaVersion: domain.SchemaVersion, Images: []domain.Image{{
-		OriginalTags: []string{"example.test/app:v1"}, CapturedReference: "127.0.0.1:5000/camp/app:captured", CapturedManifestDigest: digestA,
-		Platform: domain.Platform{OS: "linux", Architecture: "amd64"}, Source: domain.ImageSourceRegistry,
-	}}}
-	merged, err := MergeCatalog(inventory, "127.0.0.1:5000", []ports.RegistryReference{
-		{Repository: "camp/app", Tag: "captured", ManifestDigest: digestA},
+	inventory, err := InventoryFromCatalog("127.0.0.1:5000", []ports.RegistryReference{
 		{Repository: "camp-acceptance", Tag: "named", ManifestDigest: digestA},
+		{Repository: "camp-acceptance", Tag: "stable", ManifestDigest: digestA},
 		{Repository: "manual/tool", Tag: "latest", ManifestDigest: digestB},
 	}, time.Unix(100, 0).UTC())
 	if err != nil {
-		t.Fatalf("MergeCatalog() error = %v", err)
+		t.Fatalf("InventoryFromCatalog() error = %v", err)
 	}
-	if len(merged.Images) != 2 || !reflect.DeepEqual(merged.Images[0].OriginalTags, []string{"127.0.0.1:5000/camp-acceptance:named", "example.test/app:v1"}) {
-		t.Fatalf("merged aliases = %#v", merged.Images)
+	if len(inventory.Images) != 2 || !reflect.DeepEqual(inventory.Images[0].OriginalTags, []string{"127.0.0.1:5000/camp-acceptance:named", "127.0.0.1:5000/camp-acceptance:stable"}) {
+		t.Fatalf("catalog aliases = %#v", inventory.Images)
 	}
-	if merged.Images[1].CapturedReference != "127.0.0.1:5000/manual/tool:latest" || !reflect.DeepEqual(merged.Images[1].OriginalTags, []string{"127.0.0.1:5000/manual/tool:latest"}) || merged.Images[1].CapturedManifestDigest != digestB || merged.Images[1].Source != domain.ImageSourceRegistry {
-		t.Fatalf("merged inventory = %#v", merged)
+	if inventory.Images[1].CapturedReference != "127.0.0.1:5000/manual/tool:latest" || !reflect.DeepEqual(inventory.Images[1].OriginalTags, []string{"127.0.0.1:5000/manual/tool:latest"}) || inventory.Images[1].CapturedManifestDigest != digestB || inventory.Images[1].Source != domain.ImageSourceRegistry {
+		t.Fatalf("catalog inventory = %#v", inventory)
 	}
 }
 

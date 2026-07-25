@@ -39,7 +39,7 @@ jobs:
         run: |
           SOURCE_DATE_EPOCH="$(git show -s --format=%ct HEAD)"
           export SOURCE_DATE_EPOCH
-          ./packaging/build-release-evidence.sh build
+          ./developer/rccw run -r developer/toolkit.yaml --dev -t package
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: release-candidate-${{ github.sha }}

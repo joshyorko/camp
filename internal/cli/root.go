@@ -9,6 +9,8 @@ import (
 	"github.com/spf13/cobra"
 )
 
+var ErrImagesCaptureRequiresCheckpoint = errors.New("camp images capture does not inspect workspace engines; push images through CAMP_REGISTRY, then run camp sync or camp close")
+
 // NewRoot constructs Camp's production command root. Lifecycle commands are
 // registered only when their production dependencies are available.
 func NewRoot() *cobra.Command {
@@ -110,11 +112,6 @@ type SessionRequest struct {
 	Branch    string
 }
 
-type ImageCaptureRequest struct {
-	Session     SessionRequest
-	ExcludeTags []string
-}
-
 type ServeRequest struct {
 	Session SessionRequest
 	Service string
@@ -134,7 +131,6 @@ type ServeRestartRequest struct {
 
 type ImageOperations interface {
 	ImagesList(context.Context, SessionRequest, OutputMode, io.Writer) error
-	ImagesCapture(context.Context, ImageCaptureRequest, OutputMode, io.Writer) error
 	ImagesRestore(context.Context, SessionRequest, OutputMode, io.Writer) error
 }
 
@@ -221,23 +217,17 @@ func newImagesCommand(operations ImageOperations) *cobra.Command {
 	}
 	addSessionFlags(list, &listRequest)
 
-	captureRequest := ImageCaptureRequest{}
+	captureRequest := SessionRequest{}
 	capture := &cobra.Command{
-		Use: "capture", Short: "Capture workspace images", Args: usageArgs(cobra.NoArgs),
+		Use:   "capture",
+		Short: "Explain registry-only image capture",
+		Long:  "Camp captures only images explicitly pushed through CAMP_REGISTRY during camp sync or camp close.",
+		Args:  usageArgs(cobra.NoArgs),
 		RunE: func(command *cobra.Command, _ []string) error {
-			if command.Flags().Changed("exclude-tag") && len(captureRequest.ExcludeTags) == 0 {
-				return UsageError(errors.New("--exclude-tag cannot be empty"))
-			}
-			for _, tag := range captureRequest.ExcludeTags {
-				if tag == "" {
-					return UsageError(errors.New("--exclude-tag cannot be empty"))
-				}
-			}
-			return operations.ImagesCapture(command.Context(), captureRequest, OutputModeFrom(command), command.OutOrStdout())
+			return ErrImagesCaptureRequiresCheckpoint
 		},
 	}
-	addSessionFlags(capture, &captureRequest.Session)
-	capture.Flags().StringSliceVar(&captureRequest.ExcludeTags, "exclude-tag", nil, "exclude an image tag from capture")
+	addSessionFlags(capture, &captureRequest)
 
 	restoreRequest := SessionRequest{}
 	restore := &cobra.Command{

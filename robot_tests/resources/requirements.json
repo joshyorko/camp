@@ -1,0 +1,270 @@
+{
+  "schemaVersion": 1,
+  "requirements": [
+    {
+      "id": "CAMP-BB-CANDIDATE-001",
+      "tier": "required-now",
+      "source": "docs/skills/testing-release-evidence.md#RCC-developer-factory",
+      "summary": "Robot executes the exact candidate whose digest and version identity are recorded in the build receipt."
+    },
+    {
+      "id": "CAMP-BB-HELP-001",
+      "tier": "required-now",
+      "source": "prompts/camp-codex-build-prompt.md#The-product",
+      "summary": "The candidate exposes truthful help for its public automation surface."
+    },
+    {
+      "id": "CAMP-BB-COMPLETION-001",
+      "tier": "required-now",
+      "source": "docs/skills/testing-release-evidence.md#Generated-documentation-gate",
+      "summary": "The candidate generates non-empty bash, zsh, and fish completions."
+    },
+    {
+      "id": "CAMP-BB-JSON-ERROR-001",
+      "tier": "required-now",
+      "source": "prompts/camp-codex-build-prompt.md#The-product",
+      "summary": "Automation failures use stable machine-readable JSON."
+    },
+    {
+      "id": "CAMP-BB-INIT-001",
+      "tier": "required-now",
+      "source": "prompts/camp-codex-build-prompt.md#CLI-and-command-contract",
+      "summary": "Multiple independent source roots can be initialized without sharing manifests."
+    },
+    {
+      "id": "CAMP-BB-STATE-001",
+      "tier": "required-now",
+      "source": "docs/generated/commands.md#camp-list",
+      "summary": "Initialization does not fabricate stored sessions and status reports the absent-session state."
+    },
+    {
+      "id": "CAMP-BB-RECOVERY-001",
+      "tier": "required-now",
+      "source": "prompts/camp-codex-build-prompt.md#The-product",
+      "summary": "A recovery request without a session fails with an exact safe next command."
+    },
+    {
+      "id": "CAMP-BB-TRACE-001",
+      "tier": "required-now",
+      "source": "docs/skills/testing-release-evidence.md#RCC-developer-factory",
+      "summary": "Every Robot test maps to a known active requirement and every required-now requirement has an executing test."
+    },
+    {
+      "id": "CAMP-PROOF-OPEN-001",
+      "tier": "roadmap-gated",
+      "source": "prompts/camp-codex-build-prompt.md#camp-open-target",
+      "summary": "The exact candidate opens a real DevPod and Hauler-backed Camp and returns a durable session identity.",
+      "gate": "scripts/verify-real-evidence.sh all: TestLocalLifecycleVertical"
+    },
+    {
+      "id": "CAMP-PROOF-ATTACH-001",
+      "tier": "roadmap-gated",
+      "source": "prompts/camp-codex-build-prompt.md#camp-attach-target",
+      "summary": "The exact candidate attaches to the selected live session and requested landing target through DevPod.",
+      "gate": "candidate black-box attach scenario with a real open session"
+    },
+    {
+      "id": "CAMP-PROOF-SYNC-001",
+      "tier": "roadmap-gated",
+      "source": "prompts/camp-codex-build-prompt.md#camp-sync",
+      "summary": "The exact candidate publishes a verified checkpoint while leaving the selected workspace open.",
+      "gate": "scripts/verify-real-evidence.sh all: TestLocalLifecycleVertical and TestMinIOLifecycleVertical"
+    },
+    {
+      "id": "CAMP-PROOF-CLOSE-001",
+      "tier": "roadmap-gated",
+      "source": "prompts/camp-codex-build-prompt.md#camp-close",
+      "summary": "The exact candidate publishes before identity-checked teardown and reports publication separately from cleanup.",
+      "gate": "scripts/verify-real-evidence.sh all: TestLocalLifecycleVertical and TestMinIOLifecycleVertical"
+    },
+    {
+      "id": "CAMP-PROOF-FRESH-CONTROLLER-REOPEN-001",
+      "tier": "roadmap-gated",
+      "source": "docs/skills/local-lifecycle-recovery.md#Current-boundary",
+      "summary": "A fresh XDG controller reopens the latest committed generation without reusing prior controller state.",
+      "gate": "TestLocalLifecycleVertical and TestMinIOLifecycleVertical with fresh-controller evidence"
+    },
+    {
+      "id": "CAMP-PROOF-MULTI-CAMP-ROUTING-001",
+      "tier": "roadmap-gated",
+      "source": "docs/skills/session-selection-and-presentation.md",
+      "summary": "Two initialized Camps and concurrent sessions route open, attach, sync, close, status, and reopen without cross-selection.",
+      "gate": "exact-candidate extension of TestTwoCampCommandLifecycleDoesNotCrossSelect"
+    },
+    {
+      "id": "CAMP-PROOF-FILESYSTEM-SEMANTICS-001",
+      "tier": "roadmap-gated",
+      "source": "prompts/camp-codex-build-prompt.md#Integration-tests",
+      "summary": "Checkpoint and reopen preserve bytes, modes, Unicode, spaces, relative symlinks, hardlinks, deletes, and files larger than 2 MiB.",
+      "gate": "TestRemoteCheckpointLifecycleTransfersRealFilesystemSemantics plus real lifecycle reopen"
+    },
+    {
+      "id": "CAMP-PROOF-OCI-DIGEST-PORTABILITY-001",
+      "tier": "roadmap-gated",
+      "source": "docs/adr/0004-capsule-devcontainer-and-registry-contracts.md",
+      "summary": "An image explicitly pushed through CAMP_REGISTRY is sealed by digest, evicted, reopened, digest-pulled, and run.",
+      "gate": "TestLocalLifecycleVertical and TestMinIOLifecycleVertical explicit registry digest proof"
+    },
+    {
+      "id": "CAMP-PROOF-MINIO-FRESH-CONTROLLER-001",
+      "tier": "roadmap-gated",
+      "source": "docs/skills/local-lifecycle-recovery.md#Current-boundary",
+      "summary": "The exact candidate publishes to MinIO and reopens through a fresh credential-chain controller.",
+      "gate": "CAMP_TEST_REAL_MINIO_REOPEN=1 TestMinIOLifecycleVertical"
+    },
+    {
+      "id": "CAMP-PROOF-TWO-WRITER-CAS-001",
+      "tier": "roadmap-gated",
+      "source": "prompts/camp-codex-build-prompt.md#Recovery-concurrency-and-generations",
+      "summary": "Two writers cannot both advance the same pointer baseline and a loser never overwrites the winner.",
+      "gate": "TestS3TwoWriterConflict"
+    },
+    {
+      "id": "CAMP-PROOF-ORPHAN-GENERATION-RECOVERY-001",
+      "tier": "roadmap-gated",
+      "source": "docs/skills/session-selection-and-presentation.md",
+      "summary": "A verified upload that loses pointer compare-and-swap remains an inspectable recoverable orphan generation.",
+      "gate": "MinIO immutable publication plus exact-candidate recover receipt"
+    },
+    {
+      "id": "CAMP-PROOF-CRASH-MATRIX-001",
+      "tier": "roadmap-gated",
+      "source": "prompts/camp-codex-build-prompt.md#Integration-tests",
+      "summary": "Crash cuts across lifecycle effects reconcile known outcomes without replaying completed effects or guessing unknown ones.",
+      "gate": "CAMP_TEST_REAL_LIFECYCLE=1 TestLocalLifecycleCrashMatrix"
+    },
+    {
+      "id": "CAMP-PROOF-SUPERVISOR-RECOVERY-001",
+      "tier": "roadmap-gated",
+      "source": "docs/skills/local-lifecycle-recovery.md",
+      "summary": "Supervisor claim, heartbeat, replacement, and shutdown use exact durable process identity and lease state.",
+      "gate": "focused supervisor recovery tests plus an exact-candidate crash cut"
+    },
+    {
+      "id": "CAMP-PROOF-FORWARDER-RECOVERY-001",
+      "tier": "roadmap-gated",
+      "source": "docs/skills/local-lifecycle-recovery.md",
+      "summary": "A surviving detached forwarder is adopted from private identity evidence and stopped exactly once.",
+      "gate": "forwarder cut in TestLocalLifecycleCrashMatrix"
+    },
+    {
+      "id": "CAMP-PROOF-STALE-LEASE-RECOVERY-001",
+      "tier": "roadmap-gated",
+      "source": "docs/skills/local-lifecycle-recovery.md",
+      "summary": "Expired, replaced, and stale writer leases fail closed or renew only through exact conditional identity.",
+      "gate": "lease recovery tests plus exact-candidate recover or strike scenario"
+    },
+    {
+      "id": "CAMP-PROOF-EXACT-CLEANUP-001",
+      "tier": "roadmap-gated",
+      "source": "docs/skills/devpod-hauler.md",
+      "summary": "Cleanup removes only ledgered workspace IDs, recorded processes, closed ports, and ownership-verified materializations.",
+      "gate": "TestCreatedWorkspaceCleanupDeletesOnlyTrackedExactIDs plus real lifecycle teardown"
+    },
+    {
+      "id": "CAMP-PROOF-UNRELATED-WORKSPACE-001",
+      "tier": "roadmap-gated",
+      "source": "docs/skills/devpod-hauler.md",
+      "summary": "Cleanup preserves a real unrelated DevPod workspace in the same authorized provider.",
+      "gate": "non-skipping TestPrivateDevPodContextPreservesUnrelatedWorkspace"
+    },
+    {
+      "id": "CAMP-PROOF-PRIVATE-DEVPOD-CONTEXT-001",
+      "tier": "roadmap-gated",
+      "source": "docs/skills/devpod-hauler.md",
+      "summary": "Every real scenario owns DEVPOD_HOME, DEVPOD_CONFIG, SSH config, and a non-default context.",
+      "gate": "TestDevPodTestIsolationOwnsHomeConfigAndContext plus authorized provider run"
+    },
+    {
+      "id": "CAMP-PROOF-LOOPBACK-PORT-OWNERSHIP-001",
+      "tier": "roadmap-gated",
+      "source": "prompts/camp-codex-build-prompt.md#Engineering-quality",
+      "summary": "Registry and fileserver listeners are loopback-confined, identity-observed, forwarded, and closed by their owner.",
+      "gate": "TestLocalLifecycleVertical and TestMinIOLifecycleVertical listener and teardown evidence"
+    },
+    {
+      "id": "CAMP-PROOF-JSON-SUCCESS-RECEIPT-001",
+      "tier": "roadmap-gated",
+      "source": "docs/skills/session-selection-and-presentation.md",
+      "summary": "Successful lifecycle commands return deterministic redacted JSON read models from the exact candidate.",
+      "gate": "candidate black-box JSON success assertions for open, sync, close, and reopen"
+    },
+    {
+      "id": "CAMP-PROOF-JSON-PROGRESS-RECEIPT-001",
+      "tier": "roadmap-gated",
+      "source": "docs/skills/local-lifecycle-recovery.md",
+      "summary": "Human progress reports only completed durable stages while JSON remains one non-streamed success envelope.",
+      "gate": "candidate black-box human milestone and JSON envelope parity scenario"
+    },
+    {
+      "id": "CAMP-PROOF-JSON-RECOVERY-RECEIPT-001",
+      "tier": "roadmap-gated",
+      "source": "prompts/camp-codex-build-prompt.md#The-product",
+      "summary": "Failure receipts distinguish safe publication, cleanup failure, orphan generation, and the exact recovery command.",
+      "gate": "candidate black-box injected-failure recovery receipts"
+    },
+    {
+      "id": "CAMP-PROOF-ROOM-WOLFI-MATRIX-001",
+      "tier": "roadmap-gated",
+      "source": "prompts/camp-codex-build-prompt.md#Room-of-Requirement-matrix",
+      "summary": "The locked Room matrix exercises published variants, with Wolfi nested networking, Docker build, registry push, reopen, run, and Rust continuity.",
+      "gate": "authorized Room matrix using the fixture version in tools.lock.yaml"
+    },
+    {
+      "id": "CAMP-PROOF-KUBERNETES-PROTECTED-001",
+      "tier": "roadmap-gated",
+      "source": "docs/skills/testing-release-evidence.md#RCC-developer-factory",
+      "summary": "Kubernetes support is claimed only from the protected authorized exact-candidate lifecycle gate.",
+      "gate": "CAMP_KUBERNETES_EVIDENCE=1 robotKubernetes: TestKubernetesLifecycleVertical"
+    },
+    {
+      "id": "CAMP-PROOF-DOCS-HELP-COMPLETION-PARITY-001",
+      "tier": "roadmap-gated",
+      "source": "docs/skills/testing-release-evidence.md#Generated-documentation-gate",
+      "summary": "Generated docs, transcripts, root and subcommand help, and bash, zsh, and fish completions match the exact candidate.",
+      "gate": "go test ./internal/docsgen ./docs plus packaged candidate completion verification"
+    },
+    {
+      "id": "CAMP-PROOF-CANDIDATE-CONSISTENCY-001",
+      "tier": "roadmap-gated",
+      "source": "docs/skills/testing-release-evidence.md#RCC-developer-factory",
+      "summary": "Every product-proof lane consumes one executable whose digest remains equal to the immutable candidate receipt.",
+      "gate": "RCC robot gate candidate digest checks before and after all named evidence"
+    },
+    {
+      "id": "CAMP-PROMPT-IMAGE-AUTO-001",
+      "tier": "superseded",
+      "source": "prompts/camp-codex-build-prompt.md#Live-registry-and-image-capture",
+      "summary": "Automatically enumerate and capture every named workspace-engine image.",
+      "supersededBy": "CAMP-PROOF-OCI-DIGEST-PORTABILITY-001"
+    },
+    {
+      "id": "CAMP-PROMPT-LIVE-CATALOG-001",
+      "tier": "superseded",
+      "source": "prompts/camp-codex-build-prompt.md#Live-registry-and-image-capture",
+      "summary": "Treat the live registry catalog as the complete direct-push publication inventory.",
+      "supersededBy": "CAMP-PROOF-OCI-DIGEST-PORTABILITY-001"
+    },
+    {
+      "id": "CAMP-PROMPT-DEVPOD-V0911-001",
+      "tier": "superseded",
+      "source": "prompts/camp-codex-build-prompt.md#DevPod",
+      "summary": "Pin DevPod v0.9.11 as the release evidence fixture.",
+      "supersededBy": "tools.lock.yaml devpod v0.26.1"
+    },
+    {
+      "id": "CAMP-PROMPT-HAULER-V201-001",
+      "tier": "superseded",
+      "source": "prompts/camp-codex-build-prompt.md#Hauler",
+      "summary": "Pin Hauler v2.0.1 as the release evidence fixture.",
+      "supersededBy": "tools.lock.yaml hauler v2.0.2"
+    },
+    {
+      "id": "CAMP-PROMPT-ROOM-V1180-001",
+      "tier": "superseded",
+      "source": "prompts/camp-codex-build-prompt.md#Room-of-Requirement",
+      "summary": "Pin Room of Requirement v1.18.0 as the compatibility fixture.",
+      "supersededBy": "tools.lock.yaml room v1.18.3"
+    }
+  ]
+}

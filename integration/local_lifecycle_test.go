@@ -25,78 +25,89 @@ func TestLocalLifecycleVertical(t *testing.T) {
 			t.Fatalf("required executable %q: %v", name, err)
 		}
 	}
-	assertNoDevPodWorkspaces(t, context.Background())
-
 	root := t.TempDir()
 	source := filepath.Join(root, "mock Second Brain")
 	backend := filepath.Join(root, "backend")
 	controllerA := filepath.Join(root, "controller-a")
 	controllerB := filepath.Join(root, "controller-b")
-	bin := filepath.Join(root, "camp")
+	devPod := newDevPodTestIsolation(root)
+	bin := candidateBinary(t)
 	registryPort, fileserverPort := reserveLoopbackPort(t), reserveLoopbackPort(t)
 	writeLifecycleFixture(t, source)
 	if err := os.MkdirAll(backend, 0o700); err != nil {
 		t.Fatal(err)
 	}
-	build := exec.Command("go", "build", "-o", bin, "../cmd/camp")
-	if output, err := build.CombinedOutput(); err != nil {
-		t.Fatalf("build camp: %v\n%s", err, output)
-	}
-
 	ctx, cancel := context.WithTimeout(context.Background(), 45*time.Minute)
 	t.Cleanup(cancel)
+	createdWorkspaces := newCreatedWorkspaceTracker()
 	t.Cleanup(func() {
 		cleanupCtx, cleanupCancel := context.WithTimeout(context.Background(), 3*time.Minute)
 		defer cleanupCancel()
-		workspaces, _ := listDevPodWorkspaces(cleanupCtx)
-		for _, workspace := range workspaces {
-			_, _ = runLifecycleCommand(cleanupCtx, nil, "devpod", "delete", "--context", "default", "--ignore-not-found", workspace)
+		for _, controller := range []string{controllerA, controllerB} {
+			if err := createdWorkspaces.TrackController(controller); err != nil {
+				t.Errorf("recover exact workspace IDs from test-owned controller: %v", err)
+			}
+		}
+		if err := createdWorkspaces.DeleteAll(func(workspaceID string) error {
+			output, err := runDevPodCommand(cleanupCtx, devPod, "delete", "--ignore-not-found", workspaceID)
+			if err != nil {
+				return fmt.Errorf("%w: %s", err, output)
+			}
+			return nil
+		}); err != nil {
+			t.Errorf("clean exact test-owned DevPod workspaces: %v", err)
 		}
 	})
 
-	envA := lifecycleEnvironment(controllerA, source, backend, registryPort, fileserverPort)
+	envA := lifecycleEnvironment(controllerA, backend, registryPort, fileserverPort, devPod)
+	t.Log("bootstrap the Docker provider inside the private DevPod context")
+	mustBootstrapDevPodDockerProvider(t, ctx, devPod)
 	t.Log("initialize adopted fixture")
-	mustRunLifecycle(t, ctx, envA, bin, "--json", "init", source)
+	mustRunLifecycle(t, ctx, envA, bin, "--json", "init", source, "--name", "local-lifecycle")
 	t.Log("open adopted fixture through real DevPod")
-	recovered := decodeOpenResult(t, mustRunLifecycle(t, ctx, envA, bin, "--json", "open", "Projects/Unicode space"))
+	recovered := decodeOpenResult(t, mustRunLifecycleAt(t, ctx, envA, source, bin, "--json", "open"))
 	workspaceA := recovered.WorkspaceID
-	if workspaceA == "" || recovered.SessionID == "" || recovered.Target != "Projects/Unicode space" {
+	createdWorkspaces.Track(workspaceA)
+	if workspaceA == "" || recovered.SessionID == "" || recovered.Target != "." {
 		t.Fatalf("open = %#v", recovered)
 	}
 	workspaceRootA := "/workspaces/" + workspaceA
 	t.Log("mutate files and publish a named image through CAMP_REGISTRY")
 	mutate := fmt.Sprintf("set -eu; cd %s; printf 'after-open\\n' >> 'Projects/Unicode space/λ-note.txt'; chmod 600 'Projects/Unicode space/λ-note.txt'; test \"$CAMP_REGISTRY\" = %s; test \"$CAMP_FILESERVER\" = %s; wget -qO- \"http://$CAMP_REGISTRY/v2/\" >/dev/null; wget -qO- \"http://$CAMP_FILESERVER/\" >/dev/null; engine=; attempts=0; while test -z \"$engine\"; do for candidate in docker podman nerdctl; do if command -v \"$candidate\" >/dev/null 2>&1 && \"$candidate\" info >/dev/null 2>&1; then engine=$candidate; break; fi; done; attempts=$((attempts+1)); test $attempts -lt 60; sleep 1; done; \"$engine\" pull alpine:3.20; image_id=$(\"$engine\" create alpine:3.20); \"$engine\" commit \"$image_id\" %s/camp-acceptance:named; \"$engine\" rm \"$image_id\"; \"$engine\" push %s/camp-acceptance:named", shellQuote(workspaceRootA), shellQuote(loopbackEndpoint(registryPort)), shellQuote(loopbackEndpoint(fileserverPort)), loopbackEndpoint(registryPort), loopbackEndpoint(registryPort))
-	mustRunLifecycle(t, ctx, nil, "devpod", "ssh", "--context", "default", workspaceA, "--command", mutate)
+	mustRunDevPod(t, ctx, devPod, "ssh", workspaceA, "--command", mutate)
 
 	t.Log("publish explicit sync generation")
-	if generation := decodeGeneration(t, mustRunLifecycle(t, ctx, envA, bin, "--json", "sync")); generation != 1 {
+	if generation := decodeGeneration(t, mustRunLifecycle(t, ctx, envA, bin, "--json", "sync", "--camp", "local-lifecycle")); generation != 1 {
 		t.Fatalf("sync generation = %d, want 1", generation)
 	}
 	edit := fmt.Sprintf("printf 'after-sync\\n' >> %s", shellQuote(filepath.ToSlash(filepath.Join(workspaceRootA, "Projects/Unicode space/λ-note.txt"))))
-	mustRunLifecycle(t, ctx, nil, "devpod", "ssh", "--context", "default", workspaceA, "--command", edit)
+	mustRunDevPod(t, ctx, devPod, "ssh", workspaceA, "--command", edit)
 	t.Log("publish final generation and close adopted workspace")
-	if generation := decodeGeneration(t, mustRunLifecycle(t, ctx, envA, bin, "--json", "close")); generation != 2 {
+	if generation := decodeGeneration(t, mustRunLifecycle(t, ctx, envA, bin, "--json", "close", "--camp", "local-lifecycle")); generation != 2 {
 		t.Fatalf("close generation = %d, want 2", generation)
 	}
-	assertNoDevPodWorkspaces(t, ctx)
+	assertDevPodWorkspacesAbsent(t, ctx, devPod, workspaceA)
 	if _, err := os.Stat(source); err != nil {
 		t.Fatalf("adopted source did not survive: %v", err)
 	}
 
-	envB := lifecycleEnvironment(controllerB, "", backend, registryPort, fileserverPort)
+	envB := lifecycleEnvironment(controllerB, backend, registryPort, fileserverPort, devPod)
 	t.Log("reopen from the file backend with a fresh XDG controller")
-	reopened := decodeOpenResult(t, mustRunLifecycle(t, ctx, envB, bin, "--json", "reopen"))
+	reopened := decodeOpenResult(t, mustRunLifecycleAt(t, ctx, envB, source, bin, "--json", "reopen"))
 	if reopened.Generation != 2 || reopened.WorkspaceID == "" || reopened.Materialization == "" {
 		t.Fatalf("fresh-controller reopen = %#v", reopened)
 	}
+	createdWorkspaces.Track(reopened.WorkspaceID)
 	workspaceRootB := "/workspaces/" + reopened.WorkspaceID
 	t.Log("verify restored filesystem semantics and runnable named image")
 	note := shellQuote(filepath.ToSlash(filepath.Join(workspaceRootB, "Projects/Unicode space/λ-note.txt")))
 	verify := fmt.Sprintf("set -eux; grep -q before-open %s; grep -q after-open %s; grep -q after-sync %s; stat -c %%a %s | grep -qx 600; stat -c %%s %s | grep -qx %d; readlink %s | grep -qx README.md; find %s -xdev -samefile %s | grep -q README-hardlink.md; engine=; for candidate in docker podman nerdctl; do if command -v \"$candidate\" >/dev/null 2>&1 && \"$candidate\" info >/dev/null 2>&1; then engine=$candidate; break; fi; done; test -n \"$engine\"; \"$engine\" image inspect %s/camp-acceptance:named >/dev/null; \"$engine\" run --rm %s/camp-acceptance:named true", note, note, note, note, shellQuote(filepath.ToSlash(filepath.Join(workspaceRootB, "large.bin"))), lifecycleLargeSize, shellQuote(filepath.ToSlash(filepath.Join(workspaceRootB, "README-link.md"))), shellQuote(workspaceRootB), shellQuote(filepath.ToSlash(filepath.Join(workspaceRootB, "README.md"))), loopbackEndpoint(registryPort), loopbackEndpoint(registryPort))
-	mustRunLifecycle(t, ctx, nil, "devpod", "ssh", "--context", "default", reopened.WorkspaceID, "--command", verify)
+	mustRunDevPod(t, ctx, devPod, "ssh", reopened.WorkspaceID, "--command", verify)
+	preserved := fmt.Sprintf("set -eu; stat -c %%a %s | grep -qx 755; stat -c %%a %s | grep -qx 600; grep -qx 'user-owned agent state' %s", shellQuote(filepath.ToSlash(filepath.Join(workspaceRootB, "bin/camp-fixture"))), shellQuote(filepath.ToSlash(filepath.Join(workspaceRootB, ".claude/fixture.md"))), shellQuote(filepath.ToSlash(filepath.Join(workspaceRootB, ".claude/fixture.md"))))
+	mustRunDevPod(t, ctx, devPod, "ssh", reopened.WorkspaceID, "--command", preserved)
 	t.Log("close fresh controller and verify teardown")
-	mustRunLifecycle(t, ctx, envB, bin, "--json", "close")
-	assertNoDevPodWorkspaces(t, ctx)
+	mustRunLifecycle(t, ctx, envB, bin, "--json", "close", "--camp", "local-lifecycle")
+	assertDevPodWorkspacesAbsent(t, ctx, devPod, workspaceA, reopened.WorkspaceID)
 	if _, err := os.Stat(reopened.Materialization); !errors.Is(err, os.ErrNotExist) {
 		t.Fatalf("owned materialization still exists: %v", err)
 	}
@@ -157,18 +168,23 @@ func decodeGeneration(t *testing.T, output []byte) int {
 	return envelope.Result.Generation.Generation
 }
 
-func lifecycleEnvironment(controller, source, backend string, registryPort, fileserverPort int) []string {
-	env := []string{"XDG_CONFIG_HOME=" + filepath.Join(controller, "config"), "XDG_DATA_HOME=" + filepath.Join(controller, "data"), "XDG_CACHE_HOME=" + filepath.Join(controller, "cache"), "CAMP_BACKEND=file://" + backend, "CAMP_CAPSULE=default", "CAMP_DEVPOD_PROVIDER=room-of-requirement", "CAMP_REGISTRY_PORT=" + strconv.Itoa(registryPort), "CAMP_FILESERVER_PORT=" + strconv.Itoa(fileserverPort)}
-	if source != "" {
-		env = append(env, "CAMP_SOURCE="+source)
-	}
+func lifecycleEnvironment(controller, backend string, registryPort, fileserverPort int, devPod devPodTestIsolation) []string {
+	env := []string{"XDG_CONFIG_HOME=" + filepath.Join(controller, "config"), "XDG_DATA_HOME=" + filepath.Join(controller, "data"), "XDG_CACHE_HOME=" + filepath.Join(controller, "cache"), "CAMP_BACKEND=file://" + backend, "CAMP_DEVPOD_PROVIDER=docker", "CAMP_REGISTRY_PORT=" + strconv.Itoa(registryPort), "CAMP_FILESERVER_PORT=" + strconv.Itoa(fileserverPort)}
+	env = append(env, devPod.Environment()...)
 	return env
 }
 
 func writeLifecycleFixture(t *testing.T, source string) {
 	t.Helper()
 	nested := filepath.Join(source, "Projects/Unicode space")
-	if err := os.MkdirAll(nested, 0o700); err != nil {
+	scripts := filepath.Join(source, "bin")
+	claude := filepath.Join(source, ".claude")
+	for _, directory := range []string{nested, scripts, claude} {
+		if err := os.MkdirAll(directory, 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := os.WriteFile(filepath.Join(scripts, "camp-fixture"), []byte("#!/bin/sh\nexit 0\n"), 0o755); err != nil {
 		t.Fatal(err)
 	}
 	readme := filepath.Join(source, "README.md")
@@ -176,6 +192,9 @@ func writeLifecycleFixture(t *testing.T, source string) {
 		t.Fatal(err)
 	}
 	if err := os.WriteFile(filepath.Join(nested, "λ-note.txt"), []byte("before-open\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(claude, "fixture.md"), []byte("user-owned agent state\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	large := filepath.Join(source, "large.bin")
@@ -208,7 +227,16 @@ func shellQuote(value string) string   { return "'" + strings.ReplaceAll(value, 
 
 func mustRunLifecycle(t *testing.T, ctx context.Context, environment []string, executable string, argv ...string) []byte {
 	t.Helper()
-	output, err := runLifecycleCommand(ctx, environment, executable, argv...)
+	output, err := runLifecycleCommandAt(ctx, environment, "", executable, argv...)
+	if err != nil {
+		t.Fatalf("%s %s: %v\n%s", executable, strings.Join(argv, " "), err, output)
+	}
+	return output
+}
+
+func mustRunLifecycleAt(t *testing.T, ctx context.Context, environment []string, directory, executable string, argv ...string) []byte {
+	t.Helper()
+	output, err := runLifecycleCommandAt(ctx, environment, directory, executable, argv...)
 	if err != nil {
 		t.Fatalf("%s %s: %v\n%s", executable, strings.Join(argv, " "), err, output)
 	}
@@ -216,8 +244,15 @@ func mustRunLifecycle(t *testing.T, ctx context.Context, environment []string, e
 }
 
 func runLifecycleCommand(ctx context.Context, environment []string, executable string, argv ...string) ([]byte, error) {
+	return runLifecycleCommandAt(ctx, environment, "", executable, argv...)
+}
+
+func runLifecycleCommandAt(ctx context.Context, environment []string, directory, executable string, argv ...string) ([]byte, error) {
 	command := exec.CommandContext(ctx, executable, argv...)
-	command.Env = append(os.Environ(), environment...)
+	command.Env = mergeCommandEnvironment(os.Environ(), environment)
+	if directory != "" {
+		command.Dir = directory
+	}
 	var output bytes.Buffer
 	command.Stdout = &output
 	command.Stderr = &output
@@ -225,8 +260,44 @@ func runLifecycleCommand(ctx context.Context, environment []string, executable s
 	return output.Bytes(), err
 }
 
-func listDevPodWorkspaces(ctx context.Context) ([]string, error) {
-	output, err := runLifecycleCommand(ctx, nil, "devpod", "list", "--context", "default", "--output", "json", "--skip-pro")
+func runDevPodCommand(ctx context.Context, isolation devPodTestIsolation, command string, argv ...string) ([]byte, error) {
+	return runLifecycleCommand(ctx, isolation.Environment(), "devpod", isolation.CommandArgs(command, argv...)...)
+}
+
+func bootstrapDevPodDockerProvider(ctx context.Context, isolation devPodTestIsolation) ([]byte, error) {
+	return runLifecycleCommand(
+		ctx,
+		isolation.Environment(),
+		"devpod",
+		"provider",
+		"add",
+		"docker",
+		"--context",
+		isolation.context,
+		"--use",
+		"--silent",
+	)
+}
+
+func mustBootstrapDevPodDockerProvider(t *testing.T, ctx context.Context, isolation devPodTestIsolation) {
+	t.Helper()
+	output, err := bootstrapDevPodDockerProvider(ctx, isolation)
+	if err != nil {
+		t.Fatalf("bootstrap private DevPod Docker provider: %v\n%s", err, output)
+	}
+}
+
+func mustRunDevPod(t *testing.T, ctx context.Context, isolation devPodTestIsolation, command string, argv ...string) []byte {
+	t.Helper()
+	output, err := runDevPodCommand(ctx, isolation, command, argv...)
+	if err != nil {
+		t.Fatalf("devpod %s: %v\n%s", strings.Join(isolation.CommandArgs(command, argv...), " "), err, output)
+	}
+	return output
+}
+
+func listDevPodWorkspaces(ctx context.Context, isolation devPodTestIsolation) ([]string, error) {
+	output, err := runDevPodCommand(ctx, isolation, "list", "--output", "json", "--skip-pro")
 	if err != nil {
 		return nil, fmt.Errorf("list DevPod: %w: %s", err, output)
 	}
@@ -243,14 +314,20 @@ func listDevPodWorkspaces(ctx context.Context) ([]string, error) {
 	return ids, nil
 }
 
-func assertNoDevPodWorkspaces(t *testing.T, ctx context.Context) {
+func assertDevPodWorkspacesAbsent(t *testing.T, ctx context.Context, isolation devPodTestIsolation, expectedAbsent ...string) {
 	t.Helper()
-	workspaces, err := listDevPodWorkspaces(ctx)
+	workspaces, err := listDevPodWorkspaces(ctx, isolation)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(workspaces) != 0 {
-		t.Fatalf("DevPod workspaces remain: %v", workspaces)
+	present := make(map[string]struct{}, len(workspaces))
+	for _, workspace := range workspaces {
+		present[workspace] = struct{}{}
+	}
+	for _, workspace := range expectedAbsent {
+		if _, ok := present[workspace]; ok {
+			t.Fatalf("test-owned DevPod workspace %q remains in %v", workspace, workspaces)
+		}
 	}
 }
 

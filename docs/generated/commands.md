@@ -115,18 +115,17 @@ Global flags:
 
 ## `camp images capture`
 
-Capture workspace images
+Explain registry-only image capture
 
 ```text
 Usage:
   camp images capture [flags]
 
 Flags:
-      --branch string         select a branch
-      --capsule string        select a capsule
-      --exclude-tag strings   exclude an image tag from capture
-  -h, --help                  help for capture
-      --session string        select an exact session ID
+      --branch string    select a branch
+      --capsule string   select a capsule
+  -h, --help             help for capture
+      --session string   select an exact session ID
 
 Global flags:
       --json   emit stable JSON output

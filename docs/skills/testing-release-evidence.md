@@ -13,6 +13,152 @@ git diff --check
 
 Report passed, failed, and skipped gates separately. Installed-tool tests may skip without pinned DevPod, Hauler, or `pasta`; those skips leave the real lifecycle unproved. A package test, commit, push, merge, packaged artifact, and deployed release are distinct evidence states.
 
+## Durable documentation and release-note boundary
+
+Camp-specific policy requires every implementation, review, debugging,
+reconnaissance, and verification run to improve the closest canonical guide in
+`docs/skills/`. Start from `docs/skills/README.md`; every guide must remain
+listed there. Put the guide delta in the same commit or pull request as the work
+that established it. The completion receipt in `AGENTS.md` is the review
+surface and must identify:
+
+- the canonical file changed or the exact read-only proposal;
+- one durable claim and the precise code, test, command result, observed
+  failure, or immutable upstream source that supports it;
+- stale or ambiguous guidance removed; and
+- remaining uncertainty, including skipped environments and unpublished
+  release state.
+
+Do not use a skill as a run log. Skills state current reusable procedure,
+invariants, recovery, and evidence boundaries. User/operator release notes have
+a different job: describe behavior changed since the prior release, migration
+or breakage, supported environments, and recovery implications. Internal
+refactors and agent-only workflow discoveries stay in skills unless they change
+the shipped contract. One change may require both surfaces.
+
+`docs/changelog.md` is Camp's canonical source changelog. Put user-visible
+behavior, migration, safety, compatibility, and developer-factory changes under
+`Unreleased`; internal-only changes may use an explicit `no-release-note`
+classification with a reason in their pull-request receipt. Use
+`Release-note classification: docs/changelog.md` when the change updates the
+source changelog, or `Release-note classification: no-release-note: REASON`
+when it does not. A changelog entry is reviewable
+source evidence, not proof that an artifact was packaged, published, installed,
+or dogfooded. Do not create dated skill entries as a substitute.
+
+This policy borrows two upstream patterns without inheriting their product
+claims:
+
+- Project Bluefin requires same-change skill improvement, one canonical source
+  per mutable fact, source checking, and no session diaries. Camp adopts those
+  documentation properties, not Bluefin's orchestration or autonomy model.
+- RCC makes change visibility executable: its Robot development-process test
+  requires `docs/changelog.md` and `common/version.go` in the inspected commit,
+  and the built CLI exposes the changelog. Camp adopts the mechanically
+  reviewable pairing, not RCC's rule that every change bumps the binary version.
+
+Source evidence:
+
+- [Bluefin agentic contributor guide](https://github.com/projectbluefin/documentation/blob/4bf0eb750d0978ced931919aacaf741ec89f3c6d/docs/agentic-contributing.md)
+  and [skill-improvement contract](https://github.com/projectbluefin/bluefin/blob/a6cfecdb791d16e93935bc70f76812231d3b9ef6/docs/skills/skill-improvement/SKILL.md)
+- [Bluefin agentic-development post](https://docs.projectbluefin.io/blog/bluefin-agentic-development/)
+  and [automated reports/changelogs boundary](https://github.com/projectbluefin/documentation/blob/4bf0eb750d0978ced931919aacaf741ec89f3c6d/blog/2026-02-01-automated-reports-changelogs.md)
+- [RCC agent instructions](https://github.com/joshyorko/rcc/blob/2384c4124dadfce48a8eb46cf3fdc3ddebf30e5e/AGENTS.md),
+  [developer factory](https://github.com/joshyorko/rcc/blob/2384c4124dadfce48a8eb46cf3fdc3ddebf30e5e/developer/README.md),
+  [development-process gate](https://github.com/joshyorko/rcc/blob/2384c4124dadfce48a8eb46cf3fdc3ddebf30e5e/robot_tests/development_process.robot),
+  and [source changelog](https://github.com/joshyorko/rcc/blob/2384c4124dadfce48a8eb46cf3fdc3ddebf30e5e/docs/changelog.md)
+
+## RCC developer factory
+
+Camp's canonical contained developer factory is the repository-pinned RCC
+wrapper. It supports Linux amd64 hosts; Camp release artifacts still target and
+receive native verification on both Linux amd64 and arm64. The wrapper verifies
+the exact release and asset SHA-256 declared by the RCC lock before execution,
+never falls back to a PATH binary, and creates a private `ROBOCORP_HOME` under
+`${XDG_CACHE_HOME:-$HOME/.cache}/camp/rcc-homes` for each invocation. Keep
+these homes outside the repository: recursive Go commands otherwise discover
+RCC's embedded Go toolchain as part of Camp's module. Tests may override only
+the parent with `CAMP_RCC_HOME_ROOT`. `developer/rcc.lock.yaml` is the single
+updateable declaration of RCC version, source commit, asset URL, and checksum;
+the verified asset checksum is the runtime trust root. Neither the wrapper nor
+the contract tests hard-code one permanent RCC release.
+
+```bash
+./developer/rccw run -r developer/toolkit.yaml --dev -t local
+./developer/rccw run -r developer/toolkit.yaml --dev -t test
+./developer/rccw run -r developer/toolkit.yaml -t robot
+./developer/rccw run -r developer/toolkit.yaml -t robotKubernetes
+```
+
+`local` creates one truthfully stamped `build/camp` and
+`build/evidence/candidate.json`. `robot` verifies that candidate digest, asks
+the candidate to install the exact DevPod and Hauler assets from
+`tools.lock.yaml`, runs named Go evidence directly, then runs black-box Robot
+Framework suites against the same executable. Go tests are not hidden inside
+Robot keywords. Gate manifests distinguish passed and failed gates; an absent
+named test, opt-in skip, Robot skip, missing executable, or candidate mutation
+is a failure.
+
+The race gate resolves either the conventional `gcc` command or conda-forge's
+`x86_64-conda-linux-gnu-cc` compiler shim and passes that exact path through
+`CC`, while explicitly setting `CGO_ENABLED=1` for that gate. RCC's surrounding
+environment may disable CGO for deterministic cross-builds; a discovered
+compiler alone therefore does not prove that `go test -race` can use it.
+
+RCC-backed jobs run alongside the direct Go jobs during parity. Do not remove
+the direct jobs until two consecutive PR/master runs show equivalent coverage.
+Do not cache `ROBOCORP_HOME`; the environment is private writable runtime state,
+not a verified immutable cache seed.
+
+`robotKubernetes` is a protected, explicitly authorized evidence task. It
+requires `CAMP_KUBERNETES_EVIDENCE=1` and the named
+`TestKubernetesLifecycleVertical` integration test. Until that test exists and
+runs against an authorized context, the task fails closed; it is not Kubernetes
+support evidence.
+
+### RCC trust and isolation boundaries
+
+- `robot` consumes the existing `build/camp` and candidate manifest from
+  `local`; neither the Invoke task nor Robot suites may silently build or choose
+  another binary.
+- Canonicalize `CAMP_RCC_HOME_ROOT` and reject paths inside the repository.
+  Recursive Go commands must never traverse RCC's embedded toolchain.
+- The lock's release asset digest is the runtime trust root. Its commit is
+  update provenance and must be a full commit ID, but the wrapper cannot prove
+  an upstream release asset was built from that commit without separately
+  published provenance.
+- Preserve digest verification, profile before optimization, and never share a
+  writable hardlink between an RCC store and an active environment. These
+  boundaries follow the failure modes recorded in `joshyorko/rcc` issue 63.
+
+### Robot dependency contract
+
+Keep the exact Robot Framework version synchronized between
+`developer/setup.yaml` and `robot_requirements.txt`; the release-pipeline
+contract test rejects drift. Robot Framework 7.4.2 supports the factory's
+Python 3.10 runtime: conda-forge publishes 7.4.2 as a noarch package requiring
+Python 3.10 or newer. Camp's black-box suites use only Robot Framework's
+standard `OperatingSystem` and `Process` libraries. Each additional factory
+package expands the verified supply-chain surface, so do not add `rpaframework`
+unless a concrete suite requires one of its keywords.
+
+Every Robot test carries one or more stable `req:<ID>` tags registered in
+`robot_tests/resources/requirements.json`. The traceability suite rejects
+unknown tags, untested `required-now` requirements, and executing
+`superseded` requirements. `roadmap-gated` requirements stay visible without
+making ordinary PR factory work permanently red; set
+`CAMP_REQUIREMENTS_SCOPE=product` to reject a product claim while any remain.
+The historical prompt's automatic workspace-engine image discovery is
+superseded by explicit publication through `CAMP_REGISTRY`.
+
+The requirements manifest is the holistic traceability registry for the
+historical build prompt and approved product-proof plan. Each roadmap entry
+names its concrete evidence gate but has no executing Robot test until that
+proof exists. PR scope reports the complete roadmap without claiming success;
+product scope rejects every remaining gate. Traceability metadata runs without
+`CAMP_TEST_BINARY` so evidence-map validation is independent of candidate
+execution.
+
 ## Generated documentation gate
 
 Generate the command reference, deterministic command transcripts, versioned
@@ -43,7 +189,32 @@ go test ./integration -list '^TestNamedAcceptanceGate$'
 go test -v ./integration -run '^TestNamedAcceptanceGate$' -count=1
 ```
 
-Discovery currently lists `TestLocalLifecycleVertical` and its focused real-tool gate has recorded evidence in the local-lifecycle guide. It does not list `TestLocalLifecycleCrashMatrix` or a mounted-file-backend parity test. Treat those two gates as missing, not passed, until discovery lists their exact names and their runs emit the named `RUN`/`PASS` pair; the vertical does not substitute for either missing gate.
+Discovery lists `TestMountedFileBackendParity`, `TestS3TwoWriterConflict`,
+`TestMinIOLifecycleVertical`, `TestLocalLifecycleVertical`, and
+`TestLocalLifecycleCrashMatrix`. `scripts/verify-real-evidence.sh` requires all
+five names before running any selected real-evidence mode. The real lifecycle
+tests require `CAMP_TEST_BINARY`; they no longer build independent executables
+or inspect the host-global DevPod context. Each scenario uses a unique private
+DevPod home, config, SSH config, and non-default context. Before scenario
+activity, each initializes the built-in Docker provider with
+`devpod provider add docker --context <private-context> --use --silent` under
+that private environment and passes `CAMP_DEVPOD_PROVIDER=docker` to Camp. The
+Room-of-Requirement remains the devcontainer image fixture, not the DevPod
+provider. The separately
+discoverable `TestPrivateDevPodContextPreservesUnrelatedWorkspace` gate is
+intentionally missing real evidence and fails closed when explicitly enabled;
+do not add it to passed evidence until it creates an actual unrelated workspace
+and proves the scenario's exact-ID cleanup preserves it. Private provider
+bootstrap is implemented and is no longer that gate's blocker.
+
+These named tests remain executable product gates even while their requirements
+are `roadmap-gated`. The RCC `robot` task therefore fails when a current
+candidate cannot satisfy them; black-box Robot success alone must not overwrite
+that failure. Promote a requirement from `roadmap-gated` only after the same
+candidate produces the named real-tool evidence. During the initial parity
+phase, hosted CI runs RCC `local` and `test` but does not make this knowingly
+failing Robot task a required PR job. Add that job only after A2/A3 evidence is
+green.
 
 For filesystem-dependent safety tests, prove determinism with repeated focused execution when practical. The ownership-marker temporary-name substitution test requires injection of the named fallback because a Linux filesystem may support `O_TMPFILE`; the focused test passed 50 repetitions after that injection, and `go test ./internal/capsule -count=1` passed 52 tests.
 
