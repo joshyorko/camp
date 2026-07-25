@@ -64,7 +64,7 @@ func TestRunProductionInitUsesXDGAndDockerManifestBoundary(t *testing.T) {
 	t.Setenv("PATH", bin+string(os.PathListSeparator)+os.Getenv("PATH"))
 
 	var stdout, stderr bytes.Buffer
-	if code := run([]string{"--json", "init", brain}, cli.Streams{Out: &stdout, ErrOut: &stderr}); code != int(cli.ExitSuccess) {
+	if code := run([]string{"--json", "init", brain, "--name", "brain"}, cli.Streams{Out: &stdout, ErrOut: &stderr}); code != int(cli.ExitSuccess) {
 		t.Fatalf("exit = %d, stdout=%q stderr=%q", code, stdout.String(), stderr.String())
 	}
 	if !strings.Contains(stdout.String(), `"kind":"init"`) {
