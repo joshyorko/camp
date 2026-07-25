@@ -84,14 +84,21 @@ the verified asset checksum is the runtime trust root. Neither the wrapper nor
 the contract tests hard-code one permanent RCC release.
 
 ```bash
-./developer/rccw run -r developer/toolkit.yaml --dev -t local
-./developer/rccw run -r developer/toolkit.yaml --dev -t test
-./developer/rccw run -r developer/toolkit.yaml -t robot
-./developer/rccw run -r developer/toolkit.yaml -t robotKubernetes
+rcc run -r developer/toolkit.yaml --dev -t local
+rcc run -r developer/toolkit.yaml --dev -t install
+rcc run -r developer/toolkit.yaml --dev -t test
+rcc run -r developer/toolkit.yaml --dev -t package
+rcc run -r developer/toolkit.yaml -t robot
+rcc run -r developer/toolkit.yaml -t robotKubernetes
 ```
 
 `local` creates one truthfully stamped `build/camp` and
-`build/evidence/candidate.json`. `robot` verifies that candidate digest, asks
+`build/evidence/candidate.json` without mutating the user's PATH. `install` is
+the explicit developer convenience: it performs the same build and smoke, then
+atomically links that candidate at `~/.local/bin/camp` so subsequent commands
+are simply `camp setup`, `camp init`, and `camp open`. It does not edit shell
+startup files; Bluefin already includes `~/.local/bin` in PATH. `robot` verifies
+that candidate digest, asks
 the candidate to install the exact DevPod and Hauler assets from
 `tools.lock.yaml`, runs named Go evidence directly, then runs black-box Robot
 Framework suites against the same executable. Go tests are not hidden inside
@@ -109,6 +116,17 @@ RCC-backed jobs run alongside the direct Go jobs during parity. Do not remove
 the direct jobs until two consecutive PR/master runs show equivalent coverage.
 Do not cache `ROBOCORP_HOME`; the environment is private writable runtime state,
 not a verified immutable cache seed.
+
+Developer workstations use the `rcc` already on PATH and its configured
+`ROBOCORP_HOME`; this is the ordinary interactive interface. CI and release
+workflows use `developer/rccw` as a non-interactive bootstrap so a clean runner
+can verify and execute the repository-declared RCC asset without assuming a
+preinstalled binary. Do not require developers to invoke that wrapper.
+
+The local `package` task derives `VERSION=0.0.0-<short-commit>` and the full
+`COMMIT` from a clean checkout. Release CI may provide both values explicitly;
+providing only one fails closed. Automatic identity refuses a dirty checkout so
+the packaged binary cannot claim clean commit provenance for uncommitted code.
 
 `robotKubernetes` is a protected, explicitly authorized evidence task. It
 requires `CAMP_KUBERNETES_EVIDENCE=1` and the named

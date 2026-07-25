@@ -6,6 +6,9 @@
 
 - add the RCC-contained developer factory with one repository-local, truthfully
   stamped candidate and machine-readable gate evidence
+- add an explicit RCC `install` task that links the verified development
+  candidate into `~/.local/bin`, and derive local package identity from a clean
+  checkout without required shell variables
 - upgrade the contained Robot Framework runtime to 7.4.2 and add isolated
   black-box CLI suites with requirement traceability
 - run RCC factory jobs alongside the existing direct Go CI during the parity

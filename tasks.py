@@ -11,6 +11,8 @@ import time
 
 from invoke import task
 
+from developer.factory import install_candidate, resolve_package_identity
+
 
 ROOT = pathlib.Path(__file__).resolve().parent
 BUILD = ROOT / "build"
@@ -134,6 +136,15 @@ def build_candidate():
     return metadata
 
 
+def build_and_smoke_candidate():
+    metadata = build_candidate()
+    run([str(CANDIDATE), "--version"])
+    run([str(CANDIDATE), "--help"])
+    for shell in ("bash", "zsh", "fish"):
+        run([str(CANDIDATE), "completion", shell], capture=True)
+    return metadata
+
+
 def verify_candidate():
     if not CANDIDATE.is_file() or not CANDIDATE_MANIFEST.is_file():
         raise RuntimeError("candidate is missing; run the local task first")
@@ -215,12 +226,20 @@ def run_gates(suite, gates, *, env=None):
 @task
 def local(_context):
     """Build and smoke one truthfully stamped repository-local Camp candidate."""
-    metadata = build_candidate()
-    run([str(CANDIDATE), "--version"])
-    run([str(CANDIDATE), "--help"])
-    for shell in ("bash", "zsh", "fish"):
-        run([str(CANDIDATE), "completion", shell], capture=True)
+    metadata = build_and_smoke_candidate()
     print(json.dumps(metadata, sort_keys=True))
+
+
+@task(name="install")
+def install_task(_context):
+    """Build, smoke, and explicitly link the development candidate into user PATH."""
+    build_and_smoke_candidate()
+    install_dir = pathlib.Path(
+        os.environ.get("CAMP_INSTALL_DIR", pathlib.Path.home() / ".local" / "bin")
+    )
+    installed = install_candidate(CANDIDATE, install_dir)
+    run([str(installed), "--version"])
+    print(f"Installed development link: {installed}")
 
 
 @task(name="test")
@@ -232,6 +251,19 @@ def test_task(_context):
     run_gates(
         "test",
         [
+            (
+                "python-unit",
+                [
+                    "python",
+                    "-m",
+                    "unittest",
+                    "discover",
+                    "-s",
+                    "developer",
+                    "-p",
+                    "test_*.py",
+                ],
+            ),
             ("unit", ["go", "test", "./...", "-count=1"]),
             ("race", ["go", "test", "-race", "./...", "-count=1"]),
             ("vet", ["go", "vet", "./..."]),
@@ -314,10 +346,7 @@ def robot_kubernetes(_context):
 @task(name="package")
 def package_task(_context):
     """Delegate reproducible release evidence to the existing packaging authority."""
-    version = os.environ.get("VERSION")
-    commit = os.environ.get("COMMIT")
-    if not version or not commit:
-        raise RuntimeError("package requires VERSION and COMMIT")
+    version, commit = resolve_package_identity(ROOT, os.environ)
     env = {
         "VERSION": version,
         "COMMIT": commit,

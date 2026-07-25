@@ -7,6 +7,8 @@ tasks:
 devTasks:
   local:
     shell: python call_invoke.py local
+  install:
+    shell: python call_invoke.py install
   test:
     shell: python call_invoke.py test
   package:

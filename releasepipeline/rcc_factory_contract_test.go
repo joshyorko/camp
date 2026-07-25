@@ -50,6 +50,7 @@ func TestRCCFactoryDeclaresPinnedTrustRootAndCanonicalTasks(t *testing.T) {
 		"robot:",
 		"robotKubernetes:",
 		"local:",
+		"install:",
 		"test:",
 		"package:",
 		"environmentConfigs:",
@@ -70,6 +71,7 @@ func TestRCCFactoryDeclaresPinnedTrustRootAndCanonicalTasks(t *testing.T) {
 	}
 	tasks := readRepositoryFile(t, root, "tasks.py")
 	requireContains(t, tasks,
+		`from developer.factory import install_candidate, resolve_package_identity`,
 		`[str(CANDIDATE), "--json", "setup"]`,
 		`result["path"]`,
 		`"CAMP_TEST_BINARY": str(CANDIDATE)`,
@@ -77,6 +79,8 @@ func TestRCCFactoryDeclaresPinnedTrustRootAndCanonicalTasks(t *testing.T) {
 		`test_name = "TestKubernetesLifecycleVertical"`,
 		`shutil.which("gcc") or shutil.which("x86_64-conda-linux-gnu-cc")`,
 		`env={"CC": compiler, "CGO_ENABLED": "1"}`,
+		`@task(name="install")`,
+		`resolve_package_identity(ROOT, os.environ)`,
 		`"result": "pending"`,
 	)
 	if strings.Contains(tasks, "if not CANDIDATE.is_file():\n        build_candidate()") {
@@ -103,6 +107,20 @@ func TestRCCFactoryDeclaresPinnedTrustRootAndCanonicalTasks(t *testing.T) {
 		if strings.Contains(setup, forbidden) {
 			t.Fatalf("developer/setup.yaml duplicates tools.lock.yaml authority %q", forbidden)
 		}
+	}
+}
+
+func TestDeveloperGuideUsesPATHRCCWhileCIKeepsVerifiedBootstrap(t *testing.T) {
+	root := filepath.Clean("..")
+	guide := readRepositoryFile(t, root, "docs/skills/testing-release-evidence.md")
+	requireContains(t, guide,
+		"rcc run -r developer/toolkit.yaml --dev -t local",
+		"rcc run -r developer/toolkit.yaml --dev -t install",
+		"rcc run -r developer/toolkit.yaml --dev -t test",
+		"rcc run -r developer/toolkit.yaml --dev -t package",
+	)
+	if strings.Contains(guide, "Always enter the factory through `./developer/rccw`") {
+		t.Fatal("developer guidance must not require the CI bootstrap wrapper")
 	}
 }
 
