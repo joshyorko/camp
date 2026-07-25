@@ -81,10 +81,20 @@ func DocumentedInvocations() []Invocation {
 		{CommandPath: "camp completion", Args: []string{"completion", "bash"}},
 		{CommandPath: "camp doctor", Args: []string{"doctor"}},
 		{CommandPath: "camp init", Args: []string{"init", "/tmp/camp-docs-capsule", "--name", "docs-capsule"}},
+		{CommandPath: "camp images", Args: []string{"images", "--help"}},
+		{CommandPath: "camp images capture", Args: []string{"images", "capture", "--session", "session-docs"}},
+		{CommandPath: "camp images list", Args: []string{"images", "list", "--session", "session-docs"}},
+		{CommandPath: "camp images restore", Args: []string{"images", "restore", "--session", "session-docs"}},
 		{CommandPath: "camp list", Args: []string{"list"}},
 		{CommandPath: "camp open", Args: []string{"open", "memoryd"}},
+		{CommandPath: "camp provider", Args: []string{"provider", "--help"}},
+		{CommandPath: "camp provider list", Args: []string{"provider", "list"}},
 		{CommandPath: "camp recover", Args: []string{"recover", "memoryd"}},
 		{CommandPath: "camp reopen", Args: []string{"reopen", "memoryd"}},
+		{CommandPath: "camp serve", Args: []string{"serve", "--help"}},
+		{CommandPath: "camp serve logs", Args: []string{"serve", "logs", "registry"}},
+		{CommandPath: "camp serve restart", Args: []string{"serve", "restart", "registry", "--launch-token", "docs-launch"}},
+		{CommandPath: "camp serve status", Args: []string{"serve", "status", "registry"}},
 		{CommandPath: "camp setup", Args: []string{"setup"}},
 		{CommandPath: "camp status", Args: []string{"status", "--camp", "memoryd"}},
 		{CommandPath: "camp strike", Args: []string{"strike"}},
@@ -159,6 +169,27 @@ func (transcriptLifecycle) Status(_ context.Context, _ cli.OutputMode, output io
 }
 func (transcriptLifecycle) Strike(_ context.Context, _ cli.StrikeRequest, _ cli.OutputMode, output io.Writer) error {
 	return fixtureDispatch(output, "strike")
+}
+func (transcriptLifecycle) ImagesList(_ context.Context, _ cli.SessionRequest, _ cli.OutputMode, output io.Writer) error {
+	return fixtureDispatch(output, "images list")
+}
+func (transcriptLifecycle) ImagesCapture(_ context.Context, _ cli.ImageCaptureRequest, _ cli.OutputMode, output io.Writer) error {
+	return fixtureDispatch(output, "images capture")
+}
+func (transcriptLifecycle) ImagesRestore(_ context.Context, _ cli.SessionRequest, _ cli.OutputMode, output io.Writer) error {
+	return fixtureDispatch(output, "images restore")
+}
+func (transcriptLifecycle) ServeStatus(_ context.Context, _ cli.ServeRequest, _ cli.OutputMode, output io.Writer) error {
+	return fixtureDispatch(output, "serve status")
+}
+func (transcriptLifecycle) ServeLogs(_ context.Context, _ cli.ServeLogsRequest, _ cli.OutputMode, output io.Writer) error {
+	return fixtureDispatch(output, "serve logs")
+}
+func (transcriptLifecycle) ServeRestart(_ context.Context, _ cli.ServeRestartRequest, _ cli.OutputMode, output io.Writer) error {
+	return fixtureDispatch(output, "serve restart")
+}
+func (transcriptLifecycle) ProvidersList(_ context.Context, _ cli.OutputMode, output io.Writer) error {
+	return fixtureDispatch(output, "provider list")
 }
 
 func transcriptRoot() *cobra.Command { return cli.NewRootWithLifecycle(transcriptLifecycle{}) }

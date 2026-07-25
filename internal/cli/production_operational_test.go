@@ -10,10 +10,10 @@ import (
 )
 
 var (
-	_ OperationalStatus = (*ProductionLifecycle)(nil)
-	_ ImageOperations   = (*ProductionLifecycle)(nil)
-	_ ServeOperations   = (*ProductionLifecycle)(nil)
-	_ ProviderLister    = (*ProductionLifecycle)(nil)
+	_ CampStatus      = (*ProductionLifecycle)(nil)
+	_ ImageOperations = (*ProductionLifecycle)(nil)
+	_ ServeOperations = (*ProductionLifecycle)(nil)
+	_ ProviderLister  = (*ProductionLifecycle)(nil)
 )
 
 func TestProductionOperationalSelectorForwardsOnlyBoundaryFields(t *testing.T) {

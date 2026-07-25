@@ -98,6 +98,76 @@ Global flags:
       --json   emit stable JSON output
 ```
 
+## `camp images`
+
+Inspect and reconcile workspace images
+
+```text
+Usage:
+  camp images
+
+Flags:
+  -h, --help   help for images
+
+Global flags:
+      --json   emit stable JSON output
+```
+
+## `camp images capture`
+
+Capture workspace images
+
+```text
+Usage:
+  camp images capture [flags]
+
+Flags:
+      --branch string         select a branch
+      --capsule string        select a capsule
+      --exclude-tag strings   exclude an image tag from capture
+  -h, --help                  help for capture
+      --session string        select an exact session ID
+
+Global flags:
+      --json   emit stable JSON output
+```
+
+## `camp images list`
+
+List recorded workspace images
+
+```text
+Usage:
+  camp images list [flags]
+
+Flags:
+      --branch string    select a branch
+      --capsule string   select a capsule
+  -h, --help             help for list
+      --session string   select an exact session ID
+
+Global flags:
+      --json   emit stable JSON output
+```
+
+## `camp images restore`
+
+Restore recorded workspace images
+
+```text
+Usage:
+  camp images restore [flags]
+
+Flags:
+      --branch string    select a branch
+      --capsule string   select a capsule
+  -h, --help             help for restore
+      --session string   select an exact session ID
+
+Global flags:
+      --json   emit stable JSON output
+```
+
 ## `camp init`
 
 Initialize a capsule root
@@ -150,6 +220,36 @@ Global flags:
       --json   emit stable JSON output
 ```
 
+## `camp provider`
+
+Inspect configured DevPod providers
+
+```text
+Usage:
+  camp provider
+
+Flags:
+  -h, --help   help for provider
+
+Global flags:
+      --json   emit stable JSON output
+```
+
+## `camp provider list`
+
+List configured DevPod providers
+
+```text
+Usage:
+  camp provider list
+
+Flags:
+  -h, --help   help for list
+
+Global flags:
+      --json   emit stable JSON output
+```
+
 ## `camp recover`
 
 Recover an interrupted lifecycle
@@ -179,6 +279,77 @@ Flags:
       --camp string      select a camp by stable ID
   -h, --help             help for reopen
       --session string   select a session by ID
+
+Global flags:
+      --json   emit stable JSON output
+```
+
+## `camp serve`
+
+Inspect and restart Camp-managed services
+
+```text
+Usage:
+  camp serve
+
+Flags:
+  -h, --help   help for serve
+
+Global flags:
+      --json   emit stable JSON output
+```
+
+## `camp serve logs`
+
+Read bounded service logs
+
+```text
+Usage:
+  camp serve logs [service] [flags]
+
+Flags:
+      --branch string    select a branch
+      --capsule string   select a capsule
+  -h, --help             help for logs
+      --session string   select an exact session ID
+      --tail-bytes int   maximum log bytes to read (default 65536)
+
+Global flags:
+      --json   emit stable JSON output
+```
+
+## `camp serve restart`
+
+Restart a recorded service
+
+```text
+Usage:
+  camp serve restart [service] [flags]
+
+Flags:
+      --branch string         select a branch
+      --capsule string        select a capsule
+  -h, --help                  help for restart
+      --launch-token string   new unique service launch token
+      --session string        select an exact session ID
+
+Global flags:
+      --json   emit stable JSON output
+```
+
+## `camp serve status`
+
+Show observed service status
+
+```text
+Usage:
+  camp serve status [service] [flags]
+
+Flags:
+      --branch string    select a branch
+      --capsule string   select a capsule
+  -h, --help             help for status
+      --session string   select an exact session ID
 
 Global flags:
       --json   emit stable JSON output

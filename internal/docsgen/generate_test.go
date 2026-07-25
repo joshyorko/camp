@@ -33,7 +33,7 @@ func TestDocumentedInvocationsExecute(t *testing.T) {
 			if code != 0 {
 				t.Fatalf("%v exited %d\nstdout:\n%s\nstderr:\n%s", invocation.Args, code, stdout.String(), stderr.String())
 			}
-			if invocation.CommandPath != "camp" && invocation.CommandPath != "camp completion" {
+			if invocation.CommandPath != "camp" && invocation.CommandPath != "camp completion" && !containsHelpFlag(invocation.Args) {
 				marker := fmt.Sprintf("effect-free docs fixture: %s dispatched; external effects disabled", strings.TrimPrefix(invocation.CommandPath, "camp "))
 				if !strings.Contains(stdout.String(), marker) {
 					t.Fatalf("%v did not emit dispatch marker %q\nstdout:\n%s", invocation.Args, marker, stdout.String())
@@ -41,6 +41,15 @@ func TestDocumentedInvocationsExecute(t *testing.T) {
 			}
 		})
 	}
+}
+
+func containsHelpFlag(args []string) bool {
+	for _, arg := range args {
+		if arg == "--help" || arg == "-h" {
+			return true
+		}
+	}
+	return false
 }
 
 func TestGeneratedReferenceIncludesHelpFlags(t *testing.T) {

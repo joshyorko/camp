@@ -126,7 +126,7 @@ func (p *ProductionLifecycle) List(ctx context.Context, mode OutputMode, out io.
 	return table.Flush()
 }
 
-func (p *ProductionLifecycle) Status(ctx context.Context, request SessionRequest, mode OutputMode, out io.Writer) error {
+func (p *ProductionLifecycle) Status(ctx context.Context, mode OutputMode, out io.Writer) error {
 	composition, err := composeProduction(ctx)
 	if err != nil {
 		return err
@@ -138,7 +138,7 @@ func (p *ProductionLifecycle) Status(ctx context.Context, request SessionRequest
 	result, err := (app.OperationalQueries{
 		Sessions: composition.journal,
 		Observer: lifecycleadapter.NewSessionObserver(services.processes, services.units),
-	}).Status(ctx, operationalSelector(request))
+	}).Status(ctx, productionSessionSelector(ctx, composition.runtime))
 	if err != nil {
 		return err
 	}
@@ -734,32 +734,6 @@ func (p *ProductionLifecycle) Recover(ctx context.Context, value string, mode Ou
 		return err
 	}
 	return writeSuccess(out, mode, "recover", result, fmt.Sprintf("Recovered %s\n", result.Session.ID))
-}
-
-func (p *ProductionLifecycle) Status(ctx context.Context, mode OutputMode, out io.Writer) error {
-	base, err := composeProductionBase(ctx)
-	if err != nil {
-		return err
-	}
-	snapshot, err := app.SelectSession(ctx, base.journal, productionSessionSelector(ctx, base.runtime), app.SelectionRecovery)
-	if err != nil {
-		return err
-	}
-	result := struct {
-		Session         domain.JournalSnapshot `json:"session"`
-		RecoveryCommand string                 `json:"recoveryCommand,omitempty"`
-	}{Session: snapshot}
-	if snapshot.State == domain.SessionRecovering || snapshot.Cleanup.State == domain.CleanupFailed {
-		result.RecoveryCommand = "camp recover --session " + snapshot.SessionID
-	}
-	if mode == ModeJSON {
-		return writeSuccess(out, mode, "status", result, "")
-	}
-	_, err = fmt.Fprintf(out, "Camp %s\nSession %s\nState %s\nSource %s\n", snapshot.Capsule, snapshot.SessionID, snapshot.State, snapshot.Recovery.Configuration.Source)
-	if err == nil && result.RecoveryCommand != "" {
-		_, err = fmt.Fprintf(out, "next: %s\n", result.RecoveryCommand)
-	}
-	return err
 }
 
 func productionSessionSelector(ctx context.Context, runtime config.Runtime) app.SessionSelector {

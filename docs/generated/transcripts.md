@@ -20,11 +20,14 @@ Available Commands:
   completion  Generate shell completion
   doctor      Diagnose required host capabilities
   help        Help about any command
+  images      Inspect and reconcile workspace images
   init        Initialize a capsule root
   list        List stored camps
   open        Open a capsule workspace
+  provider    Inspect configured DevPod providers
   recover     Recover an interrupted lifecycle
   reopen      Reopen a closed capsule workspace
+  serve       Inspect and restart Camp-managed services
   setup       Install or reuse pinned DevPod and Hauler tools
   status      Show the selected camp session
   strike      Archive local Camp state and start fresh
@@ -72,6 +75,50 @@ $ camp init /tmp/camp-docs-capsule --name docs-capsule
 effect-free docs fixture: init dispatched; external effects disabled
 ```
 
+## `camp images --help`
+
+```console
+$ camp images --help
+Inspect and reconcile workspace images
+
+Usage:
+  camp images [command]
+
+Available Commands:
+  capture     Capture workspace images
+  list        List recorded workspace images
+  restore     Restore recorded workspace images
+
+Flags:
+  -h, --help   help for images
+
+Global Flags:
+      --json   emit stable JSON output
+
+Use "camp images [command] --help" for more information about a command.
+```
+
+## `camp images capture --session session-docs`
+
+```console
+$ camp images capture --session session-docs
+effect-free docs fixture: images capture dispatched; external effects disabled
+```
+
+## `camp images list --session session-docs`
+
+```console
+$ camp images list --session session-docs
+effect-free docs fixture: images list dispatched; external effects disabled
+```
+
+## `camp images restore --session session-docs`
+
+```console
+$ camp images restore --session session-docs
+effect-free docs fixture: images restore dispatched; external effects disabled
+```
+
 ## `camp list`
 
 ```console
@@ -86,6 +133,35 @@ $ camp open memoryd
 effect-free docs fixture: open dispatched; external effects disabled
 ```
 
+## `camp provider --help`
+
+```console
+$ camp provider --help
+Inspect configured DevPod providers
+
+Usage:
+  camp provider [flags]
+  camp provider [command]
+
+Available Commands:
+  list        List configured DevPod providers
+
+Flags:
+  -h, --help   help for provider
+
+Global Flags:
+      --json   emit stable JSON output
+
+Use "camp provider [command] --help" for more information about a command.
+```
+
+## `camp provider list`
+
+```console
+$ camp provider list
+effect-free docs fixture: provider list dispatched; external effects disabled
+```
+
 ## `camp recover memoryd`
 
 ```console
@@ -98,6 +174,50 @@ effect-free docs fixture: recover dispatched; external effects disabled
 ```console
 $ camp reopen memoryd
 effect-free docs fixture: reopen dispatched; external effects disabled
+```
+
+## `camp serve --help`
+
+```console
+$ camp serve --help
+Inspect and restart Camp-managed services
+
+Usage:
+  camp serve [command]
+
+Available Commands:
+  logs        Read bounded service logs
+  restart     Restart a recorded service
+  status      Show observed service status
+
+Flags:
+  -h, --help   help for serve
+
+Global Flags:
+      --json   emit stable JSON output
+
+Use "camp serve [command] --help" for more information about a command.
+```
+
+## `camp serve logs registry`
+
+```console
+$ camp serve logs registry
+effect-free docs fixture: serve logs dispatched; external effects disabled
+```
+
+## `camp serve restart registry --launch-token docs-launch`
+
+```console
+$ camp serve restart registry --launch-token docs-launch
+effect-free docs fixture: serve restart dispatched; external effects disabled
+```
+
+## `camp serve status registry`
+
+```console
+$ camp serve status registry
+effect-free docs fixture: serve status dispatched; external effects disabled
 ```
 
 ## `camp setup`
