@@ -17,7 +17,8 @@ import (
 	"github.com/joshyorko/camp/internal/ports"
 )
 
-func TestLocalLifecycleForwarderCrashRecovery(t *testing.T) {
+func TestLocalLifecycleCrashMatrix(t *testing.T) {
+	t.Log("implemented process-death cut: controller death after forwarder spawn and before durable forwarding fact")
 	if os.Getenv("CAMP_TEST_REAL_LIFECYCLE") != "1" {
 		t.Skip("set CAMP_TEST_REAL_LIFECYCLE=1 to run the real DevPod/Hauler lifecycle")
 	}

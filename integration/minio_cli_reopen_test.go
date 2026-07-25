@@ -14,7 +14,7 @@ import (
 	"time"
 )
 
-func TestMinIOCLIFreshControllerReopen(t *testing.T) {
+func TestMinIOLifecycleVertical(t *testing.T) {
 	if os.Getenv("CAMP_TEST_REAL_MINIO_REOPEN") != "1" {
 		t.Skip("set CAMP_TEST_REAL_MINIO_REOPEN=1 to run the real MinIO lifecycle")
 	}
