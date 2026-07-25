@@ -82,3 +82,40 @@ func TestBackendDocsDescribeExplicitInsecureHTTPPolicy(t *testing.T) {
 		t.Fatal("backend docs do not describe the explicit insecure HTTP policy")
 	}
 }
+
+func TestOperationalEvidenceDocsNameExactGatesAndMissingEvidenceRule(t *testing.T) {
+	required := map[string][]string{
+		"release.md": {
+			"scripts/verify-real-evidence.sh list",
+			"TestMountedFileBackendParity",
+			"TestS3TwoWriterConflict",
+			"skipped real-tool test is missing evidence",
+		},
+		"recovery.md": {
+			"TestLocalLifecycleVertical",
+			"TestLocalLifecycleCrashMatrix",
+			"controller death after forwarder spawn",
+		},
+		"setup-and-doctor.md": {
+			"`camp status`",
+			"`camp images list`",
+			"`camp serve status`",
+			"`camp provider list`",
+		},
+		"skills/cli-composition.md": {
+			"provider mutation",
+			"configuration mutation",
+		},
+	}
+	for path, phrases := range required {
+		body, err := os.ReadFile(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, phrase := range phrases {
+			if !strings.Contains(string(body), phrase) {
+				t.Errorf("%s lacks %q", path, phrase)
+			}
+		}
+	}
+}
