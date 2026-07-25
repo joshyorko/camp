@@ -222,12 +222,18 @@ func (p *ProductionLifecycle) Init(ctx context.Context, request InitRequest, mod
 	if err != nil {
 		return UsageError(err)
 	}
+	if err := reportInitActivity(ctx, "Writing camp manifest…"); err != nil {
+		return err
+	}
 	path, err := campconfig.Create(root, manifest)
 	if err != nil {
 		return err
 	}
 	runner := subprocess.NewRunner()
 	initializer := capsule.NewInitializer(host.NewClock(), capsule.NewCommandDigestResolver("docker", runner))
+	if err := reportInitActivity(ctx, "Initializing capsule…"); err != nil {
+		return err
+	}
 	result, err := initializer.Initialize(ctx, root, manifest.ID)
 	if err != nil {
 		return err

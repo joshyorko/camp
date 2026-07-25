@@ -101,6 +101,14 @@ type recordingLifecycle struct {
 	initRequests   []InitRequest
 	selections     []Selection
 	setupInput     io.Reader
+	initInput      io.Reader
+}
+
+func (r *recordingLifecycle) InitInteractive(_ context.Context, request InitRequest, mode OutputMode, in io.Reader, _ io.Writer) error {
+	r.initInput = in
+	r.initRequests = append(r.initRequests, request)
+	r.calls = append(r.calls, "init-interactive:"+request.Root+":"+string(mode))
+	return nil
 }
 
 type recordingStriker struct {
@@ -181,6 +189,21 @@ func TestInitUsesCampNameAndMigrationContracts(t *testing.T) {
 	}
 	if !lifecycle.initRequests[len(lifecycle.initRequests)-1].Migrate {
 		t.Fatal("init --migrate did not reach lifecycle")
+	}
+}
+
+func TestHumanInitWithoutNameDelegatesInteractiveInput(t *testing.T) {
+	lifecycle := &recordingLifecycle{}
+	input := strings.NewReader("alpha\n")
+	if code := Execute(context.Background(), NewRootWithLifecycle(lifecycle), []string{"init", "/brain"}, Streams{In: input, Out: io.Discard, ErrOut: io.Discard}); code != int(ExitSuccess) {
+		t.Fatalf("interactive init exit = %d", code)
+	}
+	if lifecycle.initInput != input {
+		t.Fatalf("interactive input = %#v, want command stdin", lifecycle.initInput)
+	}
+	var stderr bytes.Buffer
+	if code := Execute(context.Background(), NewRootWithLifecycle(lifecycle), []string{"--json", "init", "/brain"}, Streams{Out: io.Discard, ErrOut: &stderr}); code != int(ExitUsage) {
+		t.Fatalf("JSON init without name exit = %d, stderr=%q", code, stderr.String())
 	}
 }
 

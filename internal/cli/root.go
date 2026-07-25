@@ -83,6 +83,10 @@ type Setup interface {
 	Setup(context.Context, OutputMode, io.Reader, io.Writer) error
 }
 
+type InteractiveInit interface {
+	InitInteractive(context.Context, InitRequest, OutputMode, io.Reader, io.Writer) error
+}
+
 type CampLister interface {
 	List(context.Context, OutputMode, io.Writer) error
 }
@@ -135,8 +139,12 @@ func NewRootWithLifecycle(lifecycle Lifecycle) *cobra.Command {
 	if striker, ok := lifecycle.(CampStriker); ok {
 		root.AddCommand(newStrikeCommand(striker.Strike))
 	}
+	var interactiveInit func(context.Context, InitRequest, OutputMode, io.Reader, io.Writer) error
+	if initLifecycle, ok := lifecycle.(InteractiveInit); ok {
+		interactiveInit = initLifecycle.InitInteractive
+	}
 	root.AddCommand(
-		newInitCommand(lifecycle.Init),
+		newInitCommand(lifecycle.Init, interactiveInit),
 		optionalArgumentCommand("open", "Open a capsule workspace", lifecycle.Open),
 		newAttachCommand(lifecycle.Attach),
 		noArgumentCommand("sync", "Publish a checkpoint and remain open", lifecycle.Sync),
@@ -248,7 +256,7 @@ func newAttachCommand(run func(context.Context, AttachRequest, OutputMode, io.Wr
 	return command
 }
 
-func newInitCommand(run func(context.Context, InitRequest, OutputMode, io.Writer) error) *cobra.Command {
+func newInitCommand(run func(context.Context, InitRequest, OutputMode, io.Writer) error, interactive func(context.Context, InitRequest, OutputMode, io.Reader, io.Writer) error) *cobra.Command {
 	request := InitRequest{}
 	command := &cobra.Command{
 		Use: "init [root]", Short: "Initialize a capsule root", Args: usageArgs(cobra.MaximumNArgs(1)),
@@ -261,6 +269,9 @@ func newInitCommand(run func(context.Context, InitRequest, OutputMode, io.Writer
 					return UsageError(errors.New("--migrate cannot be combined with a root or camp settings"))
 				}
 			} else if request.Capsule == "" {
+				if OutputModeFrom(command) == ModeHuman && interactive != nil {
+					return interactive(command.Context(), request, ModeHuman, command.InOrStdin(), command.OutOrStdout())
+				}
 				return UsageError(errors.New("init requires --name"))
 			}
 			return run(command.Context(), request, OutputModeFrom(command), command.OutOrStdout())
