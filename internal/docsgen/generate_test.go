@@ -91,7 +91,7 @@ func TestGeneratedReferenceExcludesHiddenCommands(t *testing.T) {
 	if bytes.Contains(reference, []byte("camp supervise")) {
 		t.Fatal("hidden supervisor command was documented as shipped")
 	}
-	for _, command := range []string{"camp setup", "camp init", "camp list", "camp open", "camp sync", "camp close", "camp reopen", "camp recover", "camp strike", "camp doctor", "camp completion"} {
+	for _, command := range []string{"camp setup", "camp init", "camp list", "camp open", "camp sync", "camp close", "camp reopen", "camp recover", "camp status", "camp strike", "camp doctor", "camp completion"} {
 		if !bytes.Contains(reference, []byte("`"+command)) {
 			t.Errorf("command reference does not contain %q", command)
 		}

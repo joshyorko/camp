@@ -32,20 +32,20 @@ The regression test must keep `camp open` nonzero until a real `open` handler is
 
 Camp-owned user configuration persists only the typed non-secret fields in `config.Persistent`. Updates take an adjacent exclusive lock, write a mode-0600 temporary file, fsync it, rename it over the destination, and fsync the parent directory. URL userinfo and credential-shaped query parameters are rejected before effects. `CAMP_ACCESS_TOKEN` remains runtime-only; the legacy `accessToken` YAML field is rejected.
 
-The first-run persistent path is one explicit command:
+Machine setup and camp initialization are separate:
 
 ```bash
-camp init \
-  --source /absolute/capsule/root \
+camp setup
+camp init /absolute/camp/root \
+  --name capsule-name \
   --backend file:///absolute/camp/backend \
-  --capsule capsule-name \
-  --devpod-provider room-of-requirement \
-  --devpod-context ror
+  --workspace-provider room-of-requirement \
+  --workspace-context ror
 ```
 
-The source, backend, capsule, and provider flags are one contract: all four must be present and nonempty, and a positional root cannot be combined with `--source`. `--devpod-context` is an optional typed part of that contract and defaults to `default`; it cannot be used by itself. Camp resolves the requested backend through the same strict `config.ResolveBackend` contract used by production open before creating Camp state, resolving DevPod, initializing the capsule, or publishing configuration. An S3 backend therefore requires effective endpoint, region, path-style, and insecure-policy values that pass the normal credential-free S3 checks.
+`--name` is required outside migration. Backend and workspace settings default from machine setup and become explicit in the new manifest, so later machine-default changes cannot silently retarget an existing camp. Camp resolves the requested backend through the same strict `config.ResolveBackend` contract used by production open before creating Camp state or initializing the capsule. An S3 backend therefore requires effective endpoint, region, path-style, and insecure-policy values that pass the normal credential-free S3 checks.
 
-After capsule initialization succeeds, one `config.Store.Modify` transaction holds the adjacent exclusive lock across read, mutation, validation, mode-0600 temporary-file publication, fsync, rename, and parent-directory fsync. It writes `source`, `backend`, `defaultCapsule`, `devpodProvider`, `devpodContext`, and the effective non-secret S3 settings while retaining existing registry and fileserver port choices; concurrent writers cannot overwrite fields read before another writer commits. Human and JSON success output name the exact config path, provider, and context. A later `camp open` passes the persisted context and provider through the typed `app.OpenRequest`, with `CAMP_DEVPOD_CONTEXT` and `CAMP_DEVPOD_PROVIDER` remaining explicit runtime overrides. S3 endpoint userinfo, credential-shaped URL queries, access tokens, provider credentials, and provider option values are never persisted.
+`camp setup` uses one `config.Store.Modify` transaction that holds the adjacent exclusive lock across read, mutation, validation, mode-0600 temporary-file publication, fsync, rename, and parent-directory fsync. It writes only machine defaults: backend, workspace provider/context, ports, and effective non-secret S3 compatibility settings. Camp identity and source are written atomically to `.camp/camp.yaml` by `camp init`; they are never persisted as an active selection in machine config. `camp open` resolves the selected manifest or journal into the typed `app.OpenRequest`, while credential-bearing environment values remain runtime-only. S3 endpoint userinfo, credential-shaped URL queries, access tokens, provider credentials, and provider option values are never persisted.
 
 Provider reads must redact values using DevPod's option schema: any option marked `password: true` is redacted even when its name is innocuous. A missing provider reader is a composition error and must return a clear error instead of panicking. Provider mutation currently fails unsupported before reader or persistence effects. The pinned DevPod `pkg/config.SaveConfig` implementation at commit `86b6f9f5` writes the live file with `os.WriteFile` and provides neither locking nor temp-file/fsync/rename publication, so delegating `provider set-options` would not satisfy Camp's atomic durability contract.
 

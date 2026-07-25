@@ -80,12 +80,13 @@ func DocumentedInvocations() []Invocation {
 		{CommandPath: "camp close", Args: []string{"close"}},
 		{CommandPath: "camp completion", Args: []string{"completion", "bash"}},
 		{CommandPath: "camp doctor", Args: []string{"doctor"}},
-		{CommandPath: "camp init", Args: []string{"init", "/tmp/camp-docs-capsule"}},
+		{CommandPath: "camp init", Args: []string{"init", "/tmp/camp-docs-capsule", "--name", "docs-capsule"}},
 		{CommandPath: "camp list", Args: []string{"list"}},
 		{CommandPath: "camp open", Args: []string{"open", "memoryd"}},
 		{CommandPath: "camp recover", Args: []string{"recover", "memoryd"}},
 		{CommandPath: "camp reopen", Args: []string{"reopen", "memoryd"}},
 		{CommandPath: "camp setup", Args: []string{"setup"}},
+		{CommandPath: "camp status", Args: []string{"status", "--camp", "memoryd"}},
 		{CommandPath: "camp strike", Args: []string{"strike"}},
 		{CommandPath: "camp sync", Args: []string{"sync"}},
 	}
@@ -152,6 +153,9 @@ func (transcriptLifecycle) Doctor(_ context.Context, _ cli.OutputMode, output io
 }
 func (transcriptLifecycle) List(_ context.Context, _ cli.OutputMode, output io.Writer) error {
 	return fixtureDispatch(output, "list")
+}
+func (transcriptLifecycle) Status(_ context.Context, _ cli.OutputMode, output io.Writer) error {
+	return fixtureDispatch(output, "status")
 }
 func (transcriptLifecycle) Strike(_ context.Context, _ cli.StrikeRequest, _ cli.OutputMode, output io.Writer) error {
 	return fixtureDispatch(output, "strike")

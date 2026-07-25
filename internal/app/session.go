@@ -85,7 +85,7 @@ func SelectSession(ctx context.Context, sessions sessionLister, selector Session
 	if len(matches) == 0 {
 		commands := []string{"camp list"}
 		if selector.Capsule != "" {
-			commands = append(commands, "camp open --capsule "+selector.Capsule)
+			commands = append(commands, "camp open --camp "+selector.Capsule)
 		}
 		cause := error(ErrNoActiveSession)
 		if purpose != SelectionActiveMutation {
@@ -94,6 +94,12 @@ func SelectSession(ctx context.Context, sessions sessionLister, selector Session
 		return domain.JournalSnapshot{}, &SessionSelectionError{Code: SelectionNotFound, NextCommands: commands, cause: cause}
 	}
 	if len(matches) == 1 {
+		return matches[0], nil
+	}
+	if purpose == SelectionHistory && selector.SessionID == "" {
+		sort.SliceStable(matches, func(i, j int) bool {
+			return matches[i].UpdatedAt.After(matches[j].UpdatedAt)
+		})
 		return matches[0], nil
 	}
 	ids := make([]string, 0, len(matches))
@@ -150,7 +156,9 @@ func sessionEligible(snapshot domain.JournalSnapshot, purpose SelectionPurpose) 
 	switch purpose {
 	case SelectionActiveMutation:
 		return activeSessionState(snapshot.State)
-	case SelectionHistory, SelectionRecovery:
+	case SelectionHistory:
+		return snapshot.State == domain.SessionClosed
+	case SelectionRecovery:
 		return true
 	default:
 		return false

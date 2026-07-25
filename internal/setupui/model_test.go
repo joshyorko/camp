@@ -1,6 +1,7 @@
 package setupui
 
 import (
+	"strings"
 	"sync"
 	"testing"
 
@@ -161,5 +162,26 @@ func TestModelCtrlCCancels(t *testing.T) {
 	}
 	if cmd == nil {
 		t.Fatal("ctrl+c should return a quit command")
+	}
+}
+
+func TestModelHelpToggleAndActivityAreTruthful(t *testing.T) {
+	m := newTestModel(t, &stubPipeline{})
+	next, _ := m.Update(tea.KeyPressMsg{Code: '?', Text: "?"})
+	m = next.(Model)
+	if !m.helpVisible || !strings.Contains(m.sceneData().Foreground, "KEYBOARD") {
+		t.Fatalf("help overlay not visible: %#v", m.sceneData())
+	}
+	next, _ = m.Update(tea.KeyPressMsg{Code: '?', Text: "?"})
+	m = next.(Model)
+	if m.helpVisible {
+		t.Fatal("second ? did not close help")
+	}
+	next, _ = m.Update(FormSubmitMsg{Values: map[string]string{"backend": "file://backend"}})
+	m = next.(Model)
+	next, _ = m.Update(ActivityMsg{Stage: StageToolchain, Message: "Installing Hauler…"})
+	m = next.(Model)
+	if m.activity != "Installing Hauler…" || m.waypoints[StageToolchain].State != WaypointActive {
+		t.Fatalf("activity advanced a milestone or was lost: activity=%q state=%v", m.activity, m.waypoints[StageToolchain].State)
 	}
 }

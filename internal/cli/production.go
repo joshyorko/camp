@@ -31,6 +31,7 @@ import (
 	"github.com/joshyorko/camp/internal/adapters/supervisor"
 	tooladapter "github.com/joshyorko/camp/internal/adapters/tools"
 	"github.com/joshyorko/camp/internal/app"
+	"github.com/joshyorko/camp/internal/campconfig"
 	"github.com/joshyorko/camp/internal/capsule"
 	"github.com/joshyorko/camp/internal/checkpoint"
 	"github.com/joshyorko/camp/internal/config"
@@ -50,7 +51,11 @@ type ProductionLifecycle struct{}
 func NewProductionLifecycle() *ProductionLifecycle { return &ProductionLifecycle{} }
 
 func (p *ProductionLifecycle) Strike(ctx context.Context, request StrikeRequest, mode OutputMode, out io.Writer) error {
-	composition, err := composeProduction(ctx)
+	settings, err := resolveProductionSettings()
+	if err != nil {
+		return err
+	}
+	composition, err := composeProductionWithSettings(ctx, settings)
 	if err != nil {
 		return err
 	}
@@ -86,7 +91,11 @@ func (p *ProductionLifecycle) Strike(ctx context.Context, request StrikeRequest,
 }
 
 func (p *ProductionLifecycle) List(ctx context.Context, mode OutputMode, out io.Writer) error {
-	base, err := composeProductionBase(ctx)
+	settings, err := resolveProductionSettings()
+	if err != nil {
+		return err
+	}
+	base, err := composeProductionBaseWithSettings(settings)
 	if err != nil {
 		return err
 	}
@@ -187,42 +196,73 @@ func (p *ProductionLifecycle) Init(ctx context.Context, request InitRequest, mod
 	if err != nil {
 		return err
 	}
-	if request.Source != "" {
-		if _, err := validateConfiguredInit(request, settings.runtime.S3); err != nil {
-			return UsageError(err)
-		}
-	}
-	runner := subprocess.NewRunner()
-	initializer := capsule.NewInitializer(host.NewClock(), capsule.NewCommandDigestResolver("docker", runner))
-	root := request.Root
-	if request.Source != "" {
-		root = request.Source
-	}
-	if root == "" {
-		root = settings.runtime.Source
-	}
-	if root == "" {
-		return UsageError(errors.New("init requires a root or CAMP_SOURCE"))
-	}
-	capsuleID := settings.runtime.Capsule
-	if request.Capsule != "" {
-		capsuleID = request.Capsule
-	}
-	result, err := initializer.Initialize(ctx, root, capsuleID)
-	if err != nil {
-		return err
-	}
-	if request.Source != "" {
-		written, err := persistInitConfiguration(settings.paths.ConfigPath, request, settings.runtime.S3)
+	if request.Migrate {
+		result, err := campconfig.Migrate(settings.paths.ConfigPath)
 		if err != nil {
 			return err
 		}
-		return writeConfiguredInitSuccess(out, mode, configuredInitResult{
-			ConfigPath: settings.paths.ConfigPath, Source: written.Source, Backend: written.Backend,
-			Capsule: written.DefaultCapsule, DevPodProvider: written.DevPodProvider, DevPodContext: written.DevPodContext,
-		})
+		if mode == ModeJSON {
+			return writeSuccess(out, mode, "init", result, "")
+		}
+		if !result.Migrated {
+			_, err = fmt.Fprintln(out, "Legacy singleton configuration is already migrated.")
+			return err
+		}
+		_, err = fmt.Fprintf(out, "Migrated %s\nnext: cd %s && camp open\n", result.Manifest.Manifest.ID, result.Manifest.Root)
+		return err
 	}
-	return writeSuccess(out, mode, "init", result, fmt.Sprintf("Initialized %s at %s\n", result.Metadata.ID, root))
+	root := request.Root
+	if root == "" {
+		root, err = os.Getwd()
+		if err != nil {
+			return err
+		}
+	}
+	manifest, err := resolveInitManifest(settings, request, root)
+	if err != nil {
+		return UsageError(err)
+	}
+	path, err := campconfig.Create(root, manifest)
+	if err != nil {
+		return err
+	}
+	runner := subprocess.NewRunner()
+	initializer := capsule.NewInitializer(host.NewClock(), capsule.NewCommandDigestResolver("docker", runner))
+	result, err := initializer.Initialize(ctx, root, manifest.ID)
+	if err != nil {
+		return err
+	}
+	response := struct {
+		ManifestPath   string                 `json:"manifestPath"`
+		Manifest       campconfig.Manifest    `json:"manifest"`
+		Initialization capsule.Initialization `json:"initialization"`
+		Next           string                 `json:"next"`
+	}{ManifestPath: path, Manifest: manifest, Initialization: result, Next: "cd " + root + " && camp open"}
+	if mode == ModeJSON {
+		return writeSuccess(out, mode, "init", response, "")
+	}
+	_, err = fmt.Fprintf(out, "Initialized %s at %s\nnext: %s\n", result.Metadata.ID, root, response.Next)
+	return err
+}
+
+func resolveInitManifest(settings productionSettings, request InitRequest, root string) (campconfig.Manifest, error) {
+	backend := firstNonEmpty(request.Backend, settings.runtime.Backend)
+	provider := firstNonEmpty(request.DevPodProvider, settings.runtime.DevPodProvider, "docker")
+	contextName := firstNonEmpty(request.DevPodContext, settings.runtime.DevPodContext, "default")
+	if request.Capsule == "" {
+		return campconfig.Manifest{}, errors.New("camp name is required")
+	}
+	manifest := campconfig.Manifest{
+		SchemaVersion: campconfig.SchemaVersion,
+		ID:            request.Capsule, Source: ".", Backend: backend,
+		Workspace: campconfig.Workspace{Provider: provider, Context: contextName},
+	}
+	// Validate the resolved backend against machine S3 compatibility defaults
+	// before any filesystem mutation.
+	if _, err := config.ResolveBackend(backend, settings.runtime.S3); err != nil {
+		return campconfig.Manifest{}, err
+	}
+	return manifest, nil
 }
 
 type configuredInitResult struct {
@@ -264,6 +304,12 @@ func writeConfiguredInitSuccess(out io.Writer, mode OutputMode, result configure
 }
 
 func (p *ProductionLifecycle) Open(ctx context.Context, value string, mode OutputMode, out io.Writer) error {
+	ctx = requiringManifest(ctx)
+	if value != "" {
+		if info, err := os.Stat(value); err == nil && info.IsDir() {
+			ctx = withCampPath(ctx, value)
+		}
+	}
 	composition, err := composeProduction(ctx)
 	if err != nil {
 		return err
@@ -290,7 +336,8 @@ func (p *ProductionLifecycle) Open(ctx context.Context, value string, mode Outpu
 		return err
 	}
 	request := app.OpenRequest{
-		Capsule: composition.runtime.Capsule, ExplicitRoot: explicitRoot, Target: landing,
+		SessionID: SelectionFromContext(ctx).Session,
+		Capsule:   composition.runtime.Capsule, ExplicitRoot: explicitRoot, Target: landing,
 		Runtime: composition.runtime, ResolvedBackend: composition.backend,
 		Mode: domain.SessionReadWrite, EntryMode: domain.EntryTerminal,
 		Machine: machine, RemoteAvailable: explicitRoot == "", Context: composition.runtime.DevPodContext, Provider: provider, LocalProvider: localProvider,
@@ -324,7 +371,7 @@ func (p *ProductionLifecycle) Attach(ctx context.Context, request AttachRequest,
 		Target: target.Resolver{Zoxide: target.NewCommandZoxide("zoxide", composition.runner)}, DevPod: composition.devpod,
 	})
 	result, err := usecase.Run(ctx, app.AttachRequest{
-		Selector: app.SessionSelector{Capsule: composition.runtime.Capsule, Branch: "main"},
+		Selector: productionSessionSelector(ctx, composition.runtime),
 		Target:   request.Target, Entry: devpod.IDEEntry{IDE: devpod.IDE(request.IDE)},
 		SSH: devpod.SSHOptions{
 			User: request.User, ForwardPorts: request.ForwardPorts, ReverseForwards: request.ReverseForwardPorts,
@@ -393,7 +440,7 @@ func (p *ProductionLifecycle) Sync(ctx context.Context, mode OutputMode, out io.
 	if err != nil {
 		return err
 	}
-	session, err := app.SelectActiveSession(ctx, c.base.journal, app.SessionSelector{Capsule: c.base.runtime.Capsule, Branch: "main"})
+	session, err := app.SelectActiveSession(ctx, c.base.journal, productionSessionSelector(ctx, c.base.runtime))
 	if err != nil {
 		return err
 	}
@@ -417,7 +464,7 @@ func (p *ProductionLifecycle) Close(ctx context.Context, request CloseRequest, m
 	if err != nil {
 		return err
 	}
-	session, err := app.SelectActiveSession(ctx, c.base.journal, app.SessionSelector{Capsule: c.base.runtime.Capsule, Branch: "main"})
+	session, err := app.SelectActiveSession(ctx, c.base.journal, productionSessionSelector(ctx, c.base.runtime))
 	if err != nil {
 		return err
 	}
@@ -436,7 +483,20 @@ func (p *ProductionLifecycle) Close(ctx context.Context, request CloseRequest, m
 }
 
 func (p *ProductionLifecycle) Reopen(ctx context.Context, value string, mode OutputMode, out io.Writer) error {
-	return p.Open(ctx, value, mode, out)
+	base, err := composeProductionBase(ctx)
+	if err != nil {
+		return err
+	}
+	selector := productionSessionSelector(ctx, base.runtime)
+	if value != "" {
+		selector.SessionID = value
+	}
+	closed, err := app.SelectSession(ctx, base.journal, selector, app.SelectionHistory)
+	if err != nil {
+		return err
+	}
+	ctx = withSelection(ctx, Selection{Camp: closed.Capsule})
+	return p.Open(ctx, "", mode, out)
 }
 
 func (p *ProductionLifecycle) Recover(ctx context.Context, value string, mode OutputMode, out io.Writer) error {
@@ -444,12 +504,59 @@ func (p *ProductionLifecycle) Recover(ctx context.Context, value string, mode Ou
 	if err != nil {
 		return err
 	}
-	selector := app.SessionSelector{SessionID: value, Capsule: c.base.runtime.Capsule, Branch: "main"}
+	selector := productionSessionSelector(ctx, c.base.runtime)
+	if value != "" {
+		selector.SessionID = value
+	}
 	result, err := c.recover.Run(ctx, selector)
 	if err != nil {
 		return err
 	}
 	return writeSuccess(out, mode, "recover", result, fmt.Sprintf("Recovered %s\n", result.Session.ID))
+}
+
+func (p *ProductionLifecycle) Status(ctx context.Context, mode OutputMode, out io.Writer) error {
+	base, err := composeProductionBase(ctx)
+	if err != nil {
+		return err
+	}
+	snapshot, err := app.SelectSession(ctx, base.journal, productionSessionSelector(ctx, base.runtime), app.SelectionRecovery)
+	if err != nil {
+		return err
+	}
+	result := struct {
+		Session         domain.JournalSnapshot `json:"session"`
+		RecoveryCommand string                 `json:"recoveryCommand,omitempty"`
+	}{Session: snapshot}
+	if snapshot.State == domain.SessionRecovering || snapshot.Cleanup.State == domain.CleanupFailed {
+		result.RecoveryCommand = "camp recover --session " + snapshot.SessionID
+	}
+	if mode == ModeJSON {
+		return writeSuccess(out, mode, "status", result, "")
+	}
+	_, err = fmt.Fprintf(out, "Camp %s\nSession %s\nState %s\nSource %s\n", snapshot.Capsule, snapshot.SessionID, snapshot.State, snapshot.Recovery.Configuration.Source)
+	if err == nil && result.RecoveryCommand != "" {
+		_, err = fmt.Fprintf(out, "next: %s\n", result.RecoveryCommand)
+	}
+	return err
+}
+
+func productionSessionSelector(ctx context.Context, runtime config.Runtime) app.SessionSelector {
+	selection := SelectionFromContext(ctx)
+	return app.SessionSelector{
+		SessionID: selection.Session,
+		Capsule:   firstNonEmpty(selection.Camp, runtime.Capsule),
+		Branch:    "main",
+	}
+}
+
+func firstNonEmpty(values ...string) string {
+	for _, value := range values {
+		if value != "" {
+			return value
+		}
+	}
+	return ""
 }
 
 type lifecycleComposition struct {
@@ -696,6 +803,7 @@ func composeSupervisorHeartbeat(ctx context.Context, base productionBase) (super
 }
 
 func runSupervisor(ctx context.Context, sessionID string, composeHeartbeat func(context.Context, productionBase) (supervisorHeartbeat, error)) error {
+	ctx = withSelection(ctx, Selection{Session: sessionID})
 	bootstrap, err := composeSupervisorBootstrap(ctx)
 	if err != nil {
 		return err
@@ -715,7 +823,7 @@ func runSupervisor(ctx context.Context, sessionID string, composeHeartbeat func(
 }
 
 func composeProductionBase(ctx context.Context) (productionBase, error) {
-	settings, err := resolveProductionSettings()
+	settings, err := resolveProductionSettingsForContext(ctx)
 	if err != nil {
 		return productionBase{}, err
 	}
@@ -746,6 +854,116 @@ func resolveProductionSettings() (productionSettings, error) {
 	return productionSettings{paths: paths, runtime: runtime, backend: backend}, nil
 }
 
+type campPathContextKey struct{}
+type requireManifestContextKey struct{}
+
+func withCampPath(ctx context.Context, path string) context.Context {
+	return context.WithValue(ctx, campPathContextKey{}, path)
+}
+
+func requiringManifest(ctx context.Context) context.Context {
+	return context.WithValue(ctx, requireManifestContextKey{}, true)
+}
+
+func resolveProductionSettingsForContext(ctx context.Context) (productionSettings, error) {
+	settings, err := resolveProductionSettings()
+	if err != nil {
+		return productionSettings{}, err
+	}
+	selection := SelectionFromContext(ctx)
+	if selection.Session != "" || selection.Camp != "" {
+		store, err := journalstore.NewStore(settings.paths.DataRoot)
+		if err != nil {
+			return productionSettings{}, err
+		}
+		sessions, err := store.List(ctx)
+		if err != nil {
+			return productionSettings{}, err
+		}
+		var selected *domain.JournalSnapshot
+		for index := range sessions {
+			candidate := &sessions[index]
+			if selection.Session != "" && candidate.SessionID != selection.Session {
+				continue
+			}
+			if selection.Session == "" && candidate.Capsule != selection.Camp {
+				continue
+			}
+			if selected == nil || candidate.UpdatedAt.After(selected.UpdatedAt) {
+				selected = candidate
+			}
+		}
+		if selected == nil {
+			return productionSettings{}, fmt.Errorf("no matching Camp session; next: camp list")
+		}
+		return applySnapshotSettings(settings, *selected)
+	}
+	path, _ := ctx.Value(campPathContextKey{}).(string)
+	if path == "" {
+		path, err = os.Getwd()
+		if err != nil {
+			return productionSettings{}, err
+		}
+	}
+	resolved, err := campconfig.Discover(path)
+	if err != nil {
+		if settings.runtime.Source != "" {
+			return productionSettings{}, lifecycleFailure(errors.New("legacy singleton configuration requires migration"), campconfig.MigrationCommand)
+		}
+		required, _ := ctx.Value(requireManifestContextKey{}).(bool)
+		if required {
+			return productionSettings{}, err
+		}
+		store, storeErr := journalstore.NewStore(settings.paths.DataRoot)
+		if storeErr != nil {
+			return productionSettings{}, storeErr
+		}
+		active, selectErr := app.SelectActiveSession(ctx, store, app.SessionSelector{})
+		if selectErr != nil {
+			return productionSettings{}, err
+		}
+		return applySnapshotSettings(settings, active)
+	}
+	return applyManifestSettings(settings, resolved)
+}
+
+func applyManifestSettings(settings productionSettings, resolved campconfig.Resolved) (productionSettings, error) {
+	settings.runtime.Capsule = resolved.Manifest.ID
+	settings.runtime.Source = resolved.Root
+	settings.runtime.Backend = resolved.Manifest.Backend
+	settings.runtime.DevPodProvider = resolved.Manifest.Workspace.Provider
+	settings.runtime.DevPodContext = resolved.Manifest.Workspace.Context
+	backend, err := config.ResolveBackend(resolved.Manifest.Backend, settings.runtime.S3)
+	if err != nil {
+		return productionSettings{}, err
+	}
+	settings.backend = backend
+	return settings, nil
+}
+
+func applySnapshotSettings(settings productionSettings, snapshot domain.JournalSnapshot) (productionSettings, error) {
+	record := snapshot.Recovery.Configuration
+	settings.runtime.Capsule = snapshot.Capsule
+	if record.Source != "" {
+		settings.runtime.Source = record.Source
+	}
+	if record.BackendURL != "" {
+		settings.runtime.Backend = record.BackendURL
+	}
+	if snapshot.Workspace.Provider != "" {
+		settings.runtime.DevPodProvider = snapshot.Workspace.Provider
+	}
+	if snapshot.Workspace.Context != "" {
+		settings.runtime.DevPodContext = snapshot.Workspace.Context
+	}
+	backend, err := config.ResolveBackend(settings.runtime.Backend, settings.runtime.S3)
+	if err != nil {
+		return productionSettings{}, err
+	}
+	settings.backend = backend
+	return settings, nil
+}
+
 func composeProductionBaseWithSettings(settings productionSettings) (productionBase, error) {
 	paths, runtime, backend := settings.paths, settings.runtime, settings.backend
 	journal, err := journalstore.NewStore(paths.DataRoot)
@@ -761,7 +979,7 @@ func composeProductionBaseWithSettings(settings productionSettings) (productionB
 }
 
 func composeProduction(ctx context.Context) (productionComposition, error) {
-	settings, err := resolveProductionSettings()
+	settings, err := resolveProductionSettingsForContext(ctx)
 	if err != nil {
 		return productionComposition{}, err
 	}

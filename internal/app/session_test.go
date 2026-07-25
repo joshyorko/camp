@@ -5,6 +5,7 @@ import (
 	"errors"
 	"reflect"
 	"testing"
+	"time"
 
 	"github.com/joshyorko/camp/internal/domain"
 )
@@ -58,7 +59,7 @@ func TestSelectActiveSessionErrorsAreActionableAndDeterministic(t *testing.T) {
 	}
 
 	_, err = SelectActiveSession(context.Background(), fakeSessionLister{}, SessionSelector{Capsule: "missing"})
-	if !errors.As(err, &selectionErr) || selectionErr.Code != SelectionNotFound || !reflect.DeepEqual(selectionErr.NextCommands, []string{"camp list", "camp open --capsule missing"}) {
+	if !errors.As(err, &selectionErr) || selectionErr.Code != SelectionNotFound || !reflect.DeepEqual(selectionErr.NextCommands, []string{"camp list", "camp open --camp missing"}) {
 		t.Fatalf("not-found error = %#v, %v", selectionErr, err)
 	}
 }
@@ -80,6 +81,19 @@ func TestSelectionPurposeSeparatesMutationHistoryAndRecovery(t *testing.T) {
 	}
 	if selected, err := SelectSession(context.Background(), lister, SessionSelector{SessionID: "recovering"}, SelectionRecovery); err != nil || selected.SessionID != "recovering" {
 		t.Fatalf("recovering selection = %#v, %v", selected, err)
+	}
+}
+
+func TestHistorySelectionChoosesNewestClosedSession(t *testing.T) {
+	t.Parallel()
+	older := domain.JournalSnapshot{SessionID: "older", Capsule: "brain", State: domain.SessionClosed, UpdatedAt: time.Unix(10, 0)}
+	newer := domain.JournalSnapshot{SessionID: "newer", Capsule: "brain", State: domain.SessionClosed, UpdatedAt: time.Unix(20, 0)}
+	selected, err := SelectSession(context.Background(), fakeSessionLister{sessions: []domain.JournalSnapshot{newer, older}}, SessionSelector{Capsule: "brain"}, SelectionHistory)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if selected.SessionID != "newer" {
+		t.Fatalf("history session = %q, want newest closed session", selected.SessionID)
 	}
 }
 

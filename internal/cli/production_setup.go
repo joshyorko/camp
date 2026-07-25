@@ -93,10 +93,6 @@ func (p *ProductionLifecycle) Setup(ctx context.Context, mode OutputMode, in io.
 			if !os.IsNotExist(statErr) {
 				return statErr
 			}
-			source, err := os.Getwd()
-			if err != nil {
-				return err
-			}
 			// Rich interactive path: a truecolor TTY with a real keyboard and
 			// minimum dimensions runs the full-screen Trailhead scene from the
 			// first prompt through CAMP IS READY. Everything else (plain, JSON,
@@ -104,19 +100,19 @@ func (p *ProductionLifecycle) Setup(ctx context.Context, mode OutputMode, in io.
 			// deterministic line-based flow below.
 			if canUseRichSetup(experience, width, height) && inputIsTTY(in) {
 				handled, err := p.runRichSetup(ctx, in, out, setupPromptDefaults{
-					Source: source, Backend: "file://" + filepath.Join(paths.DataRoot, "backend"),
+					Backend: "file://" + filepath.Join(paths.DataRoot, "backend"),
 				})
 				if handled {
 					return err
 				}
 			}
 			request, err := promptSetupRequest(in, out, setupPromptDefaults{
-				Source: source, Backend: "file://" + filepath.Join(paths.DataRoot, "backend"),
+				Backend: "file://" + filepath.Join(paths.DataRoot, "backend"),
 			}, experience, presentation.ScreenSize{Width: width, Height: height})
 			if err != nil {
 				return err
 			}
-			if err := p.Init(ctx, request, mode, io.Discard); err != nil {
+			if _, err := persistSetupDefaults(paths.ConfigPath, request); err != nil {
 				return err
 			}
 		}
@@ -135,6 +131,17 @@ func (p *ProductionLifecycle) Setup(ctx context.Context, mode OutputMode, in io.
 		return err
 	}
 	return renderProductionSetupCampsite(ctx, out, lockBytes, experience, width, height)
+}
+
+func persistSetupDefaults(path string, request InitRequest) (config.Persistent, error) {
+	return config.NewStore(path).Modify(func(value *config.Persistent) error {
+		value.DefaultCapsule = ""
+		value.Source = ""
+		value.Backend = request.Backend
+		value.DevPodProvider = request.DevPodProvider
+		value.DevPodContext = request.DevPodContext
+		return nil
+	})
 }
 
 func canUseRichSetup(experience presentation.TerminalExperience, width, height int) bool {

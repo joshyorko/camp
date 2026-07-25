@@ -48,6 +48,11 @@ type WaypointFailedMsg struct {
 	Recovery string
 }
 
+type ActivityMsg struct {
+	Stage   Stage
+	Message string
+}
+
 // AllReadyMsg is emitted after the storage waypoint so the ready band appears.
 type AllReadyMsg struct{}
 
@@ -64,12 +69,14 @@ type Model struct {
 	form      ConfigForm
 	waypoints [4]Waypoint
 
-	title     string
-	subtitle  string
-	nextCmd   string
-	readyLine string
-	failMsg   string
-	recovery  string
+	title       string
+	subtitle    string
+	nextCmd     string
+	readyLine   string
+	failMsg     string
+	recovery    string
+	activity    string
+	helpVisible bool
 
 	pal       Palette
 	sprites   map[string]Sprite
@@ -169,10 +176,14 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, m.starfield.Update(msg)
 
 	case tea.KeyPressMsg:
-		if msg.String() == "ctrl+c" {
+		if msg.String() == "ctrl+c" || msg.String() == "ctrl+d" {
 			m.phase = PhaseCanceled
 			m = m.withExit()
 			return m, tea.Quit
+		}
+		if msg.String() == "?" && m.phase == PhaseConfigure {
+			m.helpVisible = !m.helpVisible
+			return m, nil
 		}
 		if m.phase == PhaseReady || m.phase == PhaseFailed {
 			// Any key dismisses the terminal states.
@@ -208,6 +219,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, m.listen()
 
 	case WaypointCompletedMsg:
+		m.activity = ""
 		i := int(msg.Stage)
 		if i >= 0 && i < len(m.waypoints) {
 			m.waypoints[i].State = WaypointCompleted
@@ -221,6 +233,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, m.listen()
 
 	case WaypointFailedMsg:
+		m.activity = ""
 		i := int(msg.Stage)
 		if i >= 0 && i < len(m.waypoints) {
 			m.waypoints[i].State = WaypointFailed
@@ -231,8 +244,16 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case AllReadyMsg:
+		m.activity = ""
 		m.phase = PhaseReady
 		return m, nil
+
+	case ActivityMsg:
+		i := int(msg.Stage)
+		if m.phase == PhaseProvision && i >= 0 && i < len(m.waypoints) && m.waypoints[i].State == WaypointActive {
+			m.activity = msg.Message
+		}
+		return m, m.listen()
 	}
 
 	if m.phase == PhaseConfigure {
@@ -280,7 +301,13 @@ func (m Model) sceneData() SceneData {
 	}
 	switch m.phase {
 	case PhaseConfigure:
-		d.Foreground = m.form.View()
+		if m.helpVisible {
+			d.Foreground = "KEYBOARD\n\ntab / shift+tab  move between fields\nenter            validate and continue\nesc              previous field or cancel\n?                close help\nctrl+c           cancel"
+		} else {
+			d.Foreground = m.form.View()
+		}
+	case PhaseProvision:
+		d.Foreground = m.activity
 	case PhaseReady:
 		d.Ready = true
 		d.ReadyLine = m.readyLine

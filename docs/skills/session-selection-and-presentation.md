@@ -1,14 +1,14 @@
 # Session selection and presentation
 
-Use one selector contract for commands that mutate an active Camp session. Apply inputs in this order and stop at the first applicable tier:
+Use one selector contract for `open`, `reopen`, `attach`, `sync`, `close`, `recover`, and `status`. Apply inputs in this order and stop at the first applicable tier:
 
-1. explicit session ID;
-2. explicit capsule and/or branch;
-3. current directory's canonical materialization root;
-4. configured capsule and/or branch defaults;
-5. all eligible sessions.
+1. explicit `--session <id>`;
+2. explicit `--camp <id>`;
+3. the nearest validated `.camp/camp.yaml` at or above the canonical current directory (or `open` path);
+4. the sole unambiguous active session, only for commands that operate on an active session;
+5. an actionable no-camp or ambiguity error.
 
-Active mutation accepts only `opening`, `open`, and `recovering` sessions. History and recovery use separate selection purposes so closed records remain addressable without making them eligible for mutation. Sort ambiguous session IDs before generating candidate commands; not-found and ambiguity errors must include exact next commands.
+There is no configured or hidden global active capsule. Positional arguments keep command-specific meaning: `open [path]` discovers a camp from that path, `reopen [session]` and `recover [session]` name sessions, and `attach [target]` names only an in-workspace landing target. Active mutation accepts only `opening`, `open`, and `recovering` sessions. Reopen history accepts closed records and deterministically chooses the most recently updated closed session when no session is explicit. Sort ambiguous session IDs before generating candidate commands; not-found and ambiguity errors must reference only shipped commands such as `camp list`, `camp status --session …`, `camp open --camp …`, and `camp init`.
 
 Build public output from application read models, never by marshaling journal snapshots. Treat service liveness as `unknown` until an inspector reconciles both helper and child process identities. Distinguish `live`, `stopped`, `dead`, and `pid-reused`; a persisted observed state alone is not liveness evidence.
 

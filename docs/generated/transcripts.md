@@ -26,6 +26,7 @@ Available Commands:
   recover     Recover an interrupted lifecycle
   reopen      Reopen a closed capsule workspace
   setup       Install or reuse pinned DevPod and Hauler tools
+  status      Show the selected camp session
   strike      Archive local Camp state and start fresh
   sync        Publish a checkpoint and remain open
 
@@ -64,10 +65,10 @@ $ camp doctor
 effect-free docs fixture: doctor dispatched; external effects disabled
 ```
 
-## `camp init /tmp/camp-docs-capsule`
+## `camp init /tmp/camp-docs-capsule --name docs-capsule`
 
 ```console
-$ camp init /tmp/camp-docs-capsule
+$ camp init /tmp/camp-docs-capsule --name docs-capsule
 effect-free docs fixture: init dispatched; external effects disabled
 ```
 
@@ -104,6 +105,13 @@ effect-free docs fixture: reopen dispatched; external effects disabled
 ```console
 $ camp setup
 effect-free docs fixture: setup dispatched; external effects disabled
+```
+
+## `camp status --camp memoryd`
+
+```console
+$ camp status --camp memoryd
+effect-free docs fixture: status dispatched; external effects disabled
 ```
 
 ## `camp strike`

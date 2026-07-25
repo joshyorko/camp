@@ -21,8 +21,11 @@ func TestStoreUpdatePersistsOnlyAllowedNonSecretFields(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got != want {
-		t.Fatalf("Read() = %#v, want %#v", got, want)
+	wantMachine := want
+	wantMachine.DefaultCapsule = ""
+	wantMachine.Source = ""
+	if got != wantMachine {
+		t.Fatalf("Read() = %#v, want machine defaults %#v", got, wantMachine)
 	}
 	body, err := os.ReadFile(path)
 	if err != nil {
@@ -45,6 +48,8 @@ func TestStoreRejectsCredentialBearingValuesBeforeReplacingConfig(t *testing.T) 
 	if err := store.Update(baseline); err != nil {
 		t.Fatal(err)
 	}
+	machineBaseline := baseline
+	machineBaseline.DefaultCapsule = ""
 	for _, candidate := range []Persistent{
 		{DefaultCapsule: "brain", Backend: "https://user:secret@example.test/camp"},
 		{DefaultCapsule: "brain", Source: "https://example.test/camp?access_token=secret"},
@@ -53,7 +58,7 @@ func TestStoreRejectsCredentialBearingValuesBeforeReplacingConfig(t *testing.T) 
 			t.Fatalf("Update(%#v) error = %v, want ErrCredentialPersistence", candidate, err)
 		}
 		got, err := store.Read()
-		if err != nil || got != baseline {
+		if err != nil || got != machineBaseline {
 			t.Fatalf("config changed after rejected update: %#v, %v", got, err)
 		}
 	}
@@ -136,5 +141,29 @@ func TestStoreRejectsCredentialBearingS3Endpoint(t *testing.T) {
 	}}
 	if err := store.Update(value); !errors.Is(err, ErrCredentialPersistence) {
 		t.Fatalf("Update() error = %v, want ErrCredentialPersistence", err)
+	}
+}
+
+func TestStoreWritesMachineDefaultsWithoutLegacyCampSelection(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.yaml")
+	value := Persistent{
+		DefaultCapsule: "legacy-brain",
+		Source:         "/srv/legacy-brain",
+		Backend:        "file:///srv/camp",
+		DevPodProvider: "docker",
+		DevPodContext:  "default",
+	}
+	if err := NewStore(path).Update(value); err != nil {
+		t.Fatal(err)
+	}
+	body, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(body), "defaultCapsule") || strings.Contains(string(body), "source:") {
+		t.Fatalf("machine config persisted camp selection:\n%s", body)
+	}
+	if !strings.Contains(string(body), "backend: file:///srv/camp") {
+		t.Fatalf("machine config omitted backend default:\n%s", body)
 	}
 }

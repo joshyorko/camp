@@ -5,14 +5,13 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"path/filepath"
 	"strings"
 
 	"github.com/joshyorko/camp/internal/presentation"
 )
 
 type setupPromptDefaults struct {
-	Source  string
+	Source  string // legacy rich-form input; setup never persists it
 	Backend string
 }
 
@@ -41,16 +40,7 @@ func promptSetupRequest(in io.Reader, out io.Writer, defaults setupPromptDefault
 		return value, nil
 	}
 
-	source, err := read("Source path", defaults.Source)
-	if err != nil {
-		return InitRequest{}, fmt.Errorf("read source path: %w", err)
-	}
-	capsuleDefault := filepath.Base(filepath.Clean(source))
-	capsule, err := read("Capsule name", capsuleDefault)
-	if err != nil {
-		return InitRequest{}, fmt.Errorf("read capsule name: %w", err)
-	}
-	backend, err := read("Backend URL", defaults.Backend)
+	backend, err := read("Default backend URL", defaults.Backend)
 	if err != nil {
 		return InitRequest{}, fmt.Errorf("read backend URL: %w", err)
 	}
@@ -62,11 +52,8 @@ func promptSetupRequest(in io.Reader, out io.Writer, defaults setupPromptDefault
 	if err != nil {
 		return InitRequest{}, fmt.Errorf("read DevPod context: %w", err)
 	}
-	request := InitRequest{
-		Source: source, Capsule: capsule, Backend: backend,
-		DevPodProvider: provider, DevPodContext: devpodContext,
-	}
-	if request.Source == "" || request.Capsule == "" || request.Backend == "" || request.DevPodProvider == "" || request.DevPodContext == "" {
+	request := InitRequest{Backend: backend, DevPodProvider: provider, DevPodContext: devpodContext}
+	if request.Backend == "" || request.DevPodProvider == "" || request.DevPodContext == "" {
 		return InitRequest{}, errors.New("setup values cannot be empty")
 	}
 	return request, nil

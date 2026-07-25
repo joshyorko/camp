@@ -12,11 +12,53 @@ import (
 	"time"
 
 	"github.com/joshyorko/camp/internal/adapters/supervisor"
+	"github.com/joshyorko/camp/internal/campconfig"
 	"github.com/joshyorko/camp/internal/config"
 	"github.com/joshyorko/camp/internal/domain"
 	journalstore "github.com/joshyorko/camp/internal/journal"
 	"github.com/joshyorko/camp/internal/ports"
 )
+
+func TestManifestOverridesMachineDefaultsForCampRuntime(t *testing.T) {
+	root := t.TempDir()
+	manifest := campconfig.Resolved{
+		Root: root,
+		Manifest: campconfig.Manifest{
+			SchemaVersion: 1, ID: "alpha", Source: ".", Backend: "file:///camp-backend",
+			Workspace: campconfig.Workspace{Provider: "room-of-requirement", Context: "alpha-context"},
+		},
+	}
+	defaults := productionSettings{runtime: config.Runtime{Bootstrap: config.Bootstrap{
+		Capsule: "legacy", Source: "/legacy", Backend: "file:///machine-default",
+		DevPodProvider: "docker", DevPodContext: "default", RegistryPort: 5000, FileserverPort: 8080,
+	}}}
+	got, err := applyManifestSettings(defaults, manifest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.runtime.Capsule != "alpha" || got.runtime.Source != root || got.runtime.Backend != "file:///camp-backend" ||
+		got.runtime.DevPodProvider != "room-of-requirement" || got.runtime.DevPodContext != "alpha-context" {
+		t.Fatalf("camp runtime = %#v", got.runtime)
+	}
+}
+
+func TestResolveInitManifestUsesMachineDefaultsAndExplicitCampName(t *testing.T) {
+	root := t.TempDir()
+	settings := productionSettings{runtime: config.Runtime{Bootstrap: config.Bootstrap{
+		Backend: "file:///machine-backend", DevPodProvider: "docker", DevPodContext: "default",
+	}}}
+	manifest, err := resolveInitManifest(settings, InitRequest{Root: root, Capsule: "alpha"}, root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := campconfig.Manifest{
+		SchemaVersion: 1, ID: "alpha", Source: ".", Backend: "file:///machine-backend",
+		Workspace: campconfig.Workspace{Provider: "docker", Context: "default"},
+	}
+	if manifest != want {
+		t.Fatalf("manifest = %#v, want %#v", manifest, want)
+	}
+}
 
 func TestPersistInitConfigurationWritesOnlyRequestedFirstRunValues(t *testing.T) {
 	t.Parallel()
@@ -31,8 +73,10 @@ func TestPersistInitConfigurationWritesOnlyRequestedFirstRunValues(t *testing.T)
 		t.Fatalf("written = %#v, want %#v", written, want)
 	}
 	got, err := config.NewStore(path).Read()
+	want.DefaultCapsule = ""
+	want.Source = ""
 	if err != nil || got != want {
-		t.Fatalf("persisted = %#v, error = %v", got, err)
+		t.Fatalf("persisted machine defaults = %#v, error = %v", got, err)
 	}
 }
 

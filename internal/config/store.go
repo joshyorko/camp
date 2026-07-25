@@ -25,6 +25,15 @@ type Persistent struct {
 	S3             S3Values `yaml:"s3,omitempty" json:"s3,omitempty"`
 }
 
+type machinePersistent struct {
+	Backend        string   `yaml:"backend,omitempty"`
+	DevPodProvider string   `yaml:"devpodProvider,omitempty"`
+	DevPodContext  string   `yaml:"devpodContext,omitempty"`
+	RegistryPort   int      `yaml:"registryPort,omitempty"`
+	FileserverPort int      `yaml:"fileserverPort,omitempty"`
+	S3             S3Values `yaml:"s3,omitempty"`
+}
+
 type Store struct{ path string }
 
 func NewStore(path string) *Store { return &Store{path: path} }
@@ -91,7 +100,10 @@ func (s *Store) withLock(run func() error) error {
 }
 
 func (s *Store) write(value Persistent) error {
-	body, err := yaml.Marshal(value)
+	body, err := yaml.Marshal(machinePersistent{
+		Backend: value.Backend, DevPodProvider: value.DevPodProvider, DevPodContext: value.DevPodContext,
+		RegistryPort: value.RegistryPort, FileserverPort: value.FileserverPort, S3: value.S3,
+	})
 	if err != nil {
 		return err
 	}

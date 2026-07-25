@@ -1,6 +1,6 @@
 # Terminal Experience
 
-Camp's campsite presentation is a view of authoritative state, not a progress simulation. Populate toolchain values from the embedded tool lock and resolved binaries, runtime values from the persisted DevPod provider/context and observed provider kind, capsule values from the effective sanitized configuration, and storage values from the resolved backend plus committed generation state. Missing fields are errors; never invent a percentage, provider, context, generation, or readiness claim to complete the picture.
+Camp's campsite presentation is a view of authoritative state, not a progress simulation. Setup reads machine defaults only: backend, workspace provider/context, ports, and non-secret S3 compatibility settings. Camp identity and source come from a validated `.camp/camp.yaml`, never machine config. Populate toolchain values from the embedded tool lock and resolved binaries, runtime values from the selected manifest or journal, and storage values from the resolved backend plus committed generation state. Missing fields are errors; never invent a percentage, provider, context, generation, or readiness claim to complete the picture.
 
 ## Visual authority
 
@@ -29,6 +29,7 @@ A `SizeGuard` shows a legible "terminal too small" prompt if a live resize shrin
 ## Terminal lifecycle and restoration
 
 The rich path runs in the alternate screen. Bubble Tea restores the terminal — leaves the alternate screen and shows the cursor — on every exit path: normal quit, error, EOF, Ctrl-C, and a panic inside the program. The shell is never left with the scene above the prompt or a hidden cursor. The cursor is visible only while a configuration field is focused (the focused text input is the visible focus indicator); provisioning, ready, and failure frames show no cursor. Cancellation writes no partial configuration.
+`tab` and `shift+tab` move between fields, `enter` validates or advances, `esc` returns to the previous field and cancels only from the first field, `?` toggles the keyboard overlay, and `ctrl+c` or EOF cancels. Typed `ActivityMsg` values display the current real operation while leaving the active waypoint incomplete; only the corresponding completion message advances it.
 Static ready renders (for deterministic re-runs) are intentionally printed with one trailing row left for the shell and terminate with a trailing newline so the prompt and cursor appear cleanly on the next line.
 
 ## Fallback boundary

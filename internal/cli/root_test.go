@@ -49,8 +49,8 @@ func TestLifecycleCommandsDelegateWithStrictArgumentsAndInheritedMode(t *testing
 		args []string
 		want string
 	}{
-		{name: "init", args: []string{"--json", "init", "/brain"}, want: "init:/brain:json"},
-		{name: "configured init", args: []string{"init", "--source", "/brain", "--backend", "file:///srv/camp", "--capsule", "brain", "--devpod-provider", "room-of-requirement", "--devpod-context", "ror"}, want: "init:/brain:file:///srv/camp:brain:room-of-requirement:ror:human"},
+		{name: "init", args: []string{"--json", "init", "/brain", "--name", "brain"}, want: "init:/brain:json"},
+		{name: "configured init", args: []string{"init", "/brain", "--name", "brain", "--backend", "file:///srv/camp", "--workspace-provider", "room-of-requirement", "--workspace-context", "ror"}, want: "init:/brain:file:///srv/camp:brain:room-of-requirement:ror:human"},
 		{name: "setup", args: []string{"setup"}, want: "setup::human"},
 		{name: "open", args: []string{"open", "memoryd"}, want: "open:memoryd:human"},
 		{name: "sync", args: []string{"sync"}, want: "sync::human"},
@@ -98,12 +98,20 @@ func TestLifecycleCommandsDelegateSetupStdin(t *testing.T) {
 type recordingLifecycle struct {
 	calls          []string
 	attachRequests []AttachRequest
+	initRequests   []InitRequest
+	selections     []Selection
 	setupInput     io.Reader
 }
 
 type recordingStriker struct {
 	*recordingLifecycle
 	request StrikeRequest
+}
+
+func (r *recordingLifecycle) Status(ctx context.Context, mode OutputMode, _ io.Writer) error {
+	r.selections = append(r.selections, SelectionFromContext(ctx))
+	r.calls = append(r.calls, "status::"+string(mode))
+	return nil
 }
 
 func (r *recordingStriker) Strike(_ context.Context, request StrikeRequest, _ OutputMode, _ io.Writer) error {
@@ -122,33 +130,34 @@ func TestStrikeCommandMapsPurgeConfirmation(t *testing.T) {
 }
 
 func (r *recordingLifecycle) Init(_ context.Context, request InitRequest, mode OutputMode, _ io.Writer) error {
-	if request.Source == "" && request.Backend == "" && request.Capsule == "" && request.DevPodProvider == "" {
+	r.initRequests = append(r.initRequests, request)
+	if request.Backend == "" && request.DevPodProvider == "" {
 		r.calls = append(r.calls, "init:"+request.Root+":"+string(mode))
 		return nil
 	}
-	r.calls = append(r.calls, "init:"+request.Source+":"+request.Backend+":"+request.Capsule+":"+request.DevPodProvider+":"+request.DevPodContext+":"+string(mode))
+	r.calls = append(r.calls, "init:"+request.Root+":"+request.Backend+":"+request.Capsule+":"+request.DevPodProvider+":"+request.DevPodContext+":"+string(mode))
 	return nil
 }
-func TestInitPersistentFlagsAreAllRequiredTogether(t *testing.T) {
+func TestInitRequiresNameOutsideMigration(t *testing.T) {
 	t.Parallel()
 	for _, args := range [][]string{
-		{"init", "--source", "/brain"},
-		{"init", "--source", "/brain", "--backend", "file:///srv/camp", "--capsule", "brain"},
-		{"init", "--devpod-context", "ror"},
+		{"init"},
+		{"init", "/brain"},
+		{"init", "/brain", "--backend", "file:///srv/camp"},
 	} {
 		var stderr bytes.Buffer
 		code := Execute(context.Background(), NewRootWithLifecycle(&recordingLifecycle{}), args, Streams{ErrOut: &stderr})
-		if code != int(ExitUsage) || !strings.Contains(stderr.String(), "must be provided together") {
-			t.Fatalf("Execute(%q) code=%d stderr=%q, want grouped persistent flag usage failure", args, code, stderr.String())
+		if code != int(ExitUsage) || !strings.Contains(stderr.String(), "requires --name") {
+			t.Fatalf("Execute(%q) code=%d stderr=%q, want name requirement", args, code, stderr.String())
 		}
 	}
 }
 
-func TestInitPersistentFlagsRejectEmptyValuesAndConflictingRoot(t *testing.T) {
+func TestInitMigrationRejectsCampArguments(t *testing.T) {
 	t.Parallel()
 	for _, args := range [][]string{
-		{"init", "--source", "", "--backend", "file:///srv/camp", "--capsule", "brain", "--devpod-provider", "docker"},
-		{"init", "/other", "--source", "/brain", "--backend", "file:///srv/camp", "--capsule", "brain", "--devpod-provider", "docker"},
+		{"init", "/other", "--migrate"},
+		{"init", "--migrate", "--name", "brain"},
 	} {
 		var stderr bytes.Buffer
 		code := Execute(context.Background(), NewRootWithLifecycle(&recordingLifecycle{}), args, Streams{ErrOut: &stderr})
@@ -158,33 +167,84 @@ func TestInitPersistentFlagsRejectEmptyValuesAndConflictingRoot(t *testing.T) {
 	}
 }
 
+func TestInitUsesCampNameAndMigrationContracts(t *testing.T) {
+	lifecycle := &recordingLifecycle{}
+	if code := Execute(context.Background(), NewRootWithLifecycle(lifecycle), []string{"init", "/brain", "--name", "brain", "--backend", "file:///srv/camp", "--workspace-provider", "docker", "--workspace-context", "default"}, Streams{Out: io.Discard, ErrOut: io.Discard}); code != int(ExitSuccess) {
+		t.Fatalf("named init exit = %d", code)
+	}
+	request := lifecycle.initRequests[len(lifecycle.initRequests)-1]
+	if request.Root != "/brain" || request.Capsule != "brain" || request.Backend != "file:///srv/camp" || request.DevPodProvider != "docker" || request.DevPodContext != "default" {
+		t.Fatalf("named init request = %#v", request)
+	}
+	if code := Execute(context.Background(), NewRootWithLifecycle(lifecycle), []string{"init", "--migrate"}, Streams{Out: io.Discard, ErrOut: io.Discard}); code != int(ExitSuccess) {
+		t.Fatalf("migration init exit = %d", code)
+	}
+	if !lifecycle.initRequests[len(lifecycle.initRequests)-1].Migrate {
+		t.Fatal("init --migrate did not reach lifecycle")
+	}
+}
+
 func (r *recordingLifecycle) Setup(_ context.Context, mode OutputMode, in io.Reader, _ io.Writer) error {
 	r.setupInput = in
 	r.calls = append(r.calls, "setup::"+string(mode))
 	return nil
 }
-func (r *recordingLifecycle) Open(_ context.Context, value string, mode OutputMode, _ io.Writer) error {
+func (r *recordingLifecycle) Open(ctx context.Context, value string, mode OutputMode, _ io.Writer) error {
+	r.selections = append(r.selections, SelectionFromContext(ctx))
 	r.calls = append(r.calls, "open:"+value+":"+string(mode))
 	return nil
 }
-func (r *recordingLifecycle) Attach(_ context.Context, request AttachRequest, mode OutputMode, _ io.Writer) error {
+func (r *recordingLifecycle) Attach(ctx context.Context, request AttachRequest, mode OutputMode, _ io.Writer) error {
+	r.selections = append(r.selections, SelectionFromContext(ctx))
 	r.attachRequests = append(r.attachRequests, request)
 	r.calls = append(r.calls, "attach:"+request.Target+":"+string(mode))
 	return nil
 }
-func (r *recordingLifecycle) Sync(_ context.Context, mode OutputMode, _ io.Writer) error {
+func (r *recordingLifecycle) Sync(ctx context.Context, mode OutputMode, _ io.Writer) error {
+	r.selections = append(r.selections, SelectionFromContext(ctx))
 	r.calls = append(r.calls, "sync::"+string(mode))
 	return nil
 }
-func (r *recordingLifecycle) Close(_ context.Context, request CloseRequest, mode OutputMode, _ io.Writer) error {
+func (r *recordingLifecycle) Close(ctx context.Context, request CloseRequest, mode OutputMode, _ io.Writer) error {
+	r.selections = append(r.selections, SelectionFromContext(ctx))
 	r.calls = append(r.calls, fmt.Sprintf("close:%t:%s", request.Discard, mode))
 	return nil
 }
-func (r *recordingLifecycle) Reopen(_ context.Context, value string, mode OutputMode, _ io.Writer) error {
+
+func TestLifecycleSelectorsAreSharedAndPositionalsKeepCommandMeaning(t *testing.T) {
+	lifecycle := &recordingLifecycle{}
+	tests := []struct {
+		args      []string
+		selection Selection
+	}{
+		{args: []string{"open", "/work/alpha", "--camp", "alpha", "--session", "session-a"}, selection: Selection{Camp: "alpha", Session: "session-a"}},
+		{args: []string{"attach", "src", "--camp", "alpha"}, selection: Selection{Camp: "alpha"}},
+		{args: []string{"sync", "--session", "session-a"}, selection: Selection{Session: "session-a"}},
+		{args: []string{"close", "--camp", "alpha"}, selection: Selection{Camp: "alpha"}},
+		{args: []string{"status", "--camp", "alpha"}, selection: Selection{Camp: "alpha"}},
+		{args: []string{"reopen", "session-a", "--camp", "alpha"}, selection: Selection{Camp: "alpha", Session: "session-a"}},
+		{args: []string{"recover", "session-a", "--camp", "alpha"}, selection: Selection{Camp: "alpha", Session: "session-a"}},
+	}
+	for _, test := range tests {
+		if code := Execute(context.Background(), NewRootWithLifecycle(lifecycle), test.args, Streams{Out: io.Discard, ErrOut: io.Discard}); code != int(ExitSuccess) {
+			t.Fatalf("Execute(%q) = %d", test.args, code)
+		}
+		got := lifecycle.selections[len(lifecycle.selections)-1]
+		if got != test.selection {
+			t.Fatalf("Execute(%q) selection = %#v, want %#v", test.args, got, test.selection)
+		}
+	}
+	if got := lifecycle.attachRequests[len(lifecycle.attachRequests)-1].Target; got != "src" {
+		t.Fatalf("attach target = %q, want src", got)
+	}
+}
+func (r *recordingLifecycle) Reopen(ctx context.Context, value string, mode OutputMode, _ io.Writer) error {
+	r.selections = append(r.selections, SelectionFromContext(ctx))
 	r.calls = append(r.calls, "reopen:"+value+":"+string(mode))
 	return nil
 }
-func (r *recordingLifecycle) Recover(_ context.Context, value string, mode OutputMode, _ io.Writer) error {
+func (r *recordingLifecycle) Recover(ctx context.Context, value string, mode OutputMode, _ io.Writer) error {
+	r.selections = append(r.selections, SelectionFromContext(ctx))
 	r.calls = append(r.calls, "recover:"+value+":"+string(mode))
 	return nil
 }
@@ -562,7 +622,7 @@ func TestRootHelpIsDeterministic(t *testing.T) {
 	if first != second {
 		t.Fatalf("help changed between identical roots:\nfirst:\n%s\nsecond:\n%s", first, second)
 	}
-	want := "Recoverable capsule workspaces\n\nUsage:\n  camp [flags]\n  camp [command]\n\nAvailable Commands:\n  attach      Attach to an open capsule workspace\n  close       Publish a checkpoint and close\n  completion  Generate shell completion\n  doctor      Diagnose required host capabilities\n  help        Help about any command\n  init        Initialize a capsule root\n  list        List stored camps\n  open        Open a capsule workspace\n  recover     Recover an interrupted lifecycle\n  reopen      Reopen a closed capsule workspace\n  setup       Install or reuse pinned DevPod and Hauler tools\n  strike      Archive local Camp state and start fresh\n  sync        Publish a checkpoint and remain open\n\nFlags:\n  -h, --help   help for camp\n      --json   emit stable JSON output\n\nUse \"camp [command] --help\" for more information about a command.\n"
+	want := "Recoverable capsule workspaces\n\nUsage:\n  camp [flags]\n  camp [command]\n\nAvailable Commands:\n  attach      Attach to an open capsule workspace\n  close       Publish a checkpoint and close\n  completion  Generate shell completion\n  doctor      Diagnose required host capabilities\n  help        Help about any command\n  init        Initialize a capsule root\n  list        List stored camps\n  open        Open a capsule workspace\n  recover     Recover an interrupted lifecycle\n  reopen      Reopen a closed capsule workspace\n  setup       Install or reuse pinned DevPod and Hauler tools\n  status      Show the selected camp session\n  strike      Archive local Camp state and start fresh\n  sync        Publish a checkpoint and remain open\n\nFlags:\n  -h, --help   help for camp\n      --json   emit stable JSON output\n\nUse \"camp [command] --help\" for more information about a command.\n"
 	if first != want {
 		t.Fatalf("help:\n%s\nwant:\n%s", first, want)
 	}
@@ -603,7 +663,7 @@ func TestAttachRejectsInsidersAndDifferentIDEWithoutEffects(t *testing.T) {
 	}
 }
 
-func TestInitHelpTruthfullyListsPersistentFirstRunFlags(t *testing.T) {
+func TestInitHelpTruthfullyListsCampManifestFlags(t *testing.T) {
 	t.Parallel()
 	root := NewRootWithLifecycle(&recordingLifecycle{})
 	var output bytes.Buffer
@@ -613,7 +673,7 @@ func TestInitHelpTruthfullyListsPersistentFirstRunFlags(t *testing.T) {
 	if err := root.Execute(); err != nil {
 		t.Fatal(err)
 	}
-	want := "Initialize a capsule root\n\nUsage:\n  camp init [root] [flags]\n\nFlags:\n      --backend string           persist the default backend URL\n      --capsule string           persist the default capsule name\n      --devpod-context string    persist the DevPod context (default \"default\")\n      --devpod-provider string   persist the default DevPod provider\n  -h, --help                     help for init\n      --source string            persist the default source path\n\nGlobal Flags:\n      --json   emit stable JSON output\n"
+	want := "Initialize a capsule root\n\nUsage:\n  camp init [root] [flags]\n\nFlags:\n      --backend string              camp backend URL (defaults to machine setup)\n  -h, --help                        help for init\n      --migrate                     migrate the legacy singleton configuration\n      --name string                 stable camp ID\n      --workspace-context string    workspace runtime context (defaults to machine setup)\n      --workspace-provider string   workspace runtime provider (defaults to machine setup)\n\nGlobal Flags:\n      --json   emit stable JSON output\n"
 	if output.String() != want {
 		t.Fatalf("init help:\n%s\nwant:\n%s", output.String(), want)
 	}

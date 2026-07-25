@@ -52,10 +52,27 @@ type InitRequest struct {
 	Capsule        string
 	DevPodProvider string
 	DevPodContext  string
+	Migrate        bool
 }
 
 type CloseRequest struct {
 	Discard bool
+}
+
+type Selection struct {
+	Camp    string
+	Session string
+}
+
+type selectionContextKey struct{}
+
+func SelectionFromContext(ctx context.Context) Selection {
+	selection, _ := ctx.Value(selectionContextKey{}).(Selection)
+	return selection
+}
+
+func withSelection(ctx context.Context, selection Selection) context.Context {
+	return context.WithValue(ctx, selectionContextKey{}, selection)
 }
 
 type doctorLifecycle interface {
@@ -68,6 +85,10 @@ type Setup interface {
 
 type CampLister interface {
 	List(context.Context, OutputMode, io.Writer) error
+}
+
+type CampStatus interface {
+	Status(context.Context, OutputMode, io.Writer) error
 }
 
 type StrikeRequest struct {
@@ -108,6 +129,9 @@ func NewRootWithLifecycle(lifecycle Lifecycle) *cobra.Command {
 	if camps, ok := lifecycle.(CampLister); ok {
 		root.AddCommand(noArgumentCommand("list", "List stored camps", camps.List))
 	}
+	if status, ok := lifecycle.(CampStatus); ok {
+		root.AddCommand(selectionCommand("status", "Show the selected camp session", status.Status))
+	}
 	if striker, ok := lifecycle.(CampStriker); ok {
 		root.AddCommand(newStrikeCommand(striker.Strike))
 	}
@@ -139,13 +163,15 @@ func newStrikeCommand(run func(context.Context, StrikeRequest, OutputMode, io.Wr
 
 func newCloseCommand(run func(context.Context, CloseRequest, OutputMode, io.Writer) error) *cobra.Command {
 	request := CloseRequest{}
+	selection := Selection{}
 	command := &cobra.Command{
 		Use: "close", Short: "Publish a checkpoint and close", Args: usageArgs(cobra.NoArgs),
 		RunE: func(command *cobra.Command, _ []string) error {
-			return run(command.Context(), request, OutputModeFrom(command), command.OutOrStdout())
+			return run(withSelection(command.Context(), selection), request, OutputModeFrom(command), command.OutOrStdout())
 		},
 	}
 	command.Flags().BoolVar(&request.Discard, "discard", false, "close without publishing the open session")
+	addSelectionFlags(command, &selection)
 	return command
 }
 
@@ -160,6 +186,7 @@ func setupCommand(run func(context.Context, OutputMode, io.Reader, io.Writer) er
 
 func newAttachCommand(run func(context.Context, AttachRequest, OutputMode, io.Writer) error) *cobra.Command {
 	request := AttachRequest{IDE: "none"}
+	selection := Selection{}
 	var insiders, agentForwarding, gpgAgentForwarding, stdio, installTerminfo bool
 	command := &cobra.Command{
 		Use: "attach [target]", Short: "Attach to an open capsule workspace",
@@ -197,7 +224,7 @@ func newAttachCommand(run func(context.Context, AttachRequest, OutputMode, io.Wr
 			if command.Flags().Changed("install-terminfo") {
 				request.InstallTerminfo = &installTerminfo
 			}
-			return run(command.Context(), request, OutputModeFrom(command), command.OutOrStdout())
+			return run(withSelection(command.Context(), selection), request, OutputModeFrom(command), command.OutOrStdout())
 		},
 	}
 	flags := command.Flags()
@@ -217,6 +244,7 @@ func newAttachCommand(run func(context.Context, AttachRequest, OutputMode, io.Wr
 	flags.StringVar(&request.TermMode, "term-mode", "", "terminal mode")
 	flags.BoolVar(&installTerminfo, "install-terminfo", false, "install local terminal information")
 	flags.StringSliceVar(&request.DevPodArgs, "devpod-arg", nil, "append one raw DevPod SSH argument")
+	addSelectionFlags(command, &selection)
 	return command
 }
 
@@ -228,54 +256,72 @@ func newInitCommand(run func(context.Context, InitRequest, OutputMode, io.Writer
 			if len(args) == 1 {
 				request.Root = args[0]
 			}
-			configured := 0
-			for _, name := range []string{"source", "backend", "capsule", "devpod-provider"} {
-				if command.Flags().Changed(name) {
-					configured++
+			if request.Migrate {
+				if request.Root != "" || request.Capsule != "" || command.Flags().Changed("backend") || command.Flags().Changed("workspace-provider") || command.Flags().Changed("workspace-context") {
+					return UsageError(errors.New("--migrate cannot be combined with a root or camp settings"))
 				}
-			}
-			if configured != 0 && configured != 4 {
-				return UsageError(fmt.Errorf("--source, --backend, --capsule, and --devpod-provider must be provided together"))
-			}
-			if configured == 4 {
-				if request.Root != "" {
-					return UsageError(fmt.Errorf("init root and --source cannot be used together"))
-				}
-				if request.Source == "" || request.Backend == "" || request.Capsule == "" || request.DevPodProvider == "" {
-					return UsageError(fmt.Errorf("persistent init values cannot be empty"))
-				}
-			}
-			if configured == 0 && command.Flags().Changed("devpod-context") {
-				return UsageError(fmt.Errorf("--source, --backend, --capsule, and --devpod-provider must be provided together when --devpod-context is set"))
+			} else if request.Capsule == "" {
+				return UsageError(errors.New("init requires --name"))
 			}
 			return run(command.Context(), request, OutputModeFrom(command), command.OutOrStdout())
 		},
 	}
-	command.Flags().StringVar(&request.Source, "source", "", "persist the default source path")
-	command.Flags().StringVar(&request.Backend, "backend", "", "persist the default backend URL")
-	command.Flags().StringVar(&request.Capsule, "capsule", "", "persist the default capsule name")
-	command.Flags().StringVar(&request.DevPodProvider, "devpod-provider", "", "persist the default DevPod provider")
-	command.Flags().StringVar(&request.DevPodContext, "devpod-context", "default", "persist the DevPod context")
+	command.Flags().StringVar(&request.Capsule, "name", "", "stable camp ID")
+	command.Flags().StringVar(&request.Backend, "backend", "", "camp backend URL (defaults to machine setup)")
+	command.Flags().StringVar(&request.DevPodProvider, "workspace-provider", "", "workspace runtime provider (defaults to machine setup)")
+	command.Flags().StringVar(&request.DevPodContext, "workspace-context", "", "workspace runtime context (defaults to machine setup)")
+	command.Flags().BoolVar(&request.Migrate, "migrate", false, "migrate the legacy singleton configuration")
 	return command
 }
 
 func optionalArgumentCommand(use, short string, run func(context.Context, string, OutputMode, io.Writer) error) *cobra.Command {
-	return &cobra.Command{
+	selection := Selection{}
+	command := &cobra.Command{
 		Use: use + " [target]", Short: short, Args: usageArgs(cobra.MaximumNArgs(1)),
 		RunE: func(command *cobra.Command, args []string) error {
 			value := ""
 			if len(args) == 1 {
 				value = args[0]
 			}
-			return run(command.Context(), value, OutputModeFrom(command), command.OutOrStdout())
+			if (use == "reopen" || use == "recover") && value != "" {
+				if selection.Session != "" && selection.Session != value {
+					return UsageError(errors.New("positional session conflicts with --session"))
+				}
+				selection.Session = value
+			}
+			return run(withSelection(command.Context(), selection), value, OutputModeFrom(command), command.OutOrStdout())
 		},
 	}
+	addSelectionFlags(command, &selection)
+	return command
 }
 
 func noArgumentCommand(use, short string, run func(context.Context, OutputMode, io.Writer) error) *cobra.Command {
-	return &cobra.Command{Use: use, Short: short, Args: usageArgs(cobra.NoArgs), RunE: func(command *cobra.Command, _ []string) error {
-		return run(command.Context(), OutputModeFrom(command), command.OutOrStdout())
+	selection := Selection{}
+	command := &cobra.Command{Use: use, Short: short, Args: usageArgs(cobra.NoArgs), RunE: func(command *cobra.Command, _ []string) error {
+		return run(withSelection(command.Context(), selection), OutputModeFrom(command), command.OutOrStdout())
 	}}
+	if use == "sync" {
+		addSelectionFlags(command, &selection)
+	}
+	return command
+}
+
+func addSelectionFlags(command *cobra.Command, selection *Selection) {
+	command.Flags().StringVar(&selection.Camp, "camp", "", "select a camp by stable ID")
+	command.Flags().StringVar(&selection.Session, "session", "", "select a session by ID")
+}
+
+func selectionCommand(use, short string, run func(context.Context, OutputMode, io.Writer) error) *cobra.Command {
+	selection := Selection{}
+	command := &cobra.Command{
+		Use: use, Short: short, Args: usageArgs(cobra.NoArgs),
+		RunE: func(command *cobra.Command, _ []string) error {
+			return run(withSelection(command.Context(), selection), OutputModeFrom(command), command.OutOrStdout())
+		},
+	}
+	addSelectionFlags(command, &selection)
+	return command
 }
 
 func hiddenRequiredArgumentCommand(use string, run func(context.Context, string, OutputMode, io.Writer) error) *cobra.Command {

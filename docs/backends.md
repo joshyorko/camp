@@ -2,7 +2,7 @@
 
 Camp accepts strict credential-free `file:///absolute/path` and `s3://bucket/optional-prefix` backend identities. URL userinfo, credential-shaped query parameters, fragments, and encoded S3 identities are rejected.
 
-The first persistent setup uses `camp init` with all of `--source`, `--backend`, `--capsule`, and `--devpod-provider`; `--devpod-context` is optional and defaults to `default`. The exact flags are generated in the [command reference](generated/commands.md). Camp persists non-secret backend and provider configuration under the user configuration directory with an adjacent lock, mode-`0600` temporary file, fsync, and atomic rename.
+`camp setup` persists the machine's non-secret backend and workspace defaults under the user configuration directory with an adjacent lock, mode-`0600` temporary file, fsync, and atomic rename. `camp init <root> --name <id>` resolves omitted values from those defaults and writes the explicit backend and workspace settings to `<root>/.camp/camp.yaml`; machine config never stores an active source or camp.
 
 ## File backend
 

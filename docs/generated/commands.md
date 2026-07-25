@@ -27,6 +27,7 @@ Usage:
 
 Flags:
       --agent-forwarding                forward the SSH agent
+      --camp string                     select a camp by stable ID
       --devpod-arg strings              append one raw DevPod SSH argument
   -L, --forward-ports strings           forward a local port through DevPod SSH
       --forward-ports-timeout string    DevPod forward-port timeout
@@ -38,6 +39,7 @@ Flags:
       --install-terminfo                install local terminal information
   -R, --reverse-forward-ports strings   reverse-forward a port through DevPod SSH
       --send-env strings                send an environment variable through DevPod SSH
+      --session string                  select a session by ID
       --set-env strings                 set an environment variable in DevPod SSH
       --ssh-keepalive-interval string   SSH keepalive interval
       --stdio                           attach SSH to standard I/O
@@ -57,8 +59,10 @@ Usage:
   camp close [flags]
 
 Flags:
-      --discard   close without publishing the open session
-  -h, --help      help for close
+      --camp string      select a camp by stable ID
+      --discard          close without publishing the open session
+  -h, --help             help for close
+      --session string   select a session by ID
 
 Global flags:
       --json   emit stable JSON output
@@ -103,12 +107,12 @@ Usage:
   camp init [root] [flags]
 
 Flags:
-      --backend string           persist the default backend URL
-      --capsule string           persist the default capsule name
-      --devpod-context string    persist the DevPod context (default "default")
-      --devpod-provider string   persist the default DevPod provider
-  -h, --help                     help for init
-      --source string            persist the default source path
+      --backend string              camp backend URL (defaults to machine setup)
+  -h, --help                        help for init
+      --migrate                     migrate the legacy singleton configuration
+      --name string                 stable camp ID
+      --workspace-context string    workspace runtime context (defaults to machine setup)
+      --workspace-provider string   workspace runtime provider (defaults to machine setup)
 
 Global flags:
       --json   emit stable JSON output
@@ -135,10 +139,12 @@ Open a capsule workspace
 
 ```text
 Usage:
-  camp open [target]
+  camp open [target] [flags]
 
 Flags:
-  -h, --help   help for open
+      --camp string      select a camp by stable ID
+  -h, --help             help for open
+      --session string   select a session by ID
 
 Global flags:
       --json   emit stable JSON output
@@ -150,10 +156,12 @@ Recover an interrupted lifecycle
 
 ```text
 Usage:
-  camp recover [target]
+  camp recover [target] [flags]
 
 Flags:
-  -h, --help   help for recover
+      --camp string      select a camp by stable ID
+  -h, --help             help for recover
+      --session string   select a session by ID
 
 Global flags:
       --json   emit stable JSON output
@@ -165,10 +173,12 @@ Reopen a closed capsule workspace
 
 ```text
 Usage:
-  camp reopen [target]
+  camp reopen [target] [flags]
 
 Flags:
-  -h, --help   help for reopen
+      --camp string      select a camp by stable ID
+  -h, --help             help for reopen
+      --session string   select a session by ID
 
 Global flags:
       --json   emit stable JSON output
@@ -184,6 +194,23 @@ Usage:
 
 Flags:
   -h, --help   help for setup
+
+Global flags:
+      --json   emit stable JSON output
+```
+
+## `camp status`
+
+Show the selected camp session
+
+```text
+Usage:
+  camp status [flags]
+
+Flags:
+      --camp string      select a camp by stable ID
+  -h, --help             help for status
+      --session string   select a session by ID
 
 Global flags:
       --json   emit stable JSON output
@@ -212,10 +239,12 @@ Publish a checkpoint and remain open
 
 ```text
 Usage:
-  camp sync
+  camp sync [flags]
 
 Flags:
-  -h, --help   help for sync
+      --camp string      select a camp by stable ID
+  -h, --help             help for sync
+      --session string   select a session by ID
 
 Global flags:
       --json   emit stable JSON output

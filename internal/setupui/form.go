@@ -1,7 +1,6 @@
 package setupui
 
 import (
-	"path/filepath"
 	"strings"
 
 	"charm.land/bubbles/v2/textinput"
@@ -30,15 +29,12 @@ type ConfigForm struct {
 	compact bool
 	errText string
 	pal     Palette
-	capsuleEdited bool
 }
 
 // NewConfigForm builds the form with Camp's setup fields and their defaults.
 func NewConfigForm(pal Palette, defaults map[string]string) ConfigForm {
 	specs := []FormField{
-		{Key: "source", Label: "Source path", Placeholder: "/path/to/notes"},
-		{Key: "capsule", Label: "Capsule name", Placeholder: "capsule"},
-		{Key: "backend", Label: "Backend URL", Placeholder: "file://…"},
+		{Key: "backend", Label: "Default backend", Placeholder: "file://…"},
 		{Key: "provider", Label: "DevPod provider", Placeholder: "docker"},
 		{Key: "context", Label: "DevPod context", Placeholder: "default"},
 	}
@@ -91,11 +87,6 @@ func (f ConfigForm) Values() map[string]string {
 		}
 		out[fld.Key] = v
 	}
-	if !f.capsuleEdited {
-		if source, ok := out["source"]; ok && source != "" {
-			out["capsule"] = filepath.Base(filepath.Clean(source))
-		}
-	}
 	return out
 }
 
@@ -137,20 +128,15 @@ func (f ConfigForm) Update(msg tea.Msg) (ConfigForm, tea.Cmd) {
 			}
 			return f.advance(1), textinput.Blink
 		case "esc":
+			if f.focus > 0 {
+				return f.advance(-1), nil
+			}
 			return f, func() tea.Msg { return FormCancelMsg{} }
 		}
 	}
 	f.errText = ""
-	focusedKey := f.fields[f.focus].Key
 	var cmd tea.Cmd
-	before := ""
-	if focusedKey == "capsule" {
-		before = f.fields[f.focus].input.Value()
-	}
 	f.fields[f.focus].input, cmd = f.fields[f.focus].input.Update(msg)
-	if focusedKey == "capsule" && before != f.fields[f.focus].input.Value() {
-		f.capsuleEdited = true
-	}
 	return f, cmd
 }
 

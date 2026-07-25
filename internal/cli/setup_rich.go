@@ -9,7 +9,6 @@ import (
 	"fmt"
 	"io"
 	"os"
-	"path/filepath"
 	"runtime"
 	"sync"
 
@@ -18,7 +17,7 @@ import (
 
 	campcontract "github.com/joshyorko/camp"
 	tooladapter "github.com/joshyorko/camp/internal/adapters/tools"
-	journalstore "github.com/joshyorko/camp/internal/journal"
+	"github.com/joshyorko/camp/internal/config"
 	"github.com/joshyorko/camp/internal/presentation"
 	"github.com/joshyorko/camp/internal/setupui"
 )
@@ -35,14 +34,6 @@ func inputIsTTY(in io.Reader) bool {
 	return err == nil
 }
 
-// filepathBase is the capsule-name default derived from the source path.
-func filepathBase(source string) string {
-	if source == "" {
-		return ""
-	}
-	return filepath.Base(filepath.Clean(source))
-}
-
 // runRichSetup drives the full-screen Trailhead scene for interactive
 // truecolor terminals. It reports handled=true when it owns the whole setup
 // (so the caller returns immediately), with err reflecting cancellation or a
@@ -56,8 +47,6 @@ func (p *ProductionLifecycle) runRichSetup(ctx context.Context, in io.Reader, ou
 	pipelineCtx, pipelineCancel := context.WithCancel(ctx)
 	pipeline := newRichSetupPipeline(p, pipelineCtx)
 	result, err := setupui.RunWithExit(ctx, in, out, setupui.DefaultPalette(), sprites, map[string]string{
-		"source":   defaults.Source,
-		"capsule":  filepathBase(defaults.Source),
 		"backend":  defaults.Backend,
 		"provider": "docker",
 		"context":  "default",
@@ -146,16 +135,22 @@ func (p *richSetupPipeline) run(values map[string]string, out chan<- tea.Msg) {
 	}
 
 	request := InitRequest{
-		Source:         values["source"],
-		Capsule:        values["capsule"],
 		Backend:        values["backend"],
 		DevPodProvider: values["provider"],
 		DevPodContext:  values["context"],
 	}
+	if !emit(setupui.ActivityMsg{Stage: setupui.StageToolchain, Message: "Writing machine defaults…"}) {
+		return
+	}
 
-	// Persist configuration (validates + writes atomically). A failure here is
+	paths, err := config.ResolveXDGPaths(config.XDGInput{Environment: environmentMap(os.Environ())})
+	if err != nil {
+		fail(setupui.StageToolchain, err, "camp setup")
+		return
+	}
+	// Persist machine defaults (validates + writes atomically). A failure here is
 	// a toolchain-stage failure with the canonical recovery command.
-	if err := p.lifecycle.Init(p.ctx, request, ModeHuman, discardWriter{}); err != nil {
+	if _, err := persistSetupDefaults(paths.ConfigPath, request); err != nil {
 		fail(setupui.StageToolchain, err, "camp setup")
 		return
 	}
@@ -167,32 +162,12 @@ func (p *richSetupPipeline) run(values map[string]string, out chan<- tea.Msg) {
 		return
 	}
 
-	// Read the persisted, authoritative facts so waypoint metadata reflects the
-	// user's real answers rather than anything invented.
-	settings, err := resolveProductionSettings()
-	if err != nil {
-		fail(setupui.StageToolchain, err, "camp setup")
-		return
-	}
-	journal, err := journalstore.NewStore(settings.paths.DataRoot)
-	if err != nil {
-		fail(setupui.StageToolchain, err, "camp setup")
-		return
-	}
-	sessions, err := journal.List(p.ctx)
-	if err != nil {
-		fail(setupui.StageToolchain, err, "camp setup")
-		return
-	}
-	model, err := buildCampsiteModel(lock, settings.runtime, settings.backend, sessions)
-	if err != nil {
-		fail(setupui.StageToolchain, err, "camp setup")
-		return
-	}
-
 	// Toolchain: resolve DevPod and Hauler for real.
 	environment := environmentMap(os.Environ())
 	completed := func(name string, resolution tooladapter.Resolution) error { return nil }
+	if !emit(setupui.ActivityMsg{Stage: setupui.StageToolchain, Message: "Installing DevPod and Hauler…"}) {
+		return
+	}
 	if err := runProductionToolSetupWithEvents(p.ctx, ModeHuman, discardWriter{}, lockBytes, "", environment, runtime.GOOS, runtime.GOARCH, completed); err != nil {
 		fail(setupui.StageToolchain, err, "camp setup")
 		return
@@ -201,15 +176,15 @@ func (p *richSetupPipeline) run(values map[string]string, out chan<- tea.Msg) {
 	// actually ready so the UI does not claim completion before the real setup is
 	// done.
 	if !emit(setupui.WaypointCompletedMsg{Stage: setupui.StageToolchain, Meta: []string{
-		fmt.Sprintf("%s %s", model.DevPod.Name, model.DevPod.Version),
-		fmt.Sprintf("%s %s", model.Hauler.Name, model.Hauler.Version),
+		fmt.Sprintf("devpod %s", lock.Tools["devpod"].Version),
+		fmt.Sprintf("hauler %s", lock.Tools["hauler"].Version),
 	}}) {
 		return
 	}
 	if !emit(setupui.ConfigAcceptedMsg{
-		Waypoints: waypointsFromModel(model),
-		NextCmd:   model.NextCommand,
-		ReadyLine: fmt.Sprintf("%s · %s · %s backend", model.Capsule, model.Provider, model.BackendKind),
+		Waypoints: machineSetupWaypoints(lock, request),
+		NextCmd:   "camp init --name <id>",
+		ReadyLine: "machine ready · no camp selected",
 	}) {
 		return
 	}
@@ -217,18 +192,30 @@ func (p *richSetupPipeline) run(values map[string]string, out chan<- tea.Msg) {
 	// Runtime, Capsule, Storage are authoritative facts derived from the
 	// persisted configuration; emit them in order once established.
 	if !emit(setupui.WaypointCompletedMsg{Stage: setupui.StageRuntime, Meta: []string{
-		fmt.Sprintf("%s · %s", model.Provider, model.RuntimeKind),
-		"context " + model.Context,
+		request.DevPodProvider,
+		"context " + request.DevPodContext,
 	}}) {
 		return
 	}
-	if !emit(setupui.WaypointCompletedMsg{Stage: setupui.StageCapsule, Meta: []string{model.Capsule, model.Source}}) {
+	if !emit(setupui.WaypointCompletedMsg{Stage: setupui.StageCapsule, Meta: []string{"no camp selected", "run camp init"}}) {
 		return
 	}
-	if !emit(setupui.WaypointCompletedMsg{Stage: setupui.StageStorage, Meta: []string{model.BackendKind + " backend", model.Storage}}) {
+	if !emit(setupui.WaypointCompletedMsg{Stage: setupui.StageStorage, Meta: []string{"default backend", request.Backend}}) {
 		return
 	}
 	emit(setupui.AllReadyMsg{})
+}
+
+func machineSetupWaypoints(lock tooladapter.Lock, request InitRequest) [4]setupui.Waypoint {
+	return [4]setupui.Waypoint{
+		{Label: "TOOLCHAIN", Landmark: "crate", Meta: []string{
+			fmt.Sprintf("devpod %s", lock.Tools["devpod"].Version),
+			fmt.Sprintf("hauler %s", lock.Tools["hauler"].Version),
+		}},
+		{Label: "RUNTIME", Landmark: "helm", Meta: []string{request.DevPodProvider, "context " + request.DevPodContext}},
+		{Label: "CAMP", Landmark: "tent", Meta: []string{"no camp selected", "run camp init"}},
+		{Label: "STORAGE", Landmark: "campfire", Meta: []string{"default backend", request.Backend}},
+	}
 }
 
 func waypointsFromModel(model presentation.CampsiteModel) [4]setupui.Waypoint {

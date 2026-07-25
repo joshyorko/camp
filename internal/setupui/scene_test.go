@@ -109,7 +109,7 @@ func TestConfigureStateShowsFormAndSuppressesCallouts(t *testing.T) {
 	if !strings.Contains(frame, "CONFIGURE") {
 		t.Fatal("configure frame missing CONFIGURE panel")
 	}
-	if !strings.Contains(frame, "Source path") {
+	if !strings.Contains(frame, "Default backend") {
 		t.Fatal("configure frame missing form fields")
 	}
 	// Waypoint metadata callouts are suppressed while all stages are pending.
@@ -178,7 +178,7 @@ func TestCompactConfigureFitsSmallTerminal(t *testing.T) {
 		t.Fatalf("configure 80x24 renders %d lines", len(lines))
 	}
 	plain := ansi.Strip(frame)
-	for _, want := range []string{"CONFIGURE", "Source path", "DevPod context"} {
+	for _, want := range []string{"CONFIGURE", "Default backend", "DevPod context"} {
 		if !strings.Contains(plain, want) {
 			t.Fatalf("configure 80x24 missing %q", want)
 		}
