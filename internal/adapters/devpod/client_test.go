@@ -275,6 +275,23 @@ func TestProbeProviderNeverAddsMissingDocker(t *testing.T) {
 	}
 }
 
+func TestListProviderNamesUsesReadOnlyContextScopedOutput(t *testing.T) {
+	t.Parallel()
+
+	runner := &providerSequenceRunner{results: []ports.Result{{Stdout: []byte(`{"ssh":{"state":{"initialized":true}},"docker":{"default":true}}`)}}}
+	got, err := NewClient("/opt/devpod", runner).ListProviderNames(context.Background(), "work")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(got, []string{"docker", "ssh"}) {
+		t.Fatalf("provider names = %#v", got)
+	}
+	want := [][]string{{"provider", "list", "--context", "work", "--output", "json"}}
+	if !reflect.DeepEqual(runner.argv, want) {
+		t.Fatalf("provider argv = %#v, want %#v", runner.argv, want)
+	}
+}
+
 type providerSequenceRunner struct {
 	results []ports.Result
 	argv    [][]string

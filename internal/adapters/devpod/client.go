@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"sort"
 	"strconv"
 	"strings"
 
@@ -305,6 +306,19 @@ func (c *Client) listProviders(ctx context.Context, devpodContext string) (map[s
 		return nil, fmt.Errorf("decode DevPod provider list: %w", err)
 	}
 	return providers, nil
+}
+
+func (c *Client) ListProviderNames(ctx context.Context, devpodContext string) ([]string, error) {
+	providers, err := c.listProviders(ctx, devpodContext)
+	if err != nil {
+		return nil, err
+	}
+	names := make([]string, 0, len(providers))
+	for name := range providers {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	return names, nil
 }
 
 func (c *Client) SSH(ctx context.Context, options SSHOptions) (ports.Result, error) {

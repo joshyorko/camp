@@ -126,6 +126,215 @@ func (p *ProductionLifecycle) List(ctx context.Context, mode OutputMode, out io.
 	return table.Flush()
 }
 
+func (p *ProductionLifecycle) Status(ctx context.Context, request SessionRequest, mode OutputMode, out io.Writer) error {
+	composition, err := composeProduction(ctx)
+	if err != nil {
+		return err
+	}
+	services, err := composeServiceBundle(composition)
+	if err != nil {
+		return err
+	}
+	result, err := (app.OperationalQueries{
+		Sessions: composition.journal,
+		Observer: lifecycleadapter.NewSessionObserver(services.processes, services.units),
+	}).Status(ctx, operationalSelector(request))
+	if err != nil {
+		return err
+	}
+	return writeStatusResult(out, mode, result)
+}
+
+func (p *ProductionLifecycle) ImagesList(ctx context.Context, request SessionRequest, mode OutputMode, out io.Writer) error {
+	base, err := composeProductionBase(ctx)
+	if err != nil {
+		return err
+	}
+	result, err := app.NewImageOperations(base.journal, nil, nil, nil, nil, nil, nil).List(ctx, operationalSelector(request))
+	if err != nil {
+		return err
+	}
+	return writeImageResult(out, mode, "images-list", result)
+}
+
+func (p *ProductionLifecycle) ImagesCapture(ctx context.Context, request ImageCaptureRequest, mode OutputMode, out io.Writer) error {
+	operations, err := composeProductionImageOperations(ctx)
+	if err != nil {
+		return err
+	}
+	result, err := operations.Capture(ctx, operationalSelector(request.Session), request.ExcludeTags)
+	if err != nil {
+		return err
+	}
+	return writeImageResult(out, mode, "images-capture", result)
+}
+
+func (p *ProductionLifecycle) ImagesRestore(ctx context.Context, request SessionRequest, mode OutputMode, out io.Writer) error {
+	operations, err := composeProductionImageOperations(ctx)
+	if err != nil {
+		return err
+	}
+	result, err := operations.Restore(ctx, operationalSelector(request))
+	if err != nil {
+		return err
+	}
+	return writeImageRestoreResult(out, mode, result)
+}
+
+func (p *ProductionLifecycle) ServeStatus(ctx context.Context, request ServeRequest, mode OutputMode, out io.Writer) error {
+	serve, err := composeProductionServe(ctx)
+	if err != nil {
+		return err
+	}
+	result, err := serve.Status(ctx, operationalSelector(request.Session), request.Service)
+	if err != nil {
+		return err
+	}
+	return writeServeResult(out, mode, "serve-status", result)
+}
+
+func (p *ProductionLifecycle) ServeLogs(ctx context.Context, request ServeLogsRequest, mode OutputMode, out io.Writer) error {
+	serve, err := composeProductionServe(ctx)
+	if err != nil {
+		return err
+	}
+	result, err := serve.Logs(ctx, operationalSelector(request.Session), request.Service, request.TailBytes)
+	if err != nil {
+		return err
+	}
+	return writeServeLogsResult(out, mode, result)
+}
+
+func (p *ProductionLifecycle) ServeRestart(ctx context.Context, request ServeRestartRequest, mode OutputMode, out io.Writer) error {
+	serve, err := composeProductionServe(ctx)
+	if err != nil {
+		return err
+	}
+	result, err := serve.Restart(ctx, app.ServeRestartRequest{
+		Selector: operationalSelector(request.Session), Service: request.Service, LaunchToken: request.LaunchToken,
+	})
+	if err != nil {
+		return err
+	}
+	return writeServeResult(out, mode, "serve-restart", result)
+}
+
+func (p *ProductionLifecycle) ProvidersList(ctx context.Context, mode OutputMode, out io.Writer) error {
+	composition, err := composeProduction(ctx)
+	if err != nil {
+		return err
+	}
+	result, err := app.NewProviders(devpodProviderReader{
+		client: composition.devpod, context: composition.runtime.DevPodContext,
+	}).List(ctx)
+	if err != nil {
+		return err
+	}
+	return writeProvidersResult(out, mode, result)
+}
+
+type devpodProviderReader struct {
+	client  *devpod.Client
+	context string
+}
+
+func (r devpodProviderReader) ListProviders(ctx context.Context) ([]app.Provider, error) {
+	names, err := r.client.ListProviderNames(ctx, r.context)
+	if err != nil {
+		return nil, err
+	}
+	result := make([]app.Provider, 0, len(names))
+	for _, name := range names {
+		result = append(result, app.Provider{Name: name})
+	}
+	return result, nil
+}
+
+func operationalSelector(request SessionRequest) app.SessionSelector {
+	return app.SessionSelector{SessionID: request.SessionID, Capsule: request.Capsule, Branch: request.Branch}
+}
+
+func writeStatusResult(out io.Writer, mode OutputMode, result app.SessionReadModel) error {
+	if mode == ModeJSON {
+		return writeSuccess(out, mode, "status", result, "")
+	}
+	if _, err := fmt.Fprintln(out, "SESSION\tCAPSULE\tBRANCH\tSTATE\tMODE\tRECOVERY"); err != nil {
+		return err
+	}
+	if _, err := fmt.Fprintf(out, "%s\t%s\t%s\t%s\t%s\t%s\n", result.ID, result.Capsule, result.Branch, result.State, result.Mode, result.Recovery.Condition); err != nil {
+		return err
+	}
+	if _, err := fmt.Fprintln(out, "SERVICE\tLIVENESS"); err != nil {
+		return err
+	}
+	for _, service := range result.Services {
+		if _, err := fmt.Fprintf(out, "%s\t%s\n", service.Name, service.Liveness); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func writeImageResult(out io.Writer, mode OutputMode, kind string, result app.ImageInventoryReadModel) error {
+	if mode == ModeJSON {
+		return writeSuccess(out, mode, kind, result, "")
+	}
+	table := tabwriter.NewWriter(out, 0, 4, 2, ' ', 0)
+	_, _ = fmt.Fprintf(table, "SESSION\tCAPSULE\tBRANCH\tIMAGES\n%s\t%s\t%s\t%d\n", result.SessionID, result.Capsule, result.Branch, len(result.Images))
+	_, _ = fmt.Fprintln(table, "REFERENCE\tDIGEST\tSOURCE")
+	for _, image := range result.Images {
+		_, _ = fmt.Fprintf(table, "%s\t%s\t%s\n", image.CapturedReference, image.CapturedManifestDigest, image.Source)
+	}
+	return table.Flush()
+}
+
+func writeImageRestoreResult(out io.Writer, mode OutputMode, result app.ImageRestoreReadModel) error {
+	if mode == ModeJSON {
+		return writeSuccess(out, mode, "images-restore", result, "")
+	}
+	_, err := fmt.Fprintf(out, "Restored %d images and %d tags for %s (%s)\n", result.Restored, result.Tags, result.Capsule, result.SessionID)
+	return err
+}
+
+func writeServeResult(out io.Writer, mode OutputMode, kind string, result app.ServiceReadModel) error {
+	if mode == ModeJSON {
+		return writeSuccess(out, mode, kind, result, "")
+	}
+	_, err := fmt.Fprintf(out, "%s\t%s\n", result.Name, result.Liveness)
+	return err
+}
+
+func writeProvidersResult(out io.Writer, mode OutputMode, result []app.Provider) error {
+	if mode == ModeJSON {
+		return writeSuccess(out, mode, "provider-list", result, "")
+	}
+	if _, err := fmt.Fprintln(out, "PROVIDER"); err != nil {
+		return err
+	}
+	for _, provider := range result {
+		if _, err := fmt.Fprintln(out, provider.Name); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func writeServeLogsResult(out io.Writer, mode OutputMode, result supervisor.LogChunk) error {
+	if mode == ModeJSON {
+		return writeSuccess(out, mode, "serve-logs", struct {
+			Text      string `json:"text"`
+			Truncated bool   `json:"truncated"`
+		}{Text: string(result.Bytes), Truncated: result.Truncated}, "")
+	}
+	if result.Truncated {
+		if _, err := io.WriteString(out, "[earlier log bytes omitted]\n"); err != nil {
+			return err
+		}
+	}
+	_, err := out.Write(result.Bytes)
+	return err
+}
+
 func (p *ProductionLifecycle) Doctor(ctx context.Context, mode OutputMode, out io.Writer) error {
 	environment := environmentMap(os.Environ())
 	paths, err := config.ResolveXDGPaths(config.XDGInput{Environment: environment})
@@ -792,6 +1001,53 @@ func composeServiceBundle(composition productionComposition) (serviceBundle, err
 	units := supervisor.NewServiceSupervisor(composition.journal, processes, supervisor.NewUnitInspector(composition.runner, http.DefaultClient))
 	confinement := supervisor.NewConfinementResolver(composition.runner, exec.LookPath, func() string { return "host" })
 	return serviceBundle{starter: lifecycleadapter.NewServiceStarter(confinement, supervisor.NewPortAllocator(), units, haulerPath, composition.hauler), units: units, processes: processes}, nil
+}
+
+func composeProductionOperationalDependencies(ctx context.Context) (productionComposition, serviceBundle, *journalstore.OperationLocker, *app.RecoverySafetyGuard, error) {
+	composition, err := composeProduction(ctx)
+	if err != nil {
+		return productionComposition{}, serviceBundle{}, nil, nil, err
+	}
+	services, err := composeServiceBundle(composition)
+	if err != nil {
+		return productionComposition{}, serviceBundle{}, nil, nil, err
+	}
+	store, err := objectstore.NewWriter(ctx, composition.backend, objectstore.Options{})
+	if err != nil {
+		return productionComposition{}, serviceBundle{}, nil, nil, err
+	}
+	locks, err := journalstore.NewOperationLocker(composition.paths.DataRoot, host.NewIdentity())
+	if err != nil {
+		return productionComposition{}, serviceBundle{}, nil, nil, err
+	}
+	guard := app.NewRecoverySafetyGuard(composition.ownership, coordination.NewLeaseRepository(store), composition.clock)
+	return composition, services, locks, guard, nil
+}
+
+func composeProductionImageOperations(ctx context.Context) (*app.ImageOperations, error) {
+	composition, services, locks, guard, err := composeProductionOperationalDependencies(ctx)
+	if err != nil {
+		return nil, err
+	}
+	catalog := registry.NewCatalog(http.DefaultClient, 100)
+	return app.NewImageOperations(
+		composition.journal, locks, guard, services.units,
+		images.NewCapturer(composition.devpod, catalog, composition.clock),
+		images.NewRestorer(composition.devpod, catalog),
+		composition.clock,
+	), nil
+}
+
+func composeProductionServe(ctx context.Context) (*app.Serve, error) {
+	composition, services, locks, guard, err := composeProductionOperationalDependencies(ctx)
+	if err != nil {
+		return nil, err
+	}
+	logs, err := supervisor.NewServiceLogReader(composition.paths.RuntimeRoot, 1024*1024)
+	if err != nil {
+		return nil, err
+	}
+	return app.NewServe(composition.journal, locks, guard, services.units, logs), nil
 }
 
 func composeSupervisorBootstrap(ctx context.Context) (supervisorBootstrap, error) {
