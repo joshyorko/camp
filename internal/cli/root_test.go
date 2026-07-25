@@ -122,6 +122,122 @@ func (r *recordingLifecycle) Status(ctx context.Context, mode OutputMode, _ io.W
 	return nil
 }
 
+type recordingOperationalLifecycle struct {
+	*recordingLifecycle
+	imageListRequests    []SessionRequest
+	imageCaptureRequests []ImageCaptureRequest
+	imageRestoreRequests []SessionRequest
+	serveStatusRequests  []ServeRequest
+	serveLogsRequests    []ServeLogsRequest
+	serveRestartRequests []ServeRestartRequest
+	providerListCalls    int
+}
+
+func (r *recordingOperationalLifecycle) ImagesList(_ context.Context, request SessionRequest, mode OutputMode, _ io.Writer) error {
+	r.imageListRequests = append(r.imageListRequests, request)
+	r.calls = append(r.calls, "images-list:"+string(mode))
+	return nil
+}
+
+func (r *recordingOperationalLifecycle) ImagesCapture(_ context.Context, request ImageCaptureRequest, mode OutputMode, _ io.Writer) error {
+	r.imageCaptureRequests = append(r.imageCaptureRequests, request)
+	r.calls = append(r.calls, "images-capture:"+string(mode))
+	return nil
+}
+
+func (r *recordingOperationalLifecycle) ImagesRestore(_ context.Context, request SessionRequest, mode OutputMode, _ io.Writer) error {
+	r.imageRestoreRequests = append(r.imageRestoreRequests, request)
+	r.calls = append(r.calls, "images-restore:"+string(mode))
+	return nil
+}
+
+func (r *recordingOperationalLifecycle) ServeStatus(_ context.Context, request ServeRequest, mode OutputMode, _ io.Writer) error {
+	r.serveStatusRequests = append(r.serveStatusRequests, request)
+	r.calls = append(r.calls, "serve-status:"+string(mode))
+	return nil
+}
+
+func (r *recordingOperationalLifecycle) ServeLogs(_ context.Context, request ServeLogsRequest, mode OutputMode, _ io.Writer) error {
+	r.serveLogsRequests = append(r.serveLogsRequests, request)
+	r.calls = append(r.calls, "serve-logs:"+string(mode))
+	return nil
+}
+
+func (r *recordingOperationalLifecycle) ServeRestart(_ context.Context, request ServeRestartRequest, mode OutputMode, _ io.Writer) error {
+	r.serveRestartRequests = append(r.serveRestartRequests, request)
+	r.calls = append(r.calls, "serve-restart:"+string(mode))
+	return nil
+}
+
+func (r *recordingOperationalLifecycle) ProvidersList(_ context.Context, mode OutputMode, _ io.Writer) error {
+	r.providerListCalls++
+	r.calls = append(r.calls, "provider-list:"+string(mode))
+	return nil
+}
+
+func TestOperationalCommandsMapStableBoundaryRequests(t *testing.T) {
+	t.Parallel()
+
+	lifecycle := &recordingOperationalLifecycle{recordingLifecycle: &recordingLifecycle{}}
+	tests := []struct {
+		name string
+		args []string
+		want string
+	}{
+		{name: "images list", args: []string{"images", "list", "--session", "session-2"}, want: "images-list:human"},
+		{name: "images capture", args: []string{"images", "capture", "--capsule", "brain", "--exclude-tag", "volatile", "--exclude-tag", "scratch"}, want: "images-capture:human"},
+		{name: "images restore", args: []string{"images", "restore", "--branch", "main"}, want: "images-restore:human"},
+		{name: "serve status", args: []string{"serve", "status", "registry", "--session", "session-3"}, want: "serve-status:human"},
+		{name: "serve logs", args: []string{"serve", "logs", "fileserver", "--tail-bytes", "4096"}, want: "serve-logs:human"},
+		{name: "serve restart", args: []string{"serve", "restart", "registry", "--launch-token", "token-1"}, want: "serve-restart:human"},
+		{name: "provider list", args: []string{"provider", "list"}, want: "provider-list:human"},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			var stderr bytes.Buffer
+			if code := Execute(context.Background(), NewRootWithLifecycle(lifecycle), test.args, Streams{Out: io.Discard, ErrOut: &stderr}); code != int(ExitSuccess) {
+				t.Fatalf("Execute(%q) = %d, stderr=%q", test.args, code, stderr.String())
+			}
+			if got := lifecycle.calls[len(lifecycle.calls)-1]; got != test.want {
+				t.Fatalf("call = %q, want %q", got, test.want)
+			}
+		})
+	}
+
+	if got := lifecycle.imageCaptureRequests[0]; got.Session.Capsule != "brain" || strings.Join(got.ExcludeTags, ",") != "volatile,scratch" {
+		t.Fatalf("capture request = %#v", got)
+	}
+	if got := lifecycle.serveLogsRequests[0]; got.Service != "fileserver" || got.TailBytes != 4096 {
+		t.Fatalf("serve logs request = %#v", got)
+	}
+	if got := lifecycle.serveRestartRequests[0]; got.Service != "registry" || got.LaunchToken != "token-1" {
+		t.Fatalf("serve restart request = %#v", got)
+	}
+}
+
+func TestOperationalCommandsRejectInvalidRequestsBeforeEffects(t *testing.T) {
+	t.Parallel()
+
+	for _, args := range [][]string{
+		{"status", "extra"},
+		{"images", "capture", "--exclude-tag", ""},
+		{"serve", "logs", "registry", "--tail-bytes", "0"},
+		{"serve", "restart", "registry"},
+		{"provider", "update"},
+		{"config"},
+	} {
+		lifecycle := &recordingOperationalLifecycle{recordingLifecycle: &recordingLifecycle{}}
+		var stderr bytes.Buffer
+		code := Execute(context.Background(), NewRootWithLifecycle(lifecycle), args, Streams{ErrOut: &stderr})
+		if code != int(ExitUsage) {
+			t.Fatalf("Execute(%q) = %d, stderr=%q; want usage", args, code, stderr.String())
+		}
+		if len(lifecycle.calls) != 0 {
+			t.Fatalf("Execute(%q) invoked effects: %v", args, lifecycle.calls)
+		}
+	}
+}
+
 func (r *recordingStriker) Strike(_ context.Context, request StrikeRequest, _ OutputMode, _ io.Writer) error {
 	r.request = request
 	return nil

@@ -104,6 +104,50 @@ type CampStriker interface {
 	Strike(context.Context, StrikeRequest, OutputMode, io.Writer) error
 }
 
+type SessionRequest struct {
+	SessionID string
+	Capsule   string
+	Branch    string
+}
+
+type ImageCaptureRequest struct {
+	Session     SessionRequest
+	ExcludeTags []string
+}
+
+type ServeRequest struct {
+	Session SessionRequest
+	Service string
+}
+
+type ServeLogsRequest struct {
+	Session   SessionRequest
+	Service   string
+	TailBytes int64
+}
+
+type ServeRestartRequest struct {
+	Session     SessionRequest
+	Service     string
+	LaunchToken string
+}
+
+type ImageOperations interface {
+	ImagesList(context.Context, SessionRequest, OutputMode, io.Writer) error
+	ImagesCapture(context.Context, ImageCaptureRequest, OutputMode, io.Writer) error
+	ImagesRestore(context.Context, SessionRequest, OutputMode, io.Writer) error
+}
+
+type ServeOperations interface {
+	ServeStatus(context.Context, ServeRequest, OutputMode, io.Writer) error
+	ServeLogs(context.Context, ServeLogsRequest, OutputMode, io.Writer) error
+	ServeRestart(context.Context, ServeRestartRequest, OutputMode, io.Writer) error
+}
+
+type ProviderLister interface {
+	ProvidersList(context.Context, OutputMode, io.Writer) error
+}
+
 func NewRootWithLifecycle(lifecycle Lifecycle) *cobra.Command {
 	root := &cobra.Command{
 		Use:           "camp",
@@ -143,6 +187,15 @@ func NewRootWithLifecycle(lifecycle Lifecycle) *cobra.Command {
 	if initLifecycle, ok := lifecycle.(InteractiveInit); ok {
 		interactiveInit = initLifecycle.InitInteractive
 	}
+	if imageOperations, ok := lifecycle.(ImageOperations); ok {
+		root.AddCommand(newImagesCommand(imageOperations))
+	}
+	if serveOperations, ok := lifecycle.(ServeOperations); ok {
+		root.AddCommand(newServeCommand(serveOperations))
+	}
+	if providers, ok := lifecycle.(ProviderLister); ok {
+		root.AddCommand(newProviderCommand(providers.ProvidersList))
+	}
 	root.AddCommand(
 		newInitCommand(lifecycle.Init, interactiveInit),
 		optionalArgumentCommand("open", "Open a capsule workspace", lifecycle.Open),
@@ -154,6 +207,108 @@ func NewRootWithLifecycle(lifecycle Lifecycle) *cobra.Command {
 		hiddenRequiredArgumentCommand("supervise", lifecycle.Supervise),
 	)
 	return root
+}
+
+func newImagesCommand(operations ImageOperations) *cobra.Command {
+	command := &cobra.Command{Use: "images", Short: "Inspect and reconcile workspace images", Args: usageArgs(cobra.NoArgs)}
+
+	listRequest := SessionRequest{}
+	list := &cobra.Command{
+		Use: "list", Short: "List recorded workspace images", Args: usageArgs(cobra.NoArgs),
+		RunE: func(command *cobra.Command, _ []string) error {
+			return operations.ImagesList(command.Context(), listRequest, OutputModeFrom(command), command.OutOrStdout())
+		},
+	}
+	addSessionFlags(list, &listRequest)
+
+	captureRequest := ImageCaptureRequest{}
+	capture := &cobra.Command{
+		Use: "capture", Short: "Capture workspace images", Args: usageArgs(cobra.NoArgs),
+		RunE: func(command *cobra.Command, _ []string) error {
+			if command.Flags().Changed("exclude-tag") && len(captureRequest.ExcludeTags) == 0 {
+				return UsageError(errors.New("--exclude-tag cannot be empty"))
+			}
+			for _, tag := range captureRequest.ExcludeTags {
+				if tag == "" {
+					return UsageError(errors.New("--exclude-tag cannot be empty"))
+				}
+			}
+			return operations.ImagesCapture(command.Context(), captureRequest, OutputModeFrom(command), command.OutOrStdout())
+		},
+	}
+	addSessionFlags(capture, &captureRequest.Session)
+	capture.Flags().StringSliceVar(&captureRequest.ExcludeTags, "exclude-tag", nil, "exclude an image tag from capture")
+
+	restoreRequest := SessionRequest{}
+	restore := &cobra.Command{
+		Use: "restore", Short: "Restore recorded workspace images", Args: usageArgs(cobra.NoArgs),
+		RunE: func(command *cobra.Command, _ []string) error {
+			return operations.ImagesRestore(command.Context(), restoreRequest, OutputModeFrom(command), command.OutOrStdout())
+		},
+	}
+	addSessionFlags(restore, &restoreRequest)
+	command.AddCommand(list, capture, restore)
+	return command
+}
+
+func newServeCommand(operations ServeOperations) *cobra.Command {
+	command := &cobra.Command{Use: "serve", Short: "Inspect and restart Camp-managed services", Args: usageArgs(cobra.NoArgs)}
+
+	statusRequest := ServeRequest{}
+	status := &cobra.Command{
+		Use: "status [service]", Short: "Show observed service status", Args: usageArgs(cobra.ExactArgs(1)),
+		RunE: func(command *cobra.Command, args []string) error {
+			statusRequest.Service = args[0]
+			return operations.ServeStatus(command.Context(), statusRequest, OutputModeFrom(command), command.OutOrStdout())
+		},
+	}
+	addSessionFlags(status, &statusRequest.Session)
+
+	logsRequest := ServeLogsRequest{TailBytes: 64 * 1024}
+	logs := &cobra.Command{
+		Use: "logs [service]", Short: "Read bounded service logs", Args: usageArgs(cobra.ExactArgs(1)),
+		RunE: func(command *cobra.Command, args []string) error {
+			if logsRequest.TailBytes <= 0 {
+				return UsageError(errors.New("--tail-bytes must be greater than zero"))
+			}
+			logsRequest.Service = args[0]
+			return operations.ServeLogs(command.Context(), logsRequest, OutputModeFrom(command), command.OutOrStdout())
+		},
+	}
+	addSessionFlags(logs, &logsRequest.Session)
+	logs.Flags().Int64Var(&logsRequest.TailBytes, "tail-bytes", logsRequest.TailBytes, "maximum log bytes to read")
+
+	restartRequest := ServeRestartRequest{}
+	restart := &cobra.Command{
+		Use: "restart [service]", Short: "Restart a recorded service", Args: usageArgs(cobra.ExactArgs(1)),
+		RunE: func(command *cobra.Command, args []string) error {
+			if restartRequest.LaunchToken == "" {
+				return UsageError(errors.New("--launch-token is required"))
+			}
+			restartRequest.Service = args[0]
+			return operations.ServeRestart(command.Context(), restartRequest, OutputModeFrom(command), command.OutOrStdout())
+		},
+	}
+	addSessionFlags(restart, &restartRequest.Session)
+	restart.Flags().StringVar(&restartRequest.LaunchToken, "launch-token", "", "new unique service launch token")
+
+	command.AddCommand(status, logs, restart)
+	return command
+}
+
+func newProviderCommand(run func(context.Context, OutputMode, io.Writer) error) *cobra.Command {
+	command := &cobra.Command{
+		Use: "provider", Short: "Inspect configured DevPod providers", Args: usageArgs(cobra.NoArgs),
+		RunE: func(*cobra.Command, []string) error { return nil },
+	}
+	command.AddCommand(noArgumentCommand("list", "List configured DevPod providers", run))
+	return command
+}
+
+func addSessionFlags(command *cobra.Command, request *SessionRequest) {
+	command.Flags().StringVar(&request.SessionID, "session", "", "select an exact session ID")
+	command.Flags().StringVar(&request.Capsule, "capsule", "", "select a capsule")
+	command.Flags().StringVar(&request.Branch, "branch", "", "select a branch")
 }
 
 func newStrikeCommand(run func(context.Context, StrikeRequest, OutputMode, io.Writer) error) *cobra.Command {
