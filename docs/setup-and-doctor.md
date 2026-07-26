@@ -4,7 +4,7 @@
 
 `camp doctor` reports a versioned capability model. Human and JSON rendering share the same model. The stable probe statuses are `healthy`, `degraded`, `blocked`, and `skipped-not-configured`; a blocked aggregate exits nonzero.
 
-Doctor currently hashes the resolved DevPod and Hauler binaries and runs their identity commands. Pasta and file-backend probes do not prove functional lifecycle behavior. S3 diagnosis can prove credential-chain resolution but not backend read/write, compare-and-swap, or cleanup. Doctor does not prove DevPod workspace creation, Kubernetes, forwarding, Hauler services, T3/Sites, or a release.
+Doctor verifies the managed DevPod and Hauler identities from the embedded lock, runs a disposable Pasta namespace/listener/cleanup probe, and performs a unique file-backend transaction with readback, conditional replacement/conflict, and identity-safe cleanup. S3 diagnosis proves the configured credential chain and performs the same backend transaction when the backend is available. Provider, workspace, forwarding, and service checks are read-only reachability probes for configured active sessions; they are `skipped-not-configured` when no corresponding configuration or active journal record exists. These checks do not create a workspace, mutate a provider, or prove Kubernetes, T3/Sites, or a release.
 
 Credentials are runtime inputs. Do not place access tokens or AWS secrets in Camp configuration, transcripts, journals, or capsules. Probe output is redacted and bounded, but operators should still treat raw third-party tool logs as potentially sensitive.
 

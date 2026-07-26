@@ -19,7 +19,11 @@ import (
 	"github.com/joshyorko/camp/internal/domain"
 )
 
-func productionReachabilityProbes(bootstrap config.Bootstrap, sessions []domain.JournalSnapshot, tools doctorManagedToolResolver) []doctor.Probe {
+type doctorToolResolver interface {
+	Inspect(context.Context, string) (doctor.ManagedToolIdentity, error)
+}
+
+func productionReachabilityProbes(bootstrap config.Bootstrap, sessions []domain.JournalSnapshot, tools doctorToolResolver) []doctor.Probe {
 	active := make([]domain.JournalSnapshot, 0, len(sessions))
 	for _, session := range sessions {
 		if session.State != domain.SessionClosed {
