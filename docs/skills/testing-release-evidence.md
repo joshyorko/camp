@@ -33,6 +33,9 @@ For GitHub Actions evidence, record runner assignment and executed steps. A
 completed failure with an empty runner name and zero steps is infrastructure
 admission evidence only: it proves neither source failure nor source success
 and must be rerun against the exact candidate before claiming CI proof.
+If GitHub reports account billing or spending-limit admission failure, classify
+the hosted gate as billing-blocked before execution; do not infer a repository
+failure, skip success, or CI proof from that check.
 
 ## Durable documentation and release-note boundary
 
