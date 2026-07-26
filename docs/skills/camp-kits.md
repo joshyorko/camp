@@ -6,14 +6,21 @@ manifests. `Inspect` and `Verify` operate on `manifest.json`-first deterministic
 tar+zstd archives. CLI composition reserves `camp kit export --generation REF
 --output FILE` for a lifecycle exporter with strict required flags; the
 production generation resolver is not wired yet. Camp still does not import,
-load, or accept kits via CLI; schema version 1 is intentionally unsupported because no
+load, or accept kits into its lifecycle backend via CLI. `camp kit import FILE
+--as CAMP` does perform complete verification before extracting the verified
+regular payload closure into a new no-replace local import directory; it does
+not create a backend pointer or claim disconnected lifecycle proof. Schema
+version 1 is intentionally unsupported because no
 public command consumed or emitted it.
 
 ## CLI usage
 
 - `camp kit inspect FILE`: prints the decoded manifest summary (`inspect`)
 - `camp kit verify FILE`: verifies payload integrity and prints a success summary (`verify`)
-- `--json` is supported for both commands.
+- `camp kit import FILE --as CAMP`: verifies the complete archive, then publishes
+  its regular payloads into a new XDG-local import directory without replacing
+  an existing name.
+- `--json` is supported for inspect, verify, and import.
 - `FILE` must be a regular file path; `camp` rejects missing files, directories,
   and symlinks before attempting to inspect or verify.
 

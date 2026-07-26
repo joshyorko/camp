@@ -168,6 +168,7 @@ Usage:
   camp kit [command]
 
 Available Commands:
+  import      Import a verified CampKit into a new local camp
   inspect     Inspect a CampKit archive
   verify      Verify archive integrity and manifest consistency
 
@@ -192,6 +193,13 @@ effect-free docs fixture: kit inspect dispatched; external effects disabled
 ```console
 $ camp kit verify /proc/self/cmdline
 effect-free docs fixture: kit verify dispatched; external effects disabled
+```
+
+## `camp kit import /proc/self/cmdline --as docs-import`
+
+```console
+$ camp kit import /proc/self/cmdline --as docs-import
+effect-free docs fixture: kit import dispatched; external effects disabled
 ```
 
 ## `camp list`

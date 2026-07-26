@@ -175,6 +175,15 @@ type KitExporter interface {
 	KitExport(context.Context, KitExportRequest, OutputMode, io.Writer) error
 }
 
+type KitImportRequest struct {
+	File string
+	Camp string
+}
+
+type KitImporter interface {
+	KitImport(context.Context, KitImportRequest, OutputMode, io.Writer) error
+}
+
 func NewRootWithLifecycle(lifecycle Lifecycle) *cobra.Command {
 	root := &cobra.Command{
 		Use:           "camp",
@@ -228,11 +237,15 @@ func NewRootWithLifecycle(lifecycle Lifecycle) *cobra.Command {
 		root.AddCommand(newProviderCommand(providers.ProvidersList, configurer))
 	}
 	if kitReader, ok := lifecycle.(KitReader); ok {
-		if exporter, ok := lifecycle.(KitExporter); ok {
-			root.AddCommand(newKitCommand(kitReader.KitInspect, kitReader.KitVerify, exporter.KitExport))
-		} else {
-			root.AddCommand(newKitCommand(kitReader.KitInspect, kitReader.KitVerify))
+		var exporter func(context.Context, KitExportRequest, OutputMode, io.Writer) error
+		if kitExporter, ok := lifecycle.(KitExporter); ok {
+			exporter = kitExporter.KitExport
 		}
+		var importer func(context.Context, KitImportRequest, OutputMode, io.Writer) error
+		if kitImporter, ok := lifecycle.(KitImporter); ok {
+			importer = kitImporter.KitImport
+		}
+		root.AddCommand(newKitCommand(kitReader.KitInspect, kitReader.KitVerify, exporter, importer))
 	}
 	root.AddCommand(
 		newInitCommand(lifecycle.Init, interactiveInit),
@@ -303,7 +316,7 @@ func newImagesCommand(operations ImageOperations) *cobra.Command {
 	return command
 }
 
-func newKitCommand(inspect func(context.Context, string, OutputMode, io.Writer) error, verify func(context.Context, string, OutputMode, io.Writer) error, exporters ...func(context.Context, KitExportRequest, OutputMode, io.Writer) error) *cobra.Command {
+func newKitCommand(inspect func(context.Context, string, OutputMode, io.Writer) error, verify func(context.Context, string, OutputMode, io.Writer) error, exporter func(context.Context, KitExportRequest, OutputMode, io.Writer) error, importer func(context.Context, KitImportRequest, OutputMode, io.Writer) error) *cobra.Command {
 	command := &cobra.Command{
 		Use: "kit", Short: "Inspect and verify CampKit archives", Args: usageArgs(cobra.NoArgs),
 		RunE: func(*cobra.Command, []string) error { return nil },
@@ -328,7 +341,7 @@ func newKitCommand(inspect func(context.Context, string, OutputMode, io.Writer) 
 			},
 		},
 	)
-	if len(exporters) == 1 {
+	if exporter != nil {
 		request := KitExportRequest{}
 		export := &cobra.Command{
 			Use: "export", Short: "Export an exact CampKit generation", Args: usageArgs(cobra.NoArgs),
@@ -336,12 +349,30 @@ func newKitCommand(inspect func(context.Context, string, OutputMode, io.Writer) 
 				if request.Generation == "" || request.Output == "" {
 					return UsageError(fmt.Errorf("--generation and --output are required"))
 				}
-				return exporters[0](command.Context(), request, OutputModeFrom(command), command.OutOrStdout())
+				return exporter(command.Context(), request, OutputModeFrom(command), command.OutOrStdout())
 			},
 		}
 		export.Flags().StringVar(&request.Generation, "generation", "", "exact generation reference")
 		export.Flags().StringVar(&request.Output, "output", "", "CampKit output file")
 		command.AddCommand(export)
+	}
+	if importer != nil {
+		request := KitImportRequest{}
+		importCommand := &cobra.Command{
+			Use: "import [file]", Short: "Import a verified CampKit into a new local camp", Args: usageArgs(cobra.ExactArgs(1)),
+			RunE: func(command *cobra.Command, args []string) error {
+				if err := validateRegularFile(args[0]); err != nil {
+					return UsageError(err)
+				}
+				if request.Camp == "" {
+					return UsageError(fmt.Errorf("--as is required"))
+				}
+				request.File = args[0]
+				return importer(command.Context(), request, OutputModeFrom(command), command.OutOrStdout())
+			},
+		}
+		importCommand.Flags().StringVar(&request.Camp, "as", "", "new local camp name")
+		command.AddCommand(importCommand)
 	}
 	return command
 }
