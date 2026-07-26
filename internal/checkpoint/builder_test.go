@@ -68,6 +68,77 @@ func TestBuilderIsOnlyOrderedPathToValidatedGenerationMetadata(t *testing.T) {
 	}
 }
 
+func TestBuilderRejectsSymlinkedCheckpointDirectoriesBeforeMutation(t *testing.T) {
+	t.Parallel()
+	for _, target := range []string{"root", ".camp", ".camp/build"} {
+		target := target
+		t.Run(target, func(t *testing.T) {
+			t.Parallel()
+			base := t.TempDir()
+			externalRoot := filepath.Join(base, "external")
+			externalCamp := filepath.Join(externalRoot, ".camp")
+			externalBuild := filepath.Join(externalCamp, "build")
+			if err := os.MkdirAll(externalBuild, 0o700); err != nil {
+				t.Fatal(err)
+			}
+			sentinels := map[string]string{
+				filepath.Join(externalCamp, "images.json"):                   "external inventory\n",
+				filepath.Join(externalCamp, "hauler-manifest.yaml"):          "external manifest\n",
+				filepath.Join(externalBuild, "second-brain.tar.zst"):         "external inner\n",
+				filepath.Join(externalBuild, "second-brain-haul-43.tar.zst"): "external haul\n",
+			}
+			for path, body := range sentinels {
+				if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
+					t.Fatal(err)
+				}
+			}
+
+			root := filepath.Join(base, "root")
+			switch target {
+			case "root":
+				if err := os.Symlink(externalRoot, root); err != nil {
+					t.Fatal(err)
+				}
+			case ".camp":
+				if err := os.Mkdir(root, 0o700); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.Symlink(externalCamp, filepath.Join(root, ".camp")); err != nil {
+					t.Fatal(err)
+				}
+			case ".camp/build":
+				if err := os.MkdirAll(filepath.Join(root, ".camp"), 0o700); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.Symlink(externalBuild, filepath.Join(root, ".camp", "build")); err != nil {
+					t.Fatal(err)
+				}
+			}
+
+			archiver := &fakeArchiver{}
+			builder := NewBuilder(archiver, fakeAssembler{archiveCalled: &archiver.called})
+			_, err := builder.Build(context.Background(), BuildRequest{
+				Capsule: "second-brain", Root: root,
+				Inventory: domain.ImageInventory{GeneratedAt: time.Unix(100, 0), Images: []domain.Image{}},
+				Lineage:   domain.Lineage{Branch: "main"}, Generation: 43,
+				SessionID: "session-a", CreatedAt: time.Unix(101, 0),
+			})
+			if err == nil {
+				t.Fatal("Build() accepted a symlinked checkpoint directory")
+			}
+			if archiver.called {
+				t.Fatal("Build() called the archiver after rejecting a symlinked checkpoint directory")
+			}
+			for path, want := range sentinels {
+				body, readErr := os.ReadFile(path)
+				if readErr != nil || string(body) != want {
+					t.Fatalf("external sentinel %q = %q, %v; want %q", path, body, readErr, want)
+				}
+			}
+		})
+	}
+}
+
 func TestCommitDocumentsRecoversCrashBetweenPairRenamesWithoutPublishingMixedCut(t *testing.T) {
 	t.Parallel()
 	campDirectory := filepath.Join(t.TempDir(), ".camp")

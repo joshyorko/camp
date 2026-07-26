@@ -16,6 +16,7 @@ import (
 	"github.com/joshyorko/camp/internal/adapters/hauler"
 	"github.com/joshyorko/camp/internal/coordination"
 	"github.com/joshyorko/camp/internal/domain"
+	"golang.org/x/sys/unix"
 )
 
 type RootArchiver interface {
@@ -57,14 +58,12 @@ func (b *Builder) Build(ctx context.Context, request BuildRequest) (BuildResult,
 	if b == nil || b.archive == nil || b.assembler == nil || request.Capsule == "" || request.SessionID == "" || request.Generation == 0 || request.CreatedAt.IsZero() {
 		return BuildResult{}, errors.New("checkpoint build request is incomplete")
 	}
-	root, err := filepath.Abs(request.Root)
+	rootDirectory, err := openCheckpointRoot(request.Root)
 	if err != nil {
 		return BuildResult{}, err
 	}
-	info, err := os.Stat(root)
-	if err != nil || !info.IsDir() {
-		return BuildResult{}, errors.New("checkpoint root is not a directory")
-	}
+	defer rootDirectory.close()
+	root := rootDirectory.path
 	inventory := request.Inventory
 	inventory.SchemaVersion = domain.SchemaVersion
 	if inventory.Images == nil {
@@ -85,18 +84,25 @@ func (b *Builder) Build(ctx context.Context, request BuildRequest) (BuildResult,
 		return BuildResult{}, err
 	}
 	inventoryBody = append(inventoryBody, '\n')
-	campDirectory := filepath.Join(root, ".camp")
-	if err := commitDocuments(campDirectory, inventoryBody, manifest); err != nil {
+	campDirectory, err := rootDirectory.openOrCreateChild(".camp")
+	if err != nil {
 		return BuildResult{}, err
 	}
-	buildDirectory := filepath.Join(campDirectory, "build")
-	if err := os.MkdirAll(buildDirectory, 0o700); err != nil {
+	defer campDirectory.close()
+	if err := commitDocuments(campDirectory.accessPath(), inventoryBody, manifest); err != nil {
 		return BuildResult{}, err
 	}
-	innerPath := filepath.Join(buildDirectory, request.Capsule+".tar.zst")
-	haulPath := filepath.Join(buildDirectory, fmt.Sprintf("%s-haul-%d.tar.zst", request.Capsule, request.Generation))
+	buildDirectory, err := campDirectory.openOrCreateChild("build")
+	if err != nil {
+		return BuildResult{}, err
+	}
+	defer buildDirectory.close()
+	innerName := request.Capsule + ".tar.zst"
+	haulName := fmt.Sprintf("%s-haul-%d.tar.zst", request.Capsule, request.Generation)
+	innerPath := filepath.Join(buildDirectory.accessPath(), innerName)
+	haulPath := filepath.Join(buildDirectory.accessPath(), haulName)
 	for _, path := range []string{innerPath, haulPath} {
-		if err := removeKnownTransient(path, buildDirectory); err != nil {
+		if err := removeKnownTransient(path, buildDirectory.accessPath()); err != nil {
 			return BuildResult{}, err
 		}
 	}
@@ -104,10 +110,12 @@ func (b *Builder) Build(ctx context.Context, request BuildRequest) (BuildResult,
 	if err != nil {
 		return BuildResult{}, err
 	}
-	artifact, err := b.assembler.Assemble(ctx, filepath.Join(campDirectory, "hauler-manifest.yaml"), buildDirectory, haulPath)
+	artifact, err := b.assembler.Assemble(ctx, filepath.Join(campDirectory.path, "hauler-manifest.yaml"), buildDirectory.accessPath(), haulPath)
 	if err != nil {
 		return BuildResult{}, err
 	}
+	inner.Path = filepath.Join(buildDirectory.path, innerName)
+	artifact.Path = filepath.Join(buildDirectory.path, haulName)
 	if !artifact.Validated || artifact.SHA256 == "" || artifact.Size < 0 {
 		return BuildResult{}, errors.New("Hauler generation was not locally validated")
 	}
@@ -387,4 +395,52 @@ func syncDir(path string) error {
 	}
 	defer directory.Close()
 	return directory.Sync()
+}
+
+type checkpointDirectory struct {
+	fd   int
+	path string
+}
+
+func openCheckpointRoot(path string) (checkpointDirectory, error) {
+	absolute, err := filepath.Abs(path)
+	if err != nil {
+		return checkpointDirectory{}, err
+	}
+	info, err := os.Lstat(absolute)
+	if err != nil || !info.IsDir() || info.Mode()&os.ModeSymlink != 0 {
+		return checkpointDirectory{}, errors.New("checkpoint root must be a real directory")
+	}
+	canonical, err := filepath.EvalSymlinks(absolute)
+	if err != nil {
+		return checkpointDirectory{}, err
+	}
+	fd, err := unix.Open(canonical, unix.O_RDONLY|unix.O_DIRECTORY|unix.O_CLOEXEC|unix.O_NOFOLLOW, 0)
+	if err != nil {
+		return checkpointDirectory{}, err
+	}
+	return checkpointDirectory{fd: fd, path: canonical}, nil
+}
+
+func (d checkpointDirectory) openOrCreateChild(name string) (checkpointDirectory, error) {
+	if err := unix.Mkdirat(d.fd, name, 0o700); err != nil && !errors.Is(err, unix.EEXIST) {
+		return checkpointDirectory{}, err
+	}
+	how := &unix.OpenHow{
+		Flags:   unix.O_RDONLY | unix.O_DIRECTORY | unix.O_CLOEXEC | unix.O_NOFOLLOW,
+		Resolve: unix.RESOLVE_BENEATH | unix.RESOLVE_NO_SYMLINKS | unix.RESOLVE_NO_XDEV,
+	}
+	fd, err := unix.Openat2(d.fd, name, how)
+	if err != nil {
+		return checkpointDirectory{}, fmt.Errorf("checkpoint directory %q is unsafe: %w", filepath.Join(d.path, name), err)
+	}
+	return checkpointDirectory{fd: fd, path: filepath.Join(d.path, name)}, nil
+}
+
+func (d checkpointDirectory) accessPath() string {
+	return fmt.Sprintf("/proc/self/fd/%d", d.fd)
+}
+
+func (d checkpointDirectory) close() {
+	_ = unix.Close(d.fd)
 }
