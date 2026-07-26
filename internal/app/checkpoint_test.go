@@ -1,10 +1,12 @@
 package app
 
 import (
+	"archive/tar"
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"errors"
+	"io"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -12,6 +14,9 @@ import (
 	"testing"
 	"time"
 
+	"github.com/klauspost/compress/zstd"
+
+	archive "github.com/joshyorko/camp/internal/adapters/archive"
 	"github.com/joshyorko/camp/internal/adapters/filebackend"
 	"github.com/joshyorko/camp/internal/adapters/hauler"
 	"github.com/joshyorko/camp/internal/checkpoint"
@@ -54,6 +59,26 @@ func (b *fakeCheckpointBuilder) Build(_ context.Context, request checkpoint.Buil
 		Artifact: hauler.GenerationArtifact{Path: path, SHA256: ref.ArchiveSHA256, Size: int64(len(body)), Validated: true},
 		Metadata: domain.GenerationMetadata{SchemaVersion: domain.SchemaVersion, Capsule: request.Capsule, Lineage: request.Lineage, Generation: ref, Parent: request.Parent, ObjectKey: objectKey, MetadataKey: metadataKey, Size: int64(len(body)), CreatedAt: request.CreatedAt, Tools: request.Tools, SessionID: request.SessionID, Verified: domain.Verification{LocalHaulLoadable: true}},
 	}, nil
+}
+
+type hostileArchiveBuilder struct {
+	calls int
+}
+
+func (b *hostileArchiveBuilder) Build(_ context.Context, request checkpoint.BuildRequest) (checkpoint.BuildResult, error) {
+	b.calls++
+	buildDirectory := filepath.Join(request.Root, ".camp", "build")
+	if err := os.MkdirAll(buildDirectory, 0o700); err != nil {
+		return checkpoint.BuildResult{}, err
+	}
+	archivePath := filepath.Join(buildDirectory, "generation-unsafe.tar.zst")
+	if err := writeHostileTarArchive(archivePath); err != nil {
+		return checkpoint.BuildResult{}, err
+	}
+	if err := archive.NewTarZstd().Extract(context.Background(), archivePath, filepath.Join(buildDirectory, "extracted")); err != nil {
+		return checkpoint.BuildResult{}, err
+	}
+	return checkpoint.BuildResult{}, errors.New("hostile build did not fail")
 }
 
 type fakeCheckpointCapturer struct {
@@ -528,6 +553,79 @@ func TestCheckpointPublisherRejectsRemoteIdentityMismatchBeforeMirrorIntent(t *t
 	_, pending, err := log.Load(ctx, snapshot.SessionID)
 	if err != nil || len(pending) != 0 {
 		t.Fatalf("pending = %#v error=%v, want no mirror intent", pending, err)
+	}
+}
+
+func TestCheckpointPublisherRejectsHostileArchiveBeforePointerPublication(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	sandbox := t.TempDir()
+	root := filepath.Join(sandbox, "root")
+	if err := os.MkdirAll(filepath.Join(root, ".camp"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	store, err := filebackend.New(filepath.Join(sandbox, "backend"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	lineage := domain.Lineage{Branch: "main"}
+	opened := domain.GenerationRef{Generation: 42, ArchiveSHA256: strings.Repeat("b", 64)}
+	openedKey, _ := coordination.GenerationObjectKey("brain", lineage, opened)
+	pointers := coordination.NewPointerRepository(store)
+	openedPointer, err := pointers.Create(ctx, domain.LatestPointer{
+		SchemaVersion: domain.SchemaVersion, Capsule: "brain", Lineage: lineage, Generation: opened, ObjectKey: openedKey, Size: 1024,
+		CreatedAt: time.Unix(99, 0).UTC(), Tools: domain.ToolVersions{DevPod: "v0.26.1", Hauler: "v2.0.1"}, SessionID: "prior",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	lease := domain.WriterLease{
+		SchemaVersion: domain.SchemaVersion, SessionID: "session-hostile", Capsule: "brain", Lineage: lineage, Machine: "machine",
+		OpenedGeneration: &opened, CreatedAt: time.Unix(100, 0).UTC(), HeartbeatAt: time.Unix(100, 0).UTC(), ExpiresAt: time.Unix(101, 0).UTC(),
+	}
+	snapshot := domain.JournalSnapshot{
+		SchemaVersion: domain.SchemaVersion, SessionID: lease.SessionID, Capsule: lease.Capsule, Lineage: lineage, Mode: domain.SessionReadWrite,
+		OpenedGeneration: &opened, CurrentBase: &opened, CurrentPointer: &openedPointer.Pointer,
+		ExpectedPointerRevision: string(openedPointer.Revision), Lease: domain.LeaseRecord{Lease: &lease, Revision: "lease-r1"},
+		Workspace: domain.WorkspaceRecord{StagingRoot: root, Provider: "docker", LocalProvider: true, LocalFolder: root}, State: domain.SessionOpen,
+	}
+	prepareCheckpointRuntime(t, &snapshot, sandbox)
+	log, err := journal.NewStore(filepath.Join(sandbox, "journal"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := log.Create(ctx, snapshot); err != nil {
+		t.Fatal(err)
+	}
+	fakes := newCheckpointFakes(time.Unix(100, 0).UTC())
+	builder := &hostileArchiveBuilder{}
+	publisher := NewCheckpointPublisher(log, &fakeLockValidator{}, &fakeLeaseValidator{}, localCheckpointTransports(&fakeMirror{}), fakes.pipeline(), builder, coordination.NewGenerationRepository(store), pointers, fixedAppClock{now: time.Unix(100, 0).UTC()})
+	token := ports.OperationToken{ID: "lock", Owner: ports.OperationOwner{SessionID: snapshot.SessionID, Operation: "sync"}}
+	if _, err := publisher.Publish(ctx, token, snapshot.SessionID); !errors.Is(err, archive.ErrUnsafeArchive) {
+		t.Fatalf("Publish() error = %v, want ErrUnsafeArchive", err)
+	}
+	if builder.calls != 1 {
+		t.Fatalf("builder calls = %d, want 1", builder.calls)
+	}
+	current, err := pointers.Read(ctx, snapshot.Capsule, snapshot.Lineage)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if current.Revision != openedPointer.Revision || current.Pointer.Generation != opened {
+		t.Fatalf("pointer changed after hostile build failure: %#v", current)
+	}
+	loaded, pending, err := log.Load(ctx, snapshot.SessionID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(pending) != 1 || pending[0].Intent.Transition != "RootSnapshotStable" {
+		t.Fatalf("pending = %#v", pending)
+	}
+	if loaded.CurrentPointer == nil || loaded.CurrentPointer.Generation != opened || loaded.CurrentPointer.ObjectKey != openedKey {
+		t.Fatalf("journal pointer = %#v", loaded.CurrentPointer)
+	}
+	if fakes.seal.calls != 1 || fakes.capture.calls != 1 {
+		t.Fatalf("earlier effects repeated seal=%d capture=%d", fakes.seal.calls, fakes.capture.calls)
 	}
 }
 
@@ -1224,6 +1322,38 @@ func TestPrepareRegistrySealAllowsOnlyItsExactPendingRestartChild(t *testing.T) 
 	if err != nil || prepared.intent.ID != seal.ID {
 		t.Fatalf("prepareRegistrySeal() prepared=%#v error=%v", prepared, err)
 	}
+}
+
+func writeHostileTarArchive(path string) error {
+	attack := []tar.Header{{Name: "../escape", Typeflag: tar.TypeReg, Mode: 0o644}}
+	file, err := os.Create(path)
+	if err != nil {
+		return err
+	}
+	encoder, err := zstd.NewWriter(file)
+	if err != nil {
+		return err
+	}
+	writer := tar.NewWriter(encoder)
+	for _, header := range attack {
+		header.Size = int64(len("x"))
+		if err := writer.WriteHeader(&header); err != nil {
+			return err
+		}
+		if _, err := io.WriteString(writer, "x"); err != nil {
+			return err
+		}
+	}
+	if err := writer.Close(); err != nil {
+		return err
+	}
+	if err := encoder.Close(); err != nil {
+		return err
+	}
+	if err := file.Close(); err != nil {
+		return err
+	}
+	return nil
 }
 
 type fixedAppClock struct{ now time.Time }
