@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"reflect"
 	"strings"
 	"testing"
 
@@ -224,6 +225,7 @@ type recordingOperationalLifecycle struct {
 	serveLogsRequests    []ServeLogsRequest
 	serveRestartRequests []ServeRestartRequest
 	providerListCalls    int
+	providerRequests     []ProviderMutationRequest
 }
 
 func (r *recordingOperationalLifecycle) ImagesList(_ context.Context, request SessionRequest, mode OutputMode, _ io.Writer) error {
@@ -262,6 +264,18 @@ func (r *recordingOperationalLifecycle) ProvidersList(_ context.Context, mode Ou
 	return nil
 }
 
+func (r *recordingOperationalLifecycle) ProviderAdd(_ context.Context, request ProviderMutationRequest, mode OutputMode, _ io.Writer) error {
+	r.providerRequests = append(r.providerRequests, request)
+	r.calls = append(r.calls, "provider-add:"+string(mode))
+	return nil
+}
+
+func (r *recordingOperationalLifecycle) ProviderUse(_ context.Context, request ProviderMutationRequest, mode OutputMode, _ io.Writer) error {
+	r.providerRequests = append(r.providerRequests, request)
+	r.calls = append(r.calls, "provider-use:"+string(mode))
+	return nil
+}
+
 func TestOperationalCommandsMapStableBoundaryRequests(t *testing.T) {
 	t.Parallel()
 
@@ -277,6 +291,8 @@ func TestOperationalCommandsMapStableBoundaryRequests(t *testing.T) {
 		{name: "serve logs", args: []string{"serve", "logs", "fileserver", "--tail-bytes", "4096"}, want: "serve-logs:human"},
 		{name: "serve restart", args: []string{"serve", "restart", "registry", "--launch-token", "token-1"}, want: "serve-restart:human"},
 		{name: "provider list", args: []string{"provider", "list"}, want: "provider-list:human"},
+		{name: "provider add", args: []string{"provider", "add", "docker", "--context", "work", "--option", "DOCKER_PATH=/run/docker.sock", "--option", "HELPER=false"}, want: "provider-add:human"},
+		{name: "provider use", args: []string{"provider", "use", "docker", "--context", "work"}, want: "provider-use:human"},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
@@ -295,6 +311,9 @@ func TestOperationalCommandsMapStableBoundaryRequests(t *testing.T) {
 	}
 	if got := lifecycle.serveRestartRequests[0]; got.Service != "registry" || got.LaunchToken != "token-1" {
 		t.Fatalf("serve restart request = %#v", got)
+	}
+	if got := lifecycle.providerRequests[0]; got.Name != "docker" || got.Context != "work" || !reflect.DeepEqual(got.Options, []string{"DOCKER_PATH=/run/docker.sock", "HELPER=false"}) {
+		t.Fatalf("provider add request = %#v", got)
 	}
 }
 

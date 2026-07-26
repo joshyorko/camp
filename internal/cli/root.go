@@ -145,6 +145,17 @@ type ProviderLister interface {
 	ProvidersList(context.Context, OutputMode, io.Writer) error
 }
 
+type ProviderMutationRequest struct {
+	Name    string
+	Context string
+	Options []string
+}
+
+type ProviderConfigurer interface {
+	ProviderAdd(context.Context, ProviderMutationRequest, OutputMode, io.Writer) error
+	ProviderUse(context.Context, ProviderMutationRequest, OutputMode, io.Writer) error
+}
+
 type KitReader interface {
 	KitInspect(context.Context, string, OutputMode, io.Writer) error
 	KitVerify(context.Context, string, OutputMode, io.Writer) error
@@ -205,7 +216,8 @@ func NewRootWithLifecycle(lifecycle Lifecycle) *cobra.Command {
 		root.AddCommand(newServeCommand(serveOperations))
 	}
 	if providers, ok := lifecycle.(ProviderLister); ok {
-		root.AddCommand(newProviderCommand(providers.ProvidersList))
+		configurer, _ := lifecycle.(ProviderConfigurer)
+		root.AddCommand(newProviderCommand(providers.ProvidersList, configurer))
 	}
 	if kitReader, ok := lifecycle.(KitReader); ok {
 		if exporter, ok := lifecycle.(KitExporter); ok {
@@ -351,12 +363,32 @@ func newServeCommand(operations ServeOperations) *cobra.Command {
 	return command
 }
 
-func newProviderCommand(run func(context.Context, OutputMode, io.Writer) error) *cobra.Command {
+func newProviderCommand(list func(context.Context, OutputMode, io.Writer) error, configurer ProviderConfigurer) *cobra.Command {
 	command := &cobra.Command{
-		Use: "provider", Short: "Inspect configured DevPod providers", Args: usageArgs(cobra.NoArgs),
+		Use: "provider", Short: "Inspect and configure DevPod providers", Args: usageArgs(cobra.NoArgs),
 		RunE: func(*cobra.Command, []string) error { return nil },
 	}
-	command.AddCommand(noArgumentCommand("list", "List configured DevPod providers", run))
+	command.AddCommand(noArgumentCommand("list", "List configured DevPod providers", list))
+	if configurer != nil {
+		command.AddCommand(
+			newProviderMutationCommand("add", "Add or repair a built-in DevPod provider", configurer.ProviderAdd),
+			newProviderMutationCommand("use", "Select an existing DevPod provider", configurer.ProviderUse),
+		)
+	}
+	return command
+}
+
+func newProviderMutationCommand(use, short string, run func(context.Context, ProviderMutationRequest, OutputMode, io.Writer) error) *cobra.Command {
+	request := ProviderMutationRequest{}
+	command := &cobra.Command{
+		Use: use + " NAME", Short: short, Args: usageArgs(cobra.ExactArgs(1)),
+		RunE: func(command *cobra.Command, args []string) error {
+			request.Name = args[0]
+			return run(command.Context(), request, OutputModeFrom(command), command.OutOrStdout())
+		},
+	}
+	command.Flags().StringVar(&request.Context, "context", "", "DevPod context (defaults to Camp configuration)")
+	command.Flags().StringArrayVarP(&request.Options, "option", "o", nil, "provider option in KEY=VALUE form")
 	return command
 }
 

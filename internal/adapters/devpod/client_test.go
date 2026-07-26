@@ -232,6 +232,48 @@ func TestEnsureProviderConfiguresAbsentDockerThenVerifiesExactIdentity(t *testin
 	}
 }
 
+func TestAddProviderUsesTypedDockerContextAndRepeatedOptionsThenVerifies(t *testing.T) {
+	t.Parallel()
+	runner := &providerSequenceRunner{results: []ports.Result{
+		{Stdout: []byte(`{}`)},
+		{},
+		{Stdout: []byte(`{"docker":{"default":true}}`)},
+	}}
+	request := ProviderRequest{Context: "work", Name: "docker", Options: []string{"DOCKER_PATH=/run/docker.sock", "HELPER=false"}}
+	if err := NewClient("/opt/devpod", runner).AddProvider(context.Background(), request); err != nil {
+		t.Fatal(err)
+	}
+	want := [][]string{
+		{"provider", "list", "--context", "work", "--output", "json"},
+		{"provider", "add", "docker", "--context", "work", "--use", "--option", "DOCKER_PATH=/run/docker.sock", "--option", "HELPER=false"},
+		{"provider", "list", "--context", "work", "--output", "json"},
+	}
+	if !reflect.DeepEqual(runner.argv, want) {
+		t.Fatalf("provider argv = %#v, want %#v", runner.argv, want)
+	}
+}
+
+func TestUseProviderUsesTypedContextAndRepeatedOptionsThenVerifies(t *testing.T) {
+	t.Parallel()
+	runner := &providerSequenceRunner{results: []ports.Result{
+		{Stdout: []byte(`{"docker":{"default":false}}`)},
+		{},
+		{Stdout: []byte(`{"docker":{"default":true}}`)},
+	}}
+	request := ProviderRequest{Context: "work", Name: "docker", Options: []string{"DOCKER_PATH=/run/docker.sock"}}
+	if err := NewClient("/opt/devpod", runner).UseProvider(context.Background(), request); err != nil {
+		t.Fatal(err)
+	}
+	want := [][]string{
+		{"provider", "list", "--context", "work", "--output", "json"},
+		{"provider", "use", "docker", "--context", "work", "--reconfigure", "--option", "DOCKER_PATH=/run/docker.sock"},
+		{"provider", "list", "--context", "work", "--output", "json"},
+	}
+	if !reflect.DeepEqual(runner.argv, want) {
+		t.Fatalf("provider argv = %#v, want %#v", runner.argv, want)
+	}
+}
+
 func TestEnsureProviderFailsClosedWhenConfiguredIdentityDoesNotMatch(t *testing.T) {
 	t.Parallel()
 	runner := &providerSequenceRunner{results: []ports.Result{{Stdout: []byte(`{}`)}, {}, {Stdout: []byte(`{"other":{"default":true}}`)}}}

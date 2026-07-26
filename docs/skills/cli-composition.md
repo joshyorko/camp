@@ -55,6 +55,8 @@ The shipped provider command therefore lists provider identities only; provider 
 
 Before recording `WorkspaceUp`, production open lists providers in the requested DevPod context. An absent supported local `docker` provider is added noninteractively with `provider add docker --context <context> --use`; an existing non-default `docker` provider is configured with `provider use docker --context <context> --reconfigure`. Camp then re-lists and requires the exact provider identity to be default. DevPod's `--devcontainer-path` is capsule-relative even though Camp retains the validated canonical absolute path in recovery state; passing the absolute path makes DevPod join the workspace root twice.
 
+The pinned DevPod v0.26.1 provider mutation surface accepts repeated provider values as `--option KEY=VALUE` on both `provider add` and `provider use`. Keep these as typed repeated arguments, keep context and provider name separately typed, and verify the selected provider through a subsequent context-scoped provider list. Raw provider passthrough remains denied; DevPod owns provider configuration and credentials.
+
 ## Proof commands
 
 ```bash

@@ -4,6 +4,7 @@ package cli
 
 import (
 	"context"
+	"strings"
 	"testing"
 
 	"github.com/joshyorko/camp/internal/config"
@@ -50,6 +51,21 @@ func TestProductionReachabilityProbesSelectConfiguredProviderWorkspaceForwarding
 			}
 		}
 	}
+}
+
+func TestProductionProviderProbeNamesExactCampRepairCommand(t *testing.T) {
+	probes := productionReachabilityProbes(config.Bootstrap{DevPodProvider: "docker", DevPodContext: "work"}, nil, doctorReachabilityToolResolver{})
+	for _, probe := range probes {
+		if probe.Capability() != "provider" {
+			continue
+		}
+		result := probe.Probe(context.Background())
+		if result.Code != "provider_unreachable" || !strings.Contains(result.Remediation, "camp provider add docker --context work") {
+			t.Fatalf("provider result = %#v", result)
+		}
+		return
+	}
+	t.Fatal("provider probe missing")
 }
 
 func TestProductionReachabilityProbesIgnoreClosedSessions(t *testing.T) {

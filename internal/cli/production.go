@@ -209,7 +209,7 @@ func (p *ProductionLifecycle) ServeRestart(ctx context.Context, request ServeRes
 }
 
 func (p *ProductionLifecycle) ProvidersList(ctx context.Context, mode OutputMode, out io.Writer) error {
-	composition, err := composeProduction(ctx)
+	composition, err := composeMachineProduction(ctx)
 	if err != nil {
 		return err
 	}
@@ -220,6 +220,34 @@ func (p *ProductionLifecycle) ProvidersList(ctx context.Context, mode OutputMode
 		return err
 	}
 	return writeProvidersResult(out, mode, result)
+}
+
+func (p *ProductionLifecycle) ProviderAdd(ctx context.Context, request ProviderMutationRequest, mode OutputMode, out io.Writer) error {
+	return p.configureProvider(ctx, request, mode, out, true)
+}
+
+func (p *ProductionLifecycle) ProviderUse(ctx context.Context, request ProviderMutationRequest, mode OutputMode, out io.Writer) error {
+	return p.configureProvider(ctx, request, mode, out, false)
+}
+
+func (p *ProductionLifecycle) configureProvider(ctx context.Context, request ProviderMutationRequest, mode OutputMode, out io.Writer, add bool) error {
+	composition, err := composeMachineProduction(ctx)
+	if err != nil {
+		return err
+	}
+	contextName := firstNonEmpty(request.Context, composition.runtime.DevPodContext, "default")
+	operations := app.NewProviderConfiguration(devpodProviderConfigurer{client: composition.devpod})
+	appRequest := app.ProviderMutationRequest{Name: request.Name, Context: contextName, Options: append([]string(nil), request.Options...)}
+	var result app.ProviderMutationResult
+	if add {
+		result, err = operations.Add(ctx, appRequest)
+	} else {
+		result, err = operations.Use(ctx, appRequest)
+	}
+	if err != nil {
+		return err
+	}
+	return writeProviderMutationResult(out, mode, result)
 }
 
 func (p *ProductionLifecycle) KitInspect(_ context.Context, path string, mode OutputMode, out io.Writer) error {
@@ -261,6 +289,16 @@ func (p *ProductionLifecycle) KitVerify(_ context.Context, path string, mode Out
 type devpodProviderReader struct {
 	client  *devpod.Client
 	context string
+}
+
+type devpodProviderConfigurer struct{ client *devpod.Client }
+
+func (c devpodProviderConfigurer) AddProvider(ctx context.Context, request app.ProviderMutationRequest) error {
+	return c.client.AddProvider(ctx, devpod.ProviderRequest{Context: request.Context, Name: request.Name, Options: request.Options})
+}
+
+func (c devpodProviderConfigurer) UseProvider(ctx context.Context, request app.ProviderMutationRequest) error {
+	return c.client.UseProvider(ctx, devpod.ProviderRequest{Context: request.Context, Name: request.Name, Options: request.Options})
 }
 
 func (r devpodProviderReader) ListProviders(ctx context.Context) ([]app.Provider, error) {
@@ -342,6 +380,14 @@ func writeProvidersResult(out io.Writer, mode OutputMode, result []app.Provider)
 		}
 	}
 	return nil
+}
+
+func writeProviderMutationResult(out io.Writer, mode OutputMode, result app.ProviderMutationResult) error {
+	if mode == ModeJSON {
+		return writeSuccess(out, mode, "provider-"+result.Action, result, "")
+	}
+	_, err := fmt.Fprintf(out, "provider %s %s in DevPod context %s\nnext: %s\n", result.Name, result.Action, result.Context, result.NextCommand)
+	return err
 }
 
 func writeServeLogsResult(out io.Writer, mode OutputMode, result supervisor.LogChunk) error {
@@ -1300,6 +1346,14 @@ func composeProductionBaseWithSettings(settings productionSettings) (productionB
 
 func composeProduction(ctx context.Context) (productionComposition, error) {
 	settings, err := resolveProductionSettingsForContext(ctx)
+	if err != nil {
+		return productionComposition{}, err
+	}
+	return composeProductionWithSettings(ctx, settings)
+}
+
+func composeMachineProduction(ctx context.Context) (productionComposition, error) {
+	settings, err := resolveProductionSettings()
 	if err != nil {
 		return productionComposition{}, err
 	}
