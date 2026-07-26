@@ -244,7 +244,10 @@ listener is absent. A failed `camp close` remains a reported cleanup error while
 the harness continues exact fallback cleanup: complete PID/boot/start process
 identities use the production process manager, created materializations use the
 ownership-marker guard, and forwarding evidence/runtime paths require matching
-device and inode identity before removal. Incomplete process or path identities
+device and inode identity atomically bound to descriptor-relative quarantine
+and removal. A quarantined mismatch is restored and reported; symlinks are not
+followed, and a replacement runtime directory is never recursively removed.
+Incomplete process or path identities
 fail closed rather than being treated as absence. It then proves the unrelated ID remains and deletes that
 unrelated ID in its own final step. DevPod workspace IDs are the safe container
 cleanup boundary; the harness neither invents a second Docker-container identity

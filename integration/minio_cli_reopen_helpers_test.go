@@ -2,7 +2,9 @@ package integration
 
 import (
 	"context"
+	"crypto/rand"
 	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -20,6 +22,7 @@ import (
 	"github.com/joshyorko/camp/internal/capsule"
 	"github.com/joshyorko/camp/internal/domain"
 	"github.com/joshyorko/camp/internal/ports"
+	"golang.org/x/sys/unix"
 )
 
 type createdWorkspaceTracker struct {
@@ -403,20 +406,68 @@ func inspectOwnedPath(path string, directory bool) (ownedPath, error) {
 }
 
 func removeExactOwnedPath(want ownedPath) error {
-	got, err := inspectOwnedPath(want.path, want.directory)
-	if errors.Is(err, os.ErrNotExist) {
-		return nil
+	return removeExactOwnedPathWithHook(want, nil)
+}
+
+func removeExactOwnedPathWithHook(want ownedPath, beforeQuarantine func() error) error {
+	if !filepath.IsAbs(want.path) || want.device == 0 || want.inode == 0 {
+		return errors.New("exact owned path removal identity is incomplete")
 	}
+	directory, name := filepath.Dir(want.path), filepath.Base(want.path)
+	if name == "." || name == string(filepath.Separator) {
+		return errors.New("exact owned path removal name is invalid")
+	}
+	dirFD, err := unix.Open(directory, unix.O_RDONLY|unix.O_DIRECTORY|unix.O_CLOEXEC|unix.O_NOFOLLOW, 0)
 	if err != nil {
-		return fmt.Errorf("inspect exact owned path %q: %w", want.path, err)
+		return fmt.Errorf("open exact owned path parent: %w", err)
 	}
-	if got.device != want.device || got.inode != want.inode {
-		return fmt.Errorf("exact owned path %q identity changed", want.path)
+	defer unix.Close(dirFD)
+	if beforeQuarantine != nil {
+		if err := beforeQuarantine(); err != nil {
+			return err
+		}
 	}
+	nonce := make([]byte, 12)
+	if _, err := rand.Read(nonce); err != nil {
+		return err
+	}
+	quarantine := "." + name + ".remove-" + hex.EncodeToString(nonce)
+	if err := unix.Renameat2(dirFD, name, dirFD, quarantine, unix.RENAME_NOREPLACE); err != nil {
+		if errors.Is(err, unix.ENOENT) {
+			return nil
+		}
+		return fmt.Errorf("quarantine exact owned path: %w", err)
+	}
+	restore := func(cause error) error {
+		restoreErr := unix.Renameat2(dirFD, quarantine, dirFD, name, unix.RENAME_NOREPLACE)
+		return errors.Join(cause, restoreErr)
+	}
+	flags := unix.O_RDONLY | unix.O_CLOEXEC | unix.O_NOFOLLOW
 	if want.directory {
-		return os.RemoveAll(want.path)
+		flags |= unix.O_DIRECTORY
 	}
-	return os.Remove(want.path)
+	fd, err := unix.Openat(dirFD, quarantine, flags, 0)
+	if err != nil {
+		return restore(fmt.Errorf("open quarantined exact owned path: %w", err))
+	}
+	var stat unix.Stat_t
+	statErr := unix.Fstat(fd, &stat)
+	_ = unix.Close(fd)
+	isDirectory := stat.Mode&unix.S_IFMT == unix.S_IFDIR
+	if statErr != nil || uint64(stat.Dev) != want.device || stat.Ino != want.inode || isDirectory != want.directory {
+		return restore(errors.Join(statErr, fmt.Errorf("exact owned path %q identity changed before removal", want.path)))
+	}
+	removeFlags := 0
+	if want.directory {
+		removeFlags = unix.AT_REMOVEDIR
+	}
+	if err := unix.Unlinkat(dirFD, quarantine, removeFlags); err != nil {
+		return restore(fmt.Errorf("unlink quarantined exact owned path: %w", err))
+	}
+	if err := unix.Fsync(dirFD); err != nil {
+		return fmt.Errorf("sync exact owned path parent: %w", err)
+	}
+	return nil
 }
 
 type devPodTestIsolation struct {
@@ -795,6 +846,56 @@ func TestLifecycleScenarioRejectsIncompleteProcessIdentity(t *testing.T) {
 	}
 	if len(scenario.processes) != 0 {
 		t.Fatalf("incomplete process identities retained: %#v", scenario.processes)
+	}
+}
+
+func TestRemoveExactOwnedPathRestoresReplacementOnIdentityMismatch(t *testing.T) {
+	for _, directory := range []bool{false, true} {
+		name := "file"
+		if directory {
+			name = "runtime-directory"
+		}
+		t.Run(name, func(t *testing.T) {
+			root := t.TempDir()
+			path := filepath.Join(root, "owned")
+			saved := filepath.Join(root, "recorded-object")
+			if directory {
+				if err := os.Mkdir(path, 0o700); err != nil {
+					t.Fatal(err)
+				}
+			} else if err := os.WriteFile(path, []byte("recorded"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			owned, err := inspectOwnedPath(path, directory)
+			if err != nil {
+				t.Fatal(err)
+			}
+			err = removeExactOwnedPathWithHook(owned, func() error {
+				if err := os.Rename(path, saved); err != nil {
+					return err
+				}
+				if directory {
+					if err := os.Mkdir(path, 0o700); err != nil {
+						return err
+					}
+					return os.WriteFile(filepath.Join(path, "competitor"), []byte("preserve"), 0o600)
+				}
+				return os.WriteFile(path, []byte("preserve"), 0o600)
+			})
+			if err == nil || !strings.Contains(err.Error(), "identity changed before removal") {
+				t.Fatalf("replacement cleanup error = %v", err)
+			}
+			competitor := path
+			if directory {
+				competitor = filepath.Join(path, "competitor")
+			}
+			if body, err := os.ReadFile(competitor); err != nil || string(body) != "preserve" {
+				t.Fatalf("competing entry = %q, %v; want preserved", body, err)
+			}
+			if _, err := os.Lstat(saved); err != nil {
+				t.Fatalf("recorded object moved by race was lost: %v", err)
+			}
+		})
 	}
 }
 
