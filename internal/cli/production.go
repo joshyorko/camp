@@ -323,14 +323,14 @@ func (p *ProductionLifecycle) KitInspect(_ context.Context, path string, mode Ou
 	return err
 }
 
-func (p *ProductionLifecycle) KitVerify(_ context.Context, path string, mode OutputMode, out io.Writer) error {
+func (p *ProductionLifecycle) KitVerify(ctx context.Context, path string, mode OutputMode, out io.Writer) error {
 	file, err := os.Open(path)
 	if err != nil {
 		return err
 	}
 	defer file.Close()
 
-	result, err := campkit.Verify(context.Background(), file, campkit.DefaultArchiveLimits(), nil)
+	result, err := campkit.Verify(ctx, file, campkit.DefaultArchiveLimits(), nil)
 	if err != nil {
 		return err
 	}

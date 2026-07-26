@@ -55,6 +55,20 @@ func TestValidKitCampNameRejectsPathNamespaceComponents(t *testing.T) {
 	}
 }
 
+func TestProductionKitVerifyPreservesCancellation(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "input.campkit")
+	if err := os.WriteFile(path, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	err := NewProductionLifecycle().KitVerify(ctx, path, ModeHuman, io.Discard)
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("KitVerify() error = %v, want context.Canceled", err)
+	}
+}
+
 func TestProductionConfigSetRoundTripsEverySupportedMachineKeyAndRejectsCampSelection(t *testing.T) {
 	for _, test := range []struct {
 		key   string

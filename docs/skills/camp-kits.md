@@ -17,6 +17,8 @@ public command consumed or emitted it.
 
 - `camp kit inspect FILE`: prints the decoded manifest summary (`inspect`)
 - `camp kit verify FILE`: verifies payload integrity and prints a success summary (`verify`)
+- Verification preserves the command context, so cancellation and deadlines
+  interrupt archive verification.
 - `camp kit import FILE --as CAMP`: verifies the complete archive, then publishes
   its regular payloads into a new XDG-local import directory without replacing
   an existing name.
