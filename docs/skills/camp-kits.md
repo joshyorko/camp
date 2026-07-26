@@ -96,9 +96,10 @@ The file backend now surfaces local object-source identity through
 `Device`/`Inode` fields for drift detection. This is best-effort metadata;
 verifier semantics are still driven by generation metadata and archive hashing.
 `ResolveExactGeneration` validates object and sidecar fingerprints when it
-resolves a generation, but its returned sources reopen the backend later. An
-exporter must therefore revalidate those fingerprints before and after copying
-payloads and abort on drift; initial resolution alone is not a transfer lock.
+resolves a generation, but its returned sources reopen the backend later.
+`ExactGenerationRecord.RevalidateSources` repeats those checks and must be
+called by export orchestration before and after copying payloads; initial
+resolution alone is not a transfer lock.
 
 ## Verification and boundaries
 

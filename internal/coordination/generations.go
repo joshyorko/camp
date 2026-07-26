@@ -33,6 +33,44 @@ type ExactGenerationRecord struct {
 	SidecarSource      ports.RestartableSource
 	ArchiveFingerprint ports.ObjectSourceFingerprint
 	SidecarFingerprint ports.ObjectSourceFingerprint
+	store              ports.ObjectStore
+}
+
+// RevalidateSources confirms that sources reopened after exact resolution
+// still identify the same immutable archive and metadata sidecar.
+func (r ExactGenerationRecord) RevalidateSources(ctx context.Context) error {
+	if r.store == nil {
+		return fmt.Errorf("exact generation has no source store: %w", ErrGenerationVerification)
+	}
+	if err := revalidateSource(ctx, r.store, r.Metadata.ObjectKey, r.ArchiveFingerprint); err != nil {
+		return fmt.Errorf("revalidate generation archive: %w", err)
+	}
+	if err := revalidateSource(ctx, r.store, r.Metadata.MetadataKey, r.SidecarFingerprint); err != nil {
+		return fmt.Errorf("revalidate generation metadata: %w", err)
+	}
+	return nil
+}
+
+func revalidateSource(ctx context.Context, store ports.ObjectStore, key string, expected ports.ObjectSourceFingerprint) error {
+	meta, err := store.Head(ctx, key)
+	if err != nil {
+		return err
+	}
+	if meta.Size != expected.Size || meta.SHA256 != expected.SHA256 || (expected.Revision != "" && meta.Revision != expected.Revision) {
+		return fmt.Errorf("source %q fingerprint changed: got size=%d sha256=%s revision=%s", key, meta.Size, meta.SHA256, meta.Revision)
+	}
+	if identityStore, ok := store.(ports.ObjectStoreIdentity); ok {
+		identity, err := identityStore.SourceIdentity(key)
+		if err != nil {
+			return err
+		}
+		if expected.CanonicalPath != "" && identity.CanonicalPath != expected.CanonicalPath ||
+			expected.Device != 0 && identity.Device != expected.Device ||
+			expected.Inode != 0 && identity.Inode != expected.Inode {
+			return fmt.Errorf("source %q identity changed", key)
+		}
+	}
+	return nil
 }
 
 type GenerationRepository struct {
@@ -216,6 +254,7 @@ func (r *GenerationRepository) ResolveExactGeneration(ctx context.Context, capsu
 		SidecarSource:      restartableObjectSource{store: r.store, key: metadata.MetadataKey},
 		ArchiveFingerprint: archiveFingerprint,
 		SidecarFingerprint: sidecarFingerprint,
+		store:              r.store,
 	}, nil
 }
 
