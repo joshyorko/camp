@@ -1,0 +1,472 @@
+package campkit
+
+import (
+	"archive/tar"
+	"bytes"
+	"compress/gzip"
+	"context"
+	"crypto/sha256"
+	"encoding/hex"
+	"encoding/json"
+	"errors"
+	"sort"
+	"testing"
+	"time"
+
+	"github.com/joshyorko/camp/internal/coordination"
+	"github.com/joshyorko/camp/internal/domain"
+	"github.com/klauspost/compress/zstd"
+)
+
+func TestInspectReadsOnlyCanonicalManifestAndMarksIntegrityNotVerified(t *testing.T) {
+	manifest := validManifest()
+	body := mustCanonical(t, manifest)
+	archive := campKitFixture(t, []fixtureEntry{
+		{name: "manifest.json", body: body},
+		{name: manifest.Payloads[0].Path, body: []byte("intentionally corrupt and unread")},
+	})
+
+	inspection, err := Inspect(bytes.NewReader(archive), DefaultArchiveLimits())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if inspection.Manifest.Lineage.KitID != manifest.Lineage.KitID {
+		t.Fatalf("kit ID = %q, want %q", inspection.Manifest.Lineage.KitID, manifest.Lineage.KitID)
+	}
+	if inspection.Integrity != IntegrityNotVerified {
+		t.Fatalf("integrity = %q, want %q", inspection.Integrity, IntegrityNotVerified)
+	}
+}
+
+func TestInspectRejectsNonDeterministicManifestHeader(t *testing.T) {
+	manifest := validManifest()
+	archive := campKitFixtureWithHeader(t, []fixtureEntry{{
+		name: "manifest.json",
+		body: mustCanonical(t, manifest),
+	}}, func(header *tar.Header) {
+		header.Mode = 0o644
+	})
+
+	if _, err := Inspect(bytes.NewReader(archive), DefaultArchiveLimits()); err == nil {
+		t.Fatal("inspect accepted a writable manifest header")
+	}
+}
+
+func TestVerifyStreamsPayloadsAndSeparatesIntegrityFromTrust(t *testing.T) {
+	archive, manifest, _ := verifiedKitFixture(t)
+
+	verification, err := Verify(context.Background(), bytes.NewReader(archive), DefaultArchiveLimits(), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if verification.Integrity != IntegrityValid {
+		t.Fatalf("integrity = %q, want %q", verification.Integrity, IntegrityValid)
+	}
+	if verification.Trust != TrustResultUnverified {
+		t.Fatalf("trust = %q, want %q", verification.Trust, TrustResultUnverified)
+	}
+	if len(verification.Payloads) != len(manifest.Payloads) {
+		t.Fatalf("verified payloads = %d, want %d", len(verification.Payloads), len(manifest.Payloads))
+	}
+	if verification.OCIClosure != OCIClosureNotVerified {
+		t.Fatalf("OCI closure = %q, want %q", verification.OCIClosure, OCIClosureNotVerified)
+	}
+}
+
+func TestVerifyRejectsCorruptReorderedAndTrailingArchives(t *testing.T) {
+	_, manifest, payloads := verifiedKitFixture(t)
+	paths := sortedPayloadPaths(manifest)
+
+	t.Run("corrupt payload", func(t *testing.T) {
+		entries := fixtureEntries(manifest, payloads, paths)
+		entries[1].body = append([]byte(nil), entries[1].body...)
+		entries[1].body[0] ^= 0xff
+		archive := campKitFixture(t, entries)
+		if _, err := Verify(context.Background(), bytes.NewReader(archive), DefaultArchiveLimits(), nil); !errors.Is(err, ErrDigestMismatch) {
+			t.Fatalf("verify error = %v, want digest mismatch", err)
+		}
+	})
+
+	t.Run("reordered payloads", func(t *testing.T) {
+		reversed := append([]string(nil), paths...)
+		reverse(reversed)
+		archive := campKitFixture(t, fixtureEntries(manifest, payloads, reversed))
+		if _, err := Verify(context.Background(), bytes.NewReader(archive), DefaultArchiveLimits(), nil); !errors.Is(err, ErrArchiveFormat) {
+			t.Fatalf("verify error = %v, want archive format", err)
+		}
+	})
+
+	t.Run("second zstd frame", func(t *testing.T) {
+		archive, _, _ := verifiedKitFixture(t)
+		second := campKitFixture(t, []fixtureEntry{{name: "manifest.json", body: mustCanonical(t, manifest)}})
+		archive = append(archive, second...)
+		if _, err := Verify(context.Background(), bytes.NewReader(archive), DefaultArchiveLimits(), nil); !errors.Is(err, ErrArchiveFormat) {
+			t.Fatalf("verify error = %v, want archive format", err)
+		}
+	})
+}
+
+func TestVerifyBindsRawGenerationMetadataSemantics(t *testing.T) {
+	_, manifest, payloads := verifiedKitFixture(t)
+	metadataPath := manifest.Generation.MetadataPath
+	var metadata domain.GenerationMetadata
+	if err := json.Unmarshal(payloads[metadataPath], &metadata); err != nil {
+		t.Fatal(err)
+	}
+	metadata.Verified.RemoteBytesVerified = false
+	payloads[metadataPath] = mustJSON(t, metadata)
+	setPayloadBytes(&manifest, metadataPath, payloads[metadataPath], "")
+	archive := campKitFixture(t, fixtureEntries(manifest, payloads, sortedPayloadPaths(manifest)))
+
+	if _, err := Verify(context.Background(), bytes.NewReader(archive), DefaultArchiveLimits(), nil); !errors.Is(err, ErrMetadataMismatch) {
+		t.Fatalf("verify error = %v, want metadata mismatch", err)
+	}
+}
+
+type fixtureEntry struct {
+	name string
+	body []byte
+}
+
+func campKitFixture(t *testing.T, entries []fixtureEntry) []byte {
+	t.Helper()
+	return campKitFixtureWithHeader(t, entries, nil)
+}
+
+func campKitFixtureWithHeader(t *testing.T, entries []fixtureEntry, mutate func(*tar.Header)) []byte {
+	t.Helper()
+	var compressed bytes.Buffer
+	encoder, err := zstd.NewWriter(
+		&compressed,
+		zstd.WithEncoderConcurrency(1),
+		zstd.WithEncoderLevel(zstd.SpeedDefault),
+		zstd.WithEncoderCRC(true),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	writer := tar.NewWriter(encoder)
+	for _, entry := range entries {
+		header := &tar.Header{
+			Typeflag: tar.TypeReg,
+			Name:     entry.name,
+			Size:     int64(len(entry.body)),
+			Mode:     0o444,
+			Uid:      0,
+			Gid:      0,
+			ModTime:  time.Unix(0, 0).UTC(),
+			Format:   tar.FormatUSTAR,
+		}
+		if mutate != nil {
+			mutate(header)
+		}
+		if err := writer.WriteHeader(header); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := writer.Write(entry.body); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := writer.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := encoder.Close(); err != nil {
+		t.Fatal(err)
+	}
+	return compressed.Bytes()
+}
+
+func verifiedKitFixture(t *testing.T) ([]byte, Manifest, map[string][]byte) {
+	t.Helper()
+	manifest := validManifest()
+	manifest.SupportedPlatforms = []Platform{amd64()}
+	manifest.Payloads = filterPlatformPayloads(manifest.Payloads, "amd64")
+	manifest.Images = nil
+	manifest.Generation.ArchivePath = "payloads/generation/archive.tar.zst"
+
+	generation, imageDigest := haulerGenerationFixture(t, manifest.Generation.Capsule, amd64())
+	manifest.Images = []ImageIdentity{{
+		Role:      ImageRoom,
+		Reference: "ghcr.io/joshyorko/room-of-requirement@sha256:" + imageDigest,
+		Digest:    "sha256:" + imageDigest,
+		Platform:  amd64(),
+	}}
+	generationDigest := digestBytes(generation)
+	manifest.Generation.Ref.ArchiveSHA256 = generationDigest
+	manifest.Lineage.SourceGeneration = manifest.Generation.Ref
+
+	payloads := make(map[string][]byte, len(manifest.Payloads))
+	payloads[manifest.Generation.ArchivePath] = generation
+	setPayloadBytes(&manifest, manifest.Generation.ArchivePath, generation, "")
+
+	ref := domain.GenerationRef{
+		Generation:    manifest.Generation.Ref.Generation,
+		ArchiveSHA256: manifest.Generation.Ref.ArchiveSHA256,
+	}
+	parent := domain.GenerationRef{
+		Generation:    manifest.Generation.Parent.Generation,
+		ArchiveSHA256: manifest.Generation.Parent.ArchiveSHA256,
+	}
+	lineage := domain.Lineage{Branch: manifest.Generation.Branch}
+	objectKey, err := coordination.GenerationObjectKey(manifest.Generation.Capsule, lineage, ref)
+	if err != nil {
+		t.Fatal(err)
+	}
+	metadataKey, err := coordination.GenerationMetadataKey(manifest.Generation.Capsule, lineage, ref)
+	if err != nil {
+		t.Fatal(err)
+	}
+	metadata := domain.GenerationMetadata{
+		SchemaVersion: domain.SchemaVersion,
+		Capsule:       manifest.Generation.Capsule,
+		Lineage:       lineage,
+		Generation:    ref,
+		Parent:        &parent,
+		ObjectKey:     objectKey,
+		MetadataKey:   metadataKey,
+		Size:          int64(len(generation)),
+		CreatedAt:     manifest.Lineage.ExportedAt.Add(-time.Minute),
+		Tools:         domain.ToolVersions{DevPod: "v0.26.1", Hauler: "v2.0.2"},
+		SessionID:     "session-campkit-test",
+		Verified:      domain.Verification{LocalHaulLoadable: true, RemoteBytesVerified: true},
+	}
+	metadataBody := mustJSON(t, metadata)
+	payloads[manifest.Generation.MetadataPath] = metadataBody
+	setPayloadBytes(&manifest, manifest.Generation.MetadataPath, metadataBody, "")
+
+	for i := range manifest.Payloads {
+		payload := &manifest.Payloads[i]
+		if _, exists := payloads[payload.Path]; exists {
+			continue
+		}
+		body := []byte("payload:" + payload.Path)
+		executableDigest := digestBytes(body)
+		if payload.Role == PayloadTool && payload.Name == "hauler" {
+			body = haulerToolFixture(t, []byte("hauler executable"))
+			executableDigest = digestBytes([]byte("hauler executable"))
+		}
+		payloads[payload.Path] = body
+		setPayloadBytes(&manifest, payload.Path, body, executableDigest)
+	}
+
+	entries := fixtureEntries(manifest, payloads, sortedPayloadPaths(manifest))
+	return campKitFixture(t, entries), manifest, payloads
+}
+
+func filterPlatformPayloads(payloads []PayloadIdentity, architecture string) []PayloadIdentity {
+	result := make([]PayloadIdentity, 0, len(payloads))
+	for _, payload := range payloads {
+		if payload.Platform == nil || payload.Platform.Architecture == architecture {
+			result = append(result, payload)
+		}
+	}
+	return result
+}
+
+func fixtureEntries(manifest Manifest, payloads map[string][]byte, paths []string) []fixtureEntry {
+	body, err := MarshalCanonical(manifest)
+	if err != nil {
+		panic(err)
+	}
+	entries := []fixtureEntry{{name: "manifest.json", body: body}}
+	for _, path := range paths {
+		entries = append(entries, fixtureEntry{name: path, body: payloads[path]})
+	}
+	return entries
+}
+
+func sortedPayloadPaths(manifest Manifest) []string {
+	paths := make([]string, 0, len(manifest.Payloads))
+	for _, payload := range manifest.Payloads {
+		paths = append(paths, payload.Path)
+	}
+	sort.Strings(paths)
+	return paths
+}
+
+func setPayloadBytes(manifest *Manifest, path string, body []byte, executableDigest string) {
+	for i := range manifest.Payloads {
+		if manifest.Payloads[i].Path != path {
+			continue
+		}
+		manifest.Payloads[i].Size = int64(len(body))
+		manifest.Payloads[i].SHA256 = digestBytes(body)
+		if manifest.Payloads[i].Platform != nil {
+			if executableDigest == "" {
+				executableDigest = manifest.Payloads[i].SHA256
+			}
+			manifest.Payloads[i].ExecutableSHA256 = executableDigest
+		}
+		return
+	}
+	panic("payload not found: " + path)
+}
+
+func haulerGenerationFixture(t *testing.T, capsule string, platform Platform) ([]byte, string) {
+	t.Helper()
+	config := []byte(`{"architecture":"amd64","os":"linux"}`)
+	layer := []byte("root archive fixture")
+	configDigest := digestBytes(config)
+	layerDigest := digestBytes(layer)
+	imageManifest := mustJSON(t, map[string]any{
+		"schemaVersion": 2,
+		"mediaType":     "application/vnd.oci.image.manifest.v1+json",
+		"config": map[string]any{
+			"mediaType": "application/vnd.oci.image.config.v1+json",
+			"digest":    "sha256:" + configDigest,
+			"size":      len(config),
+		},
+		"layers": []map[string]any{{
+			"mediaType": "application/vnd.oci.image.layer.v1.tar+gzip",
+			"digest":    "sha256:" + layerDigest,
+			"size":      len(layer),
+		}},
+	})
+	imageDigest := digestBytes(imageManifest)
+
+	fileConfig := []byte(`{}`)
+	rootLayer := []byte("root-capsule-tar-zstd")
+	fileConfigDigest := digestBytes(fileConfig)
+	rootLayerDigest := digestBytes(rootLayer)
+	fileManifest := mustJSON(t, map[string]any{
+		"schemaVersion": 2,
+		"mediaType":     "application/vnd.oci.image.manifest.v1+json",
+		"artifactType":  "application/vnd.hauler.file",
+		"config": map[string]any{
+			"mediaType": "application/vnd.oci.empty.v1+json",
+			"digest":    "sha256:" + fileConfigDigest,
+			"size":      len(fileConfig),
+		},
+		"layers": []map[string]any{{
+			"mediaType": "application/octet-stream",
+			"digest":    "sha256:" + rootLayerDigest,
+			"size":      len(rootLayer),
+		}},
+	})
+	fileDigest := digestBytes(fileManifest)
+	index := mustJSON(t, map[string]any{
+		"schemaVersion": 2,
+		"mediaType":     "application/vnd.oci.image.index.v1+json",
+		"manifests": []map[string]any{
+			{
+				"mediaType": "application/vnd.oci.image.manifest.v1+json",
+				"digest":    "sha256:" + fileDigest,
+				"size":      len(fileManifest),
+				"annotations": map[string]string{
+					"org.opencontainers.image.ref.name": "hauler/" + capsule + ".tar.zst:latest",
+				},
+			},
+			{
+				"mediaType": "application/vnd.oci.image.manifest.v1+json",
+				"digest":    "sha256:" + imageDigest,
+				"size":      len(imageManifest),
+				"platform": map[string]string{
+					"os":           platform.OS,
+					"architecture": platform.Architecture,
+				},
+				"annotations": map[string]string{
+					"io.containerd.image.name": "ghcr.io/joshyorko/room-of-requirement:fixture",
+				},
+			},
+		},
+	})
+	blobs := map[string][]byte{
+		configDigest:     config,
+		layerDigest:      layer,
+		imageDigest:      imageManifest,
+		fileConfigDigest: fileConfig,
+		rootLayerDigest:  rootLayer,
+		fileDigest:       fileManifest,
+	}
+	entries := []nestedFixtureEntry{
+		{name: "blobs/", mode: 0o755, typeflag: tar.TypeDir},
+		{name: "blobs/sha256/", mode: 0o755, typeflag: tar.TypeDir},
+	}
+	digests := make([]string, 0, len(blobs))
+	for digest := range blobs {
+		digests = append(digests, digest)
+	}
+	sort.Strings(digests)
+	for _, digest := range digests {
+		entries = append(entries, nestedFixtureEntry{name: "blobs/sha256/" + digest, mode: 0o644, typeflag: tar.TypeReg, body: blobs[digest]})
+	}
+	entries = append(entries,
+		nestedFixtureEntry{name: "index.json", mode: 0o644, typeflag: tar.TypeReg, body: index},
+		nestedFixtureEntry{name: "manifest.json", mode: 0o644, typeflag: tar.TypeReg, body: []byte("[]\n")},
+		nestedFixtureEntry{name: "oci-layout", mode: 0o644, typeflag: tar.TypeReg, body: []byte(`{"imageLayoutVersion":"1.0.0"}`)},
+	)
+	return nestedTarZstdFixture(t, entries), imageDigest
+}
+
+type nestedFixtureEntry struct {
+	name     string
+	mode     int64
+	typeflag byte
+	body     []byte
+}
+
+func nestedTarZstdFixture(t *testing.T, entries []nestedFixtureEntry) []byte {
+	t.Helper()
+	var compressed bytes.Buffer
+	encoder, err := zstd.NewWriter(&compressed, zstd.WithEncoderConcurrency(1), zstd.WithEncoderCRC(true))
+	if err != nil {
+		t.Fatal(err)
+	}
+	writer := tar.NewWriter(encoder)
+	for _, entry := range entries {
+		header := &tar.Header{
+			Name: entry.name, Mode: entry.mode, Typeflag: entry.typeflag,
+			Size: int64(len(entry.body)), ModTime: time.Unix(0, 0), Format: tar.FormatUSTAR,
+		}
+		if err := writer.WriteHeader(header); err != nil {
+			t.Fatal(err)
+		}
+		if len(entry.body) > 0 {
+			if _, err := writer.Write(entry.body); err != nil {
+				t.Fatal(err)
+			}
+		}
+	}
+	if err := writer.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := encoder.Close(); err != nil {
+		t.Fatal(err)
+	}
+	return compressed.Bytes()
+}
+
+func haulerToolFixture(t *testing.T, executable []byte) []byte {
+	t.Helper()
+	var body bytes.Buffer
+	gzipWriter := gzip.NewWriter(&body)
+	tarWriter := tar.NewWriter(gzipWriter)
+	header := &tar.Header{Name: "hauler", Typeflag: tar.TypeReg, Mode: 0o755, Size: int64(len(executable))}
+	if err := tarWriter.WriteHeader(header); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := tarWriter.Write(executable); err != nil {
+		t.Fatal(err)
+	}
+	if err := tarWriter.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := gzipWriter.Close(); err != nil {
+		t.Fatal(err)
+	}
+	return body.Bytes()
+}
+
+func digestBytes(body []byte) string {
+	sum := sha256.Sum256(body)
+	return hex.EncodeToString(sum[:])
+}
+
+func mustJSON(t *testing.T, value any) []byte {
+	t.Helper()
+	body, err := json.Marshal(value)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return body
+}

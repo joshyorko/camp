@@ -2,8 +2,9 @@
 
 CampKit schema version 2 is the current manifest-validation contract. The
 `internal/campkit` package validates, canonically encodes, and strictly decodes
-manifests. Camp does not yet export, archive, inspect, verify, import, load, or
-accept kits, and schema version 1 is intentionally unsupported because no
+manifests. `Inspect` and `Verify` operate on `manifest.json`-first deterministic
+tar+zstd archives, while Camp still does not export, import, load, or accept kits
+via CLI; schema version 1 is intentionally unsupported because no
 public command consumed or emitted it.
 
 ## Fixed wire closure
@@ -39,6 +40,11 @@ trust-evidence payload bound by path. A rejected manifest may be checksum-valid
 but is not trusted; signature verification and local receipts are outside this
 contract.
 
+Archive `Inspect` verifies determinism and manifest-decoding only. `Verify`
+streams payload bodies and checks size/digest/name ordering, then separates
+integrity status from trust evaluation so integrity can be valid while trust remains
+unverified.
+
 Canonical JSON is compact Go struct-field order with no newline. Encoding
 deep-copies the manifest, normalizes copied timestamps to UTC `Z`, and sorts
 copied platform, payload, and image slices by the schema's bytewise keys.
@@ -63,8 +69,8 @@ strict decoding, schema classification, generation and metadata binding,
 platform/tool/Room closure, paths and bounds, OCI identity, semantic
 duplicates, trust matrices, hostile values, and exact round trips.
 
-Archive entry limits, compressed-byte safety, raw generation metadata parsing,
-payload byte comparison, signature verification, authoritative artifact
-resolution, deterministic archive writing, publication, import recovery, image
-loading, and disconnected acceptance remain later lifecycle work. Do not treat
+Archive entry limits, compressed-byte safety, payload byte comparison,
+signature verification, authoritative artifact resolution, deterministic archive
+writing, publication, import recovery, image loading, and disconnected acceptance
+remain later lifecycle work. Do not treat
 a valid C0 manifest as proof that any of those operations exist or succeeded.
