@@ -436,7 +436,7 @@ func validManifest() Manifest {
 		Generation: GenerationIdentity{
 			Capsule: "second-brain", Branch: "main",
 			Ref:    GenerationRef{Generation: 42, ArchiveSHA256: digest1},
-			Parent: &parent, ArchivePath: "payloads/generation/archive.tar",
+			Parent: &parent, ArchivePath: "payloads/generation/archive.tar.zst",
 			MetadataPath: "payloads/generation/metadata.json",
 		},
 		SupportedPlatforms: []Platform{amd64(), arm64()},
