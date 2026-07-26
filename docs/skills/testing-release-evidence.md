@@ -15,6 +15,8 @@ Report passed, failed, and skipped gates separately. Installed-tool tests may sk
 
 ## Durable documentation and release-note boundary
 
+When resuming an interrupted open flow (`completeWorkspaceOpen`) and a session snapshot already contains committed forwarders, Camp now revalidates those records through `Forwarders.Observe` before deciding whether to reuse or restart them. Unit tests should assert both successful observation (no new start) and stale-observation recovery (restarts + replacement records), and treat skipped real-tool gates as still leaving installed-tool evidence incomplete.
+
 Camp-specific policy requires every implementation, review, debugging,
 reconnaissance, and verification run to improve the closest canonical guide in
 `docs/skills/`. Start from `docs/skills/README.md`; every guide must remain

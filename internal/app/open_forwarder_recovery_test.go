@@ -10,6 +10,7 @@ import (
 
 	"github.com/joshyorko/camp/internal/domain"
 	"github.com/joshyorko/camp/internal/ports"
+	"github.com/joshyorko/camp/internal/target"
 )
 
 func TestOpenReconcileAdoptsPendingForwarderFromExactDurableEvidence(t *testing.T) {
@@ -62,6 +63,82 @@ func TestOpenReconcileAdoptsPendingForwarderFromExactDurableEvidence(t *testing.
 	}
 	if len(reconciled.Recovery.Forwarding) != 1 || reconciled.Recovery.Forwarding[0].Name != "registry" || journal.fact.IntentID != pending.ID {
 		t.Fatalf("reconciled forwarding = %#v fact = %#v", reconciled.Recovery.Forwarding, journal.fact)
+	}
+}
+
+func TestOpenCompleteWorkspaceOpenRevalidatesCommittedForwarders(t *testing.T) {
+	t.Parallel()
+	environment := newRemoteOpenTestEnvironment(t)
+	events := []string{}
+	forwarders := &openForwarders{events: &events}
+	environment.open.deps.Forwarders = forwarders
+	first, err := environment.open.Run(context.Background(), OpenRequest{
+		SessionID: "forwarder-reconciled-session", Capsule: "brain", Branch: "feature", SourceLineage: domain.Lineage{Branch: "main"},
+		Mode: domain.SessionReadWrite, RemoteAvailable: true, Target: "MemoryD", Context: "default", Provider: "docker", Machine: "machine-a", Runtime: environment.runtime, Backend: environment.backend, EntryMode: "",
+	})
+	if err != nil {
+		t.Fatalf("initial Open() error = %v", err)
+	}
+	snapshot := first.Snapshot
+	snapshot.State = domain.SessionOpen
+	events = []string{}
+	completed, err := environment.open.completeWorkspaceOpen(context.Background(), snapshot, OpenRequest{}, target.Result{})
+	if err != nil {
+		t.Fatalf("completeWorkspaceOpen() error = %v", err)
+	}
+	forwardStarts, forwardObservations := 0, 0
+	for _, event := range events {
+		switch event {
+		case "forward:registry", "forward:fileserver":
+			forwardStarts++
+		case "observe-forward:registry", "observe-forward:fileserver":
+			forwardObservations++
+		}
+	}
+	if forwardStarts != 0 || forwardObservations != 2 {
+		t.Fatalf("forwarder starts = %d observations = %d, want 0 and 2", forwardStarts, forwardObservations)
+	}
+	if len(completed.Snapshot.Recovery.Forwarding) != 2 {
+		t.Fatalf("reconciled forwarders = %#v", completed.Snapshot.Recovery.Forwarding)
+	}
+}
+
+func TestOpenCompleteWorkspaceOpenRestartsUnhealthyCommittedForwarder(t *testing.T) {
+	t.Parallel()
+	environment := newRemoteOpenTestEnvironment(t)
+	events := []string{}
+	forwarders := &openForwarders{events: &events}
+	environment.open.deps.Forwarders = forwarders
+	first, err := environment.open.Run(context.Background(), OpenRequest{
+		SessionID: "forwarder-reconciled-stale-session", Capsule: "brain", Branch: "feature", SourceLineage: domain.Lineage{Branch: "main"},
+		Mode: domain.SessionReadWrite, RemoteAvailable: true, Target: "MemoryD", Context: "default", Provider: "docker", Machine: "machine-a", Runtime: environment.runtime, Backend: environment.backend, EntryMode: "",
+	})
+	if err != nil {
+		t.Fatalf("initial Open() error = %v", err)
+	}
+	forwarders.observeErr = errors.New("workspace forwarder evidence is stale")
+	environment.open.deps.Forwarders = forwarders
+	snapshot := first.Snapshot
+	snapshot.State = domain.SessionOpen
+	events = []string{}
+	completed, err := environment.open.completeWorkspaceOpen(context.Background(), snapshot, OpenRequest{}, target.Result{})
+	if err != nil {
+		t.Fatalf("completeWorkspaceOpen() error = %v", err)
+	}
+	forwardStarts, forwardObservations := 0, 0
+	for _, event := range events {
+		switch event {
+		case "forward:registry", "forward:fileserver":
+			forwardStarts++
+		case "observe-forward:registry", "observe-forward:fileserver":
+			forwardObservations++
+		}
+	}
+	if forwardStarts != 2 || forwardObservations != 2 {
+		t.Fatalf("forwarder starts = %d observations = %d, want 2 and 2", forwardStarts, forwardObservations)
+	}
+	if len(completed.Snapshot.Recovery.Forwarding) != 2 {
+		t.Fatalf("reconciled forwarders = %#v", completed.Snapshot.Recovery.Forwarding)
 	}
 }
 
