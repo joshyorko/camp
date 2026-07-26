@@ -341,7 +341,12 @@ ship reachable vulnerabilities from the runner's selected toolchain.
 
 Credentialed provider runs are separate from credential-free CI. A protected
 `release-providers` environment and an explicit named profile are required
-before a provider can be claimed. `provider-evidence.yml` uses strict allowlisted
+before a provider can be claimed. `provider-evidence.yml` is explicit-dispatch
+only because its candidate identity and provider selections are required
+inputs; it must not pretend a schedule can supply those values. Protected
+environment secrets may materialize the authorized kubeconfig and DevPod
+configuration, but they must never be used as an `if:` condition that converts
+missing authority into a skipped success. The workflow uses strict allowlisted
 artifacts and always favors fail-closed evidence generation when secrets,
 contexts, or protected inputs are missing. Do not put secret values in evidence
 JSON, artifacts, caches, output, plans, or generated config.
