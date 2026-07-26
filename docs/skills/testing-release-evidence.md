@@ -13,6 +13,22 @@ git diff --check
 
 Report passed, failed, and skipped gates separately. Installed-tool tests may skip without pinned DevPod, Hauler, or `pasta`; those skips leave the real lifecycle unproved. A package test, commit, push, merge, packaged artifact, and deployed release are distinct evidence states.
 
+## Readiness ledger
+
+For a current-state or issue-reconciliation assessment, bind every claim to one
+assessed commit and record these states separately: implemented (source exists),
+tested (a named local test passes), pushed (the commit is on a remote ref),
+merged (the commit is reachable from the assessed base), CI-proven (the exact
+commit has a successful hosted check), release-proven (a packaged artifact was
+built and verified), and runtime-proven (the real configured lifecycle or
+operator path completed). Mark a state missing when its evidence is absent;
+never promote source inspection, generated docs, fake adapters, skipped tests,
+or a successful build into a stronger state. Keep failed and skipped gates
+explicit, including the missing capability and the claim it leaves unproved.
+For issue closure, compare the ledger with that issue's own closure rule and
+attach the exact command, test, workflow run, artifact, or runtime transcript;
+do not close an issue because a dependent implementation merely merged.
+
 ## Durable documentation and release-note boundary
 
 When resuming an interrupted open flow (`completeWorkspaceOpen`) and a session snapshot already contains committed forwarders, Camp now revalidates those records through `Forwarders.Observe` before deciding whether to reuse or restart them. Unit tests should assert both successful observation (no new start) and stale-observation recovery (restarts + replacement records), and treat skipped real-tool gates as still leaving installed-tool evidence incomplete.
