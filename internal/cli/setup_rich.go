@@ -191,11 +191,10 @@ func (p *richSetupPipeline) run(values map[string]string, out chan<- tea.Msg) {
 
 	// Toolchain: resolve DevPod and Hauler for real.
 	environment := environmentMap(os.Environ())
-	completed := func(name string, resolution tooladapter.Resolution) error { return nil }
 	if !emit(setupui.ActivityMsg{Stage: setupui.StageToolchain, Message: "Installing DevPod and Hauler…"}) {
 		return
 	}
-	if err := runProductionToolSetupWithEvents(p.ctx, ModeHuman, discardWriter{}, lockBytes, "", environment, runtime.GOOS, runtime.GOARCH, completed); err != nil {
+	if err := runProductionToolSetup(p.ctx, ModeHuman, discardWriter{}, lockBytes, "", environment, runtime.GOOS, runtime.GOARCH); err != nil {
 		fail(setupui.StageToolchain, err, "camp setup")
 		return
 	}
