@@ -31,6 +31,22 @@ func TestResolveTerminalExperienceUsesOutputDescriptorAndEnvironment(t *testing.
 	}
 }
 
+func TestResolveTerminalExperienceDoesNotTreatNoColorAsMissingTerminalCapability(t *testing.T) {
+	file, err := os.CreateTemp(t.TempDir(), "terminal")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer file.Close()
+
+	probe := func(uintptr) (bool, int, int) { return true, 120, 40 }
+	got, _, _ := resolveTerminalExperience(ModeHuman, file, map[string]string{
+		"TERM": "xterm-256color", "COLORTERM": "truecolor", "NO_COLOR": "1",
+	}, probe)
+	if got != presentation.TerminalColor {
+		t.Fatalf("resolveTerminalExperience() = %q, want color", got)
+	}
+}
+
 func TestResolveTerminalExperienceReturnsProbedHeightAlongsideWidth(t *testing.T) {
 	file, err := os.CreateTemp(t.TempDir(), "terminal")
 	if err != nil {
@@ -70,7 +86,6 @@ func TestResolveTerminalExperienceTreatsNonFilesAndFallbackSignalsAsPlain(t *tes
 	}{
 		{name: "buffer", mode: ModeHuman, env: map[string]string{"TERM": "xterm-256color", "COLORTERM": "truecolor"}},
 		{name: "json", mode: ModeJSON, env: map[string]string{"TERM": "xterm-256color", "COLORTERM": "truecolor"}},
-		{name: "no color", mode: ModeHuman, env: map[string]string{"TERM": "xterm-256color", "COLORTERM": "truecolor", "NO_COLOR": ""}},
 		{name: "ci", mode: ModeHuman, env: map[string]string{"TERM": "xterm-256color", "COLORTERM": "truecolor", "CI": "true"}},
 	}
 	for _, test := range tests {

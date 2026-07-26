@@ -15,7 +15,6 @@ func TestSelectTerminalExperienceFailsClosed(t *testing.T) {
 	}{
 		{name: "interactive true color", in: TerminalInput{TTY: true, Width: 120, TERM: "xterm-256color", COLORTERM: "truecolor"}, want: TerminalColor},
 		{name: "json", in: TerminalInput{TTY: true, Width: 120, TERM: "xterm-256color", COLORTERM: "truecolor", JSON: true}, want: TerminalPlain},
-		{name: "no color", in: TerminalInput{TTY: true, Width: 120, TERM: "xterm-256color", COLORTERM: "truecolor", NoColor: true}, want: TerminalPlain},
 		{name: "ci", in: TerminalInput{TTY: true, Width: 120, TERM: "xterm-256color", COLORTERM: "truecolor", CI: true}, want: TerminalPlain},
 		{name: "redirected", in: TerminalInput{Width: 120, TERM: "xterm-256color", COLORTERM: "truecolor"}, want: TerminalPlain},
 		{name: "dumb", in: TerminalInput{TTY: true, Width: 120, TERM: "dumb", COLORTERM: "truecolor"}, want: TerminalPlain},

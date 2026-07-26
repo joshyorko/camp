@@ -20,13 +20,12 @@ type TerminalInput struct {
 	TERM      string
 	COLORTERM string
 	JSON      bool
-	NoColor   bool
 	CI        bool
 }
 
 func SelectTerminalExperience(input TerminalInput) TerminalExperience {
 	trueColor := strings.EqualFold(input.COLORTERM, "truecolor") || strings.EqualFold(input.COLORTERM, "24bit")
-	if input.JSON || input.NoColor || input.CI || !input.TTY || input.Width < 80 || strings.EqualFold(input.TERM, "dumb") || !trueColor {
+	if input.JSON || input.CI || !input.TTY || input.Width < 80 || strings.EqualFold(input.TERM, "dumb") || !trueColor {
 		return TerminalPlain
 	}
 	return TerminalColor

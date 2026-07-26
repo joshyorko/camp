@@ -96,7 +96,7 @@ func (p *ProductionLifecycle) Setup(ctx context.Context, mode OutputMode, in io.
 			// Rich interactive path: a truecolor TTY with a real keyboard and
 			// minimum dimensions runs the full-screen Trailhead scene from the
 			// first prompt through CAMP IS READY. Everything else (plain, JSON,
-			// non-TTY, NO_COLOR, piped input, undersized terminals) keeps the
+			// non-TTY, piped input, undersized terminals) keeps the
 			// deterministic line-based flow below.
 			if canUseRichSetup(experience, width, height) && inputIsTTY(in) {
 				handled, err := p.runRichSetup(ctx, in, out, setupPromptDefaults{

@@ -94,11 +94,10 @@ func resolveTerminalExperience(mode OutputMode, out io.Writer, environment map[s
 		return presentation.TerminalPlain, 0, 0
 	}
 	tty, width, height := probe(file.Fd())
-	_, noColor := environment["NO_COLOR"]
 	ci := strings.TrimSpace(environment["CI"])
 	experience := presentation.SelectTerminalExperience(presentation.TerminalInput{
 		TTY: tty, Width: width, TERM: environment["TERM"], COLORTERM: environment["COLORTERM"],
-		JSON: mode == ModeJSON, NoColor: noColor, CI: ci != "" && !strings.EqualFold(ci, "false") && ci != "0",
+		JSON: mode == ModeJSON, CI: ci != "" && !strings.EqualFold(ci, "false") && ci != "0",
 	})
 	return experience, width, height
 }
