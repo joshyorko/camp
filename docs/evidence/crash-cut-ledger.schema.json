@@ -5,12 +5,20 @@
   "required": ["schemaVersion", "candidate", "cuts"],
   "properties": {
     "schemaVersion": { "const": 1 },
-    "candidate": { "type": "string", "minLength": 1 },
+    "candidate": {
+      "type": "object",
+      "required": ["commit", "executableSha256"],
+      "properties": {
+        "commit": { "type": "string", "pattern": "^[0-9a-f]{40}$" },
+        "executableSha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" }
+      },
+      "additionalProperties": false
+    },
     "cuts": {
       "type": "array",
       "items": {
         "type": "object",
-        "required": ["id", "transition", "precondition", "death", "recovery", "durableState", "publication", "evidence"],
+        "required": ["id", "transition", "precondition", "death", "recovery", "durableState", "publication", "evidence", "status"],
         "properties": {
           "id": { "type": "string", "minLength": 1 },
           "transition": { "type": "string", "minLength": 1 },
@@ -25,7 +33,11 @@
           },
           "status": { "enum": ["implemented", "tested", "runtime-proven", "blocked"] }
         },
-        "additionalProperties": false
+        "additionalProperties": false,
+        "allOf": [{
+          "if": { "properties": { "status": { "const": "runtime-proven" } } },
+          "then": { "properties": { "evidence": { "minItems": 1 } } }
+        }]
       }
     }
   },

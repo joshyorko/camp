@@ -1,6 +1,9 @@
 {
   "schemaVersion": 1,
-  "candidate": "unverified: CAMP_TEST_BINARY required",
+  "candidate": {
+    "commit": "0000000000000000000000000000000000000000",
+    "executableSha256": "0000000000000000000000000000000000000000000000000000000000000000"
+  },
   "cuts": [
     {
       "id": "forwarder-start-before-fact",
@@ -14,8 +17,19 @@
       "status": "blocked"
     },
     {
+      "id": "service-start-before-fact",
+      "transition": "ServiceStart:<name>",
+      "precondition": "The service-start intent is durable and the recorded service is not yet facted",
+      "death": "Controller receives SIGKILL after service spawn and before the start fact",
+      "recovery": "Replacement controller observes the exact helper and child identities before adoption or restart",
+      "durableState": "The exact service record is facted or the pending start remains for fail-closed reconciliation",
+      "publication": "No duplicate service and no cleanup of an unrelated PID or listener",
+      "evidence": [],
+      "status": "blocked"
+    },
+    {
       "id": "complete-process-death-matrix",
-      "transition": "SupervisorClaimed, ServiceRestart, ForwarderStarted, WorkspaceStoppedOrDeleted, ForwardersStopped, ServicesStopped, SupervisorStopped, LeaseReleased",
+      "transition": "SupervisorClaimed, ServiceStart, ServiceRestart, ForwarderStarted, WorkspaceStoppedOrDeleted, ForwardersStopped, ServicesStopped, SupervisorStopped, LeaseReleased",
       "precondition": "Each named closure-rule transition has a durable precondition",
       "death": "SIGKILL at each transition's effect/fact boundary",
       "recovery": "Observation-first reconciliation of only the recorded intent",

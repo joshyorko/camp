@@ -4,8 +4,6 @@ This directory is the canonical, repository-local operational reference for agen
 
 Current guides:
 
-- [Crash-cut evidence](crash-cut-evidence.md)
-
 - [Camp kits](camp-kits.md)
 - [CLI composition](cli-composition.md)
 - [DevPod and Hauler behavior](devpod-hauler.md)
