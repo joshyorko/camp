@@ -89,6 +89,86 @@ func TestReleaseEvidenceBindsFinalArchivesAndVerifiesNativeInstall(t *testing.T)
 	}
 }
 
+func TestVerifiedArtifactManifestBindsBothNativeResultsAndRejectsMutation(t *testing.T) {
+	dist := filepath.Join(t.TempDir(), "downloaded")
+	runEvidence(t, "build", dist)
+	evidence := struct {
+		Artifacts []struct {
+			Name     string `json:"name"`
+			Platform string `json:"platform"`
+			SHA256   string `json:"sha256"`
+		} `json:"artifacts"`
+	}{}
+	decodeJSON(t, filepath.Join(dist, "evidence.json"), &evidence)
+	for _, artifact := range evidence.Artifacts {
+		architecture := strings.TrimPrefix(artifact.Platform, "linux/")
+		body := map[string]string{
+			"commit":   releaseCommit,
+			"platform": artifact.Platform,
+			"artifact": artifact.Name,
+			"sha256":   artifact.SHA256,
+			"result":   "passed",
+		}
+		encoded, err := json.Marshal(body)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(
+			filepath.Join(dist, "verification-"+architecture+".json"),
+			append(encoded, '\n'),
+			0o644,
+		); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	runVerifiedArtifacts(t, "create", dist, true)
+	var manifest struct {
+		Candidate struct {
+			Version string `json:"version"`
+			Commit  string `json:"commit"`
+		} `json:"candidate"`
+		Artifacts []struct {
+			Architecture       string `json:"architecture"`
+			Path               string `json:"path"`
+			Size               int64  `json:"size"`
+			SHA256             string `json:"sha256"`
+			Verification       string `json:"verification"`
+			VerificationSHA256 string `json:"verificationSha256"`
+			Result             string `json:"result"`
+		} `json:"artifacts"`
+		VerificationResult string `json:"verificationResult"`
+	}
+	decodeJSON(t, filepath.Join(dist, "verified-artifacts.json"), &manifest)
+	if manifest.Candidate.Version != releaseVersion ||
+		manifest.Candidate.Commit != releaseCommit ||
+		manifest.VerificationResult != "passed" ||
+		len(manifest.Artifacts) != 2 {
+		t.Fatalf("incomplete verified-artifact manifest: %#v", manifest)
+	}
+	for _, artifact := range manifest.Artifacts {
+		if artifact.Architecture == "" || artifact.Path == "" || artifact.Size <= 0 ||
+			artifact.SHA256 == "" || artifact.Verification == "" ||
+			artifact.VerificationSHA256 == "" || artifact.Result != "passed" {
+			t.Fatalf("incomplete verified artifact: %#v", artifact)
+		}
+	}
+	runVerifiedArtifacts(t, "recheck", dist, true)
+
+	archive := filepath.Join(dist, manifest.Artifacts[0].Path)
+	file, err := os.OpenFile(archive, os.O_APPEND|os.O_WRONLY, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := file.WriteString("mutation"); err != nil {
+		t.Fatal(err)
+	}
+	if err := file.Close(); err != nil {
+		t.Fatal(err)
+	}
+	runVerifiedArtifacts(t, "recheck", dist, false)
+}
+
 func runEvidence(t *testing.T, mode, dist string) {
 	t.Helper()
 	command := exec.Command("./packaging/build-release-evidence.sh", mode)
@@ -102,6 +182,19 @@ func runEvidence(t *testing.T, mode, dist string) {
 	)
 	if output, err := command.CombinedOutput(); err != nil {
 		t.Fatalf("release evidence %s: %v\n%s", mode, err, output)
+	}
+}
+
+func runVerifiedArtifacts(t *testing.T, mode, dist string, wantSuccess bool) {
+	t.Helper()
+	command := exec.Command("python3", "./packaging/verified_artifacts.py", mode, dist)
+	command.Dir = ".."
+	output, err := command.CombinedOutput()
+	if wantSuccess && err != nil {
+		t.Fatalf("verified artifacts %s: %v\n%s", mode, err, output)
+	}
+	if !wantSuccess && err == nil {
+		t.Fatalf("verified artifacts %s accepted mutated archive:\n%s", mode, output)
 	}
 }
 

@@ -144,3 +144,67 @@ jobs:
           path: build/evidence/test-gates.json
           if-no-files-found: error
           retention-days: 30
+
+  parity-evidence:
+    name: Direct Go and RCC parity record
+    if: always()
+    needs: [test, integration, minio, locked-tools, packaging, rcc-local, rcc-test]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - name: Record bounded parity evidence
+        env:
+          CANDIDATE_COMMIT: ${{ github.sha }}
+          RUN_ID: ${{ github.run_id }}
+          RUN_ATTEMPT: ${{ github.run_attempt }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          DIRECT_TEST: ${{ needs.test.result }}
+          DIRECT_INTEGRATION: ${{ needs.integration.result }}
+          DIRECT_MINIO: ${{ needs.minio.result }}
+          DIRECT_LOCKED_TOOLS: ${{ needs.locked-tools.result }}
+          DIRECT_PACKAGING: ${{ needs.packaging.result }}
+          RCC_LOCAL: ${{ needs.rcc-local.result }}
+          RCC_TEST: ${{ needs.rcc-test.result }}
+        run: |
+          mkdir -p build/evidence
+          python3 - <<'PY'
+          import json
+          import os
+          import pathlib
+
+          direct = {
+              "test": os.environ["DIRECT_TEST"],
+              "integration": os.environ["DIRECT_INTEGRATION"],
+              "minio": os.environ["DIRECT_MINIO"],
+              "locked-tools": os.environ["DIRECT_LOCKED_TOOLS"],
+              "packaging": os.environ["DIRECT_PACKAGING"],
+          }
+          rcc = {
+              "local": os.environ["RCC_LOCAL"],
+              "test": os.environ["RCC_TEST"],
+          }
+          complete = all(result == "success" for result in [*direct.values(), *rcc.values()])
+          record = {
+              "schemaVersion": 1,
+              "candidateCommit": os.environ["CANDIDATE_COMMIT"],
+              "run": {
+                  "id": os.environ["RUN_ID"],
+                  "attempt": os.environ["RUN_ATTEMPT"],
+                  "url": os.environ["RUN_URL"],
+              },
+              "mandatoryGates": {"direct": direct, "rcc": rcc},
+              "complete": complete,
+              "requiredConsecutiveCompleteRuns": 2,
+              "qualifiedHistoricalRuns": [],
+          }
+          pathlib.Path("build/evidence/parity.json").write_text(
+              json.dumps(record, indent=2, sort_keys=True) + "\n",
+              encoding="utf-8",
+          )
+          PY
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: rcc-parity-evidence-${{ github.sha }}
+          path: build/evidence/parity.json
+          if-no-files-found: error
+          retention-days: 90

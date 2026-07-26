@@ -3,6 +3,8 @@ tasks:
     shell: python call_invoke.py robot
   robotKubernetes:
     shell: python call_invoke.py robotKubernetes
+  package:
+    shell: python call_invoke.py package
 
 devTasks:
   local:
@@ -11,8 +13,6 @@ devTasks:
     shell: python call_invoke.py install
   test:
     shell: python call_invoke.py test
-  package:
-    shell: python call_invoke.py package
 
 environmentConfigs:
   - setup.yaml

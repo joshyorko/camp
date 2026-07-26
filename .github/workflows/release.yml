@@ -23,7 +23,8 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
-  build:
+  package:
+    name: RCC release package
     runs-on: ubuntu-24.04
     timeout-minutes: 20
     steps:
@@ -39,7 +40,7 @@ jobs:
         run: |
           SOURCE_DATE_EPOCH="$(git show -s --format=%ct HEAD)"
           export SOURCE_DATE_EPOCH
-          ./developer/rccw run -r developer/toolkit.yaml --dev -t package
+          ./developer/rccw run -r developer/toolkit.yaml -t package
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: release-candidate-${{ github.sha }}
@@ -48,7 +49,8 @@ jobs:
           retention-days: 30
 
   verify:
-    needs: build
+    name: Native verification (${{ matrix.architecture }})
+    needs: package
     strategy:
       fail-fast: false
       matrix:
@@ -84,8 +86,33 @@ jobs:
           if-no-files-found: error
           retention-days: 90
 
-  attest:
+  verified-artifacts:
+    name: Seal verified artifact set
     needs: verify
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: release-candidate-${{ github.sha }}
+          path: dist
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          pattern: verified-release-evidence-*-${{ github.sha }}
+          path: dist
+          merge-multiple: true
+      - name: Create immutable verified-artifact manifest
+        run: python3 packaging/verified_artifacts.py create dist
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: verified-release-set-${{ github.sha }}
+          path: dist/
+          if-no-files-found: error
+          retention-days: 90
+
+  attest:
+    needs: verified-artifacts
     if: github.event_name == 'push' || inputs.publish == true
     permissions:
       contents: read
@@ -93,10 +120,13 @@ jobs:
       attestations: write
     runs-on: ubuntu-24.04
     steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with:
-          name: release-candidate-${{ github.sha }}
+          name: verified-release-set-${{ github.sha }}
           path: dist
+      - name: Recheck verified archives before attestation
+        run: python3 packaging/verified_artifacts.py recheck dist
       - uses: actions/attest-build-provenance@96b4a1ef7235a096b17240c259729fdd70c83d45 # v2
         with:
           subject-path: dist/camp_*.tar.gz
@@ -109,10 +139,13 @@ jobs:
       contents: write
     runs-on: ubuntu-24.04
     steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with:
-          name: release-candidate-${{ github.sha }}
+          name: verified-release-set-${{ github.sha }}
           path: dist
+      - name: Recheck verified archives before publication
+        run: python3 packaging/verified_artifacts.py recheck dist
       - name: Publish verified assets
         env:
           GH_TOKEN: ${{ github.token }}
@@ -122,4 +155,11 @@ jobs:
           if [[ "${GITHUB_EVENT_NAME}" == "workflow_dispatch" ]]; then
             release_tag="v${REQUESTED_VERSION#v}"
           fi
-          gh release create "$release_tag" dist/* --verify-tag --generate-notes
+          gh release create "$release_tag" \
+            dist/camp_*.tar.gz \
+            dist/checksums.txt \
+            dist/*.spdx.json \
+            dist/camp.rb \
+            dist/verified-artifacts.json \
+            --verify-tag \
+            --generate-notes

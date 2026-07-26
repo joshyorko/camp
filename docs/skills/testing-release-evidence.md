@@ -86,7 +86,7 @@ the contract tests hard-code one permanent RCC release.
 ```bash
 rcc run -r developer/toolkit.yaml --dev -t local
 rcc run -r developer/toolkit.yaml --dev -t test
-rcc run -r developer/toolkit.yaml --dev -t package
+rcc run -r developer/toolkit.yaml -t package
 rcc run -r developer/toolkit.yaml -t robot
 rcc run -r developer/toolkit.yaml -t robotKubernetes
 ```
@@ -120,8 +120,13 @@ The race gate resolves either the conventional `gcc` command or conda-forge's
 environment may disable CGO for deterministic cross-builds; a discovered
 compiler alone therefore does not prove that `go test -race` can use it.
 
-RCC-backed jobs run alongside the direct Go jobs during parity. Do not remove
-the direct jobs until two consecutive PR/master runs show equivalent coverage.
+RCC-backed jobs run alongside the direct Go jobs during parity. The
+`parity-evidence` job always writes `build/evidence/parity.json` for the exact
+workflow commit and run URL, including every direct and RCC job result. Its
+`qualifiedHistoricalRuns` starts empty: repository tests cannot populate it or
+claim hosted parity. Do not remove the direct jobs until two consecutive,
+actual complete PR/master runs have passed every recorded mandatory gate; add
+those two GitHub Actions run IDs and URLs only after both runs finish.
 Do not cache `ROBOCORP_HOME`; the environment is private writable runtime state,
 not a verified immutable cache seed.
 
@@ -133,7 +138,8 @@ preinstalled binary. Do not require developers to invoke that wrapper.
 
 The local `package` task derives `VERSION=0.0.0-<short-commit>` and the full
 `COMMIT` from a clean checkout. Release CI may provide both values explicitly;
-providing only one fails closed. Automatic identity refuses a dirty checkout so
+providing only one fails closed, and an explicit `COMMIT` must equal the
+checked-out `HEAD`. Automatic identity refuses a dirty checkout so
 the packaged binary cannot claim clean commit provenance for uncommitted code.
 
 `robotKubernetes` is a protected, explicitly authorized evidence task. It
@@ -362,6 +368,17 @@ Verification checks the downloaded checksum manifest and SBOM digest, extracts
 the matching archive, installs its binary into a fresh temporary prefix, and
 executes version, help, and bash/zsh/fish completion commands. It emits
 `verification-<arch>.json`; both supported architectures must report `passed`.
+The release workflow then combines the single package artifact with both native
+verification records and runs `packaging/verified_artifacts.py create`. The
+resulting `verified-artifacts.json` binds the exact candidate version and
+commit plus each archive's architecture, relative path, byte size, SHA-256,
+verification-record path and SHA-256, and passed result. Creation fails for a
+missing native result, identity/digest mismatch, or an extra release archive.
+The sealed `verified-release-set-<commit>` is the only archive source for
+attestation and publication. Both downstream jobs independently run
+`verified_artifacts.py recheck`; neither job invokes RCC, Go, or packaging build
+scripts, so a missing, changed, substituted, or newly added archive fails before
+any protected side effect.
 Checksums stored beside mutable release assets detect accidental or transport
 corruption but do not authenticate the publisher. GitHub artifact attestations
 bind final archive digests to the workflow identity; protected tag/manual

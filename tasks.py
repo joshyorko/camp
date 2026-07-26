@@ -347,6 +347,11 @@ def robot_kubernetes(_context):
 def package_task(_context):
     """Delegate reproducible release evidence to the existing packaging authority."""
     version, commit = resolve_package_identity(ROOT, os.environ)
+    head = git("rev-parse", "HEAD")
+    if commit != head:
+        raise RuntimeError(
+            f"package COMMIT must match checked-out HEAD: got {commit}, want {head}"
+        )
     env = {
         "VERSION": version,
         "COMMIT": commit,

@@ -83,6 +83,7 @@ func TestRCCFactoryDeclaresPinnedTrustRootAndCanonicalTasks(t *testing.T) {
 		`"""Compatibility alias for the local build-and-install task."""`,
 		`installed = install_candidate(CANDIDATE, install_dir)`,
 		`resolve_package_identity(ROOT, os.environ)`,
+		`package COMMIT must match checked-out HEAD`,
 		`"result": "pending"`,
 	)
 	if strings.Contains(tasks, "if not CANDIDATE.is_file():\n        build_candidate()") {
@@ -118,7 +119,7 @@ func TestDeveloperGuideUsesPATHRCCWhileCIKeepsVerifiedBootstrap(t *testing.T) {
 	requireContains(t, guide,
 		"rcc run -r developer/toolkit.yaml --dev -t local",
 		"rcc run -r developer/toolkit.yaml --dev -t test",
-		"rcc run -r developer/toolkit.yaml --dev -t package",
+		"rcc run -r developer/toolkit.yaml -t package",
 		"`install` remains a compatibility alias for `local`",
 	)
 	if strings.Contains(guide, "Always enter the factory through `./developer/rccw`") {
