@@ -292,3 +292,27 @@ func readJSON[T any](ctx context.Context, store ports.ObjectStore, key string) (
 	}
 	return document, meta, nil
 }
+
+func readJSONWithBytes[T any](ctx context.Context, store ports.ObjectStore, key string) ([]byte, T, ports.ObjectMeta, error) {
+	var zero T
+	reader, meta, err := store.Get(ctx, key)
+	if err != nil {
+		return nil, zero, ports.ObjectMeta{}, err
+	}
+	body, readErr := io.ReadAll(io.LimitReader(reader, maxCoordinationDocumentSize+1))
+	closeErr := reader.Close()
+	if readErr != nil {
+		return nil, zero, ports.ObjectMeta{}, fmt.Errorf("read coordination object %q: %w", key, readErr)
+	}
+	if closeErr != nil {
+		return nil, zero, ports.ObjectMeta{}, fmt.Errorf("close coordination object %q: %w", key, closeErr)
+	}
+	if len(body) > maxCoordinationDocumentSize {
+		return nil, zero, ports.ObjectMeta{}, fmt.Errorf("coordination object %q exceeds size limit: %w", key, ErrInvalidDocument)
+	}
+	var document T
+	if err := json.Unmarshal(body, &document); err != nil {
+		return nil, zero, ports.ObjectMeta{}, fmt.Errorf("decode coordination object %q: %v: %w", key, err, ErrInvalidDocument)
+	}
+	return body, document, meta, nil
+}

@@ -54,6 +54,29 @@ validation, and byte-for-byte equality with canonical reserialization.
 Unsupported schema versions return `*UnsupportedSchemaError`; v1 is not
 upgraded or reinterpreted.
 
+## Exact-generation reads for reconstruction and recovery
+
+Generation reads are currently split:
+
+- `ReadMetadata(...)` resolves by logical generation identity and validates stored
+  metadata invariants.
+- `ResolveExactGeneration(...)` reads the metadata payload by exact generation key and
+  returns reopenable handles for the exact archive and metadata sidecar keys, plus
+  their identity fingerprints.
+
+The exact path verifies both object-level and metadata-level integrity before
+returning:
+
+- metadata decoding from the exact sidecar key, with raw-sidecar bytes included in the
+  result;
+- object metadata checks against `GenerationMetadata.ArchiveSHA256` and byte size;
+- optional source identity validation via `ports.ObjectStoreIdentity` when available.
+
+The file backend now surfaces local object-source identity through
+`ObjectSourceFingerprint` with `Kind: "file"`, canonical path, and optional
+`Device`/`Inode` fields for drift detection. This is best-effort metadata;
+verifier semantics are still driven by generation metadata and archive hashing.
+
 ## Verification and boundaries
 
 Run the package contract with:

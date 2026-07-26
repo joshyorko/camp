@@ -24,6 +24,17 @@ type GenerationRecord struct {
 	Sidecar  ports.ObjectMeta
 }
 
+type ExactGenerationRecord struct {
+	Metadata           domain.GenerationMetadata
+	MetadataBytes      []byte
+	Archive            ports.ObjectMeta
+	Sidecar            ports.ObjectMeta
+	ArchiveSource      ports.RestartableSource
+	SidecarSource      ports.RestartableSource
+	ArchiveFingerprint ports.ObjectSourceFingerprint
+	SidecarFingerprint ports.ObjectSourceFingerprint
+}
+
 type GenerationRepository struct {
 	store ports.ObjectStore
 }
@@ -111,6 +122,101 @@ func (r *GenerationRepository) ReadMetadata(ctx context.Context, capsule string,
 		return domain.GenerationMetadata{}, ports.ObjectMeta{}, err
 	}
 	return metadata, meta, nil
+}
+
+func (r *GenerationRepository) ResolveExactGeneration(ctx context.Context, capsule string, lineage domain.Lineage, generation domain.GenerationRef) (ExactGenerationRecord, error) {
+	objectKey, err := GenerationObjectKey(capsule, lineage, generation)
+	if err != nil {
+		return ExactGenerationRecord{}, err
+	}
+	metadataKey, err := GenerationMetadataKey(capsule, lineage, generation)
+	if err != nil {
+		return ExactGenerationRecord{}, err
+	}
+
+	rawMetadata, metadata, sidecarMeta, err := readJSONWithBytes[domain.GenerationMetadata](ctx, r.store, metadataKey)
+	if err != nil {
+		return ExactGenerationRecord{}, err
+	}
+	if err := validateStoredGenerationMetadata(metadata, capsule, lineage, generation); err != nil {
+		return ExactGenerationRecord{}, err
+	}
+
+	archiveMeta, err := r.store.Head(ctx, objectKey)
+	if err != nil {
+		return ExactGenerationRecord{}, err
+	}
+	if err := r.verifyArchive(ctx, metadata, archiveMeta); err != nil {
+		return ExactGenerationRecord{}, err
+	}
+	if sidecarMeta.Size != int64(len(rawMetadata)) {
+		return ExactGenerationRecord{}, fmt.Errorf("metadata sidecar size %d does not match read bytes %d: %w", sidecarMeta.Size, len(rawMetadata), ErrGenerationVerification)
+	}
+	if got := sha256Hex(rawMetadata); got != sidecarMeta.SHA256 {
+		return ExactGenerationRecord{}, fmt.Errorf("metadata sidecar sha256 %s does not match %s: %w", got, sidecarMeta.SHA256, ErrGenerationVerification)
+	}
+
+	archiveFingerprint := ports.ObjectSourceFingerprint{
+		Key:      metadata.ObjectKey,
+		Revision: archiveMeta.Revision,
+		Size:     archiveMeta.Size,
+		SHA256:   archiveMeta.SHA256,
+	}
+	sidecarFingerprint := ports.ObjectSourceFingerprint{
+		Key:      metadata.MetadataKey,
+		Revision: sidecarMeta.Revision,
+		Size:     sidecarMeta.Size,
+		SHA256:   sidecarMeta.SHA256,
+	}
+
+	if identityStore, ok := r.store.(ports.ObjectStoreIdentity); ok {
+		archiveIdentity, err := identityStore.SourceIdentity(metadata.ObjectKey)
+		if err != nil {
+			return ExactGenerationRecord{}, fmt.Errorf("read archive source identity %q: %w", metadata.ObjectKey, err)
+		}
+		if archiveIdentity.Key != metadata.ObjectKey {
+			return ExactGenerationRecord{}, fmt.Errorf("archive source identity key %q does not match metadata object key %q: %w", archiveIdentity.Key, metadata.ObjectKey, ErrGenerationVerification)
+		}
+		if archiveIdentity.Revision != "" && archiveIdentity.Revision != archiveMeta.Revision {
+			return ExactGenerationRecord{}, fmt.Errorf("archive source identity revision %q does not match %q: %w", archiveIdentity.Revision, archiveMeta.Revision, ErrGenerationVerification)
+		}
+		if archiveIdentity.Size > 0 && archiveIdentity.Size != archiveMeta.Size {
+			return ExactGenerationRecord{}, fmt.Errorf("archive source identity size %d does not match %d: %w", archiveIdentity.Size, archiveMeta.Size, ErrGenerationVerification)
+		}
+		if archiveIdentity.SHA256 != "" && archiveIdentity.SHA256 != archiveMeta.SHA256 {
+			return ExactGenerationRecord{}, fmt.Errorf("archive source identity sha256 %s does not match %s: %w", archiveIdentity.SHA256, archiveMeta.SHA256, ErrGenerationVerification)
+		}
+		archiveFingerprint = archiveIdentity
+
+		sidecarIdentity, err := identityStore.SourceIdentity(metadata.MetadataKey)
+		if err != nil {
+			return ExactGenerationRecord{}, fmt.Errorf("read metadata source identity %q: %w", metadata.MetadataKey, err)
+		}
+		if sidecarIdentity.Key != metadata.MetadataKey {
+			return ExactGenerationRecord{}, fmt.Errorf("metadata source identity key %q does not match sidecar key %q: %w", sidecarIdentity.Key, metadata.MetadataKey, ErrGenerationVerification)
+		}
+		if sidecarIdentity.Revision != "" && sidecarIdentity.Revision != sidecarMeta.Revision {
+			return ExactGenerationRecord{}, fmt.Errorf("metadata source identity revision %q does not match %q: %w", sidecarIdentity.Revision, sidecarMeta.Revision, ErrGenerationVerification)
+		}
+		if sidecarIdentity.Size > 0 && sidecarIdentity.Size != sidecarMeta.Size {
+			return ExactGenerationRecord{}, fmt.Errorf("metadata source identity size %d does not match %d: %w", sidecarIdentity.Size, sidecarMeta.Size, ErrGenerationVerification)
+		}
+		if sidecarIdentity.SHA256 != "" && sidecarIdentity.SHA256 != sidecarMeta.SHA256 {
+			return ExactGenerationRecord{}, fmt.Errorf("metadata source identity sha256 %s does not match %s: %w", sidecarIdentity.SHA256, sidecarMeta.SHA256, ErrGenerationVerification)
+		}
+		sidecarFingerprint = sidecarIdentity
+	}
+
+	return ExactGenerationRecord{
+		Metadata:           metadata,
+		MetadataBytes:      rawMetadata,
+		Archive:            archiveMeta,
+		Sidecar:            sidecarMeta,
+		ArchiveSource:      restartableObjectSource{store: r.store, key: metadata.ObjectKey},
+		SidecarSource:      restartableObjectSource{store: r.store, key: metadata.MetadataKey},
+		ArchiveFingerprint: archiveFingerprint,
+		SidecarFingerprint: sidecarFingerprint,
+	}, nil
 }
 
 func validateStoredGenerationMetadata(metadata domain.GenerationMetadata, capsule string, lineage domain.Lineage, generation domain.GenerationRef) error {
@@ -213,6 +319,19 @@ type restartableBytes []byte
 
 func (b restartableBytes) Open() (io.ReadCloser, error) {
 	return io.NopCloser(bytes.NewReader(b)), nil
+}
+
+type restartableObjectSource struct {
+	store ports.ObjectStore
+	key   string
+}
+
+func (o restartableObjectSource) Open() (io.ReadCloser, error) {
+	reader, _, err := o.store.Get(context.Background(), o.key)
+	if err != nil {
+		return nil, err
+	}
+	return reader, nil
 }
 
 func sha256Hex(body []byte) string {
