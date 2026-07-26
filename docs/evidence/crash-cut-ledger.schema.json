@@ -1,0 +1,33 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Camp issue #3 crash-cut ledger",
+  "type": "object",
+  "required": ["schemaVersion", "candidate", "cuts"],
+  "properties": {
+    "schemaVersion": { "const": 1 },
+    "candidate": { "type": "string", "minLength": 1 },
+    "cuts": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["id", "transition", "precondition", "death", "recovery", "durableState", "publication", "evidence"],
+        "properties": {
+          "id": { "type": "string", "minLength": 1 },
+          "transition": { "type": "string", "minLength": 1 },
+          "precondition": { "type": "string", "minLength": 1 },
+          "death": { "type": "string", "minLength": 1 },
+          "recovery": { "type": "string", "minLength": 1 },
+          "durableState": { "type": "string", "minLength": 1 },
+          "publication": { "type": "string", "minLength": 1 },
+          "evidence": {
+            "type": "array",
+            "items": { "type": "string", "minLength": 1 }
+          },
+          "status": { "enum": ["implemented", "tested", "runtime-proven", "blocked"] }
+        },
+        "additionalProperties": false
+      }
+    }
+  },
+  "additionalProperties": false
+}

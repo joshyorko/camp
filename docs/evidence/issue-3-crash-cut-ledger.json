@@ -1,0 +1,28 @@
+{
+  "schemaVersion": 1,
+  "candidate": "unverified: CAMP_TEST_BINARY required",
+  "cuts": [
+    {
+      "id": "forwarder-start-before-fact",
+      "transition": "ForwarderStarted:<name>",
+      "precondition": "Forwarder evidence is published and the start intent is pending",
+      "death": "Controller receives SIGKILL before the forwarding fact",
+      "recovery": "Fresh controller observes the recorded process and adopts the exact evidence",
+      "durableState": "Forwarding record committed; no pending start intent",
+      "publication": "No duplicate forwarder; exact-process cleanup required at close",
+      "evidence": ["integration/forwarder_crash_test.go"],
+      "status": "blocked"
+    },
+    {
+      "id": "complete-process-death-matrix",
+      "transition": "SupervisorClaimed, ServiceRestart, ForwarderStarted, WorkspaceStoppedOrDeleted, ForwardersStopped, ServicesStopped, SupervisorStopped, LeaseReleased",
+      "precondition": "Each named closure-rule transition has a durable precondition",
+      "death": "SIGKILL at each transition's effect/fact boundary",
+      "recovery": "Observation-first reconciliation of only the recorded intent",
+      "durableState": "Exact journal facts, lease ownership, pointer state, and cleanup state",
+      "publication": "Immutable generation and pointer are unchanged unless their publication cut completed",
+      "evidence": [],
+      "status": "blocked"
+    }
+  ]
+}
