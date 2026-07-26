@@ -93,10 +93,6 @@ func buildCampsiteModel(lock tooladapter.Lock, runtime config.Runtime, backend c
 		return presentation.CampsiteModel{}, fmt.Errorf("distribution lock has no hauler")
 	}
 	provider, contextName := runtime.DevPodProvider, runtime.DevPodContext
-	runtimeKind := "remote DevPod"
-	if provider == "" || provider == "docker" || provider == "podman" {
-		runtimeKind = "local DevPod"
-	}
 	latest := latestCampsiteSession(sessions, runtime.Capsule)
 	if latest != nil {
 		if latest.Workspace.Provider != "" {
@@ -105,9 +101,10 @@ func buildCampsiteModel(lock tooladapter.Lock, runtime config.Runtime, backend c
 		if latest.Workspace.Context != "" {
 			contextName = latest.Workspace.Context
 		}
-		if latest.Workspace.LocalProvider {
-			runtimeKind = "local DevPod"
-		}
+	}
+	runtimeKind := "remote DevPod"
+	if provider == "" || provider == "docker" || provider == "podman" || latest != nil && latest.Workspace.LocalProvider {
+		runtimeKind = "local DevPod"
 	}
 	if provider == "" {
 		provider = "default"

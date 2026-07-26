@@ -61,6 +61,52 @@ func TestBuildCampsiteModelStatesAbsenceWithoutInventingGeneration(t *testing.T)
 	}
 }
 
+func TestBuildCampsiteModelDerivesRuntimeKindFromLatestSessionProvider(t *testing.T) {
+	lock, err := tooladapter.ParseLock(strings.NewReader(string(campcontract.DistributionToolLock())))
+	if err != nil {
+		t.Fatal(err)
+	}
+	tests := []struct {
+		name      string
+		config    string
+		workspace domain.WorkspaceRecord
+		want      string
+	}{
+		{
+			name:      "remote session overrides local configuration",
+			config:    "docker",
+			workspace: domain.WorkspaceRecord{Provider: "room-of-requirement"},
+			want:      "remote DevPod",
+		},
+		{
+			name:      "known local session overrides remote configuration",
+			config:    "room-of-requirement",
+			workspace: domain.WorkspaceRecord{Provider: "docker", LocalProvider: true},
+			want:      "local DevPod",
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			snapshot := domain.JournalSnapshot{
+				Capsule:   "brain",
+				Workspace: test.workspace,
+			}
+			model, err := buildCampsiteModel(
+				lock,
+				config.Runtime{Bootstrap: config.Bootstrap{Capsule: "brain", Source: "/brain", DevPodProvider: test.config}},
+				config.Backend{Kind: config.BackendFile, SanitizedURL: "file:///store"},
+				[]domain.JournalSnapshot{snapshot},
+			)
+			if err != nil {
+				t.Fatalf("buildCampsiteModel: %v", err)
+			}
+			if model.RuntimeKind != test.want {
+				t.Fatalf("runtime kind = %q, want %q for provider %q", model.RuntimeKind, test.want, model.Provider)
+			}
+		})
+	}
+}
+
 func TestBuildCampsiteModelIgnoresSessionsForOtherCapsules(t *testing.T) {
 	lock, err := tooladapter.ParseLock(strings.NewReader(string(campcontract.DistributionToolLock())))
 	if err != nil {

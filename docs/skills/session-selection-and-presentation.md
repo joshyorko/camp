@@ -14,6 +14,8 @@ An explicit `open --camp <id>` may use journals/pointers to identify the camp, b
 
 Build public output from application read models, never by marshaling journal snapshots. Treat service liveness as `unknown` until an inspector reconciles both helper and child process identities. Distinguish `live`, `stopped`, `dead`, and `pid-reused`; a persisted observed state alone is not liveness evidence.
 
+The setup campsite uses the latest matching session's non-empty provider and context as durable display facts. Derive its local or remote DevPod label only after those overrides: `docker`, `podman`, an empty provider, or explicit `LocalProvider` evidence is local; other providers are remote.
+
 Keep publication, cleanup, and recovery independent. A published generation remains `published` when cleanup later fails, and that combination produces `cleanup-only` recovery. Uploaded or verified generations without pointer commitment are `orphaned`; record a proven compare-and-swap loss as `pointer-conflict`.
 
 The application-level `OperationalQueries` type is the reusable read-only seam for `list`, `status`, and `history` composition. `List` observes every journal snapshot before building session read models; `Status` uses history-purpose selection so an explicitly selected closed session remains inspectable. If process observation fails, return the error instead of publishing persisted service state as current evidence. A nil observer is allowed for callers that intentionally accept `unknown` service liveness.
