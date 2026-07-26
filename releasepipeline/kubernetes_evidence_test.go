@@ -134,9 +134,63 @@ func TestReleaseWorkflowCannotClaimKubernetesWithoutMatchingProtectedEvidence(t 
 		"environment: release-providers",
 		`--name "kubernetes-evidence-${GITHUB_SHA}"`,
 		"kubernetes_evidence.py validate",
+		"kubernetes_evidence.py validate-provenance",
 		"--relevant-change",
 		"needs: [verified-artifacts, kubernetes-evidence]",
+		"--workflow-id \"$workflow_id\"",
+		"--workflow-name \"$PROVIDER_WORKFLOW_NAME\"",
+		"--job-name \"$PROVIDER_EVIDENCE_JOB_NAME\"",
+		"--required-environment \"$PROVIDER_EVIDENCE_ENVIRONMENT\"",
 	)
+}
+
+func TestKubernetesEvidenceProvenanceValidatorRequiresProtectedRunBinding(t *testing.T) {
+	root := filepath.Clean("..")
+	commit := strings.Repeat("a", 40)
+	digest := strings.Repeat("b", 64)
+
+	runJSON := filepath.Join(t.TempDir(), "run.json")
+	jobsJSON := filepath.Join(t.TempDir(), "jobs.json")
+	runBody := `{"event":"workflow_dispatch","status":"completed","conclusion":"success","head_sha":"` + commit + `","workflow_name":"Protected Kubernetes provider evidence","workflow_id":987654321,"inputs":{"candidate_commit":"` + commit + `","candidate_sha256":"` + digest + `"}}`
+	if err := os.WriteFile(runJSON, []byte(runBody), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	jobsBody := `{"jobs":[{"name":"evidence","status":"completed","conclusion":"success","environment":{"name":"release-providers"}}]}`
+	if err := os.WriteFile(jobsJSON, []byte(jobsBody), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	command := exec.Command("python3", filepath.Join(root, "scripts", "kubernetes_evidence.py"),
+		"validate-provenance",
+		"--run", runJSON,
+		"--jobs", jobsJSON,
+		"--commit", commit,
+		"--sha256", digest,
+		"--workflow-id", "987654321",
+		"--workflow-name", "Protected Kubernetes provider evidence",
+		"--job-name", "evidence",
+		"--required-environment", "release-providers")
+	if output, err := command.CombinedOutput(); err != nil {
+		t.Fatalf("bound provenance fixture was rejected: %v\n%s", err, output)
+	}
+
+	forgedJob := filepath.Join(t.TempDir(), "jobs-forged.json")
+	if err := os.WriteFile(forgedJob, []byte(`{"jobs":[{"name":"evidence","status":"completed","conclusion":"success","environment":{"name":"not-release-providers"}}]}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	forgedCommand := exec.Command("python3", filepath.Join(root, "scripts", "kubernetes_evidence.py"),
+		"validate-provenance",
+		"--run", runJSON,
+		"--jobs", forgedJob,
+		"--commit", commit,
+		"--sha256", digest,
+		"--workflow-id", "987654321",
+		"--workflow-name", "Protected Kubernetes provider evidence",
+		"--job-name", "evidence",
+		"--required-environment", "release-providers")
+	output, err := forgedCommand.CombinedOutput()
+	if err == nil || !strings.Contains(string(output), "protected workflow environment") {
+		t.Fatalf("forged provenance accepted or produced wrong error: err=%v out=%q", err, output)
+	}
 }
 
 func writeEvidenceJSON(t *testing.T, directory, name string, value any) {

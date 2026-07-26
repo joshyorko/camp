@@ -111,6 +111,55 @@ def validate(args):
             fail("robot-results.json does not prove the named Kubernetes lifecycle vertical")
 
 
+def validate_provenance(args):
+    try:
+        run_sha = int(args.workflow_id)
+    except (TypeError, ValueError):
+        fail("workflow-id must be decimal")
+
+    run = json.loads(pathlib.Path(args.run).read_text(encoding="utf-8"))
+    jobs = json.loads(pathlib.Path(args.jobs).read_text(encoding="utf-8"))
+    if run.get("event") != "workflow_dispatch":
+        fail("expected workflow_dispatch run event")
+    if run.get("status") != "completed":
+        fail("expected completed workflow run status")
+    if run.get("conclusion") != "success":
+        fail("expected successful workflow run")
+    if not HEX40.fullmatch(run.get("head_sha", "")):
+        fail("expected run head SHA-256 must be exact lowercase 40 hex")
+    if run.get("head_sha") != args.commit:
+        fail("run head sha does not match candidate commit")
+    if run.get("workflow_name") != args.workflow_name:
+        fail("run workflow name does not match protected provider workflow")
+    if int(run.get("workflow_id")) != run_sha:
+        fail("run workflow database id does not match provider workflow")
+    inputs = run.get("inputs", {})
+    if not isinstance(inputs, dict):
+        fail("run inputs must be a JSON object")
+    if inputs.get("candidate_commit") != args.commit:
+        fail("run did not receive the expected candidate_commit input")
+    if inputs.get("candidate_sha256") != args.sha256:
+        fail("run did not receive the expected candidate_sha256 input")
+
+    if not args.required_environment:
+        fail("required environment is required")
+    entries = jobs.get("jobs")
+    if not isinstance(entries, list):
+        fail("run jobs payload must be a JSON object named jobs")
+    for entry in entries:
+        if entry.get("name") != args.job_name:
+            continue
+        if entry.get("conclusion") != "success":
+            fail("evidence job did not succeed")
+        if entry.get("status") != "completed":
+            fail("evidence job did not complete")
+        environment = entry.get("environment")
+        if not isinstance(environment, dict) or environment.get("name") != args.required_environment:
+            fail("evidence job did not run in the protected workflow environment")
+        return
+    fail(f"run missing expected job {args.job_name}")
+
+
 def sanitize_go_test(args):
     tests = {}
     with pathlib.Path(args.input).open(encoding="utf-8") as stream:
@@ -151,6 +200,16 @@ def parser():
     sanitize.add_argument("--input", required=True)
     sanitize.add_argument("--output", required=True)
     sanitize.set_defaults(function=sanitize_go_test)
+    provenance = commands.add_parser("validate-provenance")
+    provenance.add_argument("--run", required=True)
+    provenance.add_argument("--jobs", required=True)
+    provenance.add_argument("--commit", required=True)
+    provenance.add_argument("--sha256", required=True)
+    provenance.add_argument("--workflow-id", required=True)
+    provenance.add_argument("--workflow-name", required=True)
+    provenance.add_argument("--job-name", required=True)
+    provenance.add_argument("--required-environment", required=True)
+    provenance.set_defaults(function=validate_provenance)
     return root
 
 
