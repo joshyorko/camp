@@ -129,9 +129,12 @@ harnesses must not synthesize recovery commands. An exact recovery-command
 assertion becomes valid only when production application conflict handling
 returns that command.
 
-`TestS3TwoWriterConflict` is this repository/adapter-level process contract. It
-also proves that branch-scoped metadata and a pointer rooted at the recorded
-parent let a fresh process reopen the retained loser.
+`TestS3TwoWriterConflict` is this backend-factory process contract. Each
+controller resolves the sanitized S3 identity through `config.ResolveBackend`
+and binds it through `objectstore.NewWriter`, including the real writer-safety
+probe, before exercising the production coordination repositories. It also
+proves that branch-scoped metadata and a pointer rooted at the recorded parent
+let a fresh process reopen the retained loser.
 It does not prove a Camp lifecycle reopen: that claim requires a production
 CLI path that resolves the S3 runtime configuration and credential chain,
 constructs the merged writer-safe backend composition, and drives lifecycle
