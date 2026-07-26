@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"os"
 	"strings"
 	"testing"
 
@@ -44,6 +45,15 @@ func TestLifecycleCommandsDelegateWithStrictArgumentsAndInheritedMode(t *testing
 	t.Parallel()
 
 	lifecycle := &recordingLifecycle{}
+	tmp := t.TempDir()
+	inspectFile := tmp + "/input.campkit"
+	verifyFile := tmp + "/verify.campkit"
+	if err := os.WriteFile(inspectFile, []byte("inspect"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(verifyFile, []byte("verify"), 0o600); err != nil {
+		t.Fatal(err)
+	}
 	for _, test := range []struct {
 		name string
 		args []string
@@ -59,6 +69,10 @@ func TestLifecycleCommandsDelegateWithStrictArgumentsAndInheritedMode(t *testing
 		{name: "reopen", args: []string{"reopen", "memoryd"}, want: "reopen:memoryd:human"},
 		{name: "recover", args: []string{"recover", "session-1"}, want: "recover:session-1:human"},
 		{name: "supervise", args: []string{"supervise", "session-1"}, want: "supervise:session-1:human"},
+		{name: "kit inspect", args: []string{"kit", "inspect", inspectFile}, want: "kit-inspect:" + inspectFile + ":human"},
+		{name: "kit inspect json", args: []string{"--json", "kit", "inspect", inspectFile}, want: "kit-inspect:" + inspectFile + ":json"},
+		{name: "kit verify", args: []string{"kit", "verify", verifyFile}, want: "kit-verify:" + verifyFile + ":human"},
+		{name: "kit verify json", args: []string{"--json", "kit", "verify", verifyFile}, want: "kit-verify:" + verifyFile + ":json"},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			root := NewRootWithLifecycle(lifecycle)
@@ -72,11 +86,65 @@ func TestLifecycleCommandsDelegateWithStrictArgumentsAndInheritedMode(t *testing
 		})
 	}
 
-	for _, args := range [][]string{{"init", "a", "b"}, {"open", "a", "b"}, {"sync", "x"}, {"close", "x"}, {"reopen", "a", "b"}, {"recover", "a", "b"}, {"doctor", "x"}, {"supervise", "a", "b"}} {
+	for _, args := range [][]string{
+		{"init", "a", "b"},
+		{"open", "a", "b"},
+		{"sync", "x"},
+		{"close", "x"},
+		{"reopen", "a", "b"},
+		{"recover", "a", "b"},
+		{"doctor", "x"},
+		{"supervise", "a", "b"},
+		{"kit", "inspect"},
+		{"kit", "inspect", inspectFile, "extra"},
+		{"kit", "verify", "extra", "path"},
+		{"kit", "inspect", tmp},
+		{"kit", "verify", tmp},
+	} {
 		var stderr bytes.Buffer
 		if code := Execute(context.Background(), NewRootWithLifecycle(lifecycle), args, Streams{ErrOut: &stderr}); code != int(ExitUsage) {
 			t.Fatalf("Execute(%q) = %d, want usage; stderr=%q", args, code, stderr.String())
 		}
+	}
+}
+
+func TestLifecycleKitCommandRejectsInvalidPaths(t *testing.T) {
+	t.Parallel()
+
+	lifecycle := &recordingLifecycle{}
+	tmp := t.TempDir()
+	dir := tmp + "/dir"
+	if err := os.Mkdir(dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	target := tmp + "/target.campkit"
+	if err := os.WriteFile(target, []byte("target"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	symlink := tmp + "/symlink.campkit"
+	if err := os.Symlink(target, symlink); err != nil {
+		t.Fatal(err)
+	}
+	missing := tmp + "/missing.campkit"
+
+	for _, args := range [][]string{
+		{"kit", "inspect", missing},
+		{"kit", "verify", missing},
+		{"kit", "inspect", dir},
+		{"kit", "verify", dir},
+		{"kit", "inspect", symlink},
+		{"kit", "verify", symlink},
+	} {
+		t.Run(strings.Join(args, " "), func(t *testing.T) {
+			var stderr bytes.Buffer
+			code := Execute(context.Background(), NewRootWithLifecycle(lifecycle), args, Streams{ErrOut: &stderr})
+			if code != int(ExitUsage) {
+				t.Fatalf("Execute(%q) = %d, stderr=%q", args, code, stderr.String())
+			}
+			if len(lifecycle.calls) != 0 {
+				t.Fatalf("kit path check bypassed for %q: %#v", args, lifecycle.calls)
+			}
+		})
 	}
 }
 
@@ -102,6 +170,16 @@ type recordingLifecycle struct {
 	selections     []Selection
 	setupInput     io.Reader
 	initInput      io.Reader
+}
+
+func (r *recordingLifecycle) KitInspect(_ context.Context, file string, mode OutputMode, _ io.Writer) error {
+	r.calls = append(r.calls, "kit-inspect:"+file+":"+string(mode))
+	return nil
+}
+
+func (r *recordingLifecycle) KitVerify(_ context.Context, file string, mode OutputMode, _ io.Writer) error {
+	r.calls = append(r.calls, "kit-verify:"+file+":"+string(mode))
+	return nil
 }
 
 func (r *recordingLifecycle) InitInteractive(_ context.Context, request InitRequest, mode OutputMode, in io.Reader, _ io.Writer) error {
@@ -767,7 +845,7 @@ func TestRootHelpIsDeterministic(t *testing.T) {
 	if first != second {
 		t.Fatalf("help changed between identical roots:\nfirst:\n%s\nsecond:\n%s", first, second)
 	}
-	want := "Recoverable capsule workspaces\n\nUsage:\n  camp [flags]\n  camp [command]\n\nAvailable Commands:\n  attach      Attach to an open capsule workspace\n  close       Publish a checkpoint and close\n  completion  Generate shell completion\n  doctor      Diagnose required host capabilities\n  help        Help about any command\n  images      Inspect and reconcile workspace images\n  init        Initialize a capsule root\n  list        List stored camps\n  open        Open a capsule workspace\n  provider    Inspect configured DevPod providers\n  recover     Recover an interrupted lifecycle\n  reopen      Reopen a closed capsule workspace\n  serve       Inspect and restart Camp-managed services\n  setup       Install or reuse pinned DevPod and Hauler tools\n  status      Show the selected camp session\n  strike      Archive local Camp state and start fresh\n  sync        Publish a checkpoint and remain open\n\nFlags:\n  -h, --help   help for camp\n      --json   emit stable JSON output\n\nUse \"camp [command] --help\" for more information about a command.\n"
+	want := "Recoverable capsule workspaces\n\nUsage:\n  camp [flags]\n  camp [command]\n\nAvailable Commands:\n  attach      Attach to an open capsule workspace\n  close       Publish a checkpoint and close\n  completion  Generate shell completion\n  doctor      Diagnose required host capabilities\n  help        Help about any command\n  images      Inspect and reconcile workspace images\n  init        Initialize a capsule root\n  kit         Inspect and verify CampKit archives\n  list        List stored camps\n  open        Open a capsule workspace\n  provider    Inspect configured DevPod providers\n  recover     Recover an interrupted lifecycle\n  reopen      Reopen a closed capsule workspace\n  serve       Inspect and restart Camp-managed services\n  setup       Install or reuse pinned DevPod and Hauler tools\n  status      Show the selected camp session\n  strike      Archive local Camp state and start fresh\n  sync        Publish a checkpoint and remain open\n\nFlags:\n  -h, --help   help for camp\n      --json   emit stable JSON output\n\nUse \"camp [command] --help\" for more information about a command.\n"
 	if first != want {
 		t.Fatalf("help:\n%s\nwant:\n%s", first, want)
 	}

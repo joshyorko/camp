@@ -32,6 +32,7 @@ import (
 	tooladapter "github.com/joshyorko/camp/internal/adapters/tools"
 	"github.com/joshyorko/camp/internal/app"
 	"github.com/joshyorko/camp/internal/campconfig"
+	"github.com/joshyorko/camp/internal/campkit"
 	"github.com/joshyorko/camp/internal/capsule"
 	"github.com/joshyorko/camp/internal/checkpoint"
 	"github.com/joshyorko/camp/internal/config"
@@ -219,6 +220,42 @@ func (p *ProductionLifecycle) ProvidersList(ctx context.Context, mode OutputMode
 		return err
 	}
 	return writeProvidersResult(out, mode, result)
+}
+
+func (p *ProductionLifecycle) KitInspect(_ context.Context, path string, mode OutputMode, out io.Writer) error {
+	file, err := os.Open(path)
+	if err != nil {
+		return err
+	}
+	defer file.Close()
+
+	result, err := campkit.Inspect(file, campkit.DefaultArchiveLimits())
+	if err != nil {
+		return err
+	}
+	if mode == ModeJSON {
+		return writeSuccess(out, mode, "kit-inspect", result, "")
+	}
+	_, err = fmt.Fprintf(out, "inspect %s (capsule=%s branch=%s generation=%d integrity=%s)\n", filepath.Base(path), result.Manifest.Generation.Capsule, result.Manifest.Generation.Branch, result.Manifest.Generation.Ref.Generation, result.Integrity)
+	return err
+}
+
+func (p *ProductionLifecycle) KitVerify(_ context.Context, path string, mode OutputMode, out io.Writer) error {
+	file, err := os.Open(path)
+	if err != nil {
+		return err
+	}
+	defer file.Close()
+
+	result, err := campkit.Verify(context.Background(), file, campkit.DefaultArchiveLimits(), nil)
+	if err != nil {
+		return err
+	}
+	if mode == ModeJSON {
+		return writeSuccess(out, mode, "kit-verify", result, "")
+	}
+	_, err = fmt.Fprintf(out, "verify %s (capsule=%s branch=%s generation=%d integrity=%s trust=%s payloads=%d)\n", filepath.Base(path), result.Manifest.Generation.Capsule, result.Manifest.Generation.Branch, result.Manifest.Generation.Ref.Generation, result.Integrity, result.Trust, len(result.Payloads))
+	return err
 }
 
 type devpodProviderReader struct {

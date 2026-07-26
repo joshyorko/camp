@@ -7,6 +7,14 @@ tar+zstd archives, while Camp still does not export, import, load, or accept kit
 via CLI; schema version 1 is intentionally unsupported because no
 public command consumed or emitted it.
 
+## CLI usage
+
+- `camp kit inspect FILE`: prints the decoded manifest summary (`inspect`)
+- `camp kit verify FILE`: verifies payload integrity and prints a success summary (`verify`)
+- `--json` is supported for both commands.
+- `FILE` must be a regular file path; `camp` rejects missing files, directories,
+  and symlinks before attempting to inspect or verify.
+
 ## Fixed wire closure
 
 A valid v2 manifest binds one positive capsule generation and optional earlier
