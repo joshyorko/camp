@@ -13,9 +13,11 @@ import (
 	"testing"
 	"time"
 
-	"github.com/joshyorko/camp/internal/adapters/s3store"
+	"github.com/joshyorko/camp/internal/adapters/objectstore"
+	"github.com/joshyorko/camp/internal/config"
 	"github.com/joshyorko/camp/internal/coordination"
 	"github.com/joshyorko/camp/internal/domain"
+	"github.com/joshyorko/camp/internal/ports"
 )
 
 const portabilityBucket = "camp-portability"
@@ -251,9 +253,18 @@ func TestMinIOControllerHelperProcess(t *testing.T) {
 	}
 }
 
-func portabilityStore(t *testing.T, endpoint, access, secret string) *s3store.Store {
+func portabilityStore(t *testing.T, endpoint, access, secret string) ports.ObjectStore {
 	t.Helper()
-	store, err := s3store.New(s3store.Config{Endpoint: endpoint, Bucket: portabilityBucket, PathStyle: true, HTTPClient: &http.Client{Timeout: 10 * time.Second}, Signer: &minioSigner{accessKey: access, secretKey: secret}})
+	backend, err := config.ResolveBackend("s3://"+portabilityBucket, config.S3Values{
+		Endpoint: endpoint, Region: "us-east-1", PathStyle: true, Insecure: true,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	store, err := objectstore.NewWriter(context.Background(), backend, objectstore.Options{
+		HTTPClient: &http.Client{Timeout: 10 * time.Second},
+		Signer:     &minioSigner{accessKey: access, secretKey: secret},
+	})
 	if err != nil {
 		t.Fatal(err)
 	}
