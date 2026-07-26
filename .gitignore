@@ -3,7 +3,7 @@
 .tokensave
 .superpowers
 .worktrees/
-
+.clawpatch
 # Python tooling caches
 __pycache__/
 *.pyc
