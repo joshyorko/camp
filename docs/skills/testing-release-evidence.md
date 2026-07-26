@@ -244,9 +244,13 @@ listener is absent. A failed `camp close` remains a reported cleanup error while
 the harness continues exact fallback cleanup: complete PID/boot/start process
 identities use the production process manager, created materializations use the
 ownership-marker guard, and forwarding evidence/runtime paths require matching
-device and inode identity atomically bound to descriptor-relative quarantine
-and removal. A quarantined mismatch is restored and reported; symlinks are not
-followed, and a replacement runtime directory is never recursively removed.
+device, inode, and exact Linux regular-file/directory type. The opened
+quarantine descriptor remains live while the current entry is moved into a
+fresh mode-0700 removal boundary, revalidated there, and unlinked relative to
+that boundary. A post-validation substitution is restored intact and reported;
+the displaced recorded object survives, symlinks are not followed, and a
+replacement runtime directory is never recursively removed. Successful
+restoration and removal sync their affected directories.
 Incomplete process or path identities
 fail closed rather than being treated as absence. It then proves the unrelated ID remains and deletes that
 unrelated ID in its own final step. DevPod workspace IDs are the safe container
