@@ -56,9 +56,11 @@ func TestMinIOLifecycleVertical(t *testing.T) {
 	workspaceRoot := "/workspaces/" + workspaceID
 	endpoints := scenario.Endpoints(t, controllerA, recovered.SessionID)
 	t.Log("mutate workspace and publish a named image through CAMP_REGISTRY")
-	mutate := fmt.Sprintf("set -eu; cd %s; printf 'after-open\\n' >> 'Projects/Unicode space/λ-note.txt'; chmod 600 'Projects/Unicode space/λ-note.txt'; test \"$CAMP_REGISTRY\" = %s; test \"$CAMP_FILESERVER\" = %s; wget -qO- \"http://$CAMP_REGISTRY/v2/\" >/dev/null; wget -qO- \"http://$CAMP_FILESERVER/\" >/dev/null; engine=; attempts=0; while test -z \"$engine\"; do for candidate in docker podman nerdctl; do if command -v \"$candidate\" >/dev/null 2>&1 && \"$candidate\" info >/dev/null 2>&1; then engine=$candidate; break; fi; done; attempts=$((attempts+1)); test $attempts -lt 60; sleep 1; done; \"$engine\" pull alpine:3.20; image_id=$(\"$engine\" create alpine:3.20); \"$engine\" commit \"$image_id\" %s/camp/acceptance:named; \"$engine\" rm \"$image_id\"; \"$engine\" push %s/camp/acceptance:named", shellQuote(workspaceRoot), shellQuote(endpoints.Registry), shellQuote(endpoints.Fileserver), endpoints.Registry, endpoints.Registry)
+	mutate := fmt.Sprintf("set -eu; cd %s; printf 'after-open\\n' >> 'Projects/Unicode space/λ-note.txt'; chmod 600 'Projects/Unicode space/λ-note.txt'; test \"$CAMP_REGISTRY\" = %s; test \"$CAMP_FILESERVER\" = %s; wget -qO- \"http://$CAMP_REGISTRY/v2/\" >/dev/null; wget -qO- \"http://$CAMP_FILESERVER/\" >/dev/null; engine=; attempts=0; while test -z \"$engine\"; do for candidate in docker podman nerdctl; do if command -v \"$candidate\" >/dev/null 2>&1 && \"$candidate\" info >/dev/null 2>&1; then engine=$candidate; break; fi; done; attempts=$((attempts+1)); test $attempts -lt 60; sleep 1; done; reference=\"$CAMP_REGISTRY/camp/acceptance:named\"; \"$engine\" build --tag \"$reference\" image-fixture; \"$engine\" push \"$reference\"", shellQuote(workspaceRoot), shellQuote(endpoints.Registry), shellQuote(endpoints.Fileserver))
 	mustRunDevPod(t, ctx, devPod, "ssh", workspaceID, "--command", mutate)
-	namedImageDigest := registryManifestDigest(t, ctx, endpoints.Registry, "camp/acceptance", "named")
+	namedImageDigest := registryPlatformManifestDigest(t, ctx, endpoints.Registry, "camp/acceptance", "named")
+	evictedImageIDPath := filepath.ToSlash(filepath.Join(workspaceRoot, "Projects/Unicode space/evicted-image-id.txt"))
+	mustRunDevPod(t, ctx, devPod, "ssh", workspaceID, "--command", namedImageEvictionCommand(evictedImageIDPath))
 
 	if generation := decodeGeneration(t, mustRunLifecycle(t, ctx, envA, bin, "--json", "sync", "--camp", "minio-lifecycle")); generation != 1 {
 		t.Fatalf("sync generation = %d, want 1", generation)
@@ -85,7 +87,8 @@ func TestMinIOLifecycleVertical(t *testing.T) {
 	workspaceRoot = "/workspaces/" + reopened.WorkspaceID
 	endpoints = scenario.Endpoints(t, controllerB, reopened.SessionID)
 	note := shellQuote(filepath.ToSlash(filepath.Join(workspaceRoot, "Projects/Unicode space/λ-note.txt")))
-	verify := fmt.Sprintf("set -eux; grep -q before-open %s; grep -q after-open %s; grep -q after-sync %s; stat -c %%a %s | grep -qx 600; stat -c %%s %s | grep -qx %d; readlink %s | grep -qx README.md; find %s -xdev -samefile %s | grep -q README-hardlink.md; engine=; for candidate in docker podman nerdctl; do if command -v \"$candidate\" >/dev/null 2>&1 && \"$candidate\" info >/dev/null 2>&1; then engine=$candidate; break; fi; done; test -n \"$engine\"; %s", note, note, note, note, shellQuote(filepath.ToSlash(filepath.Join(workspaceRoot, "large.bin"))), lifecycleLargeSize, shellQuote(filepath.ToSlash(filepath.Join(workspaceRoot, "README-link.md"))), shellQuote(workspaceRoot), shellQuote(filepath.ToSlash(filepath.Join(workspaceRoot, "README.md"))), namedImageReopenProofCommand(namedImageDigest))
+	evictedImageIDPath = filepath.ToSlash(filepath.Join(workspaceRoot, "Projects/Unicode space/evicted-image-id.txt"))
+	verify := fmt.Sprintf("set -eux; grep -q before-open %s; grep -q after-open %s; grep -q after-sync %s; stat -c %%a %s | grep -qx 600; stat -c %%s %s | grep -qx %d; readlink %s | grep -qx README.md; find %s -xdev -samefile %s | grep -q README-hardlink.md; engine=; for candidate in docker podman nerdctl; do if command -v \"$candidate\" >/dev/null 2>&1 && \"$candidate\" info >/dev/null 2>&1; then engine=$candidate; break; fi; done; test -n \"$engine\"; %s", note, note, note, note, shellQuote(filepath.ToSlash(filepath.Join(workspaceRoot, "large.bin"))), lifecycleLargeSize, shellQuote(filepath.ToSlash(filepath.Join(workspaceRoot, "README-link.md"))), shellQuote(workspaceRoot), shellQuote(filepath.ToSlash(filepath.Join(workspaceRoot, "README.md"))), namedImageReopenProofCommand(namedImageDigest, evictedImageIDPath))
 	mustRunDevPod(t, ctx, devPod, "ssh", reopened.WorkspaceID, "--command", verify)
 	preserved := fmt.Sprintf("set -eu; stat -c %%a %s | grep -qx 755; stat -c %%a %s | grep -qx 600; grep -qx 'user-owned agent state' %s", shellQuote(filepath.ToSlash(filepath.Join(workspaceRoot, "bin/camp-fixture"))), shellQuote(filepath.ToSlash(filepath.Join(workspaceRoot, ".claude/fixture.md"))), shellQuote(filepath.ToSlash(filepath.Join(workspaceRoot, ".claude/fixture.md"))))
 	mustRunDevPod(t, ctx, devPod, "ssh", reopened.WorkspaceID, "--command", preserved)
@@ -98,11 +101,15 @@ func TestMinIOLifecycleVertical(t *testing.T) {
 	scenario.AssertEndpointsClosed(t)
 }
 
-func namedImageReopenProofCommand(expectedDigest string) string {
-	return fmt.Sprintf("reference=\"$CAMP_REGISTRY/camp/acceptance:named\"; expected_digest=%s; image_id=$(\"$engine\" image inspect --format '{{.Id}}' \"$reference\"); \"$engine\" image rm -f \"$image_id\"; if \"$engine\" image inspect \"$reference\" >/dev/null 2>&1; then exit 1; fi; digest_reference=\"$CAMP_REGISTRY/camp/acceptance@$expected_digest\"; \"$engine\" pull \"$digest_reference\"; repo_digests=$(\"$engine\" image inspect --format '{{json .RepoDigests}}' \"$digest_reference\"); case \"$repo_digests\" in *\"\\\"$digest_reference\\\"\"*) ;; *) exit 1 ;; esac; \"$engine\" run --rm \"$digest_reference\" true", shellQuote(expectedDigest))
+func namedImageEvictionCommand(imageIDPath string) string {
+	return fmt.Sprintf("set -eu; engine=; for candidate in docker podman nerdctl; do if command -v \"$candidate\" >/dev/null 2>&1 && \"$candidate\" info >/dev/null 2>&1; then engine=$candidate; break; fi; done; test -n \"$engine\"; reference=\"$CAMP_REGISTRY/camp/acceptance:named\"; image_id=$(\"$engine\" image inspect --format '{{.Id}}' \"$reference\"); printf '%%s\\n' \"$image_id\" > %s; \"$engine\" image rm -f \"$reference\" >/dev/null; if \"$engine\" image inspect \"$image_id\" >/dev/null 2>&1; then \"$engine\" image rm -f \"$image_id\" >/dev/null; fi; if \"$engine\" image inspect \"$reference\" >/dev/null 2>&1 || \"$engine\" image inspect \"$image_id\" >/dev/null 2>&1; then exit 1; fi", shellQuote(imageIDPath))
 }
 
-func registryManifestDigest(t *testing.T, ctx context.Context, endpoint, repository, tag string) string {
+func namedImageReopenProofCommand(expectedDigest, imageIDPath string) string {
+	return fmt.Sprintf("reference=\"$CAMP_REGISTRY/camp/acceptance:named\"; expected_digest=%s; image_id=$(cat %s); test -n \"$image_id\"; if \"$engine\" image inspect \"$reference\" >/dev/null 2>&1; then \"$engine\" image rm -f \"$reference\" >/dev/null; fi; if \"$engine\" image inspect \"$image_id\" >/dev/null 2>&1; then \"$engine\" image rm -f \"$image_id\" >/dev/null; fi; if \"$engine\" image inspect \"$reference\" >/dev/null 2>&1 || \"$engine\" image inspect \"$image_id\" >/dev/null 2>&1; then exit 1; fi; digest_reference=\"$CAMP_REGISTRY/camp/acceptance@$expected_digest\"; \"$engine\" pull \"$digest_reference\"; repo_digests=$(\"$engine\" image inspect --format '{{json .RepoDigests}}' \"$digest_reference\"); case \"$repo_digests\" in *\"\\\"$digest_reference\\\"\"*) ;; *) exit 1 ;; esac; \"$engine\" run --rm \"$digest_reference\" | grep -qx camp-a2-oci-ok", shellQuote(expectedDigest), shellQuote(imageIDPath))
+}
+
+func registryPlatformManifestDigest(t *testing.T, ctx context.Context, endpoint, repository, tag string) string {
 	t.Helper()
 	request, err := http.NewRequestWithContext(ctx, http.MethodGet, fmt.Sprintf("http://%s/v2/%s/manifests/%s", endpoint, repository, tag), nil)
 	if err != nil {
@@ -114,13 +121,14 @@ func registryManifestDigest(t *testing.T, ctx context.Context, endpoint, reposit
 		t.Fatalf("read pre-close named image manifest: %v", err)
 	}
 	defer response.Body.Close()
-	if _, err := io.Copy(io.Discard, response.Body); err != nil {
-		t.Fatalf("drain pre-close named image manifest: %v", err)
+	body, err := io.ReadAll(response.Body)
+	if err != nil {
+		t.Fatalf("read pre-close named image manifest body: %v", err)
 	}
 	if response.StatusCode != http.StatusOK {
 		t.Fatalf("pre-close named image manifest status = %s", response.Status)
 	}
-	digest, err := parseWorkspaceImageDigest([]byte(response.Header.Get("Docker-Content-Digest")))
+	digest, err := parsePlatformManifestDigest(body, response.Header.Get("Docker-Content-Digest"))
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -86,10 +86,19 @@ func newLifecycleScenario(t *testing.T, root string, devPod devPodTestIsolation,
 func (s *lifecycleScenario) CreateUnrelatedWorkspace(t *testing.T, ctx context.Context) {
 	t.Helper()
 	source := filepath.Join(s.root, "unrelated-workspace")
-	if err := os.MkdirAll(filepath.Join(source, ".devcontainer"), 0o700); err != nil {
+	if err := os.MkdirAll(filepath.Join(source, ".devcontainer"), 0o777); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(source, 0o777); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(filepath.Join(source, ".devcontainer"), 0o777); err != nil {
 		t.Fatal(err)
 	}
 	if err := os.WriteFile(filepath.Join(source, ".devcontainer", "devcontainer.json"), []byte(`{"image":"alpine:3.20"}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(filepath.Join(source, ".devcontainer", "devcontainer.json"), 0o666); err != nil {
 		t.Fatal(err)
 	}
 	digest := sha256.Sum256([]byte(filepath.Clean(source)))
@@ -994,10 +1003,26 @@ func TestNamedImageReopenProofIsDigestQualifiedValidShell(t *testing.T) {
 	t.Parallel()
 
 	digest := "sha256:" + strings.Repeat("b", 64)
-	command := namedImageReopenProofCommand(digest)
+	imageIDPath := "/workspaces/camp/evicted-image-id.txt"
+	eviction := namedImageEvictionCommand(imageIDPath)
+	for _, required := range []string{
+		`image_id=$("$engine" image inspect`,
+		`image rm -f "$reference"`,
+		`image rm -f "$image_id"`,
+		`printf '%s\n' "$image_id"`,
+	} {
+		if !strings.Contains(eviction, required) {
+			t.Fatalf("named image eviction omitted %q: %s", required, eviction)
+		}
+	}
+	if err := exec.Command("sh", "-n", "-c", eviction).Run(); err != nil {
+		t.Fatalf("named image eviction is invalid POSIX shell: %v\n%s", err, eviction)
+	}
+
+	command := namedImageReopenProofCommand(digest, imageIDPath)
 	for _, required := range []string{
 		`$CAMP_REGISTRY/camp/acceptance:named`,
-		`image_id=$("$engine" image inspect`,
+		`image_id=$(cat`,
 		`image rm -f`,
 		`$CAMP_REGISTRY/camp/acceptance@$expected_digest`,
 		`pull "$digest_reference"`,

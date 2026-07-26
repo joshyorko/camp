@@ -264,6 +264,32 @@ the recorded forwarding endpoints and prove they are closed after cleanup. This
 is harness behavior; it becomes real lifecycle evidence only when the gated
 tests pass with the orchestrator-provided `CAMP_TEST_BINARY` and real tools.
 
+The file lifecycle gate drives repeated `camp open` and `camp attach` through
+bounded process-group PTYs, then proves that the private DevPod context still
+contains exactly the unrelated workspace and the original Camp workspace.
+Its file-backend receipt reads the current pointer and immutable generation
+sidecar through the production repositories, hashes the archive and sidecar
+bytes directly, and proves the earlier generation remains byte-identical after
+pointer advancement. Registry evidence accepts a digest only when the
+`Docker-Content-Digest` header equals the SHA-256 of a complete single-platform
+OCI or Docker manifest body with complete config and layer descriptors; an
+index, an incomplete descriptor, or a header/body mismatch fails the gate.
+
+DevPod may change ownership of the unrelated local fixture while creating its
+workspace. That fixture therefore lives beneath the private mode-0700 scenario
+root but gives the container-owned fixture directory and file enough mode bits
+for the owning test process to remove the exact tree after deleting the exact
+workspace ID. This is not permission to relax Camp source, materialization, or
+verifier-only path ownership rules.
+
+A fresh-controller reopen can fail intermittently while starting the second
+workspace reverse forwarder even after the first controller completed sync and
+close. Preserve the bounded registry/fileserver forwarder logs and both durable
+session snapshots on failure; do not convert a retry that happens to pass into
+deterministic lifecycle evidence. The file lifecycle remains unproved until one
+current candidate completes the whole gate and exact cleanup without this
+failure.
+
 These named tests remain executable product gates even while their requirements
 are `roadmap-gated`. The RCC `robot` task therefore fails when a current
 candidate cannot satisfy them; black-box Robot success alone must not overwrite
