@@ -111,13 +111,14 @@ func TestProviderEvidenceUsesExplicitProtectedProfilesNotSecretConditionals(t *t
 	workflow := readWorkflow(t, "provider-evidence.yml")
 	requireContains(t, workflow,
 		"workflow_dispatch:",
-		"schedule:",
 		"environment: release-providers",
 		"provider_profile",
+		"secrets.CAMP_PROTECTED_KUBECONFIG_B64",
+		"secrets.CAMP_PROTECTED_DEVPOD_CONFIG_B64",
 		"evidence",
 		"gated",
 	)
-	for _, forbidden := range []string{"secrets. != ''", "secrets.", "contents: write", "id-token: write"} {
+	for _, forbidden := range []string{"secrets. != ''", "if: secrets.", "if: ${{ secrets.", "contents: write", "id-token: write"} {
 		if strings.Contains(workflow, forbidden) {
 			t.Fatalf("provider-evidence.yml contains forbidden implicit credential gate %q", forbidden)
 		}
