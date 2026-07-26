@@ -472,6 +472,39 @@ func TestInitUsesCampNameAndMigrationContracts(t *testing.T) {
 	}
 }
 
+func TestInitUsesCanonicalDevPodContextAndCompatibilityAlias(t *testing.T) {
+	for _, test := range []struct {
+		name string
+		flag string
+	}{
+		{name: "canonical", flag: "--devpod-context"},
+		{name: "compatibility alias", flag: "--workspace-context"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			lifecycle := &recordingLifecycle{}
+			args := []string{"init", "/brain", "--name", "brain", test.flag, "ror"}
+			if code := Execute(context.Background(), NewRootWithLifecycle(lifecycle), args, Streams{Out: io.Discard, ErrOut: io.Discard}); code != int(ExitSuccess) {
+				t.Fatalf("init exit = %d", code)
+			}
+			if got := lifecycle.initRequests[len(lifecycle.initRequests)-1].DevPodContext; got != "ror" {
+				t.Fatalf("DevPod context = %q, want ror", got)
+			}
+		})
+	}
+}
+
+func TestInitRejectsBothDevPodContextSpellings(t *testing.T) {
+	var stderr bytes.Buffer
+	code := Execute(context.Background(), NewRootWithLifecycle(&recordingLifecycle{}), []string{
+		"init", "/brain", "--name", "brain",
+		"--devpod-context", "default",
+		"--workspace-context", "ror",
+	}, Streams{Out: io.Discard, ErrOut: &stderr})
+	if code != int(ExitUsage) || !strings.Contains(stderr.String(), "--devpod-context cannot be combined with --workspace-context") {
+		t.Fatalf("exit = %d, stderr = %q", code, stderr.String())
+	}
+}
+
 func TestHumanInitWithoutNameDelegatesInteractiveInput(t *testing.T) {
 	lifecycle := &recordingLifecycle{}
 	input := strings.NewReader("alpha\n")
@@ -977,7 +1010,7 @@ func TestInitHelpTruthfullyListsCampManifestFlags(t *testing.T) {
 	if err := root.Execute(); err != nil {
 		t.Fatal(err)
 	}
-	want := "Initialize a capsule root\n\nUsage:\n  camp init [root] [flags]\n\nFlags:\n      --backend string              camp backend URL (defaults to machine setup)\n  -h, --help                        help for init\n      --migrate                     migrate the legacy singleton configuration\n      --name string                 stable camp ID\n      --workspace-context string    workspace runtime context (defaults to machine setup)\n      --workspace-provider string   workspace runtime provider (defaults to machine setup)\n\nGlobal Flags:\n      --json   emit stable JSON output\n"
+	want := "Initialize a capsule root\n\nUsage:\n  camp init [root] [flags]\n\nFlags:\n      --backend string              camp backend URL (defaults to machine setup)\n      --devpod-context string       named DevPod configuration context (defaults to machine setup)\n  -h, --help                        help for init\n      --migrate                     migrate the legacy singleton configuration\n      --name string                 stable camp ID\n      --workspace-provider string   workspace runtime provider (defaults to machine setup)\n\nGlobal Flags:\n      --json   emit stable JSON output\n"
 	if output.String() != want {
 		t.Fatalf("init help:\n%s\nwant:\n%s", output.String(), want)
 	}

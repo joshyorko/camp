@@ -559,14 +559,21 @@ func newAttachCommand(run func(context.Context, AttachRequest, OutputMode, io.Wr
 
 func newInitCommand(run func(context.Context, InitRequest, OutputMode, io.Writer) error, interactive func(context.Context, InitRequest, OutputMode, io.Reader, io.Writer) error) *cobra.Command {
 	request := InitRequest{}
+	var legacyWorkspaceContext string
 	command := &cobra.Command{
 		Use: "init [root]", Short: "Initialize a capsule root", Args: usageArgs(cobra.MaximumNArgs(1)),
 		RunE: func(command *cobra.Command, args []string) error {
 			if len(args) == 1 {
 				request.Root = args[0]
 			}
+			if command.Flags().Changed("devpod-context") && command.Flags().Changed("workspace-context") {
+				return UsageError(errors.New("--devpod-context cannot be combined with --workspace-context"))
+			}
+			if command.Flags().Changed("workspace-context") {
+				request.DevPodContext = legacyWorkspaceContext
+			}
 			if request.Migrate {
-				if request.Root != "" || request.Capsule != "" || command.Flags().Changed("backend") || command.Flags().Changed("workspace-provider") || command.Flags().Changed("workspace-context") {
+				if request.Root != "" || request.Capsule != "" || command.Flags().Changed("backend") || command.Flags().Changed("workspace-provider") || command.Flags().Changed("devpod-context") || command.Flags().Changed("workspace-context") {
 					return UsageError(errors.New("--migrate cannot be combined with a root or camp settings"))
 				}
 			} else if request.Capsule == "" {
@@ -581,7 +588,9 @@ func newInitCommand(run func(context.Context, InitRequest, OutputMode, io.Writer
 	command.Flags().StringVar(&request.Capsule, "name", "", "stable camp ID")
 	command.Flags().StringVar(&request.Backend, "backend", "", "camp backend URL (defaults to machine setup)")
 	command.Flags().StringVar(&request.DevPodProvider, "workspace-provider", "", "workspace runtime provider (defaults to machine setup)")
-	command.Flags().StringVar(&request.DevPodContext, "workspace-context", "", "workspace runtime context (defaults to machine setup)")
+	command.Flags().StringVar(&request.DevPodContext, "devpod-context", "", "named DevPod configuration context (defaults to machine setup)")
+	command.Flags().StringVar(&legacyWorkspaceContext, "workspace-context", "", "deprecated alias for --devpod-context")
+	_ = command.Flags().MarkHidden("workspace-context")
 	command.Flags().BoolVar(&request.Migrate, "migrate", false, "migrate the legacy singleton configuration")
 	return command
 }
