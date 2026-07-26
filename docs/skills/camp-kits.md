@@ -45,8 +45,10 @@ platforms as though an index digest were platform-specific.
 payload. `verified` and `rejected` both require a digest-shaped verifier,
 nonzero verification time no later than export, and exactly one immutable
 trust-evidence payload bound by path. A rejected manifest may be checksum-valid
-but is not trusted; signature verification and local receipts are outside this
-contract.
+but is not trusted; both statuses require evaluator participation at verification
+time. Only an evaluator result of verified establishes trusted evidence; rejected
+is an explicit non-trusted result even when checksums are valid. Signature
+verification and local receipts are outside this contract.
 
 Archive `Inspect` verifies determinism and manifest-decoding only. `Verify`
 streams payload bodies and checks size/digest/name ordering, then separates
@@ -58,9 +60,9 @@ bodies are not fully materialized. `PayloadGenerationMetadata` and
 pass trust-evidence bytes to the configured `TrustEvaluator`.
 
 Trust status remains `unverified` unless manifest trust metadata is `verified` or
-`rejected`; both of those states are trusted only with evaluator participation and
-bound trust evidence. `Verify` now returns `ErrTrustUnsupported` when trust is
-required but no evaluator or no evidence is available.
+`rejected`. `Verify` requires an evaluator and bound evidence for either status;
+it returns `ErrTrustUnsupported` when either is unavailable and never promotes a
+rejected result to trusted. No checksum-only result is publisher authenticity.
 
 Canonical JSON is compact Go struct-field order with no newline. Encoding
 deep-copies the manifest, normalizes copied timestamps to UTC `Z`, and sorts
@@ -93,6 +95,10 @@ The file backend now surfaces local object-source identity through
 `ObjectSourceFingerprint` with `Kind: "file"`, canonical path, and optional
 `Device`/`Inode` fields for drift detection. This is best-effort metadata;
 verifier semantics are still driven by generation metadata and archive hashing.
+`ResolveExactGeneration` validates object and sidecar fingerprints when it
+resolves a generation, but its returned sources reopen the backend later. An
+exporter must therefore revalidate those fingerprints before and after copying
+payloads and abort on drift; initial resolution alone is not a transfer lock.
 
 ## Verification and boundaries
 

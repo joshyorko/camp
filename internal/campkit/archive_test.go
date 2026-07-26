@@ -10,6 +10,7 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
+	"runtime"
 	"sort"
 	"testing"
 	"time"
@@ -71,6 +72,41 @@ func TestVerifyStreamsPayloadsAndSeparatesIntegrityFromTrust(t *testing.T) {
 	}
 	if verification.OCIClosure != OCIClosureNotVerified {
 		t.Fatalf("OCI closure = %q, want %q", verification.OCIClosure, OCIClosureNotVerified)
+	}
+}
+
+func TestVerifyStreamsLargePayloadThroughArchiveTraversal(t *testing.T) {
+	_, manifest, payloads := verifiedKitFixture(t)
+	var target string
+	for _, payload := range manifest.Payloads {
+		if payload.Role != PayloadGenerationArchive && payload.Role != PayloadGenerationMetadata {
+			target = payload.Path
+			break
+		}
+	}
+	if target == "" {
+		t.Fatal("fixture has no ordinary payload")
+	}
+	payloads[target] = bytes.Repeat([]byte("p"), 8<<20)
+	setPayloadBytes(&manifest, target, payloads[target], "")
+	archive := campKitFixture(t, fixtureEntries(manifest, payloads, sortedPayloadPaths(manifest)))
+
+	verification, err := Verify(context.Background(), bytes.NewReader(archive), DefaultArchiveLimits(), nil)
+	if err != nil {
+		t.Fatalf("Verify large archive: %v", err)
+	}
+	if verification.Integrity != IntegrityValid {
+		t.Fatalf("integrity = %q, want valid", verification.Integrity)
+	}
+
+	runtime.GC()
+	allocs := testing.AllocsPerRun(3, func() {
+		if _, err := Verify(context.Background(), bytes.NewReader(archive), DefaultArchiveLimits(), nil); err != nil {
+			t.Fatalf("Verify repeated large archive: %v", err)
+		}
+	})
+	if allocs > 500 {
+		t.Fatalf("large-payload Verify allocations = %.0f, want bounded traversal", allocs)
 	}
 }
 
