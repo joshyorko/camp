@@ -20,6 +20,16 @@ public command consumed or emitted it.
 - `camp kit import FILE --as CAMP`: verifies the complete archive, then publishes
   its regular payloads into a new XDG-local import directory without replacing
   an existing name.
+- Import first copies `FILE` into a private, fsynced read-only snapshot and
+  verifies and extracts from the same open snapshot; extraction never reopens
+  the caller-controlled pathname after verification. It fsyncs every imported
+  file and directory before no-replace publication, then fsyncs the publication
+  parent before returning success. Failed imports remove staging only when its
+  device/inode still matches the owned directory.
+- Import verification and payload copying are context-bound, and extraction
+  uses the same zstd memory/window limits as verification. `--as` rejects `.`,
+  `..`, separators, NUL, and other invalid path components before joining the
+  destination path.
 - `--json` is supported for inspect, verify, and import.
 - `FILE` must be a regular file path; `camp` rejects missing files, directories,
   and symlinks before attempting to inspect or verify.

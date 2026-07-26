@@ -47,6 +47,14 @@ func TestProductionConfigShowsEffectivePrecedenceAndRedactsEnvironmentSecrets(t 
 	}
 }
 
+func TestValidKitCampNameRejectsPathNamespaceComponents(t *testing.T) {
+	for _, name := range []string{".", ".."} {
+		if validKitCampName(name) {
+			t.Fatalf("validKitCampName(%q) = true, want false", name)
+		}
+	}
+}
+
 func TestProductionConfigSetRoundTripsEverySupportedMachineKeyAndRejectsCampSelection(t *testing.T) {
 	for _, test := range []struct {
 		key   string

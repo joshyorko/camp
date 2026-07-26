@@ -358,10 +358,13 @@ func Inspect(r io.Reader, limits ArchiveLimits) (Inspection, error) {
 }
 
 func Verify(ctx context.Context, reader io.Reader, limits ArchiveLimits, evaluator TrustEvaluator) (Verification, error) {
+	if err := ctx.Err(); err != nil {
+		return Verification{}, err
+	}
 	if err := validateReaderLimits(limits); err != nil {
 		return Verification{}, err
 	}
-	compressed := &countingReader{reader: reader, limit: limits.MaxCompressedBytes}
+	compressed := &countingReader{reader: &contextReader{ctx: ctx, reader: reader}, limit: limits.MaxCompressedBytes}
 	frame := newZstdFrameReader(compressed, true)
 	decoder, err := zstd.NewReader(
 		frame,

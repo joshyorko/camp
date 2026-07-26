@@ -8,9 +8,12 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"syscall"
 
 	"github.com/klauspost/compress/zstd"
 )
+
+var importBeforeExtract = func(string, string) error { return nil }
 
 // ImportResult describes an import whose archive was verified before any
 // destination directory was published.
@@ -31,13 +34,41 @@ func ImportFile(ctx context.Context, input, destination string, evaluator TrustE
 	if err != nil {
 		return ImportResult{}, err
 	}
-	verification, err := Verify(ctx, file, DefaultArchiveLimits(), evaluator)
-	closeErr := file.Close()
+	snapshot, err := os.CreateTemp("", "campkit-verified-*")
+	if err != nil {
+		_ = file.Close()
+		return ImportResult{}, err
+	}
+	snapshotPath := snapshot.Name()
+	cleanupSnapshot := true
+	defer func() {
+		_ = file.Close()
+		_ = snapshot.Close()
+		if cleanupSnapshot {
+			_ = removeOwnedPath(snapshotPath, snapshotIdentity(snapshotPath))
+		}
+	}()
+	if _, err := io.Copy(snapshot, &contextReader{ctx: ctx, reader: file}); err != nil {
+		return ImportResult{}, err
+	}
+	if err := snapshot.Sync(); err != nil {
+		return ImportResult{}, err
+	}
+	if err := file.Close(); err != nil {
+		return ImportResult{}, err
+	}
+	if err := snapshot.Chmod(0o400); err != nil {
+		return ImportResult{}, err
+	}
+	if _, err := snapshot.Seek(0, io.SeekStart); err != nil {
+		return ImportResult{}, err
+	}
+	verification, err := Verify(ctx, &contextReader{ctx: ctx, reader: snapshot}, DefaultArchiveLimits(), evaluator)
 	if err != nil {
 		return ImportResult{}, err
 	}
-	if closeErr != nil {
-		return ImportResult{}, closeErr
+	if _, err := snapshot.Seek(0, io.SeekStart); err != nil {
+		return ImportResult{}, err
 	}
 	if err := ctx.Err(); err != nil {
 		return ImportResult{}, err
@@ -56,30 +87,44 @@ func ImportFile(ctx context.Context, input, destination string, evaluator TrustE
 	if err != nil {
 		return ImportResult{}, err
 	}
+	stagingIdentity, err := directoryIdentity(staging)
+	if err != nil {
+		return ImportResult{}, err
+	}
 	owned := true
 	defer func() {
 		if owned {
-			_ = os.RemoveAll(staging)
+			_ = removeOwnedTree(staging, stagingIdentity)
 		}
 	}()
 
-	if err := extractVerified(ctx, input, staging, verification.Manifest); err != nil {
+	if err := importBeforeExtract(input, staging); err != nil {
+		return ImportResult{}, err
+	}
+	if err := extractVerified(ctx, snapshot, staging, verification.Manifest, DefaultArchiveLimits()); err != nil {
+		return ImportResult{}, err
+	}
+	if err := syncTree(ctx, staging); err != nil {
 		return ImportResult{}, err
 	}
 	if err := publishNoReplace(staging, destination); err != nil {
 		return ImportResult{}, fmt.Errorf("publish imported CampKit: %w", err)
 	}
 	owned = false
+	if err := syncDirectory(parent); err != nil {
+		return ImportResult{}, err
+	}
+	cleanupSnapshot = false
 	return ImportResult{Manifest: verification.Manifest, Verification: verification, Destination: destination}, nil
 }
 
-func extractVerified(ctx context.Context, input, destination string, manifest Manifest) error {
-	file, err := os.Open(input)
-	if err != nil {
-		return err
-	}
-	defer file.Close()
-	decoder, err := zstd.NewReader(file, zstd.WithDecoderConcurrency(1), zstd.WithDecoderLowmem(true))
+func extractVerified(ctx context.Context, input io.Reader, destination string, manifest Manifest, limits ArchiveLimits) error {
+	decoder, err := zstd.NewReader(input,
+		zstd.WithDecoderConcurrency(1),
+		zstd.WithDecoderLowmem(true),
+		zstd.WithDecoderMaxMemory(uint64(limits.MaxOuterExpandedBytes)),
+		zstd.WithDecoderMaxWindow(uint64(limits.MaxOuterEntryBytes)),
+	)
 	if err != nil {
 		return err
 	}
@@ -114,7 +159,7 @@ func extractVerified(ctx context.Context, input, destination string, manifest Ma
 		if err != nil {
 			return err
 		}
-		_, copyErr := io.Copy(out, io.LimitReader(reader, payload.Size))
+		_, copyErr := io.Copy(out, &contextReader{ctx: ctx, reader: io.LimitReader(reader, payload.Size)})
 		closeErr := out.Close()
 		if copyErr != nil {
 			return copyErr
@@ -126,4 +171,98 @@ func extractVerified(ctx context.Context, input, destination string, manifest Ma
 			return err
 		}
 	}
+}
+
+type pathIdentity struct {
+	device uint64
+	inode  uint64
+}
+
+func snapshotIdentity(path string) pathIdentity {
+	identity, _ := directoryIdentity(path)
+	return identity
+}
+
+func directoryIdentity(path string) (pathIdentity, error) {
+	info, err := os.Lstat(path)
+	if err != nil {
+		return pathIdentity{}, err
+	}
+	stat, ok := info.Sys().(*syscall.Stat_t)
+	if !ok {
+		return pathIdentity{}, errors.New("path identity unavailable")
+	}
+	return pathIdentity{device: uint64(stat.Dev), inode: stat.Ino}, nil
+}
+
+func removeOwnedPath(path string, want pathIdentity) error {
+	got, err := directoryIdentity(path)
+	if err != nil {
+		return err
+	}
+	if got != want {
+		return fmt.Errorf("refusing cleanup of replaced path")
+	}
+	return os.Remove(path)
+}
+
+func removeOwnedTree(path string, want pathIdentity) error {
+	got, err := directoryIdentity(path)
+	if err != nil || got != want {
+		return nil
+	}
+	return os.RemoveAll(path)
+}
+
+func syncTree(ctx context.Context, root string) error {
+	var directories []string
+	if err := filepath.WalkDir(root, func(path string, entry os.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		if entry.Type()&os.ModeSymlink != 0 {
+			return fmt.Errorf("unexpected symlink in imported tree: %w", ErrUnsafeArchive)
+		}
+		if entry.IsDir() {
+			directories = append(directories, path)
+			return nil
+		}
+		file, err := os.Open(path)
+		if err != nil {
+			return err
+		}
+		err = file.Sync()
+		closeErr := file.Close()
+		return errors.Join(err, closeErr)
+	}); err != nil {
+		return err
+	}
+	for i := len(directories) - 1; i >= 0; i-- {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		dir, err := os.Open(directories[i])
+		if err != nil {
+			return err
+		}
+		err = dir.Sync()
+		closeErr := dir.Close()
+		if err := errors.Join(err, closeErr); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func syncDirectory(path string) error {
+	dir, err := os.Open(path)
+	if err != nil {
+		return err
+	}
+	err = dir.Sync()
+	closeErr := dir.Close()
+	return errors.Join(err, closeErr)
 }

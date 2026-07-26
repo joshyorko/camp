@@ -369,7 +369,7 @@ type KitImportReceipt struct {
 }
 
 func validKitCampName(value string) bool {
-	if value == "" || strings.ContainsAny(value, "/\\\x00") {
+	if value == "" || value == "." || value == ".." || strings.ContainsAny(value, "/\\\x00") {
 		return false
 	}
 	for i, r := range value {
