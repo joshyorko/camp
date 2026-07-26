@@ -175,6 +175,10 @@ func (c *Controller) Hydrate(ctx context.Context, request Request) (Result, erro
 		if err != nil {
 			return Result{}, err
 		}
+		state.FinalChangeTimeNS, err = directoryChangeTimeNS(request.FinalRoot)
+		if err != nil {
+			return Result{}, err
+		}
 		state.FinalBirthTimeNS, err = directoryBirthTimeNS(request.FinalRoot)
 		if err != nil {
 			return Result{}, err
@@ -331,6 +335,10 @@ func (c *Controller) Hydrate(ctx context.Context, request Request) (Result, erro
 			if err != nil {
 				return err
 			}
+			state.FinalChangeTimeNS, err = directoryChangeTimeNS(request.FinalRoot)
+			if err != nil {
+				return err
+			}
 			state.FinalBirthTimeNS, err = directoryBirthTimeNS(request.FinalRoot)
 			if err != nil {
 				return err
@@ -420,6 +428,7 @@ type stageState struct {
 	OwnershipFact     bool   `json:"ownershipFact"`
 	FinalDevice       uint64 `json:"finalDevice,omitempty"`
 	FinalInode        uint64 `json:"finalInode,omitempty"`
+	FinalChangeTimeNS int64  `json:"finalChangeTimeNs,omitempty"`
 	FinalBirthTimeNS  int64  `json:"finalBirthTimeNs,omitempty"`
 }
 
@@ -545,12 +554,19 @@ func (c *Controller) validateFinal(request Request, state stageState) error {
 	if err != nil {
 		return err
 	}
+	changeTimeNS, err := directoryChangeTimeNS(request.FinalRoot)
+	if err != nil {
+		return err
+	}
 	birthTimeNS, err := directoryBirthTimeNS(request.FinalRoot)
 	if err != nil {
 		return err
 	}
 	if state.FinalDevice != 0 && !sameDirectoryIdentity(state.FinalDevice, state.FinalInode, state.FinalBirthTimeNS, device, inode, birthTimeNS) {
 		return fmt.Errorf("materialization final identity changed: %w", ErrUnsafeMaterialization)
+	}
+	if state.FinalChangeTimeNS != 0 && state.FinalChangeTimeNS != changeTimeNS {
+		return fmt.Errorf("materialization final change time changed: %w", ErrUnsafeMaterialization)
 	}
 	return nil
 }
@@ -1422,6 +1438,18 @@ func directoryBirthTimeNS(path string) (int64, error) {
 		return 0, nil
 	}
 	return stat.Btime.Sec*1_000_000_000 + int64(stat.Btime.Nsec), nil
+}
+
+func directoryChangeTimeNS(path string) (int64, error) {
+	info, err := os.Lstat(path)
+	if err != nil {
+		return 0, err
+	}
+	stat, ok := info.Sys().(*syscall.Stat_t)
+	if !ok {
+		return 0, errors.New("directory change time unavailable")
+	}
+	return stat.Ctim.Sec*1_000_000_000 + int64(stat.Ctim.Nsec), nil
 }
 
 func sameDirectoryIdentity(wantDevice, wantInode uint64, wantBirthTimeNS int64, gotDevice, gotInode uint64, gotBirthTimeNS int64) bool {
