@@ -282,13 +282,18 @@ for the owning test process to remove the exact tree after deleting the exact
 workspace ID. This is not permission to relax Camp source, materialization, or
 verifier-only path ownership rules.
 
-A fresh-controller reopen can fail intermittently while starting the second
-workspace reverse forwarder even after the first controller completed sync and
-close. Preserve the bounded registry/fileserver forwarder logs and both durable
-session snapshots on failure; do not convert a retry that happens to pass into
-deterministic lifecycle evidence. The file lifecycle remains unproved until one
-current candidate completes the whole gate and exact cleanup without this
-failure.
+A fresh-controller reopen previously failed intermittently while starting the
+second workspace reverse forwarder even after the first controller completed
+sync and close. Preserved evidence showed a live replacement `devpod ssh`
+process, an empty forwarder log, and an unreachable fileserver endpoint. The
+forwarder manager now retains the endpoint probe as the readiness boundary,
+replaces one bounded-but-unready process by exact PID/boot/start identity, and
+polls the same boundary when adopting a persisted pending registry forwarder.
+Focused tests prove the replacement identity is the only committed evidence and
+that exhausting both attempts stops both exact processes and removes the owned
+evidence path. Preserve bounded forwarder logs and both durable snapshots on
+any later failure. The file lifecycle remains unproved until one current
+candidate completes the whole gate and exact cleanup after this correction.
 
 These named tests remain executable product gates even while their requirements
 are `roadmap-gated`. The RCC `robot` task therefore fails when a current

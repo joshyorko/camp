@@ -25,7 +25,14 @@ import (
 	"golang.org/x/sys/unix"
 )
 
-const maxForwardingEvidenceBytes = 64 << 10
+const (
+	maxForwardingEvidenceBytes       = 64 << 10
+	defaultForwarderStartAttempts    = 2
+	defaultForwarderReadinessTimeout = 15 * time.Second
+	defaultForwarderReadinessPoll    = 100 * time.Millisecond
+)
+
+var errForwarderEndpointNotReady = errors.New("workspace forwarder endpoint is not ready")
 
 type forwardingEvidenceIdentity struct {
 	device uint64
@@ -47,10 +54,17 @@ type ForwarderManager struct {
 	devpod            forwardDevPod
 	processes         forwardProcesses
 	resolveExecutable func(string) (string, error)
+	startAttempts     int
+	readinessTimeout  time.Duration
+	readinessInterval time.Duration
 }
 
 func NewForwarderManager(client forwardDevPod, processes forwardProcesses) *ForwarderManager {
-	return &ForwarderManager{devpod: client, processes: processes, resolveExecutable: canonicalForwardingExecutable}
+	return &ForwarderManager{
+		devpod: client, processes: processes, resolveExecutable: canonicalForwardingExecutable,
+		startAttempts: defaultForwarderStartAttempts, readinessTimeout: defaultForwarderReadinessTimeout,
+		readinessInterval: defaultForwarderReadinessPoll,
+	}
 }
 
 func (m *ForwarderManager) Start(ctx context.Context, request domain.ForwardingRequest) (domain.ForwardingRecord, error) {
@@ -74,55 +88,57 @@ func (m *ForwarderManager) Start(ctx context.Context, request domain.ForwardingR
 	if err != nil {
 		return domain.ForwardingRecord{}, err
 	}
-	identity, err := m.processes.Start(ctx, ports.ProcessSpec{Command: command, NewSession: true, LogPath: request.LogPath})
+	expectedExecutable, err := m.expectedExecutable(command.Executable)
 	if err != nil {
 		return domain.ForwardingRecord{}, err
 	}
+	var lastErr error
+	for attempt := 1; attempt <= m.startAttempts; attempt++ {
+		record, retryable, err := m.startAttempt(ctx, request, command, expectedExecutable)
+		if err == nil {
+			return record, nil
+		}
+		lastErr = err
+		if !retryable || attempt == m.startAttempts {
+			return domain.ForwardingRecord{}, err
+		}
+	}
+	return domain.ForwardingRecord{}, lastErr
+}
+
+func (m *ForwarderManager) startAttempt(ctx context.Context, request domain.ForwardingRequest, command ports.Command, expectedExecutable string) (domain.ForwardingRecord, bool, error) {
+	identity, err := m.processes.Start(ctx, ports.ProcessSpec{Command: command, NewSession: true, LogPath: request.LogPath})
+	if err != nil {
+		return domain.ForwardingRecord{}, false, err
+	}
 	status, err := m.processes.Inspect(ctx, identity)
 	if err != nil || !status.Running {
-		return m.cleanupStartedProcess(ctx, identity, errors.Join(err, errors.New("workspace forwarder exited before readiness")))
-	}
-	expectedExecutable, err := m.expectedExecutable(command.Executable)
-	if err != nil {
-		return m.cleanupStartedProcess(ctx, identity, err)
+		record, cleanupErr := m.cleanupStartedProcess(ctx, identity, errors.Join(err, errors.New("workspace forwarder exited before readiness")))
+		return record, false, cleanupErr
 	}
 	record, err := newForwardingRecord(request, command, expectedExecutable, identity, status)
 	if err != nil {
-		return m.cleanupStartedProcess(ctx, identity, err)
+		record, cleanupErr := m.cleanupStartedProcess(ctx, identity, err)
+		return record, false, cleanupErr
 	}
 	evidenceIdentity, err := writeForwardingEvidence(request.EvidencePath, record)
 	if err != nil {
 		// Publication may have failed because another inode won the no-replace
 		// race. Never remove a path this attempt cannot prove it created.
-		return m.cleanupStartedProcess(ctx, identity, err)
+		record, cleanupErr := m.cleanupStartedProcess(ctx, identity, err)
+		return record, false, cleanupErr
 	}
 	record.EvidenceDevice = evidenceIdentity.device
 	record.EvidenceInode = evidenceIdentity.inode
-	probeURL := "http://" + request.WorkspaceEndpoint + "/"
-	if request.Name == "registry" {
-		probeURL += "v2/"
-	}
-	probe := ports.WorkspaceCommand{WorkspaceID: request.WorkspaceID, Context: request.Context, Argv: []string{"curl", "--fail", "--silent", "--show-error", "--max-time", "5", probeURL}}
-	deadline := time.Now().Add(15 * time.Second)
-	for {
-		if _, err = m.devpod.Execute(ctx, probe); err == nil {
-			break
+	if err := m.waitForReadiness(ctx, request, identity); err != nil {
+		cleanupErr := m.cleanupForwarder(context.WithoutCancel(ctx), record)
+		if cleanupErr != nil {
+			return domain.ForwardingRecord{}, false, errors.Join(err, cleanupErr)
 		}
-		status, inspectErr := m.processes.Inspect(ctx, identity)
-		if inspectErr != nil || !status.Running {
-			return m.cleanupForwarder(ctx, record, errors.Join(err, inspectErr, errors.New("workspace forwarder exited during readiness")))
-		}
-		if !time.Now().Before(deadline) {
-			return m.cleanupForwarder(ctx, record, fmt.Errorf("workspace endpoint %s did not become ready: %w", request.WorkspaceEndpoint, err))
-		}
-		select {
-		case <-ctx.Done():
-			return m.cleanupForwarder(ctx, record, ctx.Err())
-		case <-time.After(100 * time.Millisecond):
-		}
+		return domain.ForwardingRecord{}, errors.Is(err, errForwarderEndpointNotReady), err
 	}
 	record.ObservedState = domain.RuntimeObservedReady
-	return record, nil
+	return record, false, nil
 }
 
 func (m *ForwarderManager) Stop(ctx context.Context, record domain.ForwardingRecord) error {
@@ -173,15 +189,40 @@ func (m *ForwarderManager) Observe(ctx context.Context, request domain.Forwardin
 	if err := validateForwardingRecord(command, expectedExecutable, record, status); err != nil {
 		return domain.ForwardingRecord{}, err
 	}
-	probeURL := "http://" + request.WorkspaceEndpoint + "/"
-	if request.Name == "registry" {
-		probeURL += "v2/"
-	}
-	if _, err = m.devpod.Execute(ctx, ports.WorkspaceCommand{WorkspaceID: request.WorkspaceID, Context: request.Context, Argv: []string{"curl", "--fail", "--silent", "--show-error", "--max-time", "5", probeURL}}); err != nil {
+	if err := m.waitForReadiness(ctx, request, record.Process.Identity); err != nil {
 		return domain.ForwardingRecord{}, err
 	}
 	record.ObservedState = domain.RuntimeObservedReady
 	return record, nil
+}
+
+func (m *ForwarderManager) waitForReadiness(ctx context.Context, request domain.ForwardingRequest, identity domain.ProcessIdentity) error {
+	probeURL := "http://" + request.WorkspaceEndpoint + "/"
+	if request.Name == "registry" {
+		probeURL += "v2/"
+	}
+	probe := ports.WorkspaceCommand{WorkspaceID: request.WorkspaceID, Context: request.Context, Argv: []string{"curl", "--fail", "--silent", "--show-error", "--max-time", "5", probeURL}}
+	deadline := time.Now().Add(m.readinessTimeout)
+	var lastErr error
+	for {
+		if _, err := m.devpod.Execute(ctx, probe); err == nil {
+			return nil
+		} else {
+			lastErr = err
+		}
+		status, inspectErr := m.processes.Inspect(ctx, identity)
+		if inspectErr != nil || !status.Running {
+			return errors.Join(lastErr, inspectErr, errors.New("workspace forwarder exited during readiness"))
+		}
+		if !time.Now().Before(deadline) {
+			return fmt.Errorf("workspace endpoint %s did not become ready: %w: %v", request.WorkspaceEndpoint, errForwarderEndpointNotReady, lastErr)
+		}
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(m.readinessInterval):
+		}
+	}
 }
 
 func validateForwardEndpoint(value string) error {
@@ -438,14 +479,14 @@ func removeForwardingEvidence(record domain.ForwardingRecord) error {
 	return unix.Fsync(dirFD)
 }
 
-func (m *ForwarderManager) cleanupForwarder(ctx context.Context, record domain.ForwardingRecord, cause error) (domain.ForwardingRecord, error) {
-	if stopErr := m.processes.Stop(context.WithoutCancel(ctx), record.Process.Identity, 5*time.Second); stopErr != nil {
-		return domain.ForwardingRecord{}, errors.Join(cause, stopErr)
+func (m *ForwarderManager) cleanupForwarder(ctx context.Context, record domain.ForwardingRecord) error {
+	if stopErr := m.processes.Stop(ctx, record.Process.Identity, 5*time.Second); stopErr != nil {
+		return stopErr
 	}
 	if err := removeForwardingEvidence(record); err != nil {
-		return domain.ForwardingRecord{}, errors.Join(cause, err)
+		return err
 	}
-	return domain.ForwardingRecord{}, cause
+	return nil
 }
 
 func (m *ForwarderManager) cleanupStartedProcess(ctx context.Context, identity domain.ProcessIdentity, cause error) (domain.ForwardingRecord, error) {
