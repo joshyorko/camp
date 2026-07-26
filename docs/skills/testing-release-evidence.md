@@ -236,22 +236,23 @@ Room-of-Requirement remains the devcontainer image fixture, not the DevPod
 provider. Before each file or MinIO lifecycle scenario opens Camp's workspace,
 the harness creates one unrelated workspace in that same private context. Its
 scenario ledger recovers exact Camp workspace IDs, process identities,
-cleanup-permitted paths, and forwarded endpoints only from durable session
+cleanup-permitted materializations, verifier-only path identities, and
+forwarded endpoints only from durable session
 snapshots. The same cleanup path runs after normal completion, controller
 failure, or interruption; it closes Camp sessions, deletes only recovered exact
-workspace IDs, and proves every recorded workspace, process, owned path, and
-listener is absent. A failed `camp close` remains a reported cleanup error while
-the harness continues exact fallback cleanup: complete PID/boot/start process
-identities use the production process manager, created materializations use the
-ownership-marker guard, and forwarding evidence/runtime paths require matching
-device, inode, and exact Linux regular-file/directory type. The opened
-quarantine descriptor remains live while the current entry is moved into a
-fresh mode-0700 removal boundary, revalidated there, and unlinked relative to
-that boundary. A post-validation substitution is restored intact and reported;
-the displaced recorded object survives, symlinks are not followed, and a
-replacement runtime directory is never recursively removed. Successful
-restoration and removal sync their affected directories.
-Incomplete process or path identities
+workspace IDs, and verifies every recorded workspace, process, materialization,
+path, and listener. A failed `camp close` remains a reported cleanup error while
+the harness continues only established fallback cleanup: complete
+PID/boot/start process identities use the production process manager and
+created materializations use the ownership-marker guard. Forwarding evidence
+and scenario runtime paths record device, inode, and exact Linux
+regular-file/directory type for verification only. Unprivileged Linux cannot
+bind an `fstat`-validated directory entry to a later name-based unlink while a
+same-UID writer can mutate the directory, so the harness does not generically
+remove those paths. If a recorded path remains or the current entry has a
+different identity, cleanup fails and preserves the current entry for explicit
+recovery; a live recorded listener likewise fails cleanup and is not stopped by
+endpoint alone. Incomplete process or path identities
 fail closed rather than being treated as absence. It then proves the unrelated ID remains and deletes that
 unrelated ID in its own final step. DevPod workspace IDs are the safe container
 cleanup boundary; the harness neither invents a second Docker-container identity

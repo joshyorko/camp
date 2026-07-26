@@ -133,3 +133,32 @@ Documentation improvement:
 - Evidence: `TestRemoveExactOwnedPathPreservesPostValidationSubstitution` deterministically swaps both a forwarding-evidence regular file and a runtime directory after initial `Fstat`, proving each substitute and displaced recorded object survives and replacement directory children remain untouched; `TestInspectOwnedPathRejectsNonRegularForwardingEvidence` rejects a FIFO; the focused 50-count, full integration, vet, and diff checks above passed.
 - Stale or ambiguous guidance removed: Replaced the overstated claim that validating a mutable quarantine name atomically bound it to unlink.
 - Remaining uncertainty: Real DevPod/Hauler/Docker lifecycle gates remain unrun without the orchestrator-provided `CAMP_TEST_BINARY`; the safety proof covers regular forwarding evidence and runtime directories under the scenario-owned Linux removal boundary.
+
+## Fix round 5
+
+Removed the generic forwarding-evidence/runtime-path fallback remover. Linux
+does not provide an unprivileged unlink-by-open-descriptor primitive, so a
+same-UID writer can replace any validated name before `unlinkat`; another
+quarantine or mode-0700 directory only moves that final race. Those recorded
+device, inode, and exact-type identities are now verifier-only. After a failed
+close, the harness still stops complete process identities, removes
+ownership-marked materializations, and deletes exact workspace IDs through
+their established primitives. It then fails the cleanup receipt when a recorded
+path remains, reports identity drift while preserving the current entry for
+explicit recovery, and reports a live recorded listener without stopping
+anything by endpoint alone.
+
+Verification:
+
+- RED: `go test ./integration -run TestLifecycleScenarioCleanupConsumesInterruptedLedger -count=1` failed because the old fallback removed `forward.json`.
+- `go test ./integration -run 'Test(LifecycleScenarioCleanupConsumesInterruptedLedger|LifecycleScenarioCleanupPreservesVerifierPathSubstitutions|InspectVerifierPathRejectsNonRegularForwardingEvidence)' -count=50` — passed.
+- `go test ./integration -count=1` — passed.
+- `go vet ./...` — passed.
+- `git diff --check` — passed before this report append and is rerun as the final commit gate.
+
+Documentation improvement:
+- Canonical file changed or proposed: `docs/skills/testing-release-evidence.md`
+- Durable learning captured: Device/inode/type observations cannot authorize generic name-based removal from a same-UID-mutable directory; path and listener records are verification-only, ambiguous entries are preserved for explicit recovery, and any retained resource fails the cleanup receipt.
+- Evidence: `integration/minio_cli_reopen_helpers_test.go` removes the generic `removeExactOwnedPath` path, retains only established process/materialization/workspace cleanup primitives, and deterministically preserves substituted files, directories, displaced recorded objects, directory children, exact matching paths, and a live listener; the focused 50-count, full integration, vet, and diff checks above passed.
+- Stale or ambiguous guidance removed: Removed the claim that a private descriptor-held boundary and second `fstat` bind the validated object to the later `unlinkat`.
+- Remaining uncertainty: Real DevPod/Hauler/Docker lifecycle gates remain unrun without the orchestrator-provided `CAMP_TEST_BINARY`; a retained forwarding-evidence path, scenario runtime directory, or listener now intentionally keeps that real cleanup receipt failing until explicit recovery removes the exact resource.

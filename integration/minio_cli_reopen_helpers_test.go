@@ -2,9 +2,7 @@ package integration
 
 import (
 	"context"
-	"crypto/rand"
 	"crypto/sha256"
-	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -32,7 +30,7 @@ type createdWorkspaceTracker struct {
 
 type lifecycleEndpoints struct{ Registry, Fileserver string }
 
-type ownedPath struct {
+type verifierPath struct {
 	path     string
 	device   uint64
 	inode    uint64
@@ -44,9 +42,10 @@ type ownedMaterialization struct {
 	record   domain.Materialization
 }
 
-// lifecycleScenario owns only paths and identities created beneath its temporary
-// root.  Its cleanup is intentionally reusable from normal and interrupted test
-// paths; it never enumerates or deletes ambient DevPod resources.
+// lifecycleScenario records only resources and identities created beneath its
+// temporary root. Its cleanup is intentionally reusable from normal and
+// interrupted test paths; path identities are verification-only because Linux
+// cannot bind fstat validation to a later name-based unlink.
 type lifecycleScenario struct {
 	root                 string
 	devPod               devPodTestIsolation
@@ -56,7 +55,7 @@ type lifecycleScenario struct {
 	controllerNeedsClose map[string]bool
 	workspaces           *createdWorkspaceTracker
 	processes            map[domain.ProcessIdentity]struct{}
-	paths                map[string]ownedPath
+	verifierPaths        map[string]verifierPath
 	materializations     map[string]ownedMaterialization
 	listeners            map[string]struct{}
 }
@@ -65,7 +64,7 @@ func newLifecycleScenario(t *testing.T, root string, devPod devPodTestIsolation,
 	t.Helper()
 	scenario := &lifecycleScenario{
 		root: root, devPod: devPod, controllers: controllers, environments: map[string][]string{}, controllerNeedsClose: map[string]bool{},
-		workspaces: newCreatedWorkspaceTracker(), processes: map[domain.ProcessIdentity]struct{}{}, paths: map[string]ownedPath{}, materializations: map[string]ownedMaterialization{}, listeners: map[string]struct{}{},
+		workspaces: newCreatedWorkspaceTracker(), processes: map[domain.ProcessIdentity]struct{}{}, verifierPaths: map[string]verifierPath{}, materializations: map[string]ownedMaterialization{}, listeners: map[string]struct{}{},
 	}
 	for _, controller := range controllers {
 		runtimeDirectory := scenarioRuntimeDirectory(controller)
@@ -75,11 +74,11 @@ func newLifecycleScenario(t *testing.T, root string, devPod devPodTestIsolation,
 		if err := os.Chmod(runtimeDirectory, 0o700); err != nil {
 			t.Fatalf("secure private XDG runtime directory: %v", err)
 		}
-		owned, err := inspectOwnedPath(runtimeDirectory, true)
+		observed, err := inspectVerifierPath(runtimeDirectory, true)
 		if err != nil {
 			t.Fatalf("record private XDG runtime identity: %v", err)
 		}
-		scenario.paths[runtimeDirectory] = owned
+		scenario.verifierPaths[runtimeDirectory] = observed
 	}
 	return scenario
 }
@@ -173,7 +172,7 @@ func (s *lifecycleScenario) trackController(controller string) error {
 				if forwarding.EvidenceDevice == 0 || forwarding.EvidenceInode == 0 {
 					return fmt.Errorf("forwarding evidence identity is incomplete for %q", forwarding.EvidencePath)
 				}
-				s.paths[forwarding.EvidencePath] = ownedPath{path: forwarding.EvidencePath, device: forwarding.EvidenceDevice, inode: forwarding.EvidenceInode, fileType: unix.S_IFREG}
+				s.verifierPaths[forwarding.EvidencePath] = verifierPath{path: forwarding.EvidencePath, device: forwarding.EvidenceDevice, inode: forwarding.EvidenceInode, fileType: unix.S_IFREG}
 			}
 			if forwarding.Process.Identity.PID > 0 && !completeProcessIdentity(forwarding.Process.Identity) {
 				return fmt.Errorf("forwarding process identity is incomplete for %q", forwarding.Name)
@@ -281,18 +280,6 @@ func (s *lifecycleScenario) cleanup(binary string) error {
 				result = errors.Join(result, fmt.Errorf("remove exact owned materialization %q: %w", materialization.record.CanonicalPath, err))
 			}
 		}
-		for _, path := range s.paths {
-			if err := removeExactOwnedPath(path); err != nil {
-				result = errors.Join(result, err)
-			}
-		}
-	}
-	for path, identity := range s.paths {
-		if identity.fileType == unix.S_IFDIR {
-			if err := removeExactOwnedPath(identity); err != nil {
-				result = errors.Join(result, fmt.Errorf("remove exact scenario runtime %q: %w", path, err))
-			}
-		}
 	}
 	if err := s.workspaces.DeleteAll(func(id string) error {
 		output, err := runDevPodCommand(ctx, s.devPod, "delete", "--ignore-not-found", id)
@@ -362,11 +349,19 @@ func (s *lifecycleScenario) verifyOwnedResources(ctx context.Context) error {
 			}
 		}
 	}
-	for path := range s.paths {
-		if _, statErr := os.Lstat(path); statErr == nil {
-			result = errors.Join(result, fmt.Errorf("owned path %q remains", path))
+	for path, recorded := range s.verifierPaths {
+		info, statErr := os.Lstat(path)
+		if statErr == nil {
+			stat, ok := info.Sys().(*syscall.Stat_t)
+			if !ok {
+				result = errors.Join(result, fmt.Errorf("inspect verifier-only path %q: Linux identity unavailable", path))
+			} else if uint64(stat.Dev) == recorded.device && stat.Ino == recorded.inode && uint32(stat.Mode)&unix.S_IFMT == recorded.fileType {
+				result = errors.Join(result, fmt.Errorf("verifier-only path %q remains", path))
+			} else {
+				result = errors.Join(result, fmt.Errorf("verifier-only path %q changed identity; current entry retained for recovery", path))
+			}
 		} else if !errors.Is(statErr, os.ErrNotExist) {
-			result = errors.Join(result, fmt.Errorf("inspect owned path %q: %w", path, statErr))
+			result = errors.Join(result, fmt.Errorf("inspect verifier-only path %q: %w", path, statErr))
 		}
 	}
 	for path := range s.materializations {
@@ -390,14 +385,14 @@ func completeProcessIdentity(identity domain.ProcessIdentity) bool {
 	return identity.PID > 0 && identity.BootID != "" && identity.StartTicks > 0
 }
 
-func inspectOwnedPath(path string, directory bool) (ownedPath, error) {
+func inspectVerifierPath(path string, directory bool) (verifierPath, error) {
 	info, err := os.Lstat(path)
 	if err != nil {
-		return ownedPath{}, err
+		return verifierPath{}, err
 	}
 	stat, ok := info.Sys().(*syscall.Stat_t)
 	if !ok {
-		return ownedPath{}, fmt.Errorf("path %q has no Linux stat identity", path)
+		return verifierPath{}, fmt.Errorf("path %q has no Linux stat identity", path)
 	}
 	expectedType := uint32(unix.S_IFREG)
 	if directory {
@@ -405,128 +400,9 @@ func inspectOwnedPath(path string, directory bool) (ownedPath, error) {
 	}
 	fileType := uint32(stat.Mode) & unix.S_IFMT
 	if fileType != expectedType {
-		return ownedPath{}, fmt.Errorf("path %q type does not match ownership record", path)
+		return verifierPath{}, fmt.Errorf("path %q type does not match ownership record", path)
 	}
-	return ownedPath{path: path, device: uint64(stat.Dev), inode: stat.Ino, fileType: fileType}, nil
-}
-
-func removeExactOwnedPath(want ownedPath) error {
-	return removeExactOwnedPathWithHook(want, nil)
-}
-
-func removeExactOwnedPathWithHook(want ownedPath, afterValidation func(quarantine string) error) error {
-	if !filepath.IsAbs(want.path) || want.device == 0 || want.inode == 0 {
-		return errors.New("exact owned path removal identity is incomplete")
-	}
-	if want.fileType != unix.S_IFREG && want.fileType != unix.S_IFDIR {
-		return errors.New("exact owned path removal type is unsupported")
-	}
-	directory, name := filepath.Dir(want.path), filepath.Base(want.path)
-	if name == "." || name == string(filepath.Separator) {
-		return errors.New("exact owned path removal name is invalid")
-	}
-	dirFD, err := unix.Open(directory, unix.O_RDONLY|unix.O_DIRECTORY|unix.O_CLOEXEC|unix.O_NOFOLLOW, 0)
-	if err != nil {
-		return fmt.Errorf("open exact owned path parent: %w", err)
-	}
-	defer unix.Close(dirFD)
-	nonce := make([]byte, 12)
-	if _, err := rand.Read(nonce); err != nil {
-		return err
-	}
-	suffix := hex.EncodeToString(nonce)
-	quarantine := "." + name + ".remove-" + suffix
-	boundary := "." + name + ".remove-boundary-" + suffix
-	if err := unix.Mkdirat(dirFD, boundary, 0o700); err != nil {
-		return fmt.Errorf("create exact owned path removal boundary: %w", err)
-	}
-	boundaryFD, err := unix.Openat(dirFD, boundary, unix.O_RDONLY|unix.O_DIRECTORY|unix.O_CLOEXEC|unix.O_NOFOLLOW, 0)
-	if err != nil {
-		_ = unix.Unlinkat(dirFD, boundary, unix.AT_REMOVEDIR)
-		return fmt.Errorf("open exact owned path removal boundary: %w", err)
-	}
-	defer unix.Close(boundaryFD)
-	removeBoundary := func() error {
-		if err := unix.Unlinkat(dirFD, boundary, unix.AT_REMOVEDIR); err != nil {
-			return err
-		}
-		return unix.Fsync(dirFD)
-	}
-	if err := unix.Renameat2(dirFD, name, dirFD, quarantine, unix.RENAME_NOREPLACE); err != nil {
-		boundaryErr := removeBoundary()
-		if errors.Is(err, unix.ENOENT) {
-			return boundaryErr
-		}
-		return fmt.Errorf("quarantine exact owned path: %w", errors.Join(err, boundaryErr))
-	}
-	restoreQuarantine := func(cause error) error {
-		restoreErr := unix.Renameat2(dirFD, quarantine, dirFD, name, unix.RENAME_NOREPLACE)
-		var syncErr error
-		if restoreErr == nil {
-			syncErr = unix.Fsync(dirFD)
-		}
-		return errors.Join(cause, restoreErr, syncErr, removeBoundary())
-	}
-	fd, err := unix.Openat(dirFD, quarantine, unix.O_PATH|unix.O_CLOEXEC|unix.O_NOFOLLOW, 0)
-	if err != nil {
-		return restoreQuarantine(fmt.Errorf("open quarantined exact owned path: %w", err))
-	}
-	defer unix.Close(fd)
-	var stat unix.Stat_t
-	statErr := unix.Fstat(fd, &stat)
-	fileType := uint32(stat.Mode) & unix.S_IFMT
-	if statErr != nil || uint64(stat.Dev) != want.device || stat.Ino != want.inode || fileType != want.fileType {
-		return restoreQuarantine(errors.Join(statErr, fmt.Errorf("exact owned path %q identity changed before removal", want.path)))
-	}
-	if afterValidation != nil {
-		if err := afterValidation(filepath.Join(directory, quarantine)); err != nil {
-			return restoreQuarantine(err)
-		}
-	}
-	const candidate = "candidate"
-	if err := unix.Renameat2(dirFD, quarantine, boundaryFD, candidate, unix.RENAME_NOREPLACE); err != nil {
-		return restoreQuarantine(fmt.Errorf("move exact owned path into removal boundary: %w", err))
-	}
-	restoreCandidate := func(cause error) error {
-		restoreErr := unix.Renameat2(boundaryFD, candidate, dirFD, name, unix.RENAME_NOREPLACE)
-		var syncErr error
-		if restoreErr == nil {
-			syncErr = errors.Join(unix.Fsync(boundaryFD), unix.Fsync(dirFD))
-		}
-		var boundaryErr error
-		if restoreErr == nil {
-			boundaryErr = removeBoundary()
-		}
-		return errors.Join(cause, restoreErr, syncErr, boundaryErr)
-	}
-	candidateFD, err := unix.Openat(boundaryFD, candidate, unix.O_PATH|unix.O_CLOEXEC|unix.O_NOFOLLOW, 0)
-	if err != nil {
-		return restoreCandidate(fmt.Errorf("open removal-boundary candidate: %w", err))
-	}
-	defer unix.Close(candidateFD)
-	var candidateStat unix.Stat_t
-	statErr = unix.Fstat(candidateFD, &candidateStat)
-	candidateType := uint32(candidateStat.Mode) & unix.S_IFMT
-	if statErr != nil || uint64(candidateStat.Dev) != want.device || candidateStat.Ino != want.inode || candidateType != want.fileType {
-		return restoreCandidate(errors.Join(statErr, fmt.Errorf("exact owned path %q identity changed before removal", want.path)))
-	}
-	removeFlags := 0
-	if want.fileType == unix.S_IFDIR {
-		removeFlags = unix.AT_REMOVEDIR
-	}
-	if err := unix.Unlinkat(boundaryFD, candidate, removeFlags); err != nil {
-		return restoreCandidate(fmt.Errorf("unlink exact owned path from removal boundary: %w", err))
-	}
-	if err := unix.Fsync(boundaryFD); err != nil {
-		return fmt.Errorf("sync exact owned path removal boundary: %w", err)
-	}
-	if err := unix.Fsync(dirFD); err != nil {
-		return fmt.Errorf("sync exact owned path parent after removal: %w", err)
-	}
-	if err := removeBoundary(); err != nil {
-		return fmt.Errorf("remove exact owned path removal boundary: %w", err)
-	}
-	return nil
+	return verifierPath{path: path, device: uint64(stat.Dev), inode: stat.Ino, fileType: fileType}, nil
 }
 
 type devPodTestIsolation struct {
@@ -811,7 +687,7 @@ func TestLifecycleScenarioCleanupConsumesInterruptedLedger(t *testing.T) {
 	if err := os.WriteFile(evidencePath, []byte("owned"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	evidence, err := inspectOwnedPath(evidencePath, false)
+	evidence, err := inspectVerifierPath(evidencePath, false)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -832,10 +708,8 @@ func TestLifecycleScenarioCleanupConsumesInterruptedLedger(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	t.Cleanup(func() { _ = listener.Close() })
 	endpoint := listener.Addr().String()
-	if err := listener.Close(); err != nil {
-		t.Fatal(err)
-	}
 	snapshot, err := json.Marshal(map[string]any{
 		"state":           "open",
 		"workspace":       map[string]any{"id": "camp-owned"},
@@ -873,11 +747,25 @@ exit 1
 	if status, err := processes.Inspect(context.Background(), processIdentity); err != nil || status.Running {
 		t.Fatalf("owned process after fallback = %#v, %v", status, err)
 	}
-	for _, path := range []string{evidencePath, materializationPath, scenarioRuntimeDirectory(controller)} {
-		if _, err := os.Lstat(path); !errors.Is(err, os.ErrNotExist) {
-			t.Fatalf("owned path %q remains: %v", path, err)
+	if _, err := os.Lstat(materializationPath); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("owned materialization %q remains: %v", materializationPath, err)
+	}
+	for _, path := range []string{evidencePath, scenarioRuntimeDirectory(controller)} {
+		if _, err := os.Lstat(path); err != nil {
+			t.Fatalf("verifier-only path %q was removed: %v", path, err)
+		}
+		if !strings.Contains(cleanupErr.Error(), fmt.Sprintf("verifier-only path %q remains", path)) {
+			t.Fatalf("cleanup error omitted retained verifier-only path %q: %v", path, cleanupErr)
 		}
 	}
+	if !strings.Contains(cleanupErr.Error(), fmt.Sprintf("owned listener remains on %s", endpoint)) {
+		t.Fatalf("cleanup error omitted retained listener %s: %v", endpoint, cleanupErr)
+	}
+	connection, err := net.DialTimeout("tcp", endpoint, time.Second)
+	if err != nil {
+		t.Fatalf("verifier-only listener was stopped: %v", err)
+	}
+	_ = connection.Close()
 	body, err := os.ReadFile(logPath)
 	if err != nil {
 		t.Fatal(err)
@@ -908,17 +796,17 @@ func TestLifecycleScenarioRejectsIncompleteProcessIdentity(t *testing.T) {
 	}
 }
 
-func TestInspectOwnedPathRejectsNonRegularForwardingEvidence(t *testing.T) {
+func TestInspectVerifierPathRejectsNonRegularForwardingEvidence(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "forwarding-evidence")
 	if err := unix.Mkfifo(path, 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := inspectOwnedPath(path, false); err == nil || !strings.Contains(err.Error(), "type does not match ownership record") {
+	if _, err := inspectVerifierPath(path, false); err == nil || !strings.Contains(err.Error(), "type does not match ownership record") {
 		t.Fatalf("inspect FIFO as forwarding evidence error = %v, want type mismatch", err)
 	}
 }
 
-func TestRemoveExactOwnedPathPreservesPostValidationSubstitution(t *testing.T) {
+func TestLifecycleScenarioCleanupPreservesVerifierPathSubstitutions(t *testing.T) {
 	for _, directory := range []bool{false, true} {
 		name := "forwarding-evidence-file"
 		if directory {
@@ -926,36 +814,58 @@ func TestRemoveExactOwnedPathPreservesPostValidationSubstitution(t *testing.T) {
 		}
 		t.Run(name, func(t *testing.T) {
 			root := t.TempDir()
-			path := filepath.Join(root, "owned")
+			controller := filepath.Join(root, "controller")
+			scenario := newLifecycleScenario(t, root, newDevPodTestIsolation(root), controller)
+			path := filepath.Join(root, "forwarding-evidence")
+			if directory {
+				path = scenarioRuntimeDirectory(controller)
+			} else if err := os.WriteFile(path, []byte("recorded"), 0o600); err != nil {
+				t.Fatal(err)
+			}
 			saved := filepath.Join(root, "recorded-object")
+			if directory {
+				if err := os.WriteFile(filepath.Join(path, "recorded-child"), []byte("recorded"), 0o600); err != nil {
+					t.Fatal(err)
+				}
+			}
+			observed, err := inspectVerifierPath(path, directory)
+			if err != nil {
+				t.Fatal(err)
+			}
+			scenario.verifierPaths[path] = observed
+			if err := os.Rename(path, saved); err != nil {
+				t.Fatal(err)
+			}
 			if directory {
 				if err := os.Mkdir(path, 0o700); err != nil {
 					t.Fatal(err)
 				}
-				if err := os.WriteFile(filepath.Join(path, "recorded-child"), []byte("recorded"), 0o600); err != nil {
+				if err := os.WriteFile(filepath.Join(path, "replacement-child"), []byte("preserve"), 0o600); err != nil {
 					t.Fatal(err)
 				}
-			} else if err := os.WriteFile(path, []byte("recorded"), 0o600); err != nil {
+			} else if err := os.WriteFile(path, []byte("preserve"), 0o600); err != nil {
 				t.Fatal(err)
 			}
-			owned, err := inspectOwnedPath(path, directory)
-			if err != nil {
+			bin := filepath.Join(root, "bin")
+			if err := os.MkdirAll(bin, 0o700); err != nil {
 				t.Fatal(err)
 			}
-			err = removeExactOwnedPathWithHook(owned, func(quarantine string) error {
-				if err := os.Rename(quarantine, saved); err != nil {
-					return err
-				}
-				if directory {
-					if err := os.Mkdir(quarantine, 0o700); err != nil {
-						return err
-					}
-					return os.WriteFile(filepath.Join(quarantine, "replacement-child"), []byte("preserve"), 0o600)
-				}
-				return os.WriteFile(quarantine, []byte("preserve"), 0o600)
-			})
-			if err == nil || !strings.Contains(err.Error(), "identity changed before removal") {
-				t.Fatalf("replacement cleanup error = %v", err)
+			writeTestExecutable(t, filepath.Join(bin, "devpod"), "#!/bin/sh\nif test \"$1\" = list; then printf '[]\\n'; fi\n")
+			candidate := filepath.Join(bin, "camp")
+			writeTestExecutable(t, candidate, "#!/bin/sh\nexit 1\n")
+			t.Setenv("PATH", bin+string(os.PathListSeparator)+os.Getenv("PATH"))
+			session := filepath.Join(controller, "data", "camp", "sessions", "session-test")
+			if err := os.MkdirAll(session, 0o700); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(filepath.Join(session, "snapshot.json"), []byte(`{"state":"open"}`), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			scenario.RegisterController(controller, lifecycleEnvironment(controller, filepath.Join(root, "backend"), scenario.devPod))
+			cleanupErr := scenario.cleanup(candidate)
+			if cleanupErr == nil || !strings.Contains(cleanupErr.Error(), "close scenario controller") ||
+				!strings.Contains(cleanupErr.Error(), fmt.Sprintf("verifier-only path %q changed identity; current entry retained for recovery", path)) {
+				t.Fatalf("cleanup error = %v, want retained verifier-only path", cleanupErr)
 			}
 			replacement := path
 			if directory {
