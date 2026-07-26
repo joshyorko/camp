@@ -226,7 +226,8 @@ Discovery lists `TestMountedFileBackendParity`, `TestS3TwoWriterConflict`,
 `TestLocalLifecycleCrashMatrix`. `scripts/verify-real-evidence.sh` requires all
 five names before running any selected real-evidence mode. The real lifecycle
 tests require `CAMP_TEST_BINARY`; they no longer build independent executables
-or inspect the host-global DevPod context. Each scenario uses a unique private
+or inspect the host-global DevPod context. Each scenario uses private XDG
+config, data, state, cache, and mode-0700 runtime roots plus a unique private
 DevPod home, config, SSH config, and non-default context. Before scenario
 activity, each initializes the built-in Docker provider with
 `devpod provider add docker --context <private-context> --use --silent` under
@@ -234,11 +235,18 @@ that private environment and passes `CAMP_DEVPOD_PROVIDER=docker` to Camp. The
 Room-of-Requirement remains the devcontainer image fixture, not the DevPod
 provider. Before each file or MinIO lifecycle scenario opens Camp's workspace,
 the harness creates one unrelated workspace in that same private context. Its
-scenario ledger recovers Camp workspace IDs and forwarded endpoints only from
-durable session snapshots, closes Camp sessions on normal and interrupted
-paths, deletes only those recovered exact IDs, proves the unrelated ID remains,
-then deletes that unrelated ID in its own final step. The harness does not
-reserve or inject Camp service ports: registry and fileserver assertions use
+scenario ledger recovers exact Camp workspace IDs, process identities,
+cleanup-permitted paths, and forwarded endpoints only from durable session
+snapshots. The same cleanup path runs after normal completion, controller
+failure, or interruption; it closes Camp sessions, deletes only recovered exact
+workspace IDs, and proves every recorded workspace, process, owned path, and
+listener is absent. It then proves the unrelated ID remains and deletes that
+unrelated ID in its own final step. DevPod workspace IDs are the safe container
+cleanup boundary; the harness neither invents a second Docker-container identity
+nor treats process namespace observations as independently owned resources. It
+does not enumerate or delete ambient Docker, Dagger, RCC, or DevPod resources.
+The harness does not reserve or inject Camp service ports: registry and
+fileserver assertions use
 the recorded forwarding endpoints and prove they are closed after cleanup. This
 is harness behavior; it becomes real lifecycle evidence only when the gated
 tests pass with the orchestrator-provided `CAMP_TEST_BINARY` and real tools.

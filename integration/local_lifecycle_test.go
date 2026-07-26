@@ -156,10 +156,12 @@ func decodeGeneration(t *testing.T, output []byte) int {
 }
 
 func lifecycleEnvironment(controller, backend string, devPod devPodTestIsolation) []string {
-	env := []string{"XDG_CONFIG_HOME=" + filepath.Join(controller, "config"), "XDG_DATA_HOME=" + filepath.Join(controller, "data"), "XDG_STATE_HOME=" + filepath.Join(controller, "state"), "XDG_CACHE_HOME=" + filepath.Join(controller, "cache"), "CAMP_BACKEND=file://" + backend, "CAMP_DEVPOD_PROVIDER=docker"}
+	env := []string{"XDG_CONFIG_HOME=" + filepath.Join(controller, "config"), "XDG_DATA_HOME=" + filepath.Join(controller, "data"), "XDG_STATE_HOME=" + filepath.Join(controller, "state"), "XDG_CACHE_HOME=" + filepath.Join(controller, "cache"), "XDG_RUNTIME_DIR=" + scenarioRuntimeDirectory(controller), "CAMP_BACKEND=file://" + backend, "CAMP_DEVPOD_PROVIDER=docker"}
 	env = append(env, devPod.Environment()...)
 	return env
 }
+
+func scenarioRuntimeDirectory(controller string) string { return filepath.Join(controller, "runtime") }
 
 func writeLifecycleFixture(t *testing.T, source string) {
 	t.Helper()

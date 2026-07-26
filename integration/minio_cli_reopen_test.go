@@ -133,6 +133,7 @@ func minioLifecycleEnvironment(controller, endpoint, access, secret string, devP
 		"XDG_DATA_HOME=" + filepath.Join(controller, "data"),
 		"XDG_STATE_HOME=" + filepath.Join(controller, "state"),
 		"XDG_CACHE_HOME=" + filepath.Join(controller, "cache"),
+		"XDG_RUNTIME_DIR=" + scenarioRuntimeDirectory(controller),
 		"CAMP_BACKEND=s3://" + portabilityBucket + "/camp",
 		"CAMP_DEVPOD_PROVIDER=docker",
 		"CAMP_S3_ENDPOINT=" + endpoint,
