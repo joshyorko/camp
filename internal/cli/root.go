@@ -365,7 +365,7 @@ func newServeCommand(operations ServeOperations) *cobra.Command {
 
 func newProviderCommand(list func(context.Context, OutputMode, io.Writer) error, configurer ProviderConfigurer) *cobra.Command {
 	command := &cobra.Command{
-		Use: "provider", Short: "Inspect and configure DevPod providers", Args: usageArgs(cobra.NoArgs),
+		Use: "provider", Short: "Inspect configured DevPod providers", Args: usageArgs(cobra.NoArgs),
 		RunE: func(*cobra.Command, []string) error { return nil },
 	}
 	command.AddCommand(noArgumentCommand("list", "List configured DevPod providers", list))

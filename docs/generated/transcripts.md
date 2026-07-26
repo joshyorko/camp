@@ -182,7 +182,9 @@ Usage:
   camp provider [command]
 
 Available Commands:
+  add         Add or repair a built-in DevPod provider
   list        List configured DevPod providers
+  use         Select an existing DevPod provider
 
 Flags:
   -h, --help   help for provider
@@ -193,11 +195,25 @@ Global Flags:
 Use "camp provider [command] --help" for more information about a command.
 ```
 
+## `camp provider add docker --context docs`
+
+```console
+$ camp provider add docker --context docs
+effect-free docs fixture: provider add dispatched; external effects disabled
+```
+
 ## `camp provider list`
 
 ```console
 $ camp provider list
 effect-free docs fixture: provider list dispatched; external effects disabled
+```
+
+## `camp provider use docker --context docs`
+
+```console
+$ camp provider use docker --context docs
+effect-free docs fixture: provider use dispatched; external effects disabled
 ```
 
 ## `camp recover memoryd`

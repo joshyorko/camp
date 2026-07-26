@@ -279,6 +279,23 @@ Global flags:
       --json   emit stable JSON output
 ```
 
+## `camp provider add`
+
+Add or repair a built-in DevPod provider
+
+```text
+Usage:
+  camp provider add NAME [flags]
+
+Flags:
+      --context string       DevPod context (defaults to Camp configuration)
+  -h, --help                 help for add
+  -o, --option stringArray   provider option in KEY=VALUE form
+
+Global flags:
+      --json   emit stable JSON output
+```
+
 ## `camp provider list`
 
 List configured DevPod providers
@@ -289,6 +306,23 @@ Usage:
 
 Flags:
   -h, --help   help for list
+
+Global flags:
+      --json   emit stable JSON output
+```
+
+## `camp provider use`
+
+Select an existing DevPod provider
+
+```text
+Usage:
+  camp provider use NAME [flags]
+
+Flags:
+      --context string       DevPod context (defaults to Camp configuration)
+  -h, --help                 help for use
+  -o, --option stringArray   provider option in KEY=VALUE form
 
 Global flags:
       --json   emit stable JSON output

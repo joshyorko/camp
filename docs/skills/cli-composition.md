@@ -57,6 +57,8 @@ Before recording `WorkspaceUp`, production open lists providers in the requested
 
 The pinned DevPod v0.26.1 provider mutation surface accepts repeated provider values as `--option KEY=VALUE` on both `provider add` and `provider use`. Keep these as typed repeated arguments, keep context and provider name separately typed, and verify the selected provider through a subsequent context-scoped provider list. Raw provider passthrough remains denied; DevPod owns provider configuration and credentials.
 
+When the configured provider reachability probe fails, doctor emits the typed repair command `camp provider add <provider> --context <context>`. The docs generator covers both `camp provider add docker --context docs` and `camp provider use docker --context docs` through effect-free lifecycle handlers; regenerate checked-in artifacts with `go run ./cmd/camp-docs`.
+
 ## Proof commands
 
 ```bash

@@ -46,6 +46,23 @@ func TestDocumentedInvocationsExecute(t *testing.T) {
 	}
 }
 
+func TestDocumentedProviderMutationsPreserveTypedArguments(t *testing.T) {
+	for _, want := range []string{"camp provider add", "camp provider use"} {
+		found := false
+		for _, invocation := range DocumentedInvocations() {
+			if invocation.CommandPath == want {
+				found = true
+				if got := strings.Join(invocation.Args, " "); !strings.Contains(got, "--context docs") {
+					t.Fatalf("%s args = %q, want typed context", want, got)
+				}
+			}
+		}
+		if !found {
+			t.Fatalf("missing %s invocation", want)
+		}
+	}
+}
+
 func containsHelpFlag(args []string) bool {
 	for _, arg := range args {
 		if arg == "--help" || arg == "-h" {

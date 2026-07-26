@@ -98,7 +98,9 @@ func DocumentedInvocations() []Invocation {
 		{CommandPath: "camp list", Args: []string{"list"}},
 		{CommandPath: "camp open", Args: []string{"open", "memoryd"}},
 		{CommandPath: "camp provider", Args: []string{"provider", "--help"}},
+		{CommandPath: "camp provider add", Args: []string{"provider", "add", "docker", "--context", "docs"}},
 		{CommandPath: "camp provider list", Args: []string{"provider", "list"}},
+		{CommandPath: "camp provider use", Args: []string{"provider", "use", "docker", "--context", "docs"}},
 		{CommandPath: "camp recover", Args: []string{"recover", "memoryd"}},
 		{CommandPath: "camp reopen", Args: []string{"reopen", "memoryd"}},
 		{CommandPath: "camp serve", Args: []string{"serve", "--help"}},
@@ -200,6 +202,12 @@ func (transcriptLifecycle) ServeRestart(_ context.Context, _ cli.ServeRestartReq
 }
 func (transcriptLifecycle) ProvidersList(_ context.Context, _ cli.OutputMode, output io.Writer) error {
 	return fixtureDispatch(output, "provider list")
+}
+func (transcriptLifecycle) ProviderAdd(_ context.Context, request cli.ProviderMutationRequest, _ cli.OutputMode, output io.Writer) error {
+	return fixtureDispatch(output, "provider add")
+}
+func (transcriptLifecycle) ProviderUse(_ context.Context, request cli.ProviderMutationRequest, _ cli.OutputMode, output io.Writer) error {
+	return fixtureDispatch(output, "provider use")
 }
 func (transcriptLifecycle) KitInspect(_ context.Context, _ string, _ cli.OutputMode, output io.Writer) error {
 	return fixtureDispatch(output, "kit inspect")
