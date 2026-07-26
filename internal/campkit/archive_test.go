@@ -163,6 +163,26 @@ func TestExportFileNoReplacePreservesTargetCreatedBeforePublication(t *testing.T
 	}
 }
 
+func TestExportFileWithBeforePublishValidatesAfterStreaming(t *testing.T) {
+	_, manifest, payloads := verifiedKitFixture(t)
+	directory := t.TempDir()
+	output := filepath.Join(directory, "kit.campkit")
+	called := false
+	errExpected := errors.New("source drift")
+	if err := ExportFileWithBeforePublish(context.Background(), output, manifest, byteSources(payloads), func() error {
+		called = true
+		return errExpected
+	}); !errors.Is(err, errExpected) {
+		t.Fatalf("ExportFileWithBeforePublish error = %v, want source drift", err)
+	}
+	if !called {
+		t.Fatal("before-publish validation was not called")
+	}
+	if _, err := os.Stat(output); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("output stat error = %v, want missing output", err)
+	}
+}
+
 func setGeneratedPayload(manifest *Manifest, path string, size int64) {
 	hash := sha256.New()
 	chunk := bytes.Repeat([]byte{'x'}, 64<<10)
