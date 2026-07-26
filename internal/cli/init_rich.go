@@ -15,14 +15,16 @@ type richInitPipeline struct {
 	request  InitRequest
 	run      func(context.Context, InitRequest, OutputMode, io.Writer) error
 	done     chan struct{}
+	out      chan tea.Msg
 	startMu  sync.Mutex
 	started  bool
+	canceled bool
 	start    sync.Once
 	doneOnce sync.Once
 }
 
 func newRichInitPipeline(ctx context.Context, request InitRequest, run func(context.Context, InitRequest, OutputMode, io.Writer) error) *richInitPipeline {
-	return &richInitPipeline{ctx: ctx, request: request, run: run, done: make(chan struct{})}
+	return &richInitPipeline{ctx: ctx, request: request, run: run, done: make(chan struct{}), out: make(chan tea.Msg, 12)}
 }
 
 func (p *richInitPipeline) Done() <-chan struct{} { return p.done }
@@ -30,17 +32,22 @@ func (p *richInitPipeline) Done() <-chan struct{} { return p.done }
 func (p *richInitPipeline) markDoneIfNotStarted() {
 	p.startMu.Lock()
 	defer p.startMu.Unlock()
-	if !p.started {
+	if !p.started && !p.canceled {
+		p.canceled = true
+		close(p.out)
 		p.doneOnce.Do(func() { close(p.done) })
 	}
 }
 
 func (p *richInitPipeline) Start(values map[string]string) <-chan tea.Msg {
-	out := make(chan tea.Msg, 12)
+	p.startMu.Lock()
+	defer p.startMu.Unlock()
+	if p.canceled {
+		return p.out
+	}
+	p.started = true
+	out := p.out
 	p.start.Do(func() {
-		p.startMu.Lock()
-		p.started = true
-		p.startMu.Unlock()
 		go func() {
 			defer close(out)
 			defer p.doneOnce.Do(func() { close(p.done) })

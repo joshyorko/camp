@@ -45,7 +45,7 @@ Rich-mode cancellation is terminal-normal: the shell is restored without failure
 
 When rich-mode provisioning fails, `camp setup` maps to the same lifecycle failure shape as the line-mode flow and reports exactly one recovery command.
 
-The Bubble Tea UI context and provisioning-worker context are separate. User exit cancels provisioning without killing Bubble Tea's restoration path, and the CLI does not return until a started worker has actually exited; cancellation before submission closes the never-started completion path explicitly.
+The Bubble Tea UI context and provisioning-worker context are separate. User exit cancels provisioning without killing Bubble Tea's restoration path, and the CLI does not return until a started worker has actually exited. Cancellation before submission is terminal: it closes the never-started completion and message streams, prevents a late start from launching effects, and repeated starts share the original message stream rather than creating an unclosed one.
 
 ## Lifecycle transcripts (non-setup)
 

@@ -5,6 +5,7 @@ import (
 	"io"
 	"reflect"
 	"testing"
+	"time"
 
 	"github.com/joshyorko/camp/internal/setupui"
 )
@@ -58,8 +59,9 @@ func TestRichInitPipelineRelaysRealInitStages(t *testing.T) {
 }
 
 func TestRichInitPipelineClosesWhenCanceledBeforeSubmission(t *testing.T) {
+	runCalls := 0
 	pipeline := newRichInitPipeline(context.Background(), InitRequest{}, func(context.Context, InitRequest, OutputMode, io.Writer) error {
-		t.Fatal("init should not run before submission")
+		runCalls++
 		return nil
 	})
 	pipeline.markDoneIfNotStarted()
@@ -67,6 +69,29 @@ func TestRichInitPipelineClosesWhenCanceledBeforeSubmission(t *testing.T) {
 	case <-pipeline.Done():
 	default:
 		t.Fatal("pre-submit cancellation did not close Done")
+	}
+	for range pipeline.Start(map[string]string{"name": "late"}) {
+	}
+	if runCalls != 0 {
+		t.Fatalf("init ran %d time(s) after pre-submit cancellation", runCalls)
+	}
+}
+
+func TestRichInitPipelineRepeatedStartStreamsTerminate(t *testing.T) {
+	pipeline := newRichInitPipeline(context.Background(), InitRequest{}, func(context.Context, InitRequest, OutputMode, io.Writer) error {
+		return nil
+	})
+	first := pipeline.Start(map[string]string{"name": "alpha"})
+	second := pipeline.Start(map[string]string{"name": "alpha"})
+	for range first {
+	}
+	select {
+	case _, ok := <-second:
+		if ok {
+			t.Fatal("repeated Start returned an additional message stream")
+		}
+	case <-time.After(time.Second):
+		t.Fatal("repeated Start stream did not terminate")
 	}
 }
 
