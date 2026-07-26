@@ -51,6 +51,13 @@ or dogfooded. Do not create dated skill entries as a substitute.
 This policy borrows two upstream patterns without inheriting their product
 claims:
 
+- `TestCheckpointPublisherRejectsHostileArchiveBeforePointerPublication` in `internal/app/checkpoint_test.go`
+  proves hostile-archive input is rejected before pointer publication. The test writes a
+  crafted `../escape` archive entry through a checkpoint builder, expects
+  `archive.ErrUnsafeArchive`, and asserts no pointer movement (`CurrentPointer` remains on
+  the previously committed generation while `RootSnapshotStable` is the only durable pending
+  transition.
+
 - Project Bluefin requires same-change skill improvement, one canonical source
   per mutable fact, source checking, and no session diaries. Camp adopts those
   documentation properties, not Bluefin's orchestration or autonomy model.
