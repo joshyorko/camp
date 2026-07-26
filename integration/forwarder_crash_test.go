@@ -34,7 +34,6 @@ func TestLocalLifecycleCrashMatrix(t *testing.T) {
 	controller := filepath.Join(root, "controller")
 	devPod := newDevPodTestIsolation(root)
 	bin := candidateBinary(t)
-	registryPort, fileserverPort := reserveLoopbackPort(t), reserveLoopbackPort(t)
 	writeLifecycleFixture(t, source)
 	if err := os.MkdirAll(backend, 0o700); err != nil {
 		t.Fatal(err)
@@ -42,7 +41,7 @@ func TestLocalLifecycleCrashMatrix(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Minute)
 	t.Cleanup(cancel)
 	createdWorkspaces := newCreatedWorkspaceTracker()
-	environment := lifecycleEnvironment(controller, backend, registryPort, fileserverPort, devPod)
+	environment := lifecycleEnvironment(controller, backend, devPod)
 	var opening *exec.Cmd
 	openingWaited := false
 	t.Cleanup(func() {
@@ -144,7 +143,8 @@ func TestLocalLifecycleCrashMatrix(t *testing.T) {
 	if !ok || registry.Process.Identity != evidence.Process.Identity || registry.EvidenceDevice == 0 || registry.EvidenceInode == 0 {
 		t.Fatalf("reconciled registry forwarder = %#v, evidence = %#v", registry, evidence)
 	}
-	if _, ok := forwardingRecord(reconciled, "fileserver"); !ok || len(reconciled.Recovery.Forwarding) != 2 {
+	fileserver, fileserverOK := forwardingRecord(reconciled, "fileserver")
+	if !fileserverOK || len(reconciled.Recovery.Forwarding) != 2 {
 		t.Fatalf("reconciled forwarders = %#v", reconciled.Recovery.Forwarding)
 	}
 
@@ -154,8 +154,8 @@ func TestLocalLifecycleCrashMatrix(t *testing.T) {
 	if err == nil && status.Running {
 		t.Fatalf("recovered registry forwarder survived close: %#v", status)
 	}
-	assertLoopbackPortClosed(t, registryPort)
-	assertLoopbackPortClosed(t, fileserverPort)
+	assertEndpointClosed(t, registry.LocalEndpoint)
+	assertEndpointClosed(t, fileserver.LocalEndpoint)
 }
 
 func waitForForwarderEvidence(t *testing.T, ctx context.Context, controller, name string) string {

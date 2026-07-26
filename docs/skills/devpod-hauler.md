@@ -22,9 +22,15 @@ Do not use Hauler v2.0.2's live `_catalog` response as proof that all direct reg
 - The generated fallback Room keeps container networking enabled and mounts deterministic `iptables`, `iptables-save`, `iptables-restore`, and IPv6 compatibility entrypoints into `/usr/local/sbin`. Each entrypoint uses the legacy frontend only when its NAT table is usable and otherwise selects the image's installed nft frontend. On Bluefin, the pinned Room's legacy frontend failed because the legacy NAT table was absent; `iptables-nft` allowed dockerd 29.6.2 to start, a nested Alpine container reached the network, and the workspace built, ran, and pushed a named image through `CAMP_REGISTRY`. Do not replace this with `--iptables=false`: that would suppress the nested-engine networking contract rather than satisfy it.
 - Camp captures OCI images explicitly pushed through `CAMP_REGISTRY`; it does
   not inspect the entire Docker, Podman, or containerd inventory and guess which
-  images matter. Real acceptance records the registry digest before close,
-  reopens with a fresh controller, pulls the exact digest through the reopened
-  registry, and runs the digest-qualified image.
+  images matter. A mutable engine tag is not durable image evidence: a
+  fresh-controller reopen can restore the captured content without recreating
+  that tag. Real acceptance records a registry-provided single-platform
+  manifest digest, verifies the response body against that digest, removes the
+  local tag and image ID before checkpointing, and records the evicted ID in the
+  payload. After reopen it removes any restored copy of that exact ID, pulls
+  `repository@sha256:...` through the reopened registry, requires that exact
+  value in `RepoDigests`, and runs the digest-qualified image to its fixture
+  marker.
 - `camp images capture` is a compatibility command that fails before session
   mutation with stable guidance to push through `CAMP_REGISTRY` and run
   `camp sync` or `camp close`. It has no `--exclude-tag` option because engine

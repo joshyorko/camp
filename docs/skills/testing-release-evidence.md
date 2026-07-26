@@ -226,18 +226,69 @@ Discovery lists `TestMountedFileBackendParity`, `TestS3TwoWriterConflict`,
 `TestLocalLifecycleCrashMatrix`. `scripts/verify-real-evidence.sh` requires all
 five names before running any selected real-evidence mode. The real lifecycle
 tests require `CAMP_TEST_BINARY`; they no longer build independent executables
-or inspect the host-global DevPod context. Each scenario uses a unique private
+or inspect the host-global DevPod context. Each scenario uses private XDG
+config, data, state, cache, and mode-0700 runtime roots plus a unique private
 DevPod home, config, SSH config, and non-default context. Before scenario
 activity, each initializes the built-in Docker provider with
 `devpod provider add docker --context <private-context> --use --silent` under
 that private environment and passes `CAMP_DEVPOD_PROVIDER=docker` to Camp. The
 Room-of-Requirement remains the devcontainer image fixture, not the DevPod
-provider. The separately
-discoverable `TestPrivateDevPodContextPreservesUnrelatedWorkspace` gate is
-intentionally missing real evidence and fails closed when explicitly enabled;
-do not add it to passed evidence until it creates an actual unrelated workspace
-and proves the scenario's exact-ID cleanup preserves it. Private provider
-bootstrap is implemented and is no longer that gate's blocker.
+provider. Before each file or MinIO lifecycle scenario opens Camp's workspace,
+the harness creates one unrelated workspace in that same private context. Its
+scenario ledger recovers exact Camp workspace IDs, process identities,
+cleanup-permitted materializations, verifier-only path identities, and
+forwarded endpoints only from durable session
+snapshots. The same cleanup path runs after normal completion, controller
+failure, or interruption; it closes Camp sessions, deletes only recovered exact
+workspace IDs, and verifies every recorded workspace, process, materialization,
+path, and listener. A failed `camp close` remains a reported cleanup error while
+the harness continues only established fallback cleanup: complete
+PID/boot/start process identities use the production process manager and
+created materializations use the ownership-marker guard. Forwarding evidence
+and scenario runtime paths record device, inode, and exact Linux
+regular-file/directory type for verification only. Unprivileged Linux cannot
+bind an `fstat`-validated directory entry to a later name-based unlink while a
+same-UID writer can mutate the directory, so the harness does not generically
+remove those paths. If a recorded path remains or the current entry has a
+different identity, cleanup fails and preserves the current entry for explicit
+recovery; a live recorded listener likewise fails cleanup and is not stopped by
+endpoint alone. Incomplete process or path identities
+fail closed rather than being treated as absence. It then proves the unrelated ID remains and deletes that
+unrelated ID in its own final step. DevPod workspace IDs are the safe container
+cleanup boundary; the harness neither invents a second Docker-container identity
+nor treats process namespace observations as independently owned resources. It
+does not enumerate or delete ambient Docker, Dagger, RCC, or DevPod resources.
+The harness does not reserve or inject Camp service ports: registry and
+fileserver assertions use
+the recorded forwarding endpoints and prove they are closed after cleanup. This
+is harness behavior; it becomes real lifecycle evidence only when the gated
+tests pass with the orchestrator-provided `CAMP_TEST_BINARY` and real tools.
+
+The file lifecycle gate drives repeated `camp open` and `camp attach` through
+bounded process-group PTYs, then proves that the private DevPod context still
+contains exactly the unrelated workspace and the original Camp workspace.
+Its file-backend receipt reads the current pointer and immutable generation
+sidecar through the production repositories, hashes the archive and sidecar
+bytes directly, and proves the earlier generation remains byte-identical after
+pointer advancement. Registry evidence accepts a digest only when the
+`Docker-Content-Digest` header equals the SHA-256 of a complete single-platform
+OCI or Docker manifest body with complete config and layer descriptors; an
+index, an incomplete descriptor, or a header/body mismatch fails the gate.
+
+DevPod may change ownership of the unrelated local fixture while creating its
+workspace. That fixture therefore lives beneath the private mode-0700 scenario
+root but gives the container-owned fixture directory and file enough mode bits
+for the owning test process to remove the exact tree after deleting the exact
+workspace ID. This is not permission to relax Camp source, materialization, or
+verifier-only path ownership rules.
+
+A fresh-controller reopen can fail intermittently while starting the second
+workspace reverse forwarder even after the first controller completed sync and
+close. Preserve the bounded registry/fileserver forwarder logs and both durable
+session snapshots on failure; do not convert a retry that happens to pass into
+deterministic lifecycle evidence. The file lifecycle remains unproved until one
+current candidate completes the whole gate and exact cleanup without this
+failure.
 
 These named tests remain executable product gates even while their requirements
 are `roadmap-gated`. The RCC `robot` task therefore fails when a current
