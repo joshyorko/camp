@@ -10,6 +10,8 @@ The functional backend probe creates one random `camp-doctor/` object, proves ex
 
 A doctor report is capability evidence, not installation, full DevPod/Room-of-Requirement lifecycle, checkpoint publication, Kubernetes, release, or deployment evidence. A `skipped-not-configured` result is intentionally not proof of the configured path.
 
+The production reachability composition keeps provider, workspace, forwarding, and service probes present in every report. Each is gated by its effective provider setting or an active journal record; closed sessions do not activate probes. The regression coverage in `internal/cli/doctor_reachability_test.go` protects both the gated and configured branches, while configured checks remain read-only and may report `blocked` when their recorded identity is unavailable.
+
 When adding commands, compose existing application use cases and adapters instead of moving lifecycle logic into Cobra handlers. Preserve exact argument arrays through typed ports; do not rebuild shell command strings.
 
 Production composition is not only command registration. The `internal/adapters/lifecycle` package now supplies the production `app.CloseEffects`, live `SessionEvidence` observer, and post-publication serving refresher seams. Command composition must still provide those adapters and typed propagation of DevPod and IDE options through `app.OpenRequest`. Target entry must preserve the canonical `target.Resolver` → effective DevPod workspace root → `workspace.MapTarget` chain. A Cobra command that calls only package fakes or journal state is not a usable command.
