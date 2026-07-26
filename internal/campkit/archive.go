@@ -60,9 +60,9 @@ type PayloadSource interface {
 	Open() (io.ReadCloser, error)
 }
 
-// Export writes one deterministic CampKit archive. The complete archive is
-// assembled before it is copied to dst, so a source or encoding failure cannot
-// leave a partially published output file.
+// Export writes one deterministic CampKit archive while streaming each source
+// through tar+zstd. ExportFile supplies the publication boundary that removes
+// the owned temporary file if this operation fails.
 func Export(ctx context.Context, dst io.Writer, manifest Manifest, sources map[string]PayloadSource) error {
 	if dst == nil {
 		return fmt.Errorf("CampKit export destination is nil")
@@ -83,21 +83,24 @@ func Export(ctx context.Context, dst io.Writer, manifest Manifest, sources map[s
 	}
 	sort.Strings(paths)
 
-	var archive bytes.Buffer
-	encoder, err := zstd.NewWriter(&archive, zstd.WithEncoderConcurrency(1), zstd.WithEncoderLevel(zstd.SpeedDefault), zstd.WithEncoderCRC(true))
+	encoder, err := zstd.NewWriter(dst, zstd.WithEncoderConcurrency(1), zstd.WithEncoderLevel(zstd.SpeedDefault), zstd.WithEncoderCRC(true))
 	if err != nil {
 		return fmt.Errorf("open CampKit encoder: %w", err)
 	}
 	tarWriter := tar.NewWriter(encoder)
-	writeEntry := func(name string, body []byte) error {
-		header := &tar.Header{Name: name, Mode: 0o444, Size: int64(len(body)), ModTime: time.Unix(0, 0).UTC(), Typeflag: tar.TypeReg, Format: tar.FormatUSTAR}
+	writeHeader := func(name string, size int64) error {
+		header := &tar.Header{Name: name, Mode: 0o444, Size: size, ModTime: time.Unix(0, 0).UTC(), Typeflag: tar.TypeReg, Format: tar.FormatUSTAR}
 		if err := tarWriter.WriteHeader(header); err != nil {
 			return err
 		}
-		_, err := tarWriter.Write(body)
-		return err
+		return nil
 	}
-	if err := writeEntry("manifest.json", canonical); err != nil {
+	if err := writeHeader("manifest.json", int64(len(canonical))); err != nil {
+		_ = tarWriter.Close()
+		_ = encoder.Close()
+		return fmt.Errorf("write CampKit manifest: %w", err)
+	}
+	if _, err := tarWriter.Write(canonical); err != nil {
 		_ = tarWriter.Close()
 		_ = encoder.Close()
 		return fmt.Errorf("write CampKit manifest: %w", err)
@@ -115,19 +118,24 @@ func Export(ctx context.Context, dst io.Writer, manifest Manifest, sources map[s
 			_ = encoder.Close()
 			return fmt.Errorf("open payload %q: %w", path, err)
 		}
-		body, readErr := io.ReadAll(io.LimitReader(reader, payload.Size+1))
+		if err := writeHeader(path, payload.Size); err != nil {
+			_ = reader.Close()
+			return fmt.Errorf("write payload %q: %w", path, err)
+		}
+		hash := sha256.New()
+		limited := &contextReader{ctx: ctx, reader: io.LimitReader(reader, payload.Size)}
+		written, copyErr := io.Copy(io.MultiWriter(tarWriter, hash), limited)
+		var extra [1]byte
+		extraN, extraErr := reader.Read(extra[:])
 		closeErr := reader.Close()
-		if readErr != nil {
-			return fmt.Errorf("read payload %q: %w", path, readErr)
+		if copyErr != nil {
+			return fmt.Errorf("read payload %q: %w", path, copyErr)
+		}
+		if extraN > 0 || (extraErr != nil && !errors.Is(extraErr, io.EOF)) || written != payload.Size || hex.EncodeToString(hash.Sum(nil)) != payload.SHA256 {
+			return fmt.Errorf("payload %q does not match manifest: %w", path, ErrDigestMismatch)
 		}
 		if closeErr != nil {
 			return fmt.Errorf("close payload %q: %w", path, closeErr)
-		}
-		if int64(len(body)) != payload.Size || sha256Hex(body) != payload.SHA256 {
-			return fmt.Errorf("payload %q does not match manifest: %w", path, ErrDigestMismatch)
-		}
-		if err := writeEntry(path, body); err != nil {
-			return fmt.Errorf("write payload %q: %w", path, err)
 		}
 	}
 	if err := tarWriter.Close(); err != nil {
@@ -137,8 +145,19 @@ func Export(ctx context.Context, dst io.Writer, manifest Manifest, sources map[s
 	if err := encoder.Close(); err != nil {
 		return fmt.Errorf("close CampKit encoder: %w", err)
 	}
-	_, err = io.Copy(dst, &archive)
-	return err
+	return nil
+}
+
+type contextReader struct {
+	ctx    context.Context
+	reader io.Reader
+}
+
+func (r *contextReader) Read(p []byte) (int, error) {
+	if err := r.ctx.Err(); err != nil {
+		return 0, err
+	}
+	return r.reader.Read(p)
 }
 
 // ExportFile publishes an archive with same-directory temp-file ownership,

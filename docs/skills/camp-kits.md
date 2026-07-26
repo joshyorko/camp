@@ -118,11 +118,12 @@ duplicates, trust matrices, hostile values, and exact round trips.
 Archive entry limits, compressed-byte safety, payload byte comparison, and
 deterministic archive writing are implemented in `campkit.Export`. It validates
 the manifest first, requires a restartable source for every declared payload,
-hashes and bounds each source before writing, emits the canonical manifest first
-and payloads in bytewise path order, and buffers the complete archive before
-copying it to the destination writer. `ExportFile` adds same-directory
-ownership-checked temporary output, fsync, rename, and parent-directory fsync;
-it refuses to replace an existing output and removes its temporary file on
-failure. These functions do not resolve generations or publish/import Camp
-state. Do not treat
+streams each source through bounded size counting and SHA-256 while writing the
+canonical manifest first and payloads in bytewise path order. `ExportFile` adds
+same-directory ownership-checked temporary output, fsync, rename, and
+parent-directory fsync; it refuses to replace an existing output and removes
+only its owned temporary file on failure. These functions do not resolve
+generations or publish/import Camp state. An application exporter must
+revalidate exact-generation fingerprints before and after transfer; initial
+source resolution is not a transfer lock. Do not treat
 a valid C0 manifest as proof that any of those operations exist or succeeded.
