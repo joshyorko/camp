@@ -171,7 +171,7 @@ func TestRunManagedToolSetupJSONUsesStableIdentityFields(t *testing.T) {
 	if err := runManagedToolSetup(context.Background(), ModeJSON, &output, ensurer, "linux", "amd64"); err != nil {
 		t.Fatalf("runManagedToolSetup: %v", err)
 	}
-	for _, want := range []string{`"kind":"setup"`, `"assetSha256":`, `"binarySha256":`, `"managed":true`, `"pathExport":"export PATH=\"/managed:$PATH\""`} {
+	for _, want := range []string{`"kind":"setup"`, `"assetSha256":`, `"binarySha256":`, `"managed":true`, `"pathExport":"export PATH=/managed:\"$PATH\""`} {
 		if !strings.Contains(output.String(), want) {
 			t.Fatalf("output = %q, want %q", output.String(), want)
 		}

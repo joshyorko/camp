@@ -46,9 +46,9 @@ func productionReachabilityProbes(bootstrap config.Bootstrap, sessions []domain.
 		}
 		return devpod.NewClient(identity.Path, subprocess.NewRunner()), nil
 	}
-	providerRemediation := fmt.Sprintf("camp provider use %s --context %s", bootstrap.DevPodProvider, bootstrap.DevPodContext)
+	providerRemediation := fmt.Sprintf("camp provider use %s --context %s", shellQuoteArgument(bootstrap.DevPodProvider), shellQuoteArgument(bootstrap.DevPodContext))
 	if bootstrap.DevPodProvider == "docker" {
-		providerRemediation = fmt.Sprintf("camp provider add docker --context %s", bootstrap.DevPodContext)
+		providerRemediation = fmt.Sprintf("camp provider add docker --context %s", shellQuoteArgument(bootstrap.DevPodContext))
 	}
 	return []doctor.Probe{
 		doctor.ConfiguredProbe{Name: "provider", Configured: bootstrap.DevPodProvider != "", Remediation: providerRemediation, Check: func(ctx context.Context) (map[string]string, error) {

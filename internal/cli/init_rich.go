@@ -61,7 +61,7 @@ func (p *richInitPipeline) Start(values map[string]string) <-chan tea.Msg {
 			}
 			out <- setupui.ConfigAcceptedMsg{
 				Waypoints: waypoints,
-				NextCmd:   "cd " + request.Root + " && camp open",
+				NextCmd:   "cd " + shellQuoteArgument(request.Root) + " && camp open",
 				ReadyLine: request.Capsule + " is initialized",
 			}
 			report := func(message string) error {
@@ -89,7 +89,7 @@ func (p *richInitPipeline) Start(values map[string]string) <-chan tea.Msg {
 			if err := p.run(runCtx, request, ModeHuman, discardWriter{}); err != nil {
 				out <- setupui.WaypointFailedMsg{
 					Stage: setupui.StageRuntime, Message: setupui.SafeText(err.Error(), "camp initialization failed"),
-					Recovery: "camp init " + request.Root + " --name " + request.Capsule,
+					Recovery: initRecoveryCommand(request),
 				}
 				return
 			}
@@ -120,5 +120,5 @@ func richInitWorkflow() setupui.Workflow {
 }
 
 func initRecoveryCommand(request InitRequest) string {
-	return fmt.Sprintf("camp init %s --name %s", request.Root, request.Capsule)
+	return fmt.Sprintf("camp init %s --name %s", shellQuoteArgument(request.Root), shellQuoteArgument(request.Capsule))
 }

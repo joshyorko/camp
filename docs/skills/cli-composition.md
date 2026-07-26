@@ -14,6 +14,8 @@ The production reachability composition keeps provider, workspace, forwarding, a
 
 When adding commands, compose existing application use cases and adapters instead of moving lifecycle logic into Cobra handlers. Preserve exact argument arrays through typed ports; do not rebuild shell command strings.
 
+Copyable POSIX-shell recipes are a presentation boundary, not an execution boundary. Render every dynamic argument through `shellQuoteArgument`; domain validation for paths, provider names, contexts, or session identities is not shell escaping. PATH setup quotes the literal managed-directory prefix while leaving only the intentional existing `$PATH` expansion dynamic. The execution-based regressions in `internal/cli/shell_recipe_test.go` paste hostile-but-accepted values into `sh` and prove that rich-init next/recovery commands, doctor remediation, campsite next commands, and PATH export preserve literal values without extra effects.
+
 Production composition is not only command registration. The `internal/adapters/lifecycle` package now supplies the production `app.CloseEffects`, live `SessionEvidence` observer, and post-publication serving refresher seams. Command composition must still provide those adapters and typed propagation of DevPod and IDE options through `app.OpenRequest`. Target entry must preserve the canonical `target.Resolver` → effective DevPod workspace root → `workspace.MapTarget` chain. A Cobra command that calls only package fakes or journal state is not a usable command.
 
 `camp attach [target]` composes the existing ownership-safe `app.Attach` use case with the production journal, ownership revalidator, canonical target resolver, and DevPod adapter. The Cobra boundary owns only typed flag parsing: the VS Code Insiders alias and DevPod SSH port, user, environment, agent, GPG, stdio, keepalive, signing-key, terminal, terminfo, and raw passthrough options. Typed/raw conflict detection remains in the DevPod adapter before process execution. Terminal attach must pass the process stdin, stdout, and stderr through `ports.Command`; capturing subprocess output without those destinations would make a registered interactive command unusable even if its argv were correct.
@@ -90,5 +92,6 @@ A command is usable only when its handler is wired to production dependencies an
 - `internal/target/` and `internal/workspace/`
 - `internal/adapters/devpod/client_test.go`
 - `internal/adapters/hauler/client_test.go`
+- `internal/cli/shell_recipe.go` and `shell_recipe_test.go`
 - `internal/config/store.go`, `bootstrap.go`, and their focused tests
 - pinned DevPod `cmd/provider/options.go`, `cmd/provider/set_options.go`, and `pkg/config/config.go` at `86b6f9f5`

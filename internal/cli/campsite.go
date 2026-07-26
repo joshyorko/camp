@@ -119,7 +119,7 @@ func buildCampsiteModel(lock tooladapter.Lock, runtime config.Runtime, backend c
 	model := presentation.CampsiteModel{
 		DevPod: presentation.ToolIdentity{Name: "DevPod", Version: devpod.Version}, Hauler: presentation.ToolIdentity{Name: "Hauler", Version: hauler.Version},
 		Provider: provider, RuntimeKind: runtimeKind, Context: contextName, Capsule: runtime.Capsule, Source: runtime.Source,
-		BackendKind: string(backend.Kind), Storage: storage, NextCommand: "camp open " + runtime.Source,
+		BackendKind: string(backend.Kind), Storage: storage, NextCommand: "camp open " + shellQuoteArgument(runtime.Source),
 	}
 	var sink strings.Builder
 	if err := presentation.RenderCampsite(&sink, model, presentation.CampsiteOptions{}); err != nil {

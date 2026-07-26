@@ -221,7 +221,7 @@ func runManagedToolSetupWithEvents(ctx context.Context, mode OutputMode, out io.
 		}
 	}
 	if len(result.PATH) > 0 {
-		result.PATHExport = `export PATH="` + strings.Join(result.PATH, ":") + `:$PATH"`
+		result.PATHExport = "export PATH=" + shellQuoteArgument(strings.Join(result.PATH, ":")+":") + `"$PATH"`
 	}
 	if mode == ModeJSON {
 		return writeSuccess(out, mode, "setup", result, "")

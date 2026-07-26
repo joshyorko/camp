@@ -583,7 +583,7 @@ func (p *ProductionLifecycle) Init(ctx context.Context, request InitRequest, mod
 			_, err = fmt.Fprintln(out, "Legacy singleton configuration is already migrated.")
 			return err
 		}
-		_, err = fmt.Fprintf(out, "Migrated %s\nnext: cd %s && camp open\n", result.Manifest.Manifest.ID, result.Manifest.Root)
+		_, err = fmt.Fprintf(out, "Migrated %s\nnext: cd %s && camp open\n", result.Manifest.Manifest.ID, shellQuoteArgument(result.Manifest.Root))
 		return err
 	}
 	root := request.Root
@@ -624,7 +624,7 @@ func (p *ProductionLifecycle) Init(ctx context.Context, request InitRequest, mod
 		Manifest       campconfig.Manifest    `json:"manifest"`
 		Initialization capsule.Initialization `json:"initialization"`
 		Next           string                 `json:"next"`
-	}{ManifestPath: path, Manifest: manifest, Initialization: result, Next: "cd " + root + " && camp open"}
+	}{ManifestPath: path, Manifest: manifest, Initialization: result, Next: "cd " + shellQuoteArgument(root) + " && camp open"}
 	if mode == ModeJSON {
 		return writeSuccess(out, mode, "init", response, "")
 	}
@@ -836,7 +836,7 @@ func (p *ProductionLifecycle) Sync(ctx context.Context, mode OutputMode, out io.
 	if err != nil {
 		recovery := result.RecoveryCommand
 		if recovery == "" {
-			recovery = "camp recover " + session.SessionID
+			recovery = "camp recover " + shellQuoteArgument(session.SessionID)
 		}
 		return lifecycleFailure(err, recovery)
 	}
@@ -1366,11 +1366,11 @@ func resolveProductionSettingsForContext(ctx context.Context) (productionSetting
 func proveSelectedCampSource(camp string, snapshot domain.JournalSnapshot) (campconfig.Resolved, error) {
 	source := snapshot.Recovery.Configuration.Source
 	if source == "" {
-		return campconfig.Resolved{}, fmt.Errorf("camp %q has no proven local source; next: camp status --camp %s", camp, camp)
+		return campconfig.Resolved{}, fmt.Errorf("camp %q has no proven local source; next: camp status --camp %s", camp, shellQuoteArgument(camp))
 	}
 	resolved, err := campconfig.Discover(source)
 	if err != nil {
-		return campconfig.Resolved{}, fmt.Errorf("camp %q source %q has no current manifest: %w; next: camp init %s --name %s", camp, source, err, source, camp)
+		return campconfig.Resolved{}, fmt.Errorf("camp %q source %q has no current manifest: %w; next: camp init %s --name %s", camp, source, err, shellQuoteArgument(source), shellQuoteArgument(camp))
 	}
 	canonical, err := filepath.EvalSymlinks(source)
 	if err != nil || filepath.Clean(canonical) != filepath.Clean(resolved.Root) {
