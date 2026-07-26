@@ -18,7 +18,7 @@ public command consumed or emitted it.
 - `camp kit verify FILE`: verifies payload integrity and prints a success summary (`verify`)
 - `camp kit export --generation NUMBER-SHA256 --output FILE`: resolves one exact
   immutable generation and exports only when its complete closure is authoritative.
-- `--json` is supported for both commands.
+- `--json` is supported for inspect, verify, and export.
 - `FILE` must be a regular file path; `camp` rejects missing files, directories,
   and symlinks before attempting to inspect or verify.
 
