@@ -11,6 +11,9 @@ import (
 	"errors"
 	"io"
 	"runtime"
+	"os"
+	"path/filepath"
+	"reflect"
 	"sort"
 	"testing"
 	"time"
@@ -19,6 +22,74 @@ import (
 	"github.com/joshyorko/camp/internal/domain"
 	"github.com/klauspost/compress/zstd"
 )
+
+func TestExportWritesDeterministicArchiveFromValidatedSources(t *testing.T) {
+	_, manifest, payloads := verifiedKitFixture(t)
+	manifest.Lineage.ExportedAt = time.Unix(1700000000, 0).UTC()
+	if err := Validate(manifest); err != nil {
+		t.Fatal(err)
+	}
+
+	first := new(bytes.Buffer)
+	second := new(bytes.Buffer)
+	if err := Export(context.Background(), first, manifest, byteSources(payloads)); err != nil {
+		t.Fatal(err)
+	}
+	if err := Export(context.Background(), second, manifest, byteSources(payloads)); err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(first.Bytes(), second.Bytes()) {
+		t.Fatal("repeated exports differ")
+	}
+	if _, err := Verify(context.Background(), bytes.NewReader(first.Bytes()), DefaultArchiveLimits(), nil); err != nil {
+		t.Fatalf("exported archive does not verify: %v", err)
+	}
+}
+
+func TestExportRejectsSourceDigestMismatchBeforeWriting(t *testing.T) {
+	_, manifest, payloads := verifiedKitFixture(t)
+	payloads[manifest.Payloads[0].Path] = []byte("wrong")
+	sources := byteSources(payloads)
+	output := new(bytes.Buffer)
+	if err := Export(context.Background(), output, manifest, sources); !errors.Is(err, ErrDigestMismatch) {
+		t.Fatalf("Export error = %v, want digest mismatch", err)
+	}
+	if output.Len() != 0 {
+		t.Fatal("export wrote bytes after source validation failed")
+	}
+}
+
+func TestExportFileLeavesNoTemporaryArtifactOnFailure(t *testing.T) {
+	_, manifest, payloads := verifiedKitFixture(t)
+	payloads[manifest.Payloads[0].Path] = []byte("wrong")
+	directory := t.TempDir()
+	output := filepath.Join(directory, "kit.campkit")
+	if err := ExportFile(context.Background(), output, manifest, byteSources(payloads)); !errors.Is(err, ErrDigestMismatch) {
+		t.Fatalf("ExportFile error = %v, want digest mismatch", err)
+	}
+	if _, err := os.Stat(output); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("output stat error = %v, want missing output", err)
+	}
+	entries, err := os.ReadDir(directory)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(entries) != 0 {
+		t.Fatalf("temporary artifacts remain: %v", entries)
+	}
+}
+
+func byteSources(values map[string][]byte) map[string]PayloadSource {
+	result := make(map[string]PayloadSource, len(values))
+	for path, body := range values {
+		result[path] = payloadBytes(body)
+	}
+	return result
+}
+
+type payloadBytes []byte
+
+func (b payloadBytes) Open() (io.ReadCloser, error) { return io.NopCloser(bytes.NewReader(b)), nil }
 
 func TestInspectReadsOnlyCanonicalManifestAndMarksIntegrityNotVerified(t *testing.T) {
 	manifest := validManifest()

@@ -11,6 +11,8 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"os"
+	"path/filepath"
 	"sort"
 	"time"
 
@@ -50,6 +52,159 @@ const (
 
 type TrustEvaluator interface {
 	Evaluate(context.Context, Manifest, io.Reader) (TrustResult, error)
+}
+
+// PayloadSource is a restartable, read-only source for one manifest payload.
+// Export consumes sources only after the manifest has been validated.
+type PayloadSource interface {
+	Open() (io.ReadCloser, error)
+}
+
+// Export writes one deterministic CampKit archive. The complete archive is
+// assembled before it is copied to dst, so a source or encoding failure cannot
+// leave a partially published output file.
+func Export(ctx context.Context, dst io.Writer, manifest Manifest, sources map[string]PayloadSource) error {
+	if dst == nil {
+		return fmt.Errorf("CampKit export destination is nil")
+	}
+	if err := Validate(manifest); err != nil {
+		return err
+	}
+	canonical, err := MarshalCanonical(manifest)
+	if err != nil {
+		return err
+	}
+	paths := make([]string, 0, len(manifest.Payloads))
+	for _, payload := range manifest.Payloads {
+		paths = append(paths, payload.Path)
+		if _, ok := sources[payload.Path]; !ok {
+			return fmt.Errorf("payload source %q is missing: %w", payload.Path, ErrArchiveFormat)
+		}
+	}
+	sort.Strings(paths)
+
+	var archive bytes.Buffer
+	encoder, err := zstd.NewWriter(&archive, zstd.WithEncoderConcurrency(1), zstd.WithEncoderLevel(zstd.SpeedDefault), zstd.WithEncoderCRC(true))
+	if err != nil {
+		return fmt.Errorf("open CampKit encoder: %w", err)
+	}
+	tarWriter := tar.NewWriter(encoder)
+	writeEntry := func(name string, body []byte) error {
+		header := &tar.Header{Name: name, Mode: 0o444, Size: int64(len(body)), ModTime: time.Unix(0, 0).UTC(), Typeflag: tar.TypeReg, Format: tar.FormatUSTAR}
+		if err := tarWriter.WriteHeader(header); err != nil {
+			return err
+		}
+		_, err := tarWriter.Write(body)
+		return err
+	}
+	if err := writeEntry("manifest.json", canonical); err != nil {
+		_ = tarWriter.Close()
+		_ = encoder.Close()
+		return fmt.Errorf("write CampKit manifest: %w", err)
+	}
+	for _, path := range paths {
+		if err := ctx.Err(); err != nil {
+			_ = tarWriter.Close()
+			_ = encoder.Close()
+			return err
+		}
+		payload := findPayload(manifest.Payloads, path)
+		reader, err := sources[path].Open()
+		if err != nil {
+			_ = tarWriter.Close()
+			_ = encoder.Close()
+			return fmt.Errorf("open payload %q: %w", path, err)
+		}
+		body, readErr := io.ReadAll(io.LimitReader(reader, payload.Size+1))
+		closeErr := reader.Close()
+		if readErr != nil {
+			return fmt.Errorf("read payload %q: %w", path, readErr)
+		}
+		if closeErr != nil {
+			return fmt.Errorf("close payload %q: %w", path, closeErr)
+		}
+		if int64(len(body)) != payload.Size || sha256Hex(body) != payload.SHA256 {
+			return fmt.Errorf("payload %q does not match manifest: %w", path, ErrDigestMismatch)
+		}
+		if err := writeEntry(path, body); err != nil {
+			return fmt.Errorf("write payload %q: %w", path, err)
+		}
+	}
+	if err := tarWriter.Close(); err != nil {
+		_ = encoder.Close()
+		return fmt.Errorf("close CampKit tar: %w", err)
+	}
+	if err := encoder.Close(); err != nil {
+		return fmt.Errorf("close CampKit encoder: %w", err)
+	}
+	_, err = io.Copy(dst, &archive)
+	return err
+}
+
+// ExportFile publishes an archive with same-directory temp-file ownership,
+// fsync, rename, and parent-directory fsync. Existing output is never replaced.
+func ExportFile(ctx context.Context, output string, manifest Manifest, sources map[string]PayloadSource) error {
+	if output == "" {
+		return fmt.Errorf("CampKit output path is empty")
+	}
+	info, err := os.Lstat(output)
+	if err == nil {
+		if info.IsDir() || info.Mode()&os.ModeSymlink != 0 {
+			return fmt.Errorf("CampKit output is not a regular file: %w", ErrUnsafeArchive)
+		}
+		return fmt.Errorf("CampKit output already exists")
+	} else if !errors.Is(err, os.ErrNotExist) {
+		return err
+	}
+	directory := filepath.Dir(output)
+	temporary, err := os.CreateTemp(directory, ".campkit-*")
+	if err != nil {
+		return err
+	}
+	temporaryName := temporary.Name()
+	cleanup := true
+	defer func() {
+		if cleanup {
+			_ = os.Remove(temporaryName)
+		}
+	}()
+	if err := temporary.Chmod(0o600); err != nil {
+		_ = temporary.Close()
+		return err
+	}
+	if err := Export(ctx, temporary, manifest, sources); err != nil {
+		_ = temporary.Close()
+		return err
+	}
+	if err := temporary.Sync(); err != nil {
+		_ = temporary.Close()
+		return err
+	}
+	if err := temporary.Close(); err != nil {
+		return err
+	}
+	if err := os.Chmod(temporaryName, 0o444); err != nil {
+		return err
+	}
+	if err := os.Rename(temporaryName, output); err != nil {
+		return err
+	}
+	cleanup = false
+	dir, err := os.Open(directory)
+	if err != nil {
+		return err
+	}
+	defer dir.Close()
+	return dir.Sync()
+}
+
+func findPayload(payloads []PayloadIdentity, path string) PayloadIdentity {
+	for _, payload := range payloads {
+		if payload.Path == path {
+			return payload
+		}
+	}
+	return PayloadIdentity{}
 }
 
 type PayloadVerification struct {
