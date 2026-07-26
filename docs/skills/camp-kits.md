@@ -52,6 +52,15 @@ Archive `Inspect` verifies determinism and manifest-decoding only. `Verify`
 streams payload bodies and checks size/digest/name ordering, then separates
 integrity status from trust evaluation so integrity can be valid while trust remains
 unverified.
+For integrity checking, most payloads are hashed through a bounded reader so archive
+bodies are not fully materialized. `PayloadGenerationMetadata` and
+`PayloadTrustEvidence` are still buffered to validate metadata bindings and to
+pass trust-evidence bytes to the configured `TrustEvaluator`.
+
+Trust status remains `unverified` unless manifest trust metadata is `verified` or
+`rejected`; both of those states are trusted only with evaluator participation and
+bound trust evidence. `Verify` now returns `ErrTrustUnsupported` when trust is
+required but no evaluator or no evidence is available.
 
 Canonical JSON is compact Go struct-field order with no newline. Encoding
 deep-copies the manifest, normalizes copied timestamps to UTC `Z`, and sorts
