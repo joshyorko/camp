@@ -1,40 +1,169 @@
-name: Protected provider evidence
+name: Protected Kubernetes provider evidence
 
 on:
-  schedule:
-    - cron: "17 5 * * 1"
   workflow_dispatch:
     inputs:
-      provider_profile:
-        description: Authorized provider profile; no credentialed profile is claimed yet
+      candidate_commit:
+        description: Exact 40-character release candidate commit
         required: true
-        default: not-configured
+        type: string
+      candidate_sha256:
+        description: Exact lowercase SHA-256 of build/camp
+        required: true
+        type: string
+      provider_profile:
+        description: Authorized non-default DevPod provider name
+        required: true
+        type: string
+      devpod_context:
+        description: Authorized non-default DevPod context
+        required: true
+        type: string
+      kubernetes_context:
+        description: Authorized non-default kubeconfig context
+        required: true
+        type: string
+      oci_capability:
+        description: Whether this provider must prove the digest-pinned OCI fixture
+        required: true
+        default: required
         type: choice
-        options: [not-configured]
+        options: [required, unsupported]
 
 permissions:
   contents: read
 
 concurrency:
-  group: provider-evidence-${{ github.ref }}
+  group: protected-kubernetes-${{ inputs.candidate_commit }}
   cancel-in-progress: false
 
 jobs:
   evidence:
+    name: robotKubernetes
     environment: release-providers
     runs-on: ubuntu-24.04
-    timeout-minutes: 10
+    timeout-minutes: 75
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
-      - name: Record explicitly gated provider evidence
-        env:
-          PROVIDER_PROFILE: ${{ inputs.provider_profile || 'not-configured' }}
-        run: |
-          mkdir -p evidence
-          printf '{"commit":"%s","provider_profile":"%s","result":"gated","reason":"no credentialed provider profile is currently claimed or authorized"}\n' "$GITHUB_SHA" "$PROVIDER_PROFILE" > evidence/provider.json
-      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
-          name: provider-evidence-${{ github.sha }}
-          path: evidence/provider.json
+          ref: ${{ inputs.candidate_commit }}
+          fetch-depth: 0
+      - name: Verify exact candidate commit
+        env:
+          EXPECTED_COMMIT: ${{ inputs.candidate_commit }}
+        run: |
+          test "$EXPECTED_COMMIT" = "$(git rev-parse HEAD)"
+          test "$(printf %s "$EXPECTED_COMMIT" | tr -d '0-9a-f' | wc -c)" -eq 0
+          test "${#EXPECTED_COMMIT}" -eq 40
+      - name: Build exact protected candidate
+        run: ./developer/rccw run -r developer/toolkit.yaml --dev -t local
+      - name: Bind candidate identity and relevant change
+        id: identity
+        env:
+          EXPECTED_COMMIT: ${{ inputs.candidate_commit }}
+          EXPECTED_SHA256: ${{ inputs.candidate_sha256 }}
+        run: |
+          actual_sha256="$(sha256sum build/camp | awk '{print $1}')"
+          test "$actual_sha256" = "$EXPECTED_SHA256"
+          relevant_change="$(git log -1 --format=%H -- \
+            integration/kubernetes_lifecycle_test.go \
+            integration/kubernetes_evidence_contract_test.go \
+            internal/adapters/devpod \
+            internal/adapters/lifecycle \
+            tasks.py \
+            scripts/kubernetes_evidence.py \
+            .github/workflows/provider-evidence.yml)"
+          test -n "$relevant_change"
+          mkdir -p build/evidence/kubernetes
+          python3 - "$EXPECTED_COMMIT" "$actual_sha256" "$relevant_change" <<'PY'
+          import json, pathlib, sys
+          commit, digest, relevant = sys.argv[1:]
+          path = pathlib.Path("build/evidence/kubernetes/candidate-identity.json")
+          path.write_text(json.dumps({
+              "schemaVersion": 1,
+              "candidateCommit": commit,
+              "candidateSha256": digest,
+              "relevantChangeCommit": relevant,
+          }, indent=2, sort_keys=True) + "\n")
+          PY
+          printf 'relevant_change=%s\n' "$relevant_change" >> "$GITHUB_OUTPUT"
+      - name: Materialize protected configuration
+        env:
+          KUBECONFIG_B64: ${{ secrets.CAMP_PROTECTED_KUBECONFIG_B64 }}
+          DEVPOD_CONFIG_B64: ${{ secrets.CAMP_PROTECTED_DEVPOD_CONFIG_B64 }}
+        run: |
+          if [[ -z "$KUBECONFIG_B64" || -z "$DEVPOD_CONFIG_B64" ]]; then
+            python3 - "${{ inputs.candidate_commit }}" "${{ inputs.candidate_sha256 }}" <<'PY'
+          import json, pathlib, sys
+          path = pathlib.Path("build/evidence/kubernetes/gate-status.json")
+          path.write_text(json.dumps({
+              "schemaVersion": 1,
+              "result": "gated",
+              "candidateCommit": sys.argv[1],
+              "candidateSha256": sys.argv[2],
+              "detail": "protected kubeconfig or DevPod configuration is unavailable",
+              "gate": {
+                  "code": "missing-protected-contract",
+                  "fields": ["protected-environment-secrets"],
+                  "detail": "protected Kubernetes evidence is gated, not skipped or passed",
+              },
+          }, indent=2, sort_keys=True) + "\n")
+          PY
+            exit 1
+          fi
+          install -d -m 0700 "$RUNNER_TEMP/camp-kubernetes/devpod"
+          printf %s "$KUBECONFIG_B64" | base64 --decode > "$RUNNER_TEMP/camp-kubernetes/kubeconfig"
+          printf %s "$DEVPOD_CONFIG_B64" | base64 --decode > "$RUNNER_TEMP/camp-kubernetes/devpod/config.yaml"
+          chmod 0600 "$RUNNER_TEMP/camp-kubernetes/kubeconfig" "$RUNNER_TEMP/camp-kubernetes/devpod/config.yaml"
+      - name: Run protected lifecycle vertical
+        env:
+          CAMP_KUBERNETES_EVIDENCE: "1"
+          CAMP_KUBERNETES_PROVIDER: ${{ inputs.provider_profile }}
+          CAMP_DEVPOD_CONTEXT: ${{ inputs.devpod_context }}
+          CAMP_DEVPOD_HOME: ${{ runner.temp }}/camp-kubernetes/devpod
+          CAMP_DEVPOD_CONFIG: ${{ runner.temp }}/camp-kubernetes/devpod/config.yaml
+          CAMP_DEVPOD_SSH_CONFIG: ${{ runner.temp }}/camp-kubernetes/devpod/ssh-config
+          CAMP_KUBECONFIG: ${{ runner.temp }}/camp-kubernetes/kubeconfig
+          CAMP_KUBERNETES_CONTEXT: ${{ inputs.kubernetes_context }}
+          CAMP_KUBERNETES_CANDIDATE_COMMIT: ${{ inputs.candidate_commit }}
+          CAMP_KUBERNETES_CANDIDATE_SHA256: ${{ inputs.candidate_sha256 }}
+          CAMP_KUBERNETES_RELEVANT_CHANGE_COMMIT: ${{ steps.identity.outputs.relevant_change }}
+          CAMP_KUBERNETES_OCI_CAPABILITY: ${{ inputs.oci_capability }}
+          CAMP_KUBERNETES_EVIDENCE_OUTPUT_DIR: ${{ github.workspace }}/build/evidence/kubernetes
+          CAMP_KUBERNETES_NAMESPACE_PREFIX: camp-evidence
+        run: ./developer/rccw run -r developer/toolkit.yaml -t robotKubernetes
+      - name: Sanitize and validate allowlisted evidence
+        if: always()
+        env:
+          EXPECTED_COMMIT: ${{ inputs.candidate_commit }}
+          EXPECTED_SHA256: ${{ inputs.candidate_sha256 }}
+          RELEVANT_CHANGE: ${{ steps.identity.outputs.relevant_change }}
+        run: |
+          if [[ -f build/evidence/kubernetes-go-test.json ]]; then
+            python3 scripts/kubernetes_evidence.py sanitize-go-test \
+              --input build/evidence/kubernetes-go-test.json \
+              --output build/evidence/kubernetes/robot-results.json
+            rm build/evidence/kubernetes-go-test.json
+          fi
+          arguments=()
+          if [[ -f build/evidence/kubernetes/robot-results.json ]]; then
+            arguments+=(--require-pass)
+          fi
+          python3 scripts/kubernetes_evidence.py validate \
+            --directory build/evidence/kubernetes \
+            --commit "$EXPECTED_COMMIT" \
+            --sha256 "$EXPECTED_SHA256" \
+            --relevant-change "$RELEVANT_CHANGE" \
+            "${arguments[@]}"
+      - name: Upload strict protected evidence allowlist
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: kubernetes-evidence-${{ inputs.candidate_commit }}
+          path: |
+            build/evidence/kubernetes/candidate-identity.json
+            build/evidence/kubernetes/gate-status.json
+            build/evidence/kubernetes/cleanup-receipt.json
+            build/evidence/kubernetes/robot-results.json
           if-no-files-found: error
           retention-days: 90

@@ -323,22 +323,35 @@ def robot_kubernetes(_context):
     metadata = verify_candidate()
     test_name = "TestKubernetesLifecycleVertical"
     discover_go_test("./integration", test_name)
-    env = {
+    env = managed_tool_environment()
+    env.update({
         "CAMP_TEST_BINARY": str(CANDIDATE),
         "CAMP_KUBERNETES_EVIDENCE": "1",
-    }
-    run(
-        [
+    })
+    result_path = EVIDENCE / "kubernetes-go-test.json"
+    result_path.parent.mkdir(parents=True, exist_ok=True)
+    with result_path.open("w", encoding="utf-8") as stream:
+        completed = subprocess.run(
+            [
             "go",
             "test",
-            "-v",
+            "-json",
             "./integration",
             "-run",
             f"^{test_name}$",
             "-count=1",
         ],
-        env=env,
-    )
+            cwd=ROOT,
+            env={**os.environ, **env},
+            check=False,
+            text=True,
+            stdout=stream,
+            stderr=subprocess.STDOUT,
+        )
+    if completed.returncode:
+        raise RuntimeError(
+            f"protected Kubernetes lifecycle failed; sanitize {result_path} before retention"
+        )
     if sha256(CANDIDATE) != metadata["candidateSha256"]:
         raise RuntimeError("candidate changed during Kubernetes evidence")
 

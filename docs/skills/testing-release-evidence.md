@@ -143,10 +143,11 @@ checked-out `HEAD`. Automatic identity refuses a dirty checkout so
 the packaged binary cannot claim clean commit provenance for uncommitted code.
 
 `robotKubernetes` is a protected, explicitly authorized evidence task. It
-requires `CAMP_KUBERNETES_EVIDENCE=1` and the named
-`TestKubernetesLifecycleVertical` integration test. Until that test exists and
-runs against an authorized context, the task fails closed; it is not Kubernetes
-support evidence.
+requires `CAMP_KUBERNETES_EVIDENCE=1` and the `TestKubernetesLifecycleVertical`
+integration test. The test enforces a strict protected contract for candidate
+identity, provider/profile/context names, path regularity, and namespace ownership.
+Missing inputs or unauthorized context values fail closed with a typed gate reason,
+and only a fully authorized vertical can claim Kubernetes support evidence.
 
 ### RCC trust and isolation boundaries
 
@@ -331,10 +332,10 @@ ship reachable vulnerabilities from the runner's selected toolchain.
 
 Credentialed provider runs are separate from credential-free CI. A protected
 `release-providers` environment and an explicit named profile are required
-before a provider can be claimed. Until such a profile and successful hosted
-run exist, `provider-evidence.yml` records `result=gated` and the reason; a job
-skipped by `if: secrets.* != ''` is never provider evidence. Do not put secret
-values in evidence JSON, artifacts, caches, output, plans, or generated config.
+before a provider can be claimed. `provider-evidence.yml` uses strict allowlisted
+artifacts and always favors fail-closed evidence generation when secrets,
+contexts, or protected inputs are missing. Do not put secret values in evidence
+JSON, artifacts, caches, output, plans, or generated config.
 
 Clean-runner CI must not inherit workstation capabilities. Run CLI composition
 tests with a PATH containing only the test's declared fakes and the Go/system
