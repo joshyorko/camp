@@ -700,9 +700,12 @@ func (p *ProductionLifecycle) Reopen(ctx context.Context, value string, mode Out
 	if value != "" {
 		selector.SessionID = value
 	}
-	closed, err := app.SelectSession(ctx, base.journal, selector, app.SelectionHistory)
+	closed, manifestFallback, err := app.SelectReopenSession(ctx, base.journal, selector)
 	if err != nil {
 		return err
+	}
+	if manifestFallback {
+		return p.Open(ctx, "", mode, out)
 	}
 	ctx = withSelection(ctx, Selection{Camp: closed.Capsule})
 	return p.Open(ctx, "", mode, out)

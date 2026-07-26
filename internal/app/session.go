@@ -66,6 +66,22 @@ func SelectActiveSession(ctx context.Context, sessions sessionLister, selector S
 	return SelectSession(ctx, sessions, selector, SelectionActiveMutation)
 }
 
+// SelectReopenSession selects a closed historical session when one exists. A
+// fresh controller has no journal history, so an implicit reopen may instead
+// continue through manifest and backend resolution. Explicit session IDs
+// remain journal-authoritative and therefore fail closed when absent.
+func SelectReopenSession(ctx context.Context, sessions sessionLister, selector SessionSelector) (selected domain.JournalSnapshot, manifestFallback bool, err error) {
+	selected, err = SelectSession(ctx, sessions, selector, SelectionHistory)
+	if err == nil {
+		return selected, false, nil
+	}
+	var selectionErr *SessionSelectionError
+	if selector.SessionID == "" && errors.As(err, &selectionErr) && selectionErr.Code == SelectionNotFound {
+		return domain.JournalSnapshot{}, true, nil
+	}
+	return domain.JournalSnapshot{}, false, err
+}
+
 func SelectSession(ctx context.Context, sessions sessionLister, selector SessionSelector, purpose SelectionPurpose) (domain.JournalSnapshot, error) {
 	if sessions == nil {
 		return domain.JournalSnapshot{}, errors.New("session lister is nil")

@@ -97,6 +97,42 @@ func TestHistorySelectionChoosesNewestClosedSession(t *testing.T) {
 	}
 }
 
+func TestSelectReopenSessionUsesHistoryOrManifestFallback(t *testing.T) {
+	t.Parallel()
+	closed := domain.JournalSnapshot{SessionID: "closed", Capsule: "brain", State: domain.SessionClosed}
+
+	selected, fallback, err := SelectReopenSession(context.Background(), fakeSessionLister{sessions: []domain.JournalSnapshot{closed}}, SessionSelector{Capsule: "brain"})
+	if err != nil || fallback || selected.SessionID != closed.SessionID {
+		t.Fatalf("historical selection = %#v, fallback=%t, err=%v", selected, fallback, err)
+	}
+
+	selected, fallback, err = SelectReopenSession(context.Background(), fakeSessionLister{}, SessionSelector{Capsule: "brain"})
+	if err != nil || !fallback || !reflect.DeepEqual(selected, domain.JournalSnapshot{}) {
+		t.Fatalf("fresh-controller selection = %#v, fallback=%t, err=%v", selected, fallback, err)
+	}
+}
+
+func TestSelectReopenSessionFailsClosedOutsideImplicitNotFound(t *testing.T) {
+	t.Parallel()
+	missing := fakeSessionLister{}
+	_, fallback, err := SelectReopenSession(context.Background(), missing, SessionSelector{SessionID: "absent", Capsule: "brain"})
+	var selectionErr *SessionSelectionError
+	if !errors.As(err, &selectionErr) || selectionErr.Code != SelectionNotFound || fallback {
+		t.Fatalf("explicit absent selection = %v, fallback=%t", err, fallback)
+	}
+
+	_, fallback, err = SelectReopenSession(context.Background(), nil, SessionSelector{})
+	if err == nil || fallback {
+		t.Fatalf("invalid selection input = %v, fallback=%t", err, fallback)
+	}
+
+	listErr := errors.New("journal unavailable")
+	_, fallback, err = SelectReopenSession(context.Background(), fakeSessionLister{err: listErr}, SessionSelector{})
+	if !errors.Is(err, listErr) || fallback {
+		t.Fatalf("list error = %v, fallback=%t", err, fallback)
+	}
+}
+
 func (l fakeSessionLister) List(context.Context) ([]domain.JournalSnapshot, error) {
 	return l.sessions, l.err
 }
