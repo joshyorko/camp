@@ -3,8 +3,10 @@
 CampKit schema version 2 is the current manifest-validation contract. The
 `internal/campkit` package validates, canonically encodes, and strictly decodes
 manifests. `Inspect` and `Verify` operate on `manifest.json`-first deterministic
-tar+zstd archives, while Camp still does not export, import, load, or accept kits
-via CLI; schema version 1 is intentionally unsupported because no
+tar+zstd archives. CLI composition reserves `camp kit export --generation REF
+--output FILE` for a lifecycle exporter with strict required flags; the
+production generation resolver is not wired yet. Camp still does not import,
+load, or accept kits via CLI; schema version 1 is intentionally unsupported because no
 public command consumed or emitted it.
 
 ## CLI usage
