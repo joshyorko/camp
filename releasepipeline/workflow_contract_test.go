@@ -47,6 +47,12 @@ func TestCIAddsRCCParityWithoutCachingPrivateRuntimeHomes(t *testing.T) {
 		"developer/verify_pr_receipt.py",
 		"build/evidence/candidate.json",
 		"build/evidence/test-gates.json",
+		"name: Direct Go and RCC parity record",
+		"needs: [test, integration, minio, locked-tools, packaging, rcc-local, rcc-test]",
+		"candidateCommit",
+		"requiredConsecutiveCompleteRuns",
+		"qualifiedHistoricalRuns",
+		"build/evidence/parity.json",
 		"if: always()",
 	)
 	if strings.Contains(workflow, "./developer/rccw run -r developer/toolkit.yaml -t robot") {
@@ -66,11 +72,17 @@ func TestReleaseWorkflowVerifiesDownloadsBeforeProtectedPublication(t *testing.T
 		"contents: write",
 		"id-token: write",
 		"attestations: write",
-		"needs: attest",
+		"needs: verified-artifacts",
 		"download-artifact",
 		"sha256sum --check checksums.txt",
 		"build-release-evidence.sh verify",
-		"./developer/rccw run -r developer/toolkit.yaml --dev -t package",
+		"./developer/rccw run -r developer/toolkit.yaml -t package",
+		"name: RCC release package",
+		"name: Seal verified artifact set",
+		"verified-release-set-${{ github.sha }}",
+		"verified_artifacts.py create dist",
+		"verified_artifacts.py recheck dist",
+		"dist/verified-artifacts.json",
 		"github.event_name == 'push' || inputs.publish == true",
 		"retention-days:",
 	)
@@ -79,6 +91,18 @@ func TestReleaseWorkflowVerifiesDownloadsBeforeProtectedPublication(t *testing.T
 	}
 	if strings.Count(workflow, "github.event_name == 'push' || inputs.publish == true") != 2 {
 		t.Fatal("manual dry runs must gate both attestation and publication")
+	}
+	if strings.Count(workflow, "verified_artifacts.py recheck dist") != 2 {
+		t.Fatal("attestation and publication must independently recheck the verified set")
+	}
+	attest := workflow[strings.Index(workflow, "  attest:"):strings.LastIndex(workflow, "  publish:")]
+	publish := workflow[strings.LastIndex(workflow, "  publish:"):]
+	for name, job := range map[string]string{"attest": attest, "publish": publish} {
+		if strings.Contains(job, "build-release-evidence.sh build") ||
+			strings.Contains(job, "build-archives.sh") ||
+			strings.Contains(job, "-t package") {
+			t.Errorf("%s job can rebuild release archives", name)
+		}
 	}
 	assertActionsPinned(t, workflow)
 }
