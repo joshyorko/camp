@@ -242,9 +242,10 @@ go test -v ./integration -run '^TestNamedAcceptanceGate$' -count=1
 Discovery lists `TestMountedFileBackendParity`, `TestS3TwoWriterConflict`,
 `TestMinIOLifecycleVertical`, `TestLocalLifecycleVertical`, and
 `TestLocalLifecycleCrashMatrix`. `scripts/verify-real-evidence.sh` requires all
-five names before running any selected real-evidence mode. The real lifecycle
-tests require `CAMP_TEST_BINARY`; they no longer build independent executables
-or inspect the host-global DevPod context. Each scenario uses private XDG
+five names, an executable orchestrator-provided `build/camp`, and a passing
+test receipt for every selected mode; an opt-in skip or no-tests result is a
+failure. The real lifecycle tests require `CAMP_TEST_BINARY`; they no longer
+build independent executables or inspect the host-global DevPod context. Each scenario uses private XDG
 config, data, state, cache, and mode-0700 runtime roots plus a unique private
 DevPod home, config, SSH config, and non-default context. Before scenario
 activity, each initializes the built-in Docker provider with
