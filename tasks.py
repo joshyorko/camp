@@ -54,8 +54,12 @@ def git(*args):
     return run(["git", *args], capture=True)
 
 
-def discover_go_test(package, name):
-    listed = run(["go", "test", package, "-list", f"^{name}$"], capture=True)
+def discover_go_test(package, name, *, tags=None):
+    command = ["go", "test"]
+    if tags:
+        command.append(f"-tags={','.join(tags)}")
+    command.extend([package, "-list", f"^{name}$"])
+    listed = run(command, capture=True)
     if name not in listed.splitlines():
         raise RuntimeError(f"missing mandatory Go evidence test: {name}")
 
@@ -322,7 +326,7 @@ def robot_kubernetes(_context):
         )
     metadata = verify_candidate()
     test_name = "TestKubernetesLifecycleVertical"
-    discover_go_test("./integration", test_name)
+    discover_go_test("./integration", test_name, tags=["kubernetes_evidence"])
     env = managed_tool_environment()
     env.update({
         "CAMP_TEST_BINARY": str(CANDIDATE),
@@ -335,6 +339,7 @@ def robot_kubernetes(_context):
             [
             "go",
             "test",
+            "-tags=kubernetes_evidence",
             "-json",
             "./integration",
             "-run",

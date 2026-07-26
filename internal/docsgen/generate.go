@@ -92,6 +92,9 @@ func DocumentedInvocations() []Invocation {
 		},
 		{CommandPath: "camp images list", Args: []string{"images", "list", "--session", "session-docs"}},
 		{CommandPath: "camp images restore", Args: []string{"images", "restore", "--session", "session-docs"}},
+		{CommandPath: "camp kit", Args: []string{"kit", "--help"}},
+		{CommandPath: "camp kit inspect", Args: []string{"kit", "inspect", "/proc/self/cmdline"}},
+		{CommandPath: "camp kit verify", Args: []string{"kit", "verify", "/proc/self/cmdline"}},
 		{CommandPath: "camp list", Args: []string{"list"}},
 		{CommandPath: "camp open", Args: []string{"open", "memoryd"}},
 		{CommandPath: "camp provider", Args: []string{"provider", "--help"}},
@@ -197,6 +200,12 @@ func (transcriptLifecycle) ServeRestart(_ context.Context, _ cli.ServeRestartReq
 }
 func (transcriptLifecycle) ProvidersList(_ context.Context, _ cli.OutputMode, output io.Writer) error {
 	return fixtureDispatch(output, "provider list")
+}
+func (transcriptLifecycle) KitInspect(_ context.Context, _ string, _ cli.OutputMode, output io.Writer) error {
+	return fixtureDispatch(output, "kit inspect")
+}
+func (transcriptLifecycle) KitVerify(_ context.Context, _ string, _ cli.OutputMode, output io.Writer) error {
+	return fixtureDispatch(output, "kit verify")
 }
 
 func transcriptRoot() *cobra.Command { return cli.NewRootWithLifecycle(transcriptLifecycle{}) }

@@ -132,7 +132,7 @@ func loadKubernetesEvidenceContract(lookup func(string) string) (kubernetesEvide
 	return contract, nil
 }
 
-func TestKubernetesLifecycleVertical(t *testing.T) {
+func runKubernetesLifecycleVertical(t *testing.T) {
 	contract, err := loadKubernetesEvidenceContract(os.Getenv)
 	if err != nil {
 		writeKubernetesGateStatus(t, os.Getenv("CAMP_KUBERNETES_EVIDENCE_OUTPUT_DIR"), "gated", nil, err)

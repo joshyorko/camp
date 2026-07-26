@@ -153,10 +153,14 @@ the packaged binary cannot claim clean commit provenance for uncommitted code.
 
 `robotKubernetes` is a protected, explicitly authorized evidence task. It
 requires `CAMP_KUBERNETES_EVIDENCE=1` and the `TestKubernetesLifecycleVertical`
-integration test. The test enforces a strict protected contract for candidate
-identity, provider/profile/context names, path regularity, and namespace ownership.
-Missing inputs or unauthorized context values fail closed with a typed gate reason,
-and only a fully authorized vertical can claim Kubernetes support evidence.
+integration test. The test is compiled only with the `kubernetes_evidence` build
+tag; `tasks.py` applies that tag to both discovery and execution. Ordinary
+`go test ./...` therefore neither runs nor skips the protected vertical, and its
+absence from an ordinary run is not Kubernetes evidence. The tagged test enforces
+a strict protected contract for candidate identity, provider/profile/context
+names, path regularity, and namespace ownership. Missing inputs or unauthorized
+context values fail closed with a typed gate reason, and only a fully authorized
+vertical can claim Kubernetes support evidence.
 
 ### RCC trust and isolation boundaries
 
@@ -218,6 +222,10 @@ transcript lifecycle proves Cobra parsing and handler dispatch only; it is not D
 Hauler, backend, lifecycle, or release evidence. When the public tree changes,
 regenerate and review `git diff -- docs/generated/commands.md` before accepting
 the change.
+CampKit transcript invocations use Linux `/proc/self/cmdline` only as a stable
+regular file that satisfies the CLI's pre-dispatch file guard; the effect-free
+fixture does not decode it. Those transcripts prove command wiring, not CampKit
+archive integrity or trust.
 For `setup` dispatch, the fixture must keep the same Setup signature as
 `internal/cli` (`func(context.Context, OutputMode, io.Reader, io.Writer)`), even
 when docs execution does not supply stdin.
@@ -346,7 +354,9 @@ only because its candidate identity and provider selections are required
 inputs; it must not pretend a schedule can supply those values. Protected
 environment secrets may materialize the authorized kubeconfig and DevPod
 configuration, but they must never be used as an `if:` condition that converts
-missing authority into a skipped success. The workflow uses strict allowlisted
+missing authority into a skipped success. The workflow contract parses YAML,
+rejects `on.schedule`, and recursively checks every `if` scalar for `secrets.`,
+including folded or multiline expressions. The workflow uses strict allowlisted
 artifacts and always favors fail-closed evidence generation when secrets,
 contexts, or protected inputs are missing. Do not put secret values in evidence
 JSON, artifacts, caches, output, plans, or generated config.

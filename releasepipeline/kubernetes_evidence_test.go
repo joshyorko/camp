@@ -96,6 +96,44 @@ func TestKubernetesEvidenceSanitizerDropsGoTestOutput(t *testing.T) {
 	}
 }
 
+func TestKubernetesVerticalRequiresEvidenceBuildTag(t *testing.T) {
+	root := filepath.Clean("..")
+	for _, test := range []struct {
+		name       string
+		args       []string
+		wantListed bool
+	}{
+		{
+			name:       "ordinary integration discovery excludes protected vertical",
+			args:       []string{"test", "./integration", "-list", "^TestKubernetesLifecycleVertical$"},
+			wantListed: false,
+		},
+		{
+			name:       "evidence-tagged discovery includes protected vertical",
+			args:       []string{"test", "-tags=kubernetes_evidence", "./integration", "-list", "^TestKubernetesLifecycleVertical$"},
+			wantListed: true,
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			command := exec.Command("go", test.args...)
+			command.Dir = root
+			output, err := command.CombinedOutput()
+			if err != nil {
+				t.Fatalf("discover protected Kubernetes vertical: %v\n%s", err, output)
+			}
+			listed := false
+			for _, line := range strings.Split(string(output), "\n") {
+				if line == "TestKubernetesLifecycleVertical" {
+					listed = true
+				}
+			}
+			if listed != test.wantListed {
+				t.Fatalf("go %v listed protected vertical = %t, want %t\n%s", test.args, listed, test.wantListed, output)
+			}
+		})
+	}
+}
+
 func TestProtectedProviderWorkflowRunsBoundFailClosedKubernetesEvidence(t *testing.T) {
 	body := readRepositoryFile(t, filepath.Clean(".."), ".github/workflows/provider-evidence.yml")
 	requireContains(t, body,
