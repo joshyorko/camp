@@ -25,6 +25,73 @@ type productionReopenLister struct {
 	err      error
 }
 
+func TestProductionConfigShowsEffectivePrecedenceAndRedactsEnvironmentSecrets(t *testing.T) {
+	root := t.TempDir()
+	t.Setenv("XDG_CONFIG_HOME", filepath.Join(root, "config"))
+	t.Setenv("XDG_DATA_HOME", filepath.Join(root, "data"))
+	t.Setenv("CAMP_CAPSULE", "from-env")
+	t.Setenv("CAMP_ACCESS_TOKEN", "secret-token")
+	paths, err := config.ResolveXDGPaths(config.XDGInput{Environment: environmentMap(os.Environ())})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := config.NewStore(paths.ConfigPath).Update(config.Persistent{DefaultCapsule: "from-file", Backend: "file:///srv/camp"}); err != nil {
+		t.Fatal(err)
+	}
+	var out bytes.Buffer
+	if err := (&ProductionLifecycle{}).ConfigShow(context.Background(), true, false, ModeHuman, &out); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(out.String(), `"capsule": "from-env"`) || strings.Contains(out.String(), "secret-token") || !strings.Contains(out.String(), "[REDACTED]") {
+		t.Fatalf("effective config output = %q", out.String())
+	}
+}
+
+func TestProductionConfigSetRoundTripsEverySupportedMachineKeyAndRejectsCampSelection(t *testing.T) {
+	for _, test := range []struct {
+		key   string
+		value string
+		want  config.Persistent
+	}{
+		{key: "backend", value: "file:///srv/camp", want: config.Persistent{Backend: "file:///srv/camp"}},
+		{key: "devpodProvider", value: "docker", want: config.Persistent{DevPodProvider: "docker"}},
+		{key: "devpodContext", value: "work", want: config.Persistent{DevPodContext: "work"}},
+	} {
+		t.Run(test.key, func(t *testing.T) {
+			root := t.TempDir()
+			t.Setenv("XDG_CONFIG_HOME", filepath.Join(root, "config"))
+			t.Setenv("XDG_DATA_HOME", filepath.Join(root, "data"))
+			if err := (&ProductionLifecycle{}).ConfigSet(context.Background(), test.key, test.value, ModeHuman, io.Discard); err != nil {
+				t.Fatal(err)
+			}
+			paths, err := config.ResolveXDGPaths(config.XDGInput{Environment: environmentMap(os.Environ())})
+			if err != nil {
+				t.Fatal(err)
+			}
+			stored, err := config.NewStore(paths.ConfigPath).Read()
+			if err != nil {
+				t.Fatal(err)
+			}
+			if stored != test.want {
+				t.Fatalf("stored config = %#v, want %#v", stored, test.want)
+			}
+		})
+	}
+
+	for _, key := range []string{"defaultCapsule", "source"} {
+		t.Run("reject_"+key, func(t *testing.T) {
+			root := t.TempDir()
+			t.Setenv("XDG_CONFIG_HOME", filepath.Join(root, "config"))
+			t.Setenv("XDG_DATA_HOME", filepath.Join(root, "data"))
+			err := (&ProductionLifecycle{}).ConfigSet(context.Background(), key, "discarded", ModeHuman, io.Discard)
+			var exit *ExitError
+			if !errors.As(err, &exit) || exit.Code != ExitUsage {
+				t.Fatalf("ConfigSet(%q) error = %v, want usage error", key, err)
+			}
+		})
+	}
+}
+
 func (l productionReopenLister) List(context.Context) ([]domain.JournalSnapshot, error) {
 	return l.sessions, l.err
 }

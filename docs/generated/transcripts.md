@@ -18,6 +18,7 @@ Available Commands:
   attach      Attach to an open capsule workspace
   close       Publish a checkpoint and close
   completion  Generate shell completion
+  config      Inspect and update Camp configuration
   doctor      Diagnose required host capabilities
   help        Help about any command
   images      Inspect and reconcile workspace images
@@ -60,6 +61,42 @@ effect-free docs fixture: close dispatched; external effects disabled
 ```console
 $ camp completion bash
 generated bash completion: 16033 bytes, sha256 c71f420df86270070783db8dab96672fcec9ed3433df71fe8b60a09992ca3a02
+```
+
+## `camp config --help`
+
+```console
+$ camp config --help
+Inspect and update Camp configuration
+
+Usage:
+  camp config [command]
+
+Available Commands:
+  set         Persist one supported Camp configuration value
+  show        Show Camp configuration
+
+Flags:
+  -h, --help   help for config
+
+Global Flags:
+      --json   emit stable JSON output
+
+Use "camp config [command] --help" for more information about a command.
+```
+
+## `camp config show --effective`
+
+```console
+$ camp config show --effective
+effect-free docs fixture: config show dispatched; external effects disabled
+```
+
+## `camp config set defaultCapsule docs-capsule`
+
+```console
+$ camp config set defaultCapsule docs-capsule
+effect-free docs fixture: config set dispatched; external effects disabled
 ```
 
 ## `camp doctor`
@@ -182,7 +219,9 @@ Usage:
   camp provider [command]
 
 Available Commands:
+  add         Add or repair a built-in DevPod provider
   list        List configured DevPod providers
+  use         Select an existing DevPod provider
 
 Flags:
   -h, --help   help for provider
@@ -193,11 +232,25 @@ Global Flags:
 Use "camp provider [command] --help" for more information about a command.
 ```
 
+## `camp provider add docker --context docs`
+
+```console
+$ camp provider add docker --context docs
+effect-free docs fixture: provider add dispatched; external effects disabled
+```
+
 ## `camp provider list`
 
 ```console
 $ camp provider list
 effect-free docs fixture: provider list dispatched; external effects disabled
+```
+
+## `camp provider use docker --context docs`
+
+```console
+$ camp provider use docker --context docs
+effect-free docs fixture: provider use dispatched; external effects disabled
 ```
 
 ## `camp recover memoryd`

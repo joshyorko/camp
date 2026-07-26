@@ -53,3 +53,51 @@ func (p *Providers) List(ctx context.Context) ([]Provider, error) {
 func (*Providers) Update(context.Context, string, map[string]string) error {
 	return ErrProviderMutationUnsupported
 }
+
+type ProviderMutationRequest struct {
+	Name    string   `json:"name"`
+	Context string   `json:"context"`
+	Options []string `json:"-"`
+}
+
+type ProviderMutationResult struct {
+	Action      string `json:"action"`
+	Name        string `json:"name"`
+	Context     string `json:"context"`
+	NextCommand string `json:"nextCommand"`
+}
+
+type ProviderConfigurer interface {
+	AddProvider(context.Context, ProviderMutationRequest) error
+	UseProvider(context.Context, ProviderMutationRequest) error
+}
+
+type ProviderConfiguration struct{ configurer ProviderConfigurer }
+
+func NewProviderConfiguration(configurer ProviderConfigurer) *ProviderConfiguration {
+	return &ProviderConfiguration{configurer: configurer}
+}
+
+func (p *ProviderConfiguration) Add(ctx context.Context, request ProviderMutationRequest) (ProviderMutationResult, error) {
+	if p == nil || p.configurer == nil {
+		return ProviderMutationResult{}, errors.New("provider configurer is nil")
+	}
+	if err := p.configurer.AddProvider(ctx, request); err != nil {
+		return ProviderMutationResult{}, err
+	}
+	return providerMutationResult("added", request), nil
+}
+
+func (p *ProviderConfiguration) Use(ctx context.Context, request ProviderMutationRequest) (ProviderMutationResult, error) {
+	if p == nil || p.configurer == nil {
+		return ProviderMutationResult{}, errors.New("provider configurer is nil")
+	}
+	if err := p.configurer.UseProvider(ctx, request); err != nil {
+		return ProviderMutationResult{}, err
+	}
+	return providerMutationResult("selected", request), nil
+}
+
+func providerMutationResult(action string, request ProviderMutationRequest) ProviderMutationResult {
+	return ProviderMutationResult{Action: action, Name: request.Name, Context: request.Context, NextCommand: "camp doctor"}
+}

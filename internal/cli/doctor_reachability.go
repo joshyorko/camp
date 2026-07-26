@@ -5,6 +5,7 @@ package cli
 import (
 	"context"
 	"errors"
+	"fmt"
 	"net/http"
 	"path/filepath"
 	"strconv"
@@ -45,8 +46,12 @@ func productionReachabilityProbes(bootstrap config.Bootstrap, sessions []domain.
 		}
 		return devpod.NewClient(identity.Path, subprocess.NewRunner()), nil
 	}
+	providerRemediation := fmt.Sprintf("camp provider use %s --context %s", bootstrap.DevPodProvider, bootstrap.DevPodContext)
+	if bootstrap.DevPodProvider == "docker" {
+		providerRemediation = fmt.Sprintf("camp provider add docker --context %s", bootstrap.DevPodContext)
+	}
 	return []doctor.Probe{
-		doctor.ConfiguredProbe{Name: "provider", Configured: bootstrap.DevPodProvider != "", Check: func(ctx context.Context) (map[string]string, error) {
+		doctor.ConfiguredProbe{Name: "provider", Configured: bootstrap.DevPodProvider != "", Remediation: providerRemediation, Check: func(ctx context.Context) (map[string]string, error) {
 			client, err := clientFor(ctx)
 			if err != nil {
 				return nil, err

@@ -83,6 +83,52 @@ Global flags:
       --json   emit stable JSON output
 ```
 
+## `camp config`
+
+Inspect and update Camp configuration
+
+```text
+Usage:
+  camp config
+
+Flags:
+  -h, --help   help for config
+
+Global flags:
+      --json   emit stable JSON output
+```
+
+## `camp config set`
+
+Persist one supported Camp configuration value
+
+```text
+Usage:
+  camp config set KEY VALUE
+
+Flags:
+  -h, --help   help for set
+
+Global flags:
+      --json   emit stable JSON output
+```
+
+## `camp config show`
+
+Show Camp configuration
+
+```text
+Usage:
+  camp config show [flags]
+
+Flags:
+      --effective   resolve defaults, environment, and flags
+  -h, --help        help for show
+
+Global flags:
+      --json   emit stable JSON output
+```
+
 ## `camp doctor`
 
 Diagnose required host capabilities
@@ -279,6 +325,23 @@ Global flags:
       --json   emit stable JSON output
 ```
 
+## `camp provider add`
+
+Add or repair a built-in DevPod provider
+
+```text
+Usage:
+  camp provider add NAME [flags]
+
+Flags:
+      --context string       DevPod context (defaults to Camp configuration)
+  -h, --help                 help for add
+  -o, --option stringArray   provider option in KEY=VALUE form
+
+Global flags:
+      --json   emit stable JSON output
+```
+
 ## `camp provider list`
 
 List configured DevPod providers
@@ -289,6 +352,23 @@ Usage:
 
 Flags:
   -h, --help   help for list
+
+Global flags:
+      --json   emit stable JSON output
+```
+
+## `camp provider use`
+
+Select an existing DevPod provider
+
+```text
+Usage:
+  camp provider use NAME [flags]
+
+Flags:
+      --context string       DevPod context (defaults to Camp configuration)
+  -h, --help                 help for use
+  -o, --option stringArray   provider option in KEY=VALUE form
 
 Global flags:
       --json   emit stable JSON output
