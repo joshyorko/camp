@@ -232,12 +232,16 @@ activity, each initializes the built-in Docker provider with
 `devpod provider add docker --context <private-context> --use --silent` under
 that private environment and passes `CAMP_DEVPOD_PROVIDER=docker` to Camp. The
 Room-of-Requirement remains the devcontainer image fixture, not the DevPod
-provider. The separately
-discoverable `TestPrivateDevPodContextPreservesUnrelatedWorkspace` gate is
-intentionally missing real evidence and fails closed when explicitly enabled;
-do not add it to passed evidence until it creates an actual unrelated workspace
-and proves the scenario's exact-ID cleanup preserves it. Private provider
-bootstrap is implemented and is no longer that gate's blocker.
+provider. Before each file or MinIO lifecycle scenario opens Camp's workspace,
+the harness creates one unrelated workspace in that same private context. Its
+scenario ledger recovers Camp workspace IDs and forwarded endpoints only from
+durable session snapshots, closes Camp sessions on normal and interrupted
+paths, deletes only those recovered exact IDs, proves the unrelated ID remains,
+then deletes that unrelated ID in its own final step. The harness does not
+reserve or inject Camp service ports: registry and fileserver assertions use
+the recorded forwarding endpoints and prove they are closed after cleanup. This
+is harness behavior; it becomes real lifecycle evidence only when the gated
+tests pass with the orchestrator-provided `CAMP_TEST_BINARY` and real tools.
 
 These named tests remain executable product gates even while their requirements
 are `roadmap-gated`. The RCC `robot` task therefore fails when a current

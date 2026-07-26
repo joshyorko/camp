@@ -10,7 +10,6 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
-	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -32,48 +31,35 @@ func TestLocalLifecycleVertical(t *testing.T) {
 	controllerB := filepath.Join(root, "controller-b")
 	devPod := newDevPodTestIsolation(root)
 	bin := candidateBinary(t)
-	registryPort, fileserverPort := reserveLoopbackPort(t), reserveLoopbackPort(t)
 	writeLifecycleFixture(t, source)
 	if err := os.MkdirAll(backend, 0o700); err != nil {
 		t.Fatal(err)
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 45*time.Minute)
 	t.Cleanup(cancel)
-	createdWorkspaces := newCreatedWorkspaceTracker()
+	scenario := newLifecycleScenario(t, root, devPod, controllerA, controllerB)
 	t.Cleanup(func() {
-		cleanupCtx, cleanupCancel := context.WithTimeout(context.Background(), 3*time.Minute)
-		defer cleanupCancel()
-		for _, controller := range []string{controllerA, controllerB} {
-			if err := createdWorkspaces.TrackController(controller); err != nil {
-				t.Errorf("recover exact workspace IDs from test-owned controller: %v", err)
-			}
-		}
-		if err := createdWorkspaces.DeleteAll(func(workspaceID string) error {
-			output, err := runDevPodCommand(cleanupCtx, devPod, "delete", "--ignore-not-found", workspaceID)
-			if err != nil {
-				return fmt.Errorf("%w: %s", err, output)
-			}
-			return nil
-		}); err != nil {
-			t.Errorf("clean exact test-owned DevPod workspaces: %v", err)
-		}
+		scenario.Cleanup(t, bin)
 	})
 
-	envA := lifecycleEnvironment(controllerA, backend, registryPort, fileserverPort, devPod)
+	envA := lifecycleEnvironment(controllerA, backend, devPod)
+	scenario.RegisterController(controllerA, envA)
 	t.Log("bootstrap the Docker provider inside the private DevPod context")
 	mustBootstrapDevPodDockerProvider(t, ctx, devPod)
+	scenario.CreateUnrelatedWorkspace(t, ctx)
 	t.Log("initialize adopted fixture")
 	mustRunLifecycle(t, ctx, envA, bin, "--json", "init", source, "--name", "local-lifecycle")
 	t.Log("open adopted fixture through real DevPod")
 	recovered := decodeOpenResult(t, mustRunLifecycleAt(t, ctx, envA, source, bin, "--json", "open"))
 	workspaceA := recovered.WorkspaceID
-	createdWorkspaces.Track(workspaceA)
+	scenario.TrackController(t, controllerA)
 	if workspaceA == "" || recovered.SessionID == "" || recovered.Target != "." {
 		t.Fatalf("open = %#v", recovered)
 	}
 	workspaceRootA := "/workspaces/" + workspaceA
+	endpoints := scenario.Endpoints(t, controllerA, recovered.SessionID)
 	t.Log("mutate files and publish a named image through CAMP_REGISTRY")
-	mutate := fmt.Sprintf("set -eu; cd %s; printf 'after-open\\n' >> 'Projects/Unicode space/λ-note.txt'; chmod 600 'Projects/Unicode space/λ-note.txt'; test \"$CAMP_REGISTRY\" = %s; test \"$CAMP_FILESERVER\" = %s; wget -qO- \"http://$CAMP_REGISTRY/v2/\" >/dev/null; wget -qO- \"http://$CAMP_FILESERVER/\" >/dev/null; engine=; attempts=0; while test -z \"$engine\"; do for candidate in docker podman nerdctl; do if command -v \"$candidate\" >/dev/null 2>&1 && \"$candidate\" info >/dev/null 2>&1; then engine=$candidate; break; fi; done; attempts=$((attempts+1)); test $attempts -lt 60; sleep 1; done; \"$engine\" pull alpine:3.20; image_id=$(\"$engine\" create alpine:3.20); \"$engine\" commit \"$image_id\" %s/camp-acceptance:named; \"$engine\" rm \"$image_id\"; \"$engine\" push %s/camp-acceptance:named", shellQuote(workspaceRootA), shellQuote(loopbackEndpoint(registryPort)), shellQuote(loopbackEndpoint(fileserverPort)), loopbackEndpoint(registryPort), loopbackEndpoint(registryPort))
+	mutate := fmt.Sprintf("set -eu; cd %s; printf 'after-open\\n' >> 'Projects/Unicode space/λ-note.txt'; chmod 600 'Projects/Unicode space/λ-note.txt'; test \"$CAMP_REGISTRY\" = %s; test \"$CAMP_FILESERVER\" = %s; wget -qO- \"http://$CAMP_REGISTRY/v2/\" >/dev/null; wget -qO- \"http://$CAMP_FILESERVER/\" >/dev/null; engine=; attempts=0; while test -z \"$engine\"; do for candidate in docker podman nerdctl; do if command -v \"$candidate\" >/dev/null 2>&1 && \"$candidate\" info >/dev/null 2>&1; then engine=$candidate; break; fi; done; attempts=$((attempts+1)); test $attempts -lt 60; sleep 1; done; \"$engine\" pull alpine:3.20; image_id=$(\"$engine\" create alpine:3.20); \"$engine\" commit \"$image_id\" %s/camp-acceptance:named; \"$engine\" rm \"$image_id\"; \"$engine\" push %s/camp-acceptance:named", shellQuote(workspaceRootA), shellQuote(endpoints.Registry), shellQuote(endpoints.Fileserver), endpoints.Registry, endpoints.Registry)
 	mustRunDevPod(t, ctx, devPod, "ssh", workspaceA, "--command", mutate)
 
 	t.Log("publish explicit sync generation")
@@ -91,17 +77,19 @@ func TestLocalLifecycleVertical(t *testing.T) {
 		t.Fatalf("adopted source did not survive: %v", err)
 	}
 
-	envB := lifecycleEnvironment(controllerB, backend, registryPort, fileserverPort, devPod)
+	envB := lifecycleEnvironment(controllerB, backend, devPod)
+	scenario.RegisterController(controllerB, envB)
 	t.Log("reopen from the file backend with a fresh XDG controller")
 	reopened := decodeOpenResult(t, mustRunLifecycleAt(t, ctx, envB, source, bin, "--json", "reopen"))
 	if reopened.Generation != 2 || reopened.WorkspaceID == "" || reopened.Materialization == "" {
 		t.Fatalf("fresh-controller reopen = %#v", reopened)
 	}
-	createdWorkspaces.Track(reopened.WorkspaceID)
+	scenario.TrackController(t, controllerB)
 	workspaceRootB := "/workspaces/" + reopened.WorkspaceID
 	t.Log("verify restored filesystem semantics and runnable named image")
 	note := shellQuote(filepath.ToSlash(filepath.Join(workspaceRootB, "Projects/Unicode space/λ-note.txt")))
-	verify := fmt.Sprintf("set -eux; grep -q before-open %s; grep -q after-open %s; grep -q after-sync %s; stat -c %%a %s | grep -qx 600; stat -c %%s %s | grep -qx %d; readlink %s | grep -qx README.md; find %s -xdev -samefile %s | grep -q README-hardlink.md; engine=; for candidate in docker podman nerdctl; do if command -v \"$candidate\" >/dev/null 2>&1 && \"$candidate\" info >/dev/null 2>&1; then engine=$candidate; break; fi; done; test -n \"$engine\"; \"$engine\" image inspect %s/camp-acceptance:named >/dev/null; \"$engine\" run --rm %s/camp-acceptance:named true", note, note, note, note, shellQuote(filepath.ToSlash(filepath.Join(workspaceRootB, "large.bin"))), lifecycleLargeSize, shellQuote(filepath.ToSlash(filepath.Join(workspaceRootB, "README-link.md"))), shellQuote(workspaceRootB), shellQuote(filepath.ToSlash(filepath.Join(workspaceRootB, "README.md"))), loopbackEndpoint(registryPort), loopbackEndpoint(registryPort))
+	endpoints = scenario.Endpoints(t, controllerB, reopened.SessionID)
+	verify := fmt.Sprintf("set -eux; grep -q before-open %s; grep -q after-open %s; grep -q after-sync %s; stat -c %%a %s | grep -qx 600; stat -c %%s %s | grep -qx %d; readlink %s | grep -qx README.md; find %s -xdev -samefile %s | grep -q README-hardlink.md; engine=; for candidate in docker podman nerdctl; do if command -v \"$candidate\" >/dev/null 2>&1 && \"$candidate\" info >/dev/null 2>&1; then engine=$candidate; break; fi; done; test -n \"$engine\"; \"$engine\" image inspect %s/camp-acceptance:named >/dev/null; \"$engine\" run --rm %s/camp-acceptance:named true", note, note, note, note, shellQuote(filepath.ToSlash(filepath.Join(workspaceRootB, "large.bin"))), lifecycleLargeSize, shellQuote(filepath.ToSlash(filepath.Join(workspaceRootB, "README-link.md"))), shellQuote(workspaceRootB), shellQuote(filepath.ToSlash(filepath.Join(workspaceRootB, "README.md"))), endpoints.Registry, endpoints.Registry)
 	mustRunDevPod(t, ctx, devPod, "ssh", reopened.WorkspaceID, "--command", verify)
 	preserved := fmt.Sprintf("set -eu; stat -c %%a %s | grep -qx 755; stat -c %%a %s | grep -qx 600; grep -qx 'user-owned agent state' %s", shellQuote(filepath.ToSlash(filepath.Join(workspaceRootB, "bin/camp-fixture"))), shellQuote(filepath.ToSlash(filepath.Join(workspaceRootB, ".claude/fixture.md"))), shellQuote(filepath.ToSlash(filepath.Join(workspaceRootB, ".claude/fixture.md"))))
 	mustRunDevPod(t, ctx, devPod, "ssh", reopened.WorkspaceID, "--command", preserved)
@@ -111,8 +99,7 @@ func TestLocalLifecycleVertical(t *testing.T) {
 	if _, err := os.Stat(reopened.Materialization); !errors.Is(err, os.ErrNotExist) {
 		t.Fatalf("owned materialization still exists: %v", err)
 	}
-	assertLoopbackPortClosed(t, registryPort)
-	assertLoopbackPortClosed(t, fileserverPort)
+	scenario.AssertEndpointsClosed(t)
 }
 
 const lifecycleLargeSize = 3*1024*1024 + 1
@@ -168,8 +155,8 @@ func decodeGeneration(t *testing.T, output []byte) int {
 	return envelope.Result.Generation.Generation
 }
 
-func lifecycleEnvironment(controller, backend string, registryPort, fileserverPort int, devPod devPodTestIsolation) []string {
-	env := []string{"XDG_CONFIG_HOME=" + filepath.Join(controller, "config"), "XDG_DATA_HOME=" + filepath.Join(controller, "data"), "XDG_CACHE_HOME=" + filepath.Join(controller, "cache"), "CAMP_BACKEND=file://" + backend, "CAMP_DEVPOD_PROVIDER=docker", "CAMP_REGISTRY_PORT=" + strconv.Itoa(registryPort), "CAMP_FILESERVER_PORT=" + strconv.Itoa(fileserverPort)}
+func lifecycleEnvironment(controller, backend string, devPod devPodTestIsolation) []string {
+	env := []string{"XDG_CONFIG_HOME=" + filepath.Join(controller, "config"), "XDG_DATA_HOME=" + filepath.Join(controller, "data"), "XDG_STATE_HOME=" + filepath.Join(controller, "state"), "XDG_CACHE_HOME=" + filepath.Join(controller, "cache"), "CAMP_BACKEND=file://" + backend, "CAMP_DEVPOD_PROVIDER=docker"}
 	env = append(env, devPod.Environment()...)
 	return env
 }
@@ -209,21 +196,7 @@ func writeLifecycleFixture(t *testing.T, source string) {
 	}
 }
 
-func reserveLoopbackPort(t *testing.T) int {
-	t.Helper()
-	listener, err := net.Listen("tcp4", "127.0.0.1:0")
-	if err != nil {
-		t.Fatal(err)
-	}
-	port := listener.Addr().(*net.TCPAddr).Port
-	if err := listener.Close(); err != nil {
-		t.Fatal(err)
-	}
-	return port
-}
-
-func loopbackEndpoint(port int) string { return "127.0.0.1:" + strconv.Itoa(port) }
-func shellQuote(value string) string   { return "'" + strings.ReplaceAll(value, "'", "'\\''") + "'" }
+func shellQuote(value string) string { return "'" + strings.ReplaceAll(value, "'", "'\\''") + "'" }
 
 func mustRunLifecycle(t *testing.T, ctx context.Context, environment []string, executable string, argv ...string) []byte {
 	t.Helper()
@@ -331,11 +304,11 @@ func assertDevPodWorkspacesAbsent(t *testing.T, ctx context.Context, isolation d
 	}
 }
 
-func assertLoopbackPortClosed(t *testing.T, port int) {
+func assertEndpointClosed(t *testing.T, endpoint string) {
 	t.Helper()
-	connection, err := net.DialTimeout("tcp4", loopbackEndpoint(port), time.Second)
+	connection, err := net.DialTimeout("tcp", endpoint, time.Second)
 	if err == nil {
 		_ = connection.Close()
-		t.Fatalf("listener remains on %s", loopbackEndpoint(port))
+		t.Fatalf("listener remains on %s", endpoint)
 	}
 }

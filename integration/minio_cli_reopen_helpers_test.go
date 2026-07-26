@@ -12,11 +12,236 @@ import (
 	"reflect"
 	"strings"
 	"testing"
+	"time"
 )
 
 type createdWorkspaceTracker struct {
 	ids  []string
 	seen map[string]struct{}
+}
+
+type lifecycleEndpoints struct{ Registry, Fileserver string }
+
+// lifecycleScenario owns only paths and identities created beneath its temporary
+// root.  Its cleanup is intentionally reusable from normal and interrupted test
+// paths; it never enumerates or deletes ambient DevPod resources.
+type lifecycleScenario struct {
+	root         string
+	devPod       devPodTestIsolation
+	unrelatedID  string
+	controllers  []string
+	environments map[string][]string
+	workspaces   *createdWorkspaceTracker
+	containers   map[string]struct{}
+	processes    map[string]struct{}
+	namespaces   map[string]struct{}
+	paths        map[string]struct{}
+	listeners    map[string]struct{}
+}
+
+func newLifecycleScenario(t *testing.T, root string, devPod devPodTestIsolation, controllers ...string) *lifecycleScenario {
+	t.Helper()
+	scenario := &lifecycleScenario{
+		root: root, devPod: devPod, controllers: controllers, environments: map[string][]string{},
+		workspaces: newCreatedWorkspaceTracker(), containers: map[string]struct{}{}, processes: map[string]struct{}{}, namespaces: map[string]struct{}{}, paths: map[string]struct{}{root: {}}, listeners: map[string]struct{}{},
+	}
+	for _, controller := range controllers {
+		scenario.paths[controller] = struct{}{}
+	}
+	return scenario
+}
+
+func (s *lifecycleScenario) CreateUnrelatedWorkspace(t *testing.T, ctx context.Context) {
+	t.Helper()
+	source := filepath.Join(s.root, "unrelated-workspace")
+	if err := os.MkdirAll(filepath.Join(source, ".devcontainer"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(source, ".devcontainer", "devcontainer.json"), []byte(`{"image":"alpine:3.20"}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	digest := sha256.Sum256([]byte(filepath.Clean(source)))
+	id := fmt.Sprintf("camp-unrelated-%x", digest[:6])
+	output, err := runDevPodCommand(ctx, s.devPod, "up", "--ide", "none", "--open-ide=false", "--id", id, "--provider", "docker", source)
+	if err != nil {
+		t.Fatalf("create unrelated exact DevPod workspace %q: %v\n%s", id, err, output)
+	}
+	s.unrelatedID = id
+}
+
+func (s *lifecycleScenario) RegisterController(controller string, environment []string) {
+	s.environments[controller] = append([]string(nil), environment...)
+}
+
+func (s *lifecycleScenario) TrackController(t *testing.T, controller string) {
+	t.Helper()
+	if err := s.trackController(controller); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func (s *lifecycleScenario) trackController(controller string) error {
+	matches, err := filepath.Glob(filepath.Join(controller, "data", "camp", "sessions", "*", "snapshot.json"))
+	if err != nil {
+		return fmt.Errorf("find scenario snapshots: %w", err)
+	}
+	for _, path := range matches {
+		body, err := os.ReadFile(path)
+		if err != nil {
+			return fmt.Errorf("read scenario snapshot %q: %w", path, err)
+		}
+		var snapshot struct {
+			Workspace struct {
+				ID string `json:"id"`
+			} `json:"workspace"`
+			Materialization struct {
+				CanonicalPath string `json:"canonicalPath"`
+			} `json:"materialization"`
+			Recovery struct {
+				Forwarding []struct {
+					Name          string `json:"name"`
+					LocalEndpoint string `json:"localEndpoint"`
+					EvidencePath  string `json:"evidencePath"`
+				} `json:"forwarding"`
+			} `json:"recovery"`
+			Services []struct {
+				PIDPath string `json:"pidPath"`
+				LogPath string `json:"logPath"`
+				Helper  struct {
+					Identity struct {
+						PID int `json:"pid"`
+					} `json:"identity"`
+					NetNS string `json:"netNs"`
+				} `json:"helper"`
+				Child struct {
+					Identity struct {
+						PID int `json:"pid"`
+					} `json:"identity"`
+					NetNS string `json:"netNs"`
+				} `json:"child"`
+			} `json:"services"`
+		}
+		if err := json.Unmarshal(body, &snapshot); err != nil {
+			return fmt.Errorf("decode scenario snapshot %q: %w", path, err)
+		}
+		s.workspaces.Track(snapshot.Workspace.ID)
+		if snapshot.Workspace.ID != "" {
+			s.containers[snapshot.Workspace.ID] = struct{}{}
+		}
+		if snapshot.Materialization.CanonicalPath != "" {
+			s.paths[snapshot.Materialization.CanonicalPath] = struct{}{}
+		}
+		for _, forwarding := range snapshot.Recovery.Forwarding {
+			if forwarding.LocalEndpoint != "" {
+				s.listeners[forwarding.LocalEndpoint] = struct{}{}
+			}
+			if forwarding.EvidencePath != "" {
+				s.paths[forwarding.EvidencePath] = struct{}{}
+			}
+		}
+		for _, service := range snapshot.Services {
+			for _, path := range []string{service.PIDPath, service.LogPath} {
+				if path != "" {
+					s.paths[path] = struct{}{}
+				}
+			}
+			for _, process := range []struct {
+				PID   int
+				NetNS string
+			}{{service.Helper.Identity.PID, service.Helper.NetNS}, {service.Child.Identity.PID, service.Child.NetNS}} {
+				if process.PID > 0 {
+					s.processes[fmt.Sprintf("%d", process.PID)] = struct{}{}
+				}
+				if process.NetNS != "" {
+					s.namespaces[process.NetNS] = struct{}{}
+				}
+			}
+		}
+	}
+	return nil
+}
+
+func (s *lifecycleScenario) Endpoints(t *testing.T, controller, sessionID string) lifecycleEndpoints {
+	t.Helper()
+	path := filepath.Join(controller, "data", "camp", "sessions", sessionID, "snapshot.json")
+	body, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read durable session evidence %q: %v", path, err)
+	}
+	var snapshot struct {
+		Recovery struct {
+			Forwarding []struct {
+				Name          string `json:"name"`
+				LocalEndpoint string `json:"localEndpoint"`
+			} `json:"forwarding"`
+		} `json:"recovery"`
+	}
+	if err := json.Unmarshal(body, &snapshot); err != nil {
+		t.Fatalf("decode durable session evidence %q: %v", path, err)
+	}
+	var endpoints lifecycleEndpoints
+	for _, forwarding := range snapshot.Recovery.Forwarding {
+		s.listeners[forwarding.LocalEndpoint] = struct{}{}
+		switch forwarding.Name {
+		case "registry":
+			endpoints.Registry = forwarding.LocalEndpoint
+		case "fileserver":
+			endpoints.Fileserver = forwarding.LocalEndpoint
+		}
+	}
+	if endpoints.Registry == "" || endpoints.Fileserver == "" {
+		t.Fatalf("durable session evidence has incomplete endpoints: %#v", snapshot.Recovery.Forwarding)
+	}
+	return endpoints
+}
+
+func (s *lifecycleScenario) Cleanup(t *testing.T, binary string) {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
+	defer cancel()
+	for _, controller := range s.controllers {
+		if environment := s.environments[controller]; len(environment) != 0 {
+			_, _ = runLifecycleCommand(ctx, environment, binary, "--json", "close")
+		}
+		if err := s.trackController(controller); err != nil {
+			t.Errorf("recover scenario resource ledger: %v", err)
+		}
+	}
+	if err := s.workspaces.DeleteAll(func(id string) error {
+		output, err := runDevPodCommand(ctx, s.devPod, "delete", "--ignore-not-found", id)
+		if err != nil {
+			return fmt.Errorf("%w: %s", err, output)
+		}
+		return nil
+	}); err != nil {
+		t.Errorf("clean exact scenario DevPod workspaces: %v", err)
+	}
+	if s.unrelatedID != "" {
+		workspaces, err := listDevPodWorkspaces(ctx, s.devPod)
+		if err != nil {
+			t.Errorf("list unrelated DevPod workspace: %v", err)
+		} else {
+			found := false
+			for _, id := range workspaces {
+				found = found || id == s.unrelatedID
+			}
+			if !found {
+				t.Errorf("unrelated DevPod workspace %q was removed by scenario cleanup", s.unrelatedID)
+			}
+		}
+		output, err := runDevPodCommand(ctx, s.devPod, "delete", "--ignore-not-found", s.unrelatedID)
+		if err != nil {
+			t.Errorf("delete exact unrelated DevPod workspace %q: %v\n%s", s.unrelatedID, err, output)
+		}
+	}
+	s.AssertEndpointsClosed(t)
+}
+
+func (s *lifecycleScenario) AssertEndpointsClosed(t *testing.T) {
+	t.Helper()
+	for endpoint := range s.listeners {
+		assertEndpointClosed(t, endpoint)
+	}
 }
 
 type devPodTestIsolation struct {
@@ -262,11 +487,20 @@ printf '\nDEVPOD_HOME=<%s>\nDEVPOD_CONFIG=<%s>\nSSH_CONFIG_PATH=<%s>\nCAMP_DEVPO
 	}
 }
 
-func TestPrivateDevPodContextPreservesUnrelatedWorkspace(t *testing.T) {
-	if os.Getenv("CAMP_TEST_REAL_DEVPOD_UNRELATED_WORKSPACE") != "1" {
-		t.Skip("missing real evidence: set CAMP_TEST_REAL_DEVPOD_UNRELATED_WORKSPACE=1 only with a real unrelated-workspace fixture")
+func TestLifecycleScenarioReadsEndpointsOnlyFromDurableSessionEvidence(t *testing.T) {
+	root := t.TempDir()
+	controller := filepath.Join(root, "controller")
+	session := filepath.Join(controller, "data", "camp", "sessions", "session-test")
+	if err := os.MkdirAll(session, 0o700); err != nil {
+		t.Fatal(err)
 	}
-	t.Fatal("missing real evidence: private Docker-provider bootstrap is available, but this gate must still create an unrelated workspace, run exact scenario-ledger cleanup, prove it survives, then delete only that exact workspace in its own finalizer")
+	if err := os.WriteFile(filepath.Join(session, "snapshot.json"), []byte(`{"recovery":{"forwarding":[{"name":"registry","localEndpoint":"127.0.0.1:41001"},{"name":"fileserver","localEndpoint":"127.0.0.1:41002"}]}}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	scenario := newLifecycleScenario(t, root, newDevPodTestIsolation(root), controller)
+	if got := scenario.Endpoints(t, controller, "session-test"); got != (lifecycleEndpoints{Registry: "127.0.0.1:41001", Fileserver: "127.0.0.1:41002"}) {
+		t.Fatalf("endpoints = %#v", got)
+	}
 }
 
 func TestLifecycleEnvironmentIncludesDevPodIsolation(t *testing.T) {
@@ -276,8 +510,6 @@ func TestLifecycleEnvironmentIncludesDevPodIsolation(t *testing.T) {
 	fileEnvironment := lifecycleEnvironment(
 		controller,
 		filepath.Join(root, "backend"),
-		5000,
-		8080,
 		isolation,
 	)
 	minioEnvironment := minioLifecycleEnvironment(
@@ -285,8 +517,6 @@ func TestLifecycleEnvironmentIncludesDevPodIsolation(t *testing.T) {
 		"http://127.0.0.1:9000",
 		"access",
 		"secret",
-		5000,
-		8080,
 		isolation,
 	)
 
