@@ -81,6 +81,9 @@ func DocumentedInvocations() []Invocation {
 		{CommandPath: "camp attach", Args: []string{"attach", "memoryd"}},
 		{CommandPath: "camp close", Args: []string{"close"}},
 		{CommandPath: "camp completion", Args: []string{"completion", "bash"}},
+		{CommandPath: "camp config", Args: []string{"config", "--help"}},
+		{CommandPath: "camp config show", Args: []string{"config", "show", "--effective"}},
+		{CommandPath: "camp config set", Args: []string{"config", "set", "defaultCapsule", "docs-capsule"}},
 		{CommandPath: "camp doctor", Args: []string{"doctor"}},
 		{CommandPath: "camp init", Args: []string{"init", "/tmp/camp-docs-capsule", "--name", "docs-capsule"}},
 		{CommandPath: "camp images", Args: []string{"images", "--help"}},
@@ -179,6 +182,12 @@ func (transcriptLifecycle) List(_ context.Context, _ cli.OutputMode, output io.W
 }
 func (transcriptLifecycle) Status(_ context.Context, _ cli.OutputMode, output io.Writer) error {
 	return fixtureDispatch(output, "status")
+}
+func (transcriptLifecycle) ConfigShow(_ context.Context, _, _ bool, _ cli.OutputMode, output io.Writer) error {
+	return fixtureDispatch(output, "config show")
+}
+func (transcriptLifecycle) ConfigSet(_ context.Context, key, value string, _ cli.OutputMode, output io.Writer) error {
+	return fixtureDispatch(output, "config set")
 }
 func (transcriptLifecycle) Strike(_ context.Context, _ cli.StrikeRequest, _ cli.OutputMode, output io.Writer) error {
 	return fixtureDispatch(output, "strike")

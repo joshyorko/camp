@@ -127,6 +127,61 @@ func (p *ProductionLifecycle) List(ctx context.Context, mode OutputMode, out io.
 	return table.Flush()
 }
 
+func (p *ProductionLifecycle) ConfigShow(_ context.Context, effective, _ bool, mode OutputMode, out io.Writer) error {
+	environment := environmentMap(os.Environ())
+	paths, err := config.ResolveXDGPaths(config.XDGInput{Environment: environment})
+	if err != nil {
+		return err
+	}
+	var value any
+	if effective {
+		resolved, resolveErr := config.ResolveBootstrap(config.BootstrapInput{ConfigPath: paths.ConfigPath, Environment: environment})
+		if resolveErr != nil {
+			return resolveErr
+		}
+		if resolved.Backend == "" {
+			resolved.Backend = "file://" + filepath.Join(paths.DataRoot, "backend")
+		}
+		value = resolved
+	} else {
+		stored, readErr := config.NewStore(paths.ConfigPath).Read()
+		if readErr != nil && !errors.Is(readErr, os.ErrNotExist) {
+			return readErr
+		}
+		value = stored
+	}
+	body, marshalErr := config.MarshalRedacted(value)
+	if marshalErr != nil {
+		return marshalErr
+	}
+	return writeSuccess(out, mode, "config-show", json.RawMessage(body), string(body)+"\n")
+}
+
+func (p *ProductionLifecycle) ConfigSet(_ context.Context, key, value string, mode OutputMode, out io.Writer) error {
+	environment := environmentMap(os.Environ())
+	paths, err := config.ResolveXDGPaths(config.XDGInput{Environment: environment})
+	if err != nil {
+		return err
+	}
+	updated, err := config.NewStore(paths.ConfigPath).Modify(func(current *config.Persistent) error {
+		switch key {
+		case "backend":
+			current.Backend = value
+		case "devpodProvider":
+			current.DevPodProvider = value
+		case "devpodContext":
+			current.DevPodContext = value
+		default:
+			return UsageError(fmt.Errorf("unsupported config key %q", key))
+		}
+		return nil
+	})
+	if err != nil {
+		return err
+	}
+	return writeSuccess(out, mode, "config-set", updated, fmt.Sprintf("set %s\n", key))
+}
+
 func (p *ProductionLifecycle) Status(ctx context.Context, mode OutputMode, out io.Writer) error {
 	composition, err := composeProduction(ctx)
 	if err != nil {

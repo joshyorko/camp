@@ -98,6 +98,11 @@ type CampStatus interface {
 	Status(context.Context, OutputMode, io.Writer) error
 }
 
+type ConfigOperations interface {
+	ConfigShow(context.Context, bool, bool, OutputMode, io.Writer) error
+	ConfigSet(context.Context, string, string, OutputMode, io.Writer) error
+}
+
 type StrikeRequest struct {
 	Purge bool
 	Yes   bool
@@ -182,6 +187,9 @@ func NewRootWithLifecycle(lifecycle Lifecycle) *cobra.Command {
 	if status, ok := lifecycle.(CampStatus); ok {
 		root.AddCommand(selectionCommand("status", "Show the selected camp session", status.Status))
 	}
+	if configuration, ok := lifecycle.(ConfigOperations); ok {
+		root.AddCommand(newConfigCommand(configuration))
+	}
 	if striker, ok := lifecycle.(CampStriker); ok {
 		root.AddCommand(newStrikeCommand(striker.Strike))
 	}
@@ -212,6 +220,26 @@ func NewRootWithLifecycle(lifecycle Lifecycle) *cobra.Command {
 		hiddenRequiredArgumentCommand("supervise", lifecycle.Supervise),
 	)
 	return root
+}
+
+func newConfigCommand(operations ConfigOperations) *cobra.Command {
+	command := &cobra.Command{Use: "config", Short: "Inspect and update Camp configuration", Args: usageArgs(cobra.NoArgs)}
+	showEffective := false
+	show := &cobra.Command{
+		Use: "show", Short: "Show Camp configuration", Args: usageArgs(cobra.NoArgs),
+		RunE: func(command *cobra.Command, _ []string) error {
+			return operations.ConfigShow(command.Context(), showEffective, true, OutputModeFrom(command), command.OutOrStdout())
+		},
+	}
+	show.Flags().BoolVar(&showEffective, "effective", false, "resolve defaults, environment, and flags")
+	set := &cobra.Command{
+		Use: "set KEY VALUE", Short: "Persist one supported Camp configuration value", Args: usageArgs(cobra.ExactArgs(2)),
+		RunE: func(command *cobra.Command, args []string) error {
+			return operations.ConfigSet(command.Context(), args[0], args[1], OutputModeFrom(command), command.OutOrStdout())
+		},
+	}
+	command.AddCommand(show, set)
+	return command
 }
 
 func newImagesCommand(operations ImageOperations) *cobra.Command {

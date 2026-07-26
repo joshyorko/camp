@@ -83,6 +83,52 @@ Global flags:
       --json   emit stable JSON output
 ```
 
+## `camp config`
+
+Inspect and update Camp configuration
+
+```text
+Usage:
+  camp config
+
+Flags:
+  -h, --help   help for config
+
+Global flags:
+      --json   emit stable JSON output
+```
+
+## `camp config set`
+
+Persist one supported Camp configuration value
+
+```text
+Usage:
+  camp config set KEY VALUE
+
+Flags:
+  -h, --help   help for set
+
+Global flags:
+      --json   emit stable JSON output
+```
+
+## `camp config show`
+
+Show Camp configuration
+
+```text
+Usage:
+  camp config show [flags]
+
+Flags:
+      --effective   resolve defaults, environment, and flags
+  -h, --help        help for show
+
+Global flags:
+      --json   emit stable JSON output
+```
+
 ## `camp doctor`
 
 Diagnose required host capabilities

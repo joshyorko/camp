@@ -18,6 +18,7 @@ Available Commands:
   attach      Attach to an open capsule workspace
   close       Publish a checkpoint and close
   completion  Generate shell completion
+  config      Inspect and update Camp configuration
   doctor      Diagnose required host capabilities
   help        Help about any command
   images      Inspect and reconcile workspace images
@@ -60,6 +61,42 @@ effect-free docs fixture: close dispatched; external effects disabled
 ```console
 $ camp completion bash
 generated bash completion: 16033 bytes, sha256 c71f420df86270070783db8dab96672fcec9ed3433df71fe8b60a09992ca3a02
+```
+
+## `camp config --help`
+
+```console
+$ camp config --help
+Inspect and update Camp configuration
+
+Usage:
+  camp config [command]
+
+Available Commands:
+  set         Persist one supported Camp configuration value
+  show        Show Camp configuration
+
+Flags:
+  -h, --help   help for config
+
+Global Flags:
+      --json   emit stable JSON output
+
+Use "camp config [command] --help" for more information about a command.
+```
+
+## `camp config show --effective`
+
+```console
+$ camp config show --effective
+effect-free docs fixture: config show dispatched; external effects disabled
+```
+
+## `camp config set defaultCapsule docs-capsule`
+
+```console
+$ camp config set defaultCapsule docs-capsule
+effect-free docs fixture: config set dispatched; external effects disabled
 ```
 
 ## `camp doctor`
