@@ -8,6 +8,10 @@ publication/cleanup result, and evidence artifacts. A cut is runtime-proven
 only when its real gate runs against the exact `CAMP_TEST_BINARY`; unit tests
 and skipped capability gates do not upgrade its status.
 
+Pull-request receipts are machine-validated: each `Passed gates:`, `Failed
+gates:`, and `Missing or skipped gates:` label must include a non-empty value on
+the same line as the label.
+
 The current ledger intentionally marks the complete process-death matrix
 blocked. The existing `integration/forwarder_crash_test.go` proves only the
 forwarder-start-before-fact cut. Required real capabilities must fail the gate
