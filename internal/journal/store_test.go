@@ -2,6 +2,7 @@ package journal
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"os"
 	"path/filepath"
@@ -141,6 +142,42 @@ func TestStoreRejectsPointerCommittedFactWithoutCompletePointer(t *testing.T) {
 	}
 	if err := store.RecordFact(ctx, fact, snapshot); err == nil {
 		t.Fatal("RecordFact() accepted an incomplete committed pointer")
+	}
+}
+
+func TestStoreListRejectsSnapshotDirectoryIdentityMismatch(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	root := t.TempDir()
+	store, err := NewStore(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	snapshot := domain.JournalSnapshot{
+		SchemaVersion: domain.SchemaVersion,
+		SessionID:     "session-a",
+		Capsule:       "brain",
+		Lineage:       domain.Lineage{Branch: "main"},
+		Mode:          domain.SessionReadWrite,
+		State:         domain.SessionClosed,
+		CreatedAt:     time.Unix(100, 0).UTC(),
+		UpdatedAt:     time.Unix(101, 0).UTC(),
+	}
+	if err := store.Create(ctx, snapshot); err != nil {
+		t.Fatal(err)
+	}
+	snapshot.SessionID = "session-b"
+	body, err := json.Marshal(snapshot)
+	if err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(root, sessionsDirectory, "session-a", snapshotFilename)
+	if err := os.WriteFile(path, body, 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := store.List(ctx); err == nil || !strings.Contains(err.Error(), "does not match session directory") {
+		t.Fatalf("List() error = %v, want snapshot directory identity mismatch", err)
 	}
 }
 

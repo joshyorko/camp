@@ -3,6 +3,7 @@ package app
 import (
 	"context"
 	"errors"
+	"fmt"
 	"sort"
 	"strings"
 
@@ -71,15 +72,23 @@ func SelectActiveSession(ctx context.Context, sessions sessionLister, selector S
 // continue through manifest and backend resolution. Explicit session IDs
 // remain journal-authoritative and therefore fail closed when absent.
 func SelectReopenSession(ctx context.Context, sessions sessionLister, selector SessionSelector) (selected domain.JournalSnapshot, manifestFallback bool, err error) {
-	selected, err = SelectSession(ctx, sessions, selector, SelectionHistory)
-	if err == nil {
-		return selected, false, nil
+	if sessions == nil {
+		return domain.JournalSnapshot{}, false, errors.New("session lister is nil")
 	}
-	var selectionErr *SessionSelectionError
-	if selector.SessionID == "" && errors.As(err, &selectionErr) && selectionErr.Code == SelectionNotFound {
+	listed, err := sessions.List(ctx)
+	if err != nil {
+		return domain.JournalSnapshot{}, false, err
+	}
+	for _, snapshot := range listed {
+		if err := validateReopenHistorySnapshot(snapshot); err != nil {
+			return domain.JournalSnapshot{}, false, err
+		}
+	}
+	if len(listed) == 0 && selector.SessionID == "" {
 		return domain.JournalSnapshot{}, true, nil
 	}
-	return domain.JournalSnapshot{}, false, err
+	selected, err = selectSession(listed, selector, SelectionHistory)
+	return selected, false, err
 }
 
 func SelectSession(ctx context.Context, sessions sessionLister, selector SessionSelector, purpose SelectionPurpose) (domain.JournalSnapshot, error) {
@@ -90,6 +99,10 @@ func SelectSession(ctx context.Context, sessions sessionLister, selector Session
 	if err != nil {
 		return domain.JournalSnapshot{}, err
 	}
+	return selectSession(listed, selector, purpose)
+}
+
+func selectSession(listed []domain.JournalSnapshot, selector SessionSelector, purpose SelectionPurpose) (domain.JournalSnapshot, error) {
 	eligible := make([]domain.JournalSnapshot, 0, len(listed))
 	for _, snapshot := range listed {
 		if !sessionEligible(snapshot, purpose) {
@@ -116,7 +129,9 @@ func SelectSession(ctx context.Context, sessions sessionLister, selector Session
 		sort.SliceStable(matches, func(i, j int) bool {
 			return matches[i].UpdatedAt.After(matches[j].UpdatedAt)
 		})
-		return matches[0], nil
+		if !matches[0].UpdatedAt.Equal(matches[1].UpdatedAt) {
+			return matches[0], nil
+		}
 	}
 	ids := make([]string, 0, len(matches))
 	for _, snapshot := range matches {
@@ -132,6 +147,34 @@ func SelectSession(ctx context.Context, sessions sessionLister, selector Session
 		cause = errors.New("multiple matching Camp sessions")
 	}
 	return domain.JournalSnapshot{}, &SessionSelectionError{Code: SelectionAmbiguous, Candidates: ids, NextCommands: commands, cause: cause}
+}
+
+func validateReopenHistorySnapshot(snapshot domain.JournalSnapshot) error {
+	if snapshot.SchemaVersion != domain.SchemaVersion ||
+		snapshot.SessionID == "" || strings.ContainsAny(snapshot.SessionID, "/\\\x00") ||
+		snapshot.Capsule == "" || strings.ContainsAny(snapshot.Capsule, "/\\\x00") ||
+		snapshot.Lineage.Branch == "" {
+		return fmt.Errorf("journal snapshot %q has invalid identity", snapshot.SessionID)
+	}
+	if snapshot.Mode != domain.SessionReadWrite && snapshot.Mode != domain.SessionReadOnly {
+		return fmt.Errorf("journal snapshot %q has invalid mode %q", snapshot.SessionID, snapshot.Mode)
+	}
+	switch snapshot.State {
+	case domain.SessionOpening, domain.SessionOpen, domain.SessionRecovering, domain.SessionClosed:
+	default:
+		return fmt.Errorf("journal snapshot %q has invalid state %q", snapshot.SessionID, snapshot.State)
+	}
+	if snapshot.CreatedAt.IsZero() || snapshot.UpdatedAt.IsZero() || snapshot.UpdatedAt.Before(snapshot.CreatedAt) {
+		return fmt.Errorf("journal snapshot %q has invalid timestamps", snapshot.SessionID)
+	}
+	if configured := snapshot.Recovery.Configuration.Capsule; configured != "" && configured != snapshot.Capsule {
+		return fmt.Errorf("journal snapshot %q has mismatched capsule identity", snapshot.SessionID)
+	}
+	if lease := snapshot.Lease.Lease; lease != nil &&
+		(lease.SessionID != snapshot.SessionID || lease.Capsule != snapshot.Capsule || lease.Lineage != snapshot.Lineage) {
+		return fmt.Errorf("journal snapshot %q has mismatched lease identity", snapshot.SessionID)
+	}
+	return nil
 }
 
 func applySessionPrecedence(sessions []domain.JournalSnapshot, selector SessionSelector) []domain.JournalSnapshot {

@@ -291,6 +291,9 @@ func (s *Store) List(ctx context.Context) ([]domain.JournalSnapshot, error) {
 		if err != nil {
 			return nil, err
 		}
+		if snapshot.SessionID != entry.Name() {
+			return nil, fmt.Errorf("journal snapshot identity %q does not match session directory %q", snapshot.SessionID, entry.Name())
+		}
 		result = append(result, snapshot)
 	}
 	sort.Slice(result, func(i, j int) bool { return result[i].SessionID < result[j].SessionID })

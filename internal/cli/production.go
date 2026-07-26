@@ -700,15 +700,25 @@ func (p *ProductionLifecycle) Reopen(ctx context.Context, value string, mode Out
 	if value != "" {
 		selector.SessionID = value
 	}
-	closed, manifestFallback, err := app.SelectReopenSession(ctx, base.journal, selector)
+	return dispatchProductionReopen(ctx, base.journal, selector, mode, out, p.Open)
+}
+
+type reopenSessionLister interface {
+	List(context.Context) ([]domain.JournalSnapshot, error)
+}
+
+type productionOpenFunc func(context.Context, string, OutputMode, io.Writer) error
+
+func dispatchProductionReopen(ctx context.Context, sessions reopenSessionLister, selector app.SessionSelector, mode OutputMode, out io.Writer, open productionOpenFunc) error {
+	closed, manifestFallback, err := app.SelectReopenSession(ctx, sessions, selector)
 	if err != nil {
 		return err
 	}
 	if manifestFallback {
-		return p.Open(ctx, "", mode, out)
+		return open(ctx, "", mode, out)
 	}
 	ctx = withSelection(ctx, Selection{Camp: closed.Capsule})
-	return p.Open(ctx, "", mode, out)
+	return open(ctx, "", mode, out)
 }
 
 func (p *ProductionLifecycle) Recover(ctx context.Context, value string, mode OutputMode, out io.Writer) error {

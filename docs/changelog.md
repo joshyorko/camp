@@ -22,8 +22,10 @@
 - constrain real lifecycle cleanup to exact test-owned DevPod workspace IDs and
   recover interrupted-open IDs from test-owned controller journals
 - align real lifecycle fixtures with named Camp initialization and
-  directory-based discovery; retain fresh-controller reopen as a failing
-  product gate until durable history is available to a new controller
+  directory-based discovery; let a fresh controller reopen from the discovered
+  manifest and durable backend pointer when validated local history is empty,
+  while retaining the real fresh-controller lifecycle as a product gate until
+  the exact candidate passes it
 - keep private RCC homes outside the Go module and reject unverified RCC assets,
   mismatched hosts, invalid lock provenance, and candidate drift
 

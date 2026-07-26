@@ -12,12 +12,96 @@ import (
 	"time"
 
 	"github.com/joshyorko/camp/internal/adapters/supervisor"
+	"github.com/joshyorko/camp/internal/app"
 	"github.com/joshyorko/camp/internal/campconfig"
 	"github.com/joshyorko/camp/internal/config"
 	"github.com/joshyorko/camp/internal/domain"
 	journalstore "github.com/joshyorko/camp/internal/journal"
 	"github.com/joshyorko/camp/internal/ports"
 )
+
+type productionReopenLister struct {
+	sessions []domain.JournalSnapshot
+	err      error
+}
+
+func (l productionReopenLister) List(context.Context) ([]domain.JournalSnapshot, error) {
+	return l.sessions, l.err
+}
+
+type productionReopenContextKey struct{}
+
+func TestDispatchProductionReopenPreservesOnlyFallbackContext(t *testing.T) {
+	t.Parallel()
+	now := time.Unix(100, 0).UTC()
+	closed := domain.JournalSnapshot{
+		SchemaVersion: domain.SchemaVersion,
+		SessionID:     "closed-session",
+		Capsule:       "brain",
+		Lineage:       domain.Lineage{Branch: "main"},
+		Mode:          domain.SessionReadWrite,
+		State:         domain.SessionClosed,
+		CreatedAt:     now.Add(-time.Minute),
+		UpdatedAt:     now,
+	}
+	tests := []struct {
+		name          string
+		sessions      []domain.JournalSnapshot
+		input         Selection
+		selector      app.SessionSelector
+		wantSelection Selection
+	}{
+		{
+			name:          "fresh controller keeps original manifest context",
+			input:         Selection{Camp: "brain"},
+			selector:      app.SessionSelector{Capsule: "brain", Branch: "main"},
+			wantSelection: Selection{Camp: "brain"},
+		},
+		{
+			name:          "historical session keeps existing camp handoff",
+			sessions:      []domain.JournalSnapshot{closed},
+			input:         Selection{Session: closed.SessionID},
+			selector:      app.SessionSelector{SessionID: closed.SessionID, Capsule: "brain", Branch: "main"},
+			wantSelection: Selection{Camp: "brain"},
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			ctx := context.WithValue(context.Background(), productionReopenContextKey{}, "preserved")
+			ctx = withSelection(ctx, test.input)
+			calls := 0
+			err := dispatchProductionReopen(ctx, productionReopenLister{sessions: test.sessions}, test.selector, ModeJSON, io.Discard, func(openCtx context.Context, value string, mode OutputMode, out io.Writer) error {
+				calls++
+				if got := openCtx.Value(productionReopenContextKey{}); got != "preserved" {
+					t.Fatalf("context marker = %v, want preserved", got)
+				}
+				if got := SelectionFromContext(openCtx); got != test.wantSelection {
+					t.Fatalf("open selection = %#v, want %#v", got, test.wantSelection)
+				}
+				if value != "" || mode != ModeJSON || out != io.Discard {
+					t.Fatalf("open arguments = %q, %q, %T", value, mode, out)
+				}
+				return nil
+			})
+			if err != nil || calls != 1 {
+				t.Fatalf("dispatch error = %v, open calls = %d", err, calls)
+			}
+		})
+	}
+}
+
+func TestDispatchProductionReopenDoesNotOpenOnInvalidHistory(t *testing.T) {
+	t.Parallel()
+	invalid := domain.JournalSnapshot{SessionID: "corrupt", State: domain.SessionState("unknown")}
+	calls := 0
+	err := dispatchProductionReopen(context.Background(), productionReopenLister{sessions: []domain.JournalSnapshot{invalid}}, app.SessionSelector{}, ModeHuman, io.Discard, func(context.Context, string, OutputMode, io.Writer) error {
+		calls++
+		return nil
+	})
+	if err == nil || calls != 0 {
+		t.Fatalf("dispatch error = %v, open calls = %d", err, calls)
+	}
+}
 
 func TestManifestOverridesMachineDefaultsForCampRuntime(t *testing.T) {
 	root := t.TempDir()

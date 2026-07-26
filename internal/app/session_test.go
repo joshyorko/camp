@@ -99,7 +99,7 @@ func TestHistorySelectionChoosesNewestClosedSession(t *testing.T) {
 
 func TestSelectReopenSessionUsesHistoryOrManifestFallback(t *testing.T) {
 	t.Parallel()
-	closed := domain.JournalSnapshot{SessionID: "closed", Capsule: "brain", State: domain.SessionClosed}
+	closed := validReopenSnapshot("closed", domain.SessionClosed, time.Unix(20, 0))
 
 	selected, fallback, err := SelectReopenSession(context.Background(), fakeSessionLister{sessions: []domain.JournalSnapshot{closed}}, SessionSelector{Capsule: "brain"})
 	if err != nil || fallback || selected.SessionID != closed.SessionID {
@@ -130,6 +130,63 @@ func TestSelectReopenSessionFailsClosedOutsideImplicitNotFound(t *testing.T) {
 	_, fallback, err = SelectReopenSession(context.Background(), fakeSessionLister{err: listErr}, SessionSelector{})
 	if !errors.Is(err, listErr) || fallback {
 		t.Fatalf("list error = %v, fallback=%t", err, fallback)
+	}
+}
+
+func TestSelectReopenSessionRejectsNonemptyInvalidOrAmbiguousHistory(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name     string
+		sessions []domain.JournalSnapshot
+	}{
+		{
+			name: "unknown state",
+			sessions: []domain.JournalSnapshot{func() domain.JournalSnapshot {
+				snapshot := validReopenSnapshot("corrupt", domain.SessionClosed, time.Unix(20, 0))
+				snapshot.State = domain.SessionState("unknown")
+				return snapshot
+			}()},
+		},
+		{
+			name: "mismatched identity",
+			sessions: []domain.JournalSnapshot{func() domain.JournalSnapshot {
+				snapshot := validReopenSnapshot("corrupt", domain.SessionClosed, time.Unix(20, 0))
+				snapshot.Recovery.Configuration.Capsule = "other"
+				return snapshot
+			}()},
+		},
+		{
+			name:     "no closed history",
+			sessions: []domain.JournalSnapshot{validReopenSnapshot("open", domain.SessionOpen, time.Unix(20, 0))},
+		},
+		{
+			name: "ambiguous newest history",
+			sessions: []domain.JournalSnapshot{
+				validReopenSnapshot("one", domain.SessionClosed, time.Unix(20, 0)),
+				validReopenSnapshot("two", domain.SessionClosed, time.Unix(20, 0)),
+			},
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			_, fallback, err := SelectReopenSession(context.Background(), fakeSessionLister{sessions: test.sessions}, SessionSelector{Capsule: "brain"})
+			if err == nil || fallback {
+				t.Fatalf("selection error = %v, fallback=%t", err, fallback)
+			}
+		})
+	}
+}
+
+func validReopenSnapshot(sessionID string, state domain.SessionState, updatedAt time.Time) domain.JournalSnapshot {
+	return domain.JournalSnapshot{
+		SchemaVersion: domain.SchemaVersion,
+		SessionID:     sessionID,
+		Capsule:       "brain",
+		Lineage:       domain.Lineage{Branch: "main"},
+		Mode:          domain.SessionReadWrite,
+		State:         state,
+		CreatedAt:     updatedAt.Add(-time.Minute),
+		UpdatedAt:     updatedAt,
 	}
 }
 
