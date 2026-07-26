@@ -173,6 +173,16 @@ func (r *contextReader) Read(p []byte) (int, error) {
 // ExportFile publishes an archive with same-directory temp-file ownership,
 // fsync, rename, and parent-directory fsync. Existing output is never replaced.
 func ExportFile(ctx context.Context, output string, manifest Manifest, sources map[string]PayloadSource) error {
+	return exportFile(ctx, output, manifest, sources, nil)
+}
+
+// ExportFileWithBeforePublish adds a final validation barrier after all
+// payload bytes have streamed and before the no-replace rename.
+func ExportFileWithBeforePublish(ctx context.Context, output string, manifest Manifest, sources map[string]PayloadSource, beforePublish func() error) error {
+	return exportFile(ctx, output, manifest, sources, beforePublish)
+}
+
+func exportFile(ctx context.Context, output string, manifest Manifest, sources map[string]PayloadSource, beforePublish func() error) error {
 	if output == "" {
 		return fmt.Errorf("CampKit output path is empty")
 	}
@@ -217,6 +227,11 @@ func ExportFile(ctx context.Context, output string, manifest Manifest, sources m
 	}
 	if err := exportFileBeforePublish(output); err != nil {
 		return err
+	}
+	if beforePublish != nil {
+		if err := beforePublish(); err != nil {
+			return err
+		}
 	}
 	if err := publishNoReplace(temporaryName, output); err != nil {
 		return err

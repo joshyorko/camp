@@ -102,6 +102,10 @@ resolves a generation, but its returned sources reopen the backend later.
 `ExactGenerationRecord.RevalidateSources` repeats those checks and must be
 called by export orchestration before and after copying payloads; initial
 resolution alone is not a transfer lock.
+`app.ExportCampKit` is the application seam: it requires an authoritative
+resolver and revalidator, performs the first check before streaming, and uses
+the final check immediately before `ExportFile`'s no-replace publication. It
+does not move pointers or acquire leases.
 
 ## Verification and boundaries
 
