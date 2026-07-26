@@ -59,6 +59,17 @@ Do not use Hauler v2.0.2's live `_catalog` response as proof that all direct reg
   the same candidate.
 - On enforcing SELinux hosts, the packaged `pasta` executable transitions into `pasta_t`; an unwrapped Hauler child inherits that domain and can be denied `cgroup_t` search even though its private store is correctly owned. Camp keeps pasta in `pasta_t` but launches the exact Hauler child through the policy-authorized `/usr/bin/runcon -t unconfined_t` prefix, records that prefix in the confinement fingerprint and launch intent, and still validates the final Hauler PID, argv, namespace, guest listener, loopback mapping, and HTTP endpoint. Evidence: the Bluefin audit log recorded `comm="hauler" ... scontext=...:pasta_t ... tcontext=...:cgroup_t ... denied { search }`; the unwrapped service returned `stat .../store: permission denied`; the wrapped standalone probe returned HTTP 200 on `127.0.0.1:45999/v2/`; and the fresh real `camp open` reached and completed `devpod up` with both services live.
 - A DevPod container cannot reach a host-only `127.0.0.1` registry or fileserver merely because Camp injected `CAMP_REGISTRY` and `CAMP_FILESERVER`. After `devpod up`, production composition starts one supervised `devpod ssh --reverse-forward-ports` process per endpoint, records its PID/start-time/executable/argv identity in `Recovery.Forwarding`, and probes the exact endpoint from the exact workspace before declaring it ready. Startup failure stops only the recorded forwarders; close stops them by recorded identity. Evidence: the unforwarded real workspace returned connection refused for `$CAMP_REGISTRY`; the production-composed workspace subsequently returned HTTP 200 for both `http://$CAMP_REGISTRY/v2/` and `http://$CAMP_FILESERVER/`, with two distinct forwarder process records in the session snapshot.
+- A live `devpod ssh` process is not sufficient forwarder readiness evidence: a
+  fresh-controller file lifecycle run observed the process remain alive while
+  its fileserver reverse tunnel never became reachable and its forwarder log
+  remained empty. Camp keeps the in-workspace HTTP probe as the readiness
+  boundary. If that bounded probe expires, it stops and removes evidence for
+  only the exact PID/boot/start identity, launches one fresh process attempt,
+  and journals only the identity whose endpoint becomes ready. Pending-start
+  recovery polls the same endpoint while adopting the exact persisted process;
+  it never launches a duplicate. Unit coverage proves replacement, adoption,
+  retry exhaustion, and evidence cleanup. A complete real file lifecycle pass
+  after this correction remains required release evidence.
 
 Installed-tool tests in `integration/contracts_test.go` skip when the binaries are unavailable. A skip is not proof of real Hauler or DevPod behavior.
 

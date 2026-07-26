@@ -47,6 +47,71 @@ func TestForwarderManagerStartsExactDevPodReverseForwardAndProbesWorkspace(t *te
 	}
 }
 
+func TestForwarderManagerRetriesUnreadyTunnelWithFreshExactProcessIdentity(t *testing.T) {
+	root := t.TempDir()
+	first := forwarderProcessStatus(41)
+	second := forwarderProcessStatus(42)
+	client := &fakeForwardDevPod{executeErrors: []error{errors.New("tunnel not installed"), nil}}
+	processes := &fakeForwardProcesses{startStatuses: []ports.ProcessStatus{first, second}}
+	manager := newTestForwarderManager(client, processes)
+	manager.startAttempts = 2
+	manager.readinessTimeout = 0
+	manager.readinessInterval = 0
+
+	record, err := manager.Start(context.Background(), domain.ForwardingRequest{
+		Name: "fileserver", WorkspaceID: "camp-brain", Context: "default",
+		LocalEndpoint: "127.0.0.1:39402", WorkspaceEndpoint: "127.0.0.1:39402", LogPath: filepath.Join(root, "forward.log"),
+		EvidencePath: filepath.Join(root, "fileserver-forwarding.json"),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if record.Process.Identity != second.Identity {
+		t.Fatalf("recorded process = %#v, want replacement %#v", record.Process.Identity, second.Identity)
+	}
+	if !reflect.DeepEqual(processes.stopped, []domain.ProcessIdentity{first.Identity}) {
+		t.Fatalf("stopped identities = %#v, want only failed attempt %#v", processes.stopped, first.Identity)
+	}
+	if len(processes.specs) != 2 || len(client.executed) != 2 {
+		t.Fatalf("starts = %d probes = %d, want two exact attempts", len(processes.specs), len(client.executed))
+	}
+	persisted, err := readForwardingEvidence(filepath.Join(root, "fileserver-forwarding.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if persisted.Process.Identity != second.Identity {
+		t.Fatalf("persisted process = %#v, want replacement %#v", persisted.Process.Identity, second.Identity)
+	}
+}
+
+func TestForwarderManagerFailedRetriesStopExactProcessesAndRemoveEvidence(t *testing.T) {
+	root := t.TempDir()
+	first := forwarderProcessStatus(51)
+	second := forwarderProcessStatus(52)
+	client := &fakeForwardDevPod{executeErrors: []error{errors.New("first tunnel missing"), errors.New("second tunnel missing")}}
+	processes := &fakeForwardProcesses{startStatuses: []ports.ProcessStatus{first, second}}
+	manager := newTestForwarderManager(client, processes)
+	manager.startAttempts = 2
+	manager.readinessTimeout = 0
+	manager.readinessInterval = 0
+	evidencePath := filepath.Join(root, "fileserver-forwarding.json")
+
+	_, err := manager.Start(context.Background(), domain.ForwardingRequest{
+		Name: "fileserver", WorkspaceID: "camp-brain", Context: "default",
+		LocalEndpoint: "127.0.0.1:39402", WorkspaceEndpoint: "127.0.0.1:39402", LogPath: filepath.Join(root, "forward.log"),
+		EvidencePath: evidencePath,
+	})
+	if err == nil {
+		t.Fatal("Start() error = nil")
+	}
+	if !reflect.DeepEqual(processes.stopped, []domain.ProcessIdentity{first.Identity, second.Identity}) {
+		t.Fatalf("stopped identities = %#v, want both failed exact identities", processes.stopped)
+	}
+	if _, statErr := os.Lstat(evidencePath); !errors.Is(statErr, os.ErrNotExist) {
+		t.Fatalf("failed retry evidence remains: %v", statErr)
+	}
+}
+
 func TestForwarderManagerStartRejectsPreexistingEvidence(t *testing.T) {
 	t.Parallel()
 	root := t.TempDir()
@@ -191,6 +256,48 @@ func TestForwarderManagerObserveReplaysPersistedEvidenceWithoutStarting(t *testi
 	}
 	if !reflect.DeepEqual(got.Process.Identity, record.Process.Identity) || got.ObservedState != domain.RuntimeObservedReady {
 		t.Fatalf("Observe() = %#v", got)
+	}
+}
+
+func TestForwarderManagerObservePollsPersistedRegistryForwarderUntilReady(t *testing.T) {
+	root := t.TempDir()
+	evidencePath := filepath.Join(root, "forwarding.json")
+	status := forwarderProcessStatus(61)
+	record := domain.ForwardingRecord{
+		Name: "registry", LocalEndpoint: "127.0.0.1:39401", WorkspaceEndpoint: "127.0.0.1:39401", EvidencePath: evidencePath,
+		Process: domain.ProcessRecord{
+			Identity: status.Identity, DesiredExecutable: "/opt/devpod", ObservedExecutable: "/opt/devpod",
+			Argv: append([]string(nil), status.Argv...), ArgvSHA256: forwardingArgvSHA256(status.Argv),
+			ParentPID: status.ParentPID, PGID: status.PGID, SID: status.SID, NetNS: status.NetNS,
+		},
+		DesiredState: domain.RuntimeDesiredRunning, ObservedState: domain.RuntimeObservedPending,
+	}
+	body, err := json.Marshal(record)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(evidencePath, body, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	client := &fakeForwardDevPod{executeErrors: []error{errors.New("tunnel still converging"), nil}}
+	processes := &fakeForwardProcesses{status: status}
+	manager := newTestForwarderManager(client, processes)
+	manager.readinessTimeout = time.Second
+	manager.readinessInterval = 0
+
+	got, err := manager.Observe(context.Background(), domain.ForwardingRequest{
+		Name: "registry", WorkspaceID: "camp-brain", Context: "default",
+		LocalEndpoint: "127.0.0.1:39401", WorkspaceEndpoint: "127.0.0.1:39401", LogPath: filepath.Join(root, "forward.log"),
+		EvidencePath: evidencePath,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Process.Identity != status.Identity || got.ObservedState != domain.RuntimeObservedReady {
+		t.Fatalf("Observe() = %#v", got)
+	}
+	if len(client.executed) != 2 || len(processes.specs) != 0 || len(processes.stopped) != 0 {
+		t.Fatalf("probes=%d starts=%d stops=%#v, want adoption-only polling", len(client.executed), len(processes.specs), processes.stopped)
 	}
 }
 
@@ -347,10 +454,11 @@ func TestReadForwardingEvidenceRejectsUnsafeInodes(t *testing.T) {
 }
 
 type fakeForwardDevPod struct {
-	options    devpod.SSHOptions
-	executed   []ports.WorkspaceCommand
-	onExecute  func()
-	executeErr error
+	options       devpod.SSHOptions
+	executed      []ports.WorkspaceCommand
+	onExecute     func()
+	executeErr    error
+	executeErrors []error
 }
 
 func (f *fakeForwardDevPod) SSHCommand(options devpod.SSHOptions) (ports.Command, error) {
@@ -362,29 +470,54 @@ func (f *fakeForwardDevPod) Execute(_ context.Context, command ports.WorkspaceCo
 	if f.onExecute != nil {
 		f.onExecute()
 	}
+	if len(f.executeErrors) > 0 {
+		err := f.executeErrors[0]
+		f.executeErrors = f.executeErrors[1:]
+		return ports.Result{ExitCode: 0}, err
+	}
 	return ports.Result{ExitCode: 0}, f.executeErr
 }
 
 type fakeForwardProcesses struct {
-	status    ports.ProcessStatus
-	spec      ports.ProcessSpec
-	onStart   func()
-	stopCalls int
+	status        ports.ProcessStatus
+	startStatuses []ports.ProcessStatus
+	spec          ports.ProcessSpec
+	specs         []ports.ProcessSpec
+	onStart       func()
+	stopCalls     int
+	stopped       []domain.ProcessIdentity
 }
 
 func (f *fakeForwardProcesses) Start(_ context.Context, spec ports.ProcessSpec) (domain.ProcessIdentity, error) {
 	f.spec = spec
+	f.specs = append(f.specs, spec)
 	if f.onStart != nil {
 		f.onStart()
 	}
+	if len(f.startStatuses) > 0 {
+		f.status = f.startStatuses[0]
+		f.startStatuses = f.startStatuses[1:]
+	}
 	return f.status.Identity, nil
 }
-func (f *fakeForwardProcesses) Inspect(context.Context, domain.ProcessIdentity) (ports.ProcessStatus, error) {
+func (f *fakeForwardProcesses) Inspect(_ context.Context, identity domain.ProcessIdentity) (ports.ProcessStatus, error) {
+	if f.status.Identity != identity {
+		return ports.ProcessStatus{Identity: identity}, errors.New("unexpected process identity")
+	}
 	return f.status, nil
 }
-func (f *fakeForwardProcesses) Stop(context.Context, domain.ProcessIdentity, time.Duration) error {
+func (f *fakeForwardProcesses) Stop(_ context.Context, identity domain.ProcessIdentity, _ time.Duration) error {
 	f.stopCalls++
+	f.stopped = append(f.stopped, identity)
 	return nil
+}
+
+func forwarderProcessStatus(pid int) ports.ProcessStatus {
+	return ports.ProcessStatus{
+		Identity: domain.ProcessIdentity{PID: pid, BootID: "boot", StartTicks: uint64(pid + 100)}, Running: true,
+		Executable: "/opt/devpod", Argv: []string{"/opt/devpod", "ssh", "camp-brain"}, ParentPID: 500,
+		PGID: pid, SID: pid, NetNS: "net:[1]",
+	}
 }
 
 func forwardingArgvSHA256(argv []string) string {
