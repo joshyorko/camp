@@ -341,6 +341,46 @@ func (p *ProductionLifecycle) KitVerify(_ context.Context, path string, mode Out
 	return err
 }
 
+func (p *ProductionLifecycle) KitImport(ctx context.Context, request KitImportRequest, mode OutputMode, out io.Writer) error {
+	if !validKitCampName(request.Camp) {
+		return UsageError(fmt.Errorf("invalid --as camp name %q", request.Camp))
+	}
+	paths, err := config.ResolveXDGPaths(config.XDGInput{Environment: environmentMap(os.Environ())})
+	if err != nil {
+		return err
+	}
+	destination := filepath.Join(paths.DataRoot, "imported-camps", request.Camp)
+	result, err := campkit.ImportFile(ctx, request.File, destination, nil)
+	if err != nil {
+		return err
+	}
+	receipt := KitImportReceipt{Camp: request.Camp, Destination: result.Destination, Generation: result.Manifest.Generation.Ref}
+	if mode == ModeJSON {
+		return writeSuccess(out, mode, "kit-import", receipt, "")
+	}
+	_, err = fmt.Fprintf(out, "imported generation %d to %s\n", receipt.Generation.Generation, receipt.Destination)
+	return err
+}
+
+type KitImportReceipt struct {
+	Camp        string                `json:"camp"`
+	Destination string                `json:"destination"`
+	Generation  campkit.GenerationRef `json:"generation"`
+}
+
+func validKitCampName(value string) bool {
+	if value == "" || value == "." || value == ".." || strings.ContainsAny(value, "/\\\x00") {
+		return false
+	}
+	for i, r := range value {
+		if (r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') || (r >= '0' && r <= '9' && i > 0) || (r == '.' || r == '-' || r == '_') {
+			continue
+		}
+		return false
+	}
+	return true
+}
+
 type devpodProviderReader struct {
 	client  *devpod.Client
 	context string

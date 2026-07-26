@@ -248,6 +248,22 @@ Global flags:
       --json   emit stable JSON output
 ```
 
+## `camp kit import`
+
+Import a verified CampKit into a new local camp
+
+```text
+Usage:
+  camp kit import [file] [flags]
+
+Flags:
+      --as string   new local camp name
+  -h, --help        help for import
+
+Global flags:
+      --json   emit stable JSON output
+```
+
 ## `camp kit inspect`
 
 Inspect a CampKit archive
