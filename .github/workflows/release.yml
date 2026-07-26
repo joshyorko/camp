@@ -14,6 +14,19 @@ on:
         required: true
         default: false
         type: boolean
+      claim_kubernetes_support:
+        description: Require matching protected Kubernetes evidence for this candidate
+        required: true
+        default: false
+        type: boolean
+      kubernetes_evidence_run_id:
+        description: Provider-evidence workflow run containing the exact candidate artifact
+        required: false
+        type: string
+      kubernetes_candidate_sha256:
+        description: Exact build/camp SHA-256 recorded by protected evidence
+        required: false
+        type: string
 
 permissions:
   contents: read
@@ -111,9 +124,57 @@ jobs:
           if-no-files-found: error
           retention-days: 90
 
-  attest:
+  kubernetes-evidence:
+    name: Bind optional Kubernetes support claim
     needs: verified-artifacts
-    if: github.event_name == 'push' || inputs.publish == true
+    if: inputs.claim_kubernetes_support == true
+    environment: release-providers
+    permissions:
+      actions: read
+      contents: read
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          fetch-depth: 0
+      - name: Download exact protected evidence
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RUN_ID: ${{ inputs.kubernetes_evidence_run_id }}
+        run: |
+          test -n "$RUN_ID"
+          gh run download "$RUN_ID" \
+            --repo "$GITHUB_REPOSITORY" \
+            --name "kubernetes-evidence-${GITHUB_SHA}" \
+            --dir kubernetes-evidence
+      - name: Reject stale or mismatched Kubernetes support evidence
+        env:
+          CANDIDATE_SHA256: ${{ inputs.kubernetes_candidate_sha256 }}
+        run: |
+          test -n "$CANDIDATE_SHA256"
+          relevant_change="$(git log -1 --format=%H -- \
+            integration/kubernetes_lifecycle_test.go \
+            integration/kubernetes_evidence_contract_test.go \
+            internal/adapters/devpod \
+            internal/adapters/lifecycle \
+            tasks.py \
+            scripts/kubernetes_evidence.py \
+            .github/workflows/provider-evidence.yml)"
+          python3 scripts/kubernetes_evidence.py validate \
+            --directory kubernetes-evidence \
+            --commit "$GITHUB_SHA" \
+            --sha256 "$CANDIDATE_SHA256" \
+            --relevant-change "$relevant_change" \
+            --require-pass
+
+  attest:
+    needs: [verified-artifacts, kubernetes-evidence]
+    if: >-
+      always() &&
+      needs.verified-artifacts.result == 'success' &&
+      (inputs.claim_kubernetes_support != true || needs.kubernetes-evidence.result == 'success') &&
+      (github.event_name == 'push' || inputs.publish == true)
     permissions:
       contents: read
       id-token: write
