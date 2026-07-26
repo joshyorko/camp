@@ -151,6 +151,12 @@ providing only one fails closed, and an explicit `COMMIT` must equal the
 checked-out `HEAD`. Automatic identity refuses a dirty checkout so
 the packaged binary cannot claim clean commit provenance for uncommitted code.
 
+The packaging authority requires a tar implementation that supports GNU
+options, including `--sort=name`; BusyBox `tar` is insufficient. A packaging
+failure at that option is an environment prerequisite failure, not evidence of
+an archive-content defect. Verify `tar --version` before interpreting direct,
+RCC `test`, or release-package results.
+
 `robotKubernetes` is a protected, explicitly authorized evidence task. It
 requires `CAMP_KUBERNETES_EVIDENCE=1` and the `TestKubernetesLifecycleVertical`
 integration test. The test is compiled only with the `kubernetes_evidence` build
