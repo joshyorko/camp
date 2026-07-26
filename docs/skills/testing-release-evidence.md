@@ -240,7 +240,12 @@ cleanup-permitted paths, and forwarded endpoints only from durable session
 snapshots. The same cleanup path runs after normal completion, controller
 failure, or interruption; it closes Camp sessions, deletes only recovered exact
 workspace IDs, and proves every recorded workspace, process, owned path, and
-listener is absent. It then proves the unrelated ID remains and deletes that
+listener is absent. A failed `camp close` remains a reported cleanup error while
+the harness continues exact fallback cleanup: complete PID/boot/start process
+identities use the production process manager, created materializations use the
+ownership-marker guard, and forwarding evidence/runtime paths require matching
+device and inode identity before removal. Incomplete process or path identities
+fail closed rather than being treated as absence. It then proves the unrelated ID remains and deletes that
 unrelated ID in its own final step. DevPod workspace IDs are the safe container
 cleanup boundary; the harness neither invents a second Docker-container identity
 nor treats process namespace observations as independently owned resources. It
