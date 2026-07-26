@@ -22,6 +22,11 @@ public command consumed or emitted it.
 - `FILE` must be a regular file path; `camp` rejects missing files, directories,
   and symlinks before attempting to inspect or verify.
 
+The generated `camp kit export` transcript intentionally returns `incomplete
+CampKit closure` from the effect-free fixture. This proves the public route
+remains fail-closed when authoritative closure is unavailable; it does not
+claim that export, import, or disconnected lifecycle support is complete.
+
 ## Fixed wire closure
 
 A valid v2 manifest binds one positive capsule generation and optional earlier

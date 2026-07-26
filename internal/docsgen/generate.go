@@ -11,6 +11,7 @@ import (
 
 	"github.com/joshyorko/camp/internal/cli"
 	"github.com/joshyorko/camp/internal/doctor"
+	"github.com/joshyorko/camp/internal/domain"
 	"github.com/spf13/cobra"
 )
 
@@ -93,6 +94,12 @@ func DocumentedInvocations() []Invocation {
 		{CommandPath: "camp images list", Args: []string{"images", "list", "--session", "session-docs"}},
 		{CommandPath: "camp images restore", Args: []string{"images", "restore", "--session", "session-docs"}},
 		{CommandPath: "camp kit", Args: []string{"kit", "--help"}},
+		{
+			CommandPath: "camp kit export",
+			Args:        []string{"kit", "export", "--generation", "42-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "--output", "/tmp/camp-docs.campkit"},
+			ExitCode:    int(cli.ExitFailure),
+			Stderr:      "incomplete CampKit closure",
+		},
 		{CommandPath: "camp kit inspect", Args: []string{"kit", "inspect", "/proc/self/cmdline"}},
 		{CommandPath: "camp kit verify", Args: []string{"kit", "verify", "/proc/self/cmdline"}},
 		{CommandPath: "camp list", Args: []string{"list"}},
@@ -206,6 +213,13 @@ func (transcriptLifecycle) KitInspect(_ context.Context, _ string, _ cli.OutputM
 }
 func (transcriptLifecycle) KitVerify(_ context.Context, _ string, _ cli.OutputMode, output io.Writer) error {
 	return fixtureDispatch(output, "kit verify")
+}
+func (transcriptLifecycle) KitExport(_ context.Context, _ cli.KitExportRequest, _ cli.OutputMode, _ io.Writer) error {
+	return &cli.CampKitIncompleteClosureError{
+		Capsule: "docs-capsule", Branch: "main",
+		Generation: domain.GenerationRef{Generation: 42, ArchiveSHA256: strings.Repeat("a", 64)},
+		Missing:    []string{"camp executable", "runtime", "devpod provider", "devpod tool", "hauler tool", "Room image"},
+	}
 }
 
 func transcriptRoot() *cobra.Command { return cli.NewRootWithLifecycle(transcriptLifecycle{}) }

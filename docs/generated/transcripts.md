@@ -131,6 +131,7 @@ Usage:
   camp kit [command]
 
 Available Commands:
+  export      Export an exact CampKit generation
   inspect     Inspect a CampKit archive
   verify      Verify archive integrity and manifest consistency
 
@@ -141,6 +142,13 @@ Global Flags:
       --json   emit stable JSON output
 
 Use "camp kit [command] --help" for more information about a command.
+```
+
+## `camp kit export --generation 42-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa --output /tmp/camp-docs.campkit`
+
+```console
+$ camp kit export --generation 42-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa --output /tmp/camp-docs.campkit
+error [command_failed]: incomplete CampKit closure for docs-capsule/main generation 42-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa: missing authoritative camp executable, runtime, devpod provider, devpod tool, hauler tool, Room image
 ```
 
 ## `camp kit inspect /proc/self/cmdline`
