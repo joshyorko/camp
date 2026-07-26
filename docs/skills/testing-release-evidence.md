@@ -85,7 +85,6 @@ the contract tests hard-code one permanent RCC release.
 
 ```bash
 rcc run -r developer/toolkit.yaml --dev -t local
-rcc run -r developer/toolkit.yaml --dev -t install
 rcc run -r developer/toolkit.yaml --dev -t test
 rcc run -r developer/toolkit.yaml --dev -t package
 rcc run -r developer/toolkit.yaml -t robot
@@ -93,12 +92,11 @@ rcc run -r developer/toolkit.yaml -t robotKubernetes
 ```
 
 `local` creates one truthfully stamped `build/camp` and
-`build/evidence/candidate.json` without mutating the user's PATH. `install` is
-the explicit developer convenience: it performs the same build and smoke, then
-atomically links that candidate at `~/.local/bin/camp` so subsequent commands
-are simply `camp setup`, `camp init`, and `camp open`. It does not edit shell
-startup files; Bluefin already includes `~/.local/bin` in PATH. `robot` verifies
-that candidate digest, asks
+`build/evidence/candidate.json`, then atomically links that candidate at
+`~/.local/bin/camp` so subsequent commands are simply `camp setup`, `camp init`,
+and `camp open`. `install` remains a compatibility alias for `local`. Neither
+task edits shell startup files; Bluefin already includes `~/.local/bin` in
+PATH. `robot` verifies that candidate digest, asks
 the candidate to install the exact DevPod and Hauler assets from
 `tools.lock.yaml`, runs named Go evidence directly, then runs black-box Robot
 Framework suites against the same executable. Go tests are not hidden inside

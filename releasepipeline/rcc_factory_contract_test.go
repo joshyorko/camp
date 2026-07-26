@@ -80,6 +80,8 @@ func TestRCCFactoryDeclaresPinnedTrustRootAndCanonicalTasks(t *testing.T) {
 		`shutil.which("gcc") or shutil.which("x86_64-conda-linux-gnu-cc")`,
 		`env={"CC": compiler, "CGO_ENABLED": "1"}`,
 		`@task(name="install")`,
+		`"""Compatibility alias for the local build-and-install task."""`,
+		`installed = install_candidate(CANDIDATE, install_dir)`,
 		`resolve_package_identity(ROOT, os.environ)`,
 		`"result": "pending"`,
 	)
@@ -115,9 +117,9 @@ func TestDeveloperGuideUsesPATHRCCWhileCIKeepsVerifiedBootstrap(t *testing.T) {
 	guide := readRepositoryFile(t, root, "docs/skills/testing-release-evidence.md")
 	requireContains(t, guide,
 		"rcc run -r developer/toolkit.yaml --dev -t local",
-		"rcc run -r developer/toolkit.yaml --dev -t install",
 		"rcc run -r developer/toolkit.yaml --dev -t test",
 		"rcc run -r developer/toolkit.yaml --dev -t package",
+		"`install` remains a compatibility alias for `local`",
 	)
 	if strings.Contains(guide, "Always enter the factory through `./developer/rccw`") {
 		t.Fatal("developer guidance must not require the CI bootstrap wrapper")

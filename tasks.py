@@ -225,21 +225,21 @@ def run_gates(suite, gates, *, env=None):
 
 @task
 def local(_context):
-    """Build and smoke one truthfully stamped repository-local Camp candidate."""
+    """Build, smoke, and install one truthfully stamped development candidate."""
     metadata = build_and_smoke_candidate()
-    print(json.dumps(metadata, sort_keys=True))
-
-
-@task(name="install")
-def install_task(_context):
-    """Build, smoke, and explicitly link the development candidate into user PATH."""
-    build_and_smoke_candidate()
     install_dir = pathlib.Path(
         os.environ.get("CAMP_INSTALL_DIR", pathlib.Path.home() / ".local" / "bin")
     )
     installed = install_candidate(CANDIDATE, install_dir)
     run([str(installed), "--version"])
     print(f"Installed development link: {installed}")
+    print(json.dumps(metadata, sort_keys=True))
+
+
+@task(name="install")
+def install_task(_context):
+    """Compatibility alias for the local build-and-install task."""
+    local(_context)
 
 
 @task(name="test")
