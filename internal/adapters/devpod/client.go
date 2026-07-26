@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"path/filepath"
 	"sort"
 	"strconv"
 	"strings"
@@ -50,6 +51,12 @@ type WorkspaceProvider struct {
 
 type WorkspaceSource struct {
 	LocalFolder string `json:"localFolder,omitempty"`
+}
+
+type ProviderRequest struct {
+	Context string
+	Name    string
+	Options []string
 }
 
 type UpOptions struct {
@@ -254,6 +261,95 @@ func (c *Client) EnsureProvider(ctx context.Context, devpodContext, provider str
 		}
 	}
 	providers, err = c.listProviders(ctx, devpodContext)
+	if err != nil {
+		return err
+	}
+	if configured, ok := providers[provider]; !ok || !configured.Default {
+		return fmt.Errorf("configured DevPod provider identity %q was not verified", provider)
+	}
+	return nil
+}
+
+// AddProvider ensures the built-in Docker provider exists and is selected in
+// one DevPod context. DevPod remains authoritative for provider configuration.
+func (c *Client) AddProvider(ctx context.Context, request ProviderRequest) error {
+	if err := validateProviderRequest(c, request); err != nil {
+		return err
+	}
+	if request.Name != "docker" {
+		return fmt.Errorf("adding DevPod provider %q is unsupported; only the built-in docker provider is supported", request.Name)
+	}
+	providers, err := c.listProviders(ctx, request.Context)
+	if err != nil {
+		return err
+	}
+	configured, exists := providers[request.Name]
+	if exists && configured.Default && len(request.Options) == 0 {
+		return nil
+	}
+	argv := []string{"provider", "add", request.Name, "--context", request.Context, "--use"}
+	if exists {
+		argv = []string{"provider", "use", request.Name, "--context", request.Context, "--reconfigure"}
+	}
+	argv = appendRepeated(argv, "--option", request.Options)
+	if _, err := c.run(ctx, argv); err != nil {
+		return fmt.Errorf("configure DevPod provider %q: %w", request.Name, err)
+	}
+	return c.verifyDefaultProvider(ctx, request.Context, request.Name)
+}
+
+// UseProvider selects and reconfigures one existing provider through DevPod's
+// typed provider command surface.
+func (c *Client) UseProvider(ctx context.Context, request ProviderRequest) error {
+	if err := validateProviderRequest(c, request); err != nil {
+		return err
+	}
+	providers, err := c.listProviders(ctx, request.Context)
+	if err != nil {
+		return err
+	}
+	if _, exists := providers[request.Name]; !exists {
+		return fmt.Errorf("DevPod provider %q was not found in context %q", request.Name, request.Context)
+	}
+	argv := []string{"provider", "use", request.Name, "--context", request.Context, "--reconfigure"}
+	argv = appendRepeated(argv, "--option", request.Options)
+	if _, err := c.run(ctx, argv); err != nil {
+		return fmt.Errorf("select DevPod provider %q: %w", request.Name, err)
+	}
+	return c.verifyDefaultProvider(ctx, request.Context, request.Name)
+}
+
+func validateProviderRequest(c *Client, request ProviderRequest) error {
+	if c == nil || c.runner == nil || strings.TrimSpace(request.Context) != request.Context || request.Context == "" ||
+		strings.TrimSpace(request.Name) != request.Name || request.Name == "" || strings.ContainsAny(request.Context+request.Name, "/\\\t\r\n ") {
+		return errors.New("unsupported or incomplete DevPod provider request")
+	}
+	for _, option := range request.Options {
+		key, value, ok := strings.Cut(option, "=")
+		if !ok || key == "" || strings.TrimSpace(key) != key || strings.ContainsAny(option, "\x00\r\n") {
+			return errors.New("DevPod provider options must use KEY=VALUE without control characters")
+		}
+		if request.Name != "docker" {
+			return fmt.Errorf("DevPod provider option %q is unsupported for provider %q", key, request.Name)
+		}
+		switch key {
+		case "DOCKER_PATH":
+			if !filepath.IsAbs(value) {
+				return errors.New("DevPod docker option DOCKER_PATH must be an absolute path")
+			}
+		case "HELPER":
+			if _, err := strconv.ParseBool(value); err != nil {
+				return errors.New("DevPod docker option HELPER must be true or false")
+			}
+		default:
+			return fmt.Errorf("DevPod docker option %q is not in Camp's non-secret allowlist", key)
+		}
+	}
+	return nil
+}
+
+func (c *Client) verifyDefaultProvider(ctx context.Context, devpodContext, provider string) error {
+	providers, err := c.listProviders(ctx, devpodContext)
 	if err != nil {
 		return err
 	}

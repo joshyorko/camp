@@ -232,6 +232,86 @@ func TestEnsureProviderConfiguresAbsentDockerThenVerifiesExactIdentity(t *testin
 	}
 }
 
+func TestAddProviderUsesTypedDockerContextAndRepeatedOptionsThenVerifies(t *testing.T) {
+	t.Parallel()
+	runner := &providerSequenceRunner{results: []ports.Result{
+		{Stdout: []byte(`{}`)},
+		{},
+		{Stdout: []byte(`{"docker":{"default":true}}`)},
+	}}
+	request := ProviderRequest{Context: "work", Name: "docker", Options: []string{"DOCKER_PATH=/run/docker.sock", "HELPER=false"}}
+	if err := NewClient("/opt/devpod", runner).AddProvider(context.Background(), request); err != nil {
+		t.Fatal(err)
+	}
+	want := [][]string{
+		{"provider", "list", "--context", "work", "--output", "json"},
+		{"provider", "add", "docker", "--context", "work", "--use", "--option", "DOCKER_PATH=/run/docker.sock", "--option", "HELPER=false"},
+		{"provider", "list", "--context", "work", "--output", "json"},
+	}
+	if !reflect.DeepEqual(runner.argv, want) {
+		t.Fatalf("provider argv = %#v, want %#v", runner.argv, want)
+	}
+}
+
+func TestUseProviderUsesTypedContextAndRepeatedOptionsThenVerifies(t *testing.T) {
+	t.Parallel()
+	runner := &providerSequenceRunner{results: []ports.Result{
+		{Stdout: []byte(`{"docker":{"default":false}}`)},
+		{},
+		{Stdout: []byte(`{"docker":{"default":true}}`)},
+	}}
+	request := ProviderRequest{Context: "work", Name: "docker", Options: []string{"DOCKER_PATH=/run/docker.sock"}}
+	if err := NewClient("/opt/devpod", runner).UseProvider(context.Background(), request); err != nil {
+		t.Fatal(err)
+	}
+	want := [][]string{
+		{"provider", "list", "--context", "work", "--output", "json"},
+		{"provider", "use", "docker", "--context", "work", "--reconfigure", "--option", "DOCKER_PATH=/run/docker.sock"},
+		{"provider", "list", "--context", "work", "--output", "json"},
+	}
+	if !reflect.DeepEqual(runner.argv, want) {
+		t.Fatalf("provider argv = %#v, want %#v", runner.argv, want)
+	}
+}
+
+func TestProviderMutationRejectsSensitiveOptionBeforeProcessExecution(t *testing.T) {
+	t.Parallel()
+	const secret = "should-never-reach-argv"
+	runner := &providerSequenceRunner{}
+	err := NewClient("/opt/devpod", runner).AddProvider(context.Background(), ProviderRequest{
+		Context: "work",
+		Name:    "docker",
+		Options: []string{"PASSWORD=" + secret},
+	})
+	if err == nil {
+		t.Fatal("AddProvider() error = nil")
+	}
+	if strings.Contains(err.Error(), secret) {
+		t.Fatalf("error exposed provider option value: %q", err)
+	}
+	if len(runner.argv) != 0 {
+		t.Fatalf("runner argv = %#v, want no process execution", runner.argv)
+	}
+}
+
+func TestProviderMutationRejectsOptionsForNamedProviderBeforeProcessExecution(t *testing.T) {
+	t.Parallel()
+	runner := &providerSequenceRunner{}
+	err := NewClient("/opt/devpod", runner).UseProvider(context.Background(), ProviderRequest{
+		Context: "work",
+		Name:    "room-of-requirement",
+		Options: []string{"TOKEN=redacted"},
+	})
+	if err == nil {
+		t.Fatal("UseProvider() error = nil")
+	}
+	if strings.Contains(err.Error(), "redacted") {
+		t.Fatalf("error exposed provider option value: %q", err)
+	}
+	if len(runner.argv) != 0 {
+		t.Fatalf("runner argv = %#v, want no process execution", runner.argv)
+	}
+}
 func TestEnsureProviderFailsClosedWhenConfiguredIdentityDoesNotMatch(t *testing.T) {
 	t.Parallel()
 	runner := &providerSequenceRunner{results: []ports.Result{{Stdout: []byte(`{}`)}, {}, {Stdout: []byte(`{"other":{"default":true}}`)}}}

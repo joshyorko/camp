@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"reflect"
 	"strings"
 	"testing"
 
@@ -39,6 +40,51 @@ func TestExecuteRejectsUnavailableAndUnknownCommands(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestConfigCommandsDispatchEffectiveShowAndSet(t *testing.T) {
+	var gotShow bool
+	var gotSet string
+	lifecycle := &recordingLifecycle{}
+	root := NewRootWithLifecycle(configLifecycle{
+		Lifecycle: lifecycle,
+		show: func(_ context.Context, effective, redact bool, _ OutputMode, _ io.Writer) error {
+			gotShow = effective && redact
+			return nil
+		},
+		set: func(_ context.Context, key, value string, _ OutputMode, _ io.Writer) error {
+			gotSet = key + "=" + value
+			return nil
+		},
+	})
+
+	if code := Execute(context.Background(), root, []string{"config", "show", "--effective"}, Streams{}); code != int(ExitSuccess) || !gotShow {
+		t.Fatalf("config show code=%d gotShow=%v", code, gotShow)
+	}
+	if code := Execute(context.Background(), root, []string{"config", "set", "backend", "file:///srv/camp"}, Streams{}); code != int(ExitSuccess) || gotSet != "backend=file:///srv/camp" {
+		t.Fatalf("config set code=%d gotSet=%q", code, gotSet)
+	}
+	var help bytes.Buffer
+	if code := Execute(context.Background(), root, []string{"config", "show", "--help"}, Streams{Out: &help}); code != int(ExitSuccess) {
+		t.Fatalf("config show help code=%d", code)
+	}
+	if strings.Contains(help.String(), "--redact") {
+		t.Fatalf("config show help exposes secret-dump toggle:\n%s", help.String())
+	}
+}
+
+type configLifecycle struct {
+	Lifecycle
+	show func(context.Context, bool, bool, OutputMode, io.Writer) error
+	set  func(context.Context, string, string, OutputMode, io.Writer) error
+}
+
+func (c configLifecycle) ConfigShow(ctx context.Context, effective, redact bool, mode OutputMode, out io.Writer) error {
+	return c.show(ctx, effective, redact, mode, out)
+}
+
+func (c configLifecycle) ConfigSet(ctx context.Context, key, value string, mode OutputMode, out io.Writer) error {
+	return c.set(ctx, key, value, mode, out)
 }
 
 func TestLifecycleCommandsDelegateWithStrictArgumentsAndInheritedMode(t *testing.T) {
@@ -224,6 +270,7 @@ type recordingOperationalLifecycle struct {
 	serveLogsRequests    []ServeLogsRequest
 	serveRestartRequests []ServeRestartRequest
 	providerListCalls    int
+	providerRequests     []ProviderMutationRequest
 }
 
 func (r *recordingOperationalLifecycle) ImagesList(_ context.Context, request SessionRequest, mode OutputMode, _ io.Writer) error {
@@ -262,6 +309,18 @@ func (r *recordingOperationalLifecycle) ProvidersList(_ context.Context, mode Ou
 	return nil
 }
 
+func (r *recordingOperationalLifecycle) ProviderAdd(_ context.Context, request ProviderMutationRequest, mode OutputMode, _ io.Writer) error {
+	r.providerRequests = append(r.providerRequests, request)
+	r.calls = append(r.calls, "provider-add:"+string(mode))
+	return nil
+}
+
+func (r *recordingOperationalLifecycle) ProviderUse(_ context.Context, request ProviderMutationRequest, mode OutputMode, _ io.Writer) error {
+	r.providerRequests = append(r.providerRequests, request)
+	r.calls = append(r.calls, "provider-use:"+string(mode))
+	return nil
+}
+
 func TestOperationalCommandsMapStableBoundaryRequests(t *testing.T) {
 	t.Parallel()
 
@@ -277,6 +336,8 @@ func TestOperationalCommandsMapStableBoundaryRequests(t *testing.T) {
 		{name: "serve logs", args: []string{"serve", "logs", "fileserver", "--tail-bytes", "4096"}, want: "serve-logs:human"},
 		{name: "serve restart", args: []string{"serve", "restart", "registry", "--launch-token", "token-1"}, want: "serve-restart:human"},
 		{name: "provider list", args: []string{"provider", "list"}, want: "provider-list:human"},
+		{name: "provider add", args: []string{"provider", "add", "docker", "--context", "work", "--option", "DOCKER_PATH=/run/docker.sock", "--option", "HELPER=false"}, want: "provider-add:human"},
+		{name: "provider use", args: []string{"provider", "use", "docker", "--context", "work"}, want: "provider-use:human"},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
@@ -295,6 +356,9 @@ func TestOperationalCommandsMapStableBoundaryRequests(t *testing.T) {
 	}
 	if got := lifecycle.serveRestartRequests[0]; got.Service != "registry" || got.LaunchToken != "token-1" {
 		t.Fatalf("serve restart request = %#v", got)
+	}
+	if got := lifecycle.providerRequests[0]; got.Name != "docker" || got.Context != "work" || !reflect.DeepEqual(got.Options, []string{"DOCKER_PATH=/run/docker.sock", "HELPER=false"}) {
+		t.Fatalf("provider add request = %#v", got)
 	}
 }
 
@@ -862,6 +926,7 @@ func TestRootHelpIsDeterministic(t *testing.T) {
 		t.Fatalf("help changed between identical roots:\nfirst:\n%s\nsecond:\n%s", first, second)
 	}
 	want := "Recoverable capsule workspaces\n\nUsage:\n  camp [flags]\n  camp [command]\n\nAvailable Commands:\n  attach      Attach to an open capsule workspace\n  close       Publish a checkpoint and close\n  completion  Generate shell completion\n  doctor      Diagnose required host capabilities\n  help        Help about any command\n  images      Inspect and reconcile workspace images\n  init        Initialize a capsule root\n  kit         Inspect and verify CampKit archives\n  list        List stored camps\n  open        Open a capsule workspace\n  provider    Inspect configured DevPod providers\n  recover     Recover an interrupted lifecycle\n  reopen      Reopen a closed capsule workspace\n  serve       Inspect and restart Camp-managed services\n  setup       Install or reuse pinned DevPod and Hauler tools\n  status      Show the selected camp session\n  strike      Archive local Camp state and start fresh\n  sync        Publish a checkpoint and remain open\n\nFlags:\n  -h, --help   help for camp\n      --json   emit stable JSON output\n\nUse \"camp [command] --help\" for more information about a command.\n"
+	want = strings.Replace(want, "  doctor", "  config      Inspect and update Camp configuration"+"\n"+"  doctor", 1)
 	if first != want {
 		t.Fatalf("help:\n%s\nwant:\n%s", first, want)
 	}
