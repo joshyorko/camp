@@ -13,6 +13,13 @@ git diff --check
 
 Report passed, failed, and skipped gates separately. Installed-tool tests may skip without pinned DevPod, Hauler, or `pasta`; those skips leave the real lifecycle unproved. A package test, commit, push, merge, packaged artifact, and deployed release are distinct evidence states.
 
+Hosted Actions admission is a separate state from test execution. When a run
+reports an account billing or spending-limit admission block and its jobs have
+empty `runner_name` and zero executed steps, record the checks as
+`billing-blocked`/not yet proven; do not interpret their conclusions as source
+test failures or successes. Reassess only after a fresh run has an assigned
+runner and executed steps.
+
 ## Readiness ledger
 
 For a current-state or issue-reconciliation assessment, bind every claim to one
