@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"os"
 
 	"github.com/spf13/cobra"
 )
@@ -144,6 +145,11 @@ type ProviderLister interface {
 	ProvidersList(context.Context, OutputMode, io.Writer) error
 }
 
+type KitReader interface {
+	KitInspect(context.Context, string, OutputMode, io.Writer) error
+	KitVerify(context.Context, string, OutputMode, io.Writer) error
+}
+
 func NewRootWithLifecycle(lifecycle Lifecycle) *cobra.Command {
 	root := &cobra.Command{
 		Use:           "camp",
@@ -192,6 +198,9 @@ func NewRootWithLifecycle(lifecycle Lifecycle) *cobra.Command {
 	if providers, ok := lifecycle.(ProviderLister); ok {
 		root.AddCommand(newProviderCommand(providers.ProvidersList))
 	}
+	if kitReader, ok := lifecycle.(KitReader); ok {
+		root.AddCommand(newKitCommand(kitReader.KitInspect, kitReader.KitVerify))
+	}
 	root.AddCommand(
 		newInitCommand(lifecycle.Init, interactiveInit),
 		optionalArgumentCommand("open", "Open a capsule workspace", lifecycle.Open),
@@ -238,6 +247,34 @@ func newImagesCommand(operations ImageOperations) *cobra.Command {
 	}
 	addSessionFlags(restore, &restoreRequest)
 	command.AddCommand(list, capture, restore)
+	return command
+}
+
+func newKitCommand(inspect func(context.Context, string, OutputMode, io.Writer) error, verify func(context.Context, string, OutputMode, io.Writer) error) *cobra.Command {
+	command := &cobra.Command{
+		Use: "kit", Short: "Inspect and verify CampKit archives", Args: usageArgs(cobra.NoArgs),
+		RunE: func(*cobra.Command, []string) error { return nil },
+	}
+	command.AddCommand(
+		&cobra.Command{
+			Use: "inspect [file]", Short: "Inspect a CampKit archive", Args: usageArgs(cobra.ExactArgs(1)),
+			RunE: func(command *cobra.Command, args []string) error {
+				if err := validateRegularFile(args[0]); err != nil {
+					return UsageError(err)
+				}
+				return inspect(command.Context(), args[0], OutputModeFrom(command), command.OutOrStdout())
+			},
+		},
+		&cobra.Command{
+			Use: "verify [file]", Short: "Verify archive integrity and manifest consistency", Args: usageArgs(cobra.ExactArgs(1)),
+			RunE: func(command *cobra.Command, args []string) error {
+				if err := validateRegularFile(args[0]); err != nil {
+					return UsageError(err)
+				}
+				return verify(command.Context(), args[0], OutputModeFrom(command), command.OutOrStdout())
+			},
+		},
+	)
 	return command
 }
 
@@ -498,4 +535,15 @@ func usageArgs(validate cobra.PositionalArgs) cobra.PositionalArgs {
 		}
 		return nil
 	}
+}
+
+func validateRegularFile(path string) error {
+	info, err := os.Lstat(path)
+	if err != nil {
+		return err
+	}
+	if info.Mode()&os.ModeSymlink != 0 || !info.Mode().IsRegular() {
+		return fmt.Errorf("expected %s to be a regular file", path)
+	}
+	return nil
 }
