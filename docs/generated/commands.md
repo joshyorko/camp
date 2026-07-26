@@ -187,6 +187,51 @@ Global flags:
       --json   emit stable JSON output
 ```
 
+## `camp kit`
+
+Inspect and verify CampKit archives
+
+```text
+Usage:
+  camp kit
+
+Flags:
+  -h, --help   help for kit
+
+Global flags:
+      --json   emit stable JSON output
+```
+
+## `camp kit inspect`
+
+Inspect a CampKit archive
+
+```text
+Usage:
+  camp kit inspect [file]
+
+Flags:
+  -h, --help   help for inspect
+
+Global flags:
+      --json   emit stable JSON output
+```
+
+## `camp kit verify`
+
+Verify archive integrity and manifest consistency
+
+```text
+Usage:
+  camp kit verify [file]
+
+Flags:
+  -h, --help   help for verify
+
+Global flags:
+      --json   emit stable JSON output
+```
+
 ## `camp list`
 
 List stored camps

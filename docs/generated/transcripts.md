@@ -22,6 +22,7 @@ Available Commands:
   help        Help about any command
   images      Inspect and reconcile workspace images
   init        Initialize a capsule root
+  kit         Inspect and verify CampKit archives
   list        List stored camps
   open        Open a capsule workspace
   provider    Inspect configured DevPod providers
@@ -117,6 +118,43 @@ effect-free docs fixture: images list dispatched; external effects disabled
 ```console
 $ camp images restore --session session-docs
 effect-free docs fixture: images restore dispatched; external effects disabled
+```
+
+## `camp kit --help`
+
+```console
+$ camp kit --help
+Inspect and verify CampKit archives
+
+Usage:
+  camp kit [flags]
+  camp kit [command]
+
+Available Commands:
+  inspect     Inspect a CampKit archive
+  verify      Verify archive integrity and manifest consistency
+
+Flags:
+  -h, --help   help for kit
+
+Global Flags:
+      --json   emit stable JSON output
+
+Use "camp kit [command] --help" for more information about a command.
+```
+
+## `camp kit inspect /proc/self/cmdline`
+
+```console
+$ camp kit inspect /proc/self/cmdline
+effect-free docs fixture: kit inspect dispatched; external effects disabled
+```
+
+## `camp kit verify /proc/self/cmdline`
+
+```console
+$ camp kit verify /proc/self/cmdline
+effect-free docs fixture: kit verify dispatched; external effects disabled
 ```
 
 ## `camp list`

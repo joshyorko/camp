@@ -1,6 +1,7 @@
 package releasepipeline_test
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -118,12 +119,72 @@ func TestProviderEvidenceUsesExplicitProtectedProfilesNotSecretConditionals(t *t
 		"evidence",
 		"gated",
 	)
-	for _, forbidden := range []string{"secrets. != ''", "if: secrets.", "if: ${{ secrets.", "contents: write", "id-token: write"} {
+	for _, forbidden := range []string{"contents: write", "id-token: write"} {
 		if strings.Contains(workflow, forbidden) {
 			t.Fatalf("provider-evidence.yml contains forbidden implicit credential gate %q", forbidden)
 		}
 	}
+	var document map[string]any
+	if err := yaml.Unmarshal([]byte(workflow), &document); err != nil {
+		t.Fatalf("parse provider-evidence.yml: %v", err)
+	}
+	triggers, ok := document["on"].(map[string]any)
+	if !ok {
+		t.Fatal("provider-evidence.yml lacks a mapping-valued on trigger")
+	}
+	if _, scheduled := triggers["schedule"]; scheduled {
+		t.Fatal("provider-evidence.yml must be explicitly dispatched, not scheduled")
+	}
+	if path, condition, found := secretConditional(document, ""); found {
+		t.Fatalf("provider-evidence.yml condition %s gates on a secret: %q", path, condition)
+	}
 	assertActionsPinned(t, workflow)
+}
+
+func TestSecretConditionalFindsFoldedAndNestedExpressions(t *testing.T) {
+	var document map[string]any
+	if err := yaml.Unmarshal([]byte(`
+jobs:
+  evidence:
+    steps:
+      - if: >-
+          always() &&
+          secrets.CAMP_PROTECTED_TOKEN != ''
+`), &document); err != nil {
+		t.Fatal(err)
+	}
+	path, _, found := secretConditional(document, "")
+	if !found || path != "jobs.evidence.steps[0].if" {
+		t.Fatalf("secret conditional = %q, found %t", path, found)
+	}
+}
+
+func secretConditional(value any, path string) (string, string, bool) {
+	switch node := value.(type) {
+	case map[string]any:
+		for key, child := range node {
+			childPath := key
+			if path != "" {
+				childPath = path + "." + key
+			}
+			if key == "if" {
+				if condition, ok := child.(string); ok && strings.Contains(condition, "secrets.") {
+					return childPath, condition, true
+				}
+			}
+			if foundPath, condition, found := secretConditional(child, childPath); found {
+				return foundPath, condition, true
+			}
+		}
+	case []any:
+		for index, child := range node {
+			childPath := fmt.Sprintf("%s[%d]", path, index)
+			if foundPath, condition, found := secretConditional(child, childPath); found {
+				return foundPath, condition, true
+			}
+		}
+	}
+	return "", "", false
 }
 
 func readWorkflow(t *testing.T, name string) string {
