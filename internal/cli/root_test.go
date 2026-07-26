@@ -108,6 +108,17 @@ func TestLifecycleCommandsDelegateWithStrictArgumentsAndInheritedMode(t *testing
 	}
 }
 
+func TestKitExportCommandDelegatesGenerationAndOutput(t *testing.T) {
+	lifecycle := &recordingLifecycle{}
+	var stdout, stderr bytes.Buffer
+	if code := Execute(context.Background(), NewRootWithLifecycle(lifecycle), []string{"kit", "export", "--generation", "42-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "--output", "/tmp/out.campkit"}, Streams{Out: &stdout, ErrOut: &stderr}); code != int(ExitSuccess) {
+		t.Fatalf("export exit code = %d, stderr=%q", code, stderr.String())
+	}
+	if got, want := lifecycle.calls[len(lifecycle.calls)-1], "kit-export:42-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa:/tmp/out.campkit:human"; got != want {
+		t.Fatalf("export call = %q, want %q", got, want)
+	}
+}
+
 func TestLifecycleKitCommandRejectsInvalidPaths(t *testing.T) {
 	t.Parallel()
 
@@ -179,6 +190,11 @@ func (r *recordingLifecycle) KitInspect(_ context.Context, file string, mode Out
 
 func (r *recordingLifecycle) KitVerify(_ context.Context, file string, mode OutputMode, _ io.Writer) error {
 	r.calls = append(r.calls, "kit-verify:"+file+":"+string(mode))
+	return nil
+}
+
+func (r *recordingLifecycle) KitExport(_ context.Context, request KitExportRequest, mode OutputMode, _ io.Writer) error {
+	r.calls = append(r.calls, "kit-export:"+request.Generation+":"+request.Output+":"+string(mode))
 	return nil
 }
 
