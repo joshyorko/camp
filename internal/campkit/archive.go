@@ -213,6 +213,7 @@ func Verify(ctx context.Context, reader io.Reader, limits ArchiveLimits, evaluat
 
 	verifiedPayloads := make([]PayloadVerification, 0, len(payloads))
 	seen := make(map[string]struct{}, len(payloads))
+	var trustEvidence []byte
 	for expected := 0; ; expected++ {
 		entry, err := tarReader.Next()
 		if errors.Is(err, io.EOF) {
@@ -241,11 +242,28 @@ func Verify(ctx context.Context, reader io.Reader, limits ArchiveLimits, evaluat
 		if entry.Size != payload.Size {
 			return Verification{}, fmt.Errorf("%q payload size %d != manifest %d: %w", entry.Name, entry.Size, payload.Size, ErrDigestMismatch)
 		}
-		body, err := readExactBounded(tarReader, entry.Size, limits.MaxOuterEntryBytes)
-		if err != nil {
-			return Verification{}, fmt.Errorf("read payload %q: %w", entry.Name, err)
+		var body []byte
+		digest := ""
+		switch payload.Role {
+		case PayloadGenerationMetadata:
+			body, err = readExactBounded(tarReader, entry.Size, limits.MaxOuterEntryBytes)
+			if err != nil {
+				return Verification{}, fmt.Errorf("read payload %q: %w", entry.Name, err)
+			}
+			digest = sha256Hex(body)
+		case PayloadTrustEvidence:
+			body, err = readExactBounded(tarReader, entry.Size, limits.MaxTrustEvidenceBytes)
+			if err != nil {
+				return Verification{}, fmt.Errorf("read trust evidence %q: %w", entry.Name, err)
+			}
+			trustEvidence = body
+			digest = sha256Hex(body)
+		default:
+			digest, err = sha256HexFromReader(tarReader, entry.Size, limits.MaxOuterEntryBytes)
+			if err != nil {
+				return Verification{}, fmt.Errorf("read payload %q: %w", entry.Name, err)
+			}
 		}
-		digest := sha256Hex(body)
 		if digest != payload.SHA256 {
 			return Verification{}, fmt.Errorf("%q digest mismatch: %w", entry.Name, ErrDigestMismatch)
 		}
@@ -287,12 +305,22 @@ func Verify(ctx context.Context, reader io.Reader, limits ArchiveLimits, evaluat
 		OCIClosure: OCIClosureNotVerified,
 		Payloads:   verifiedPayloads,
 	}
-	if evaluator != nil {
-		trust, trustErr := evaluator.Evaluate(ctx, manifest, nil)
+	switch manifest.Trust.Status {
+	case TrustUnverified:
+	case TrustVerified, TrustRejected:
+		if evaluator == nil {
+			return verification, ErrTrustUnsupported
+		}
+		if len(trustEvidence) == 0 {
+			return verification, ErrTrustUnsupported
+		}
+		trust, trustErr := evaluator.Evaluate(ctx, manifest, bytes.NewReader(trustEvidence))
 		if trustErr != nil {
 			return verification, trustErr
 		}
 		verification.Trust = trust
+	default:
+		return verification, fmt.Errorf("unsupported trust status %q", manifest.Trust.Status)
 	}
 
 	return verification, nil
@@ -318,6 +346,30 @@ func metadataMatchesGeneration(body []byte, generation GenerationIdentity) bool 
 func sha256Hex(body []byte) string {
 	sum := sha256.Sum256(body)
 	return hex.EncodeToString(sum[:])
+}
+
+func sha256HexFromReader(reader io.Reader, size, limit int64) (string, error) {
+	if size < 0 || size > limit {
+		return "", &LimitError{Resource: "entry bytes", Limit: limit, Observed: size}
+	}
+	h := sha256.New()
+	body := make([]byte, min(64*1024, size))
+	remaining := size
+	for remaining > 0 {
+		chunk := min(len(body), int(remaining))
+		n, err := io.ReadFull(reader, body[:chunk])
+		if n > 0 {
+			h.Write(body[:n])
+			remaining -= int64(n)
+		}
+		if err != nil {
+			if errors.Is(err, io.ErrUnexpectedEOF) {
+				return "", io.ErrUnexpectedEOF
+			}
+			return "", err
+		}
+	}
+	return hex.EncodeToString(h.Sum(nil)), nil
 }
 
 type LimitError struct {

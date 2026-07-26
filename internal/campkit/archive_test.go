@@ -9,6 +9,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"io"
 	"sort"
 	"testing"
 	"time"
@@ -73,6 +74,75 @@ func TestVerifyStreamsPayloadsAndSeparatesIntegrityFromTrust(t *testing.T) {
 	}
 }
 
+func TestVerifyPassesTrustEvidenceToEvaluator(t *testing.T) {
+	archive, manifest, payloads := verifiedKitFixture(t)
+	when := manifest.Lineage.ExportedAt.Add(-time.Minute)
+	manifest.Trust = verifiedTrust(&when)
+	evidence := []byte(`{"evidence":"sig","trust":"present"}`)
+	addTrustEvidence(&manifest)
+	payloads[manifest.Trust.EvidencePath] = evidence
+	setPayloadBytes(&manifest, manifest.Trust.EvidencePath, evidence, "")
+	archive = campKitFixture(t, fixtureEntries(manifest, payloads, sortedPayloadPaths(manifest)))
+
+	expected := string(evidence)
+	evaluator := &trustEvaluatorMock{
+		evidence: expected,
+		result:   TrustResult("verified"),
+	}
+	verification, err := Verify(context.Background(), bytes.NewReader(archive), DefaultArchiveLimits(), evaluator)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if verification.Trust != TrustResult("verified") {
+		t.Fatalf("trust = %q, want %q", verification.Trust, TrustResult("verified"))
+	}
+	if got := string(evaluator.received); got != expected {
+		t.Fatalf("evidence = %q, want %q", got, expected)
+	}
+}
+
+func TestVerifyRejectsTrustRejectedPath(t *testing.T) {
+	archive, manifest, payloads := verifiedKitFixture(t)
+	when := manifest.Lineage.ExportedAt.Add(-time.Minute)
+	manifest.Trust = verifiedTrust(&when)
+	manifest.Trust.Status = TrustRejected
+	evidence := []byte(`{"evidence":"reject"}`)
+	addTrustEvidence(&manifest)
+	payloads[manifest.Trust.EvidencePath] = evidence
+	setPayloadBytes(&manifest, manifest.Trust.EvidencePath, evidence, "")
+	archive = campKitFixture(t, fixtureEntries(manifest, payloads, sortedPayloadPaths(manifest)))
+
+	evaluator := &trustEvaluatorMock{
+		evidence: string(evidence),
+		err:      ErrTrustRejected,
+	}
+	if _, err := Verify(context.Background(), bytes.NewReader(archive), DefaultArchiveLimits(), evaluator); !errors.Is(err, ErrTrustRejected) {
+		t.Fatalf("verify error = %v, want %v", err, ErrTrustRejected)
+	}
+}
+
+func TestVerifyRejectsVerifiedTrustWithoutEvaluator(t *testing.T) {
+	archive, manifest, payloads := verifiedKitFixture(t)
+	when := manifest.Lineage.ExportedAt.Add(-time.Minute)
+	manifest.Trust = verifiedTrust(&when)
+	evidence := []byte(`{"evidence":"sig","trust":"required"}`)
+	addTrustEvidence(&manifest)
+	payloads[manifest.Trust.EvidencePath] = evidence
+	setPayloadBytes(&manifest, manifest.Trust.EvidencePath, evidence, "")
+	archive = campKitFixture(t, fixtureEntries(manifest, payloads, sortedPayloadPaths(manifest)))
+
+	if _, err := Verify(context.Background(), bytes.NewReader(archive), DefaultArchiveLimits(), nil); !errors.Is(err, ErrTrustUnsupported) {
+		t.Fatalf("verify error = %v, want %v", err, ErrTrustUnsupported)
+	}
+}
+
+func TestVerifyRejectsOversizedPayloadWithoutBoundedAllocation(t *testing.T) {
+	payload := bytes.Repeat([]byte{'a'}, 65536)
+	if _, err := sha256HexFromReader(bytes.NewReader(payload), int64(len(payload)), 1024); !errors.Is(err, ErrArchiveLimit) {
+		t.Fatalf("sha256HexFromReader error = %v, want %v", err, ErrArchiveLimit)
+	}
+}
+
 func TestVerifyRejectsCorruptReorderedAndTrailingArchives(t *testing.T) {
 	_, manifest, payloads := verifiedKitFixture(t)
 	paths := sortedPayloadPaths(manifest)
@@ -121,6 +191,22 @@ func TestVerifyBindsRawGenerationMetadataSemantics(t *testing.T) {
 	if _, err := Verify(context.Background(), bytes.NewReader(archive), DefaultArchiveLimits(), nil); !errors.Is(err, ErrMetadataMismatch) {
 		t.Fatalf("verify error = %v, want metadata mismatch", err)
 	}
+}
+
+type trustEvaluatorMock struct {
+	evidence string
+	received []byte
+	result   TrustResult
+	err      error
+}
+
+func (m *trustEvaluatorMock) Evaluate(_ context.Context, _ Manifest, r io.Reader) (TrustResult, error) {
+	body, err := io.ReadAll(r)
+	if err != nil {
+		return TrustResultUnverified, err
+	}
+	m.received = body
+	return m.result, m.err
 }
 
 type fixtureEntry struct {
