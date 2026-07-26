@@ -499,4 +499,5 @@ still a failed gate; it must not be reported as package lifecycle evidence.
 - `docs/superpowers/plans/2026-07-14-camp.md` (names the currently missing local lifecycle gates)
 - `.github/workflows/ci.yml`, `release.yml`, and `provider-evidence.yml`
 - `releasepipeline/workflow_contract_test.go` and `evidence_test.go`
+- `scripts/kubernetes_evidence.py` and `releasepipeline/kubernetes_evidence_test.go`
 - `packaging/build-release-evidence.sh`

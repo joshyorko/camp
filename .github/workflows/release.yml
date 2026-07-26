@@ -142,8 +142,31 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           RUN_ID: ${{ inputs.kubernetes_evidence_run_id }}
+          CANDIDATE_COMMIT: ${{ github.sha }}
+          CANDIDATE_SHA256: ${{ inputs.kubernetes_candidate_sha256 }}
+          PROVIDER_WORKFLOW_NAME: "Protected Kubernetes provider evidence"
+          PROVIDER_WORKFLOW_PATH: ".github/workflows/provider-evidence.yml"
+          PROVIDER_EVIDENCE_JOB_NAME: "evidence"
+          PROVIDER_EVIDENCE_ENVIRONMENT: "release-providers"
         run: |
           test -n "$RUN_ID"
+          test -n "$CANDIDATE_COMMIT"
+          test -n "$CANDIDATE_SHA256"
+          run_json="$(mktemp)"
+          jobs_json="$(mktemp)"
+          workflow_id="$(gh api "repos/$GITHUB_REPOSITORY/actions/workflows/$PROVIDER_WORKFLOW_PATH" --jq .id)"
+          test -n "$workflow_id"
+          gh api "repos/$GITHUB_REPOSITORY/actions/runs/$RUN_ID" > "$run_json"
+          gh api "repos/$GITHUB_REPOSITORY/actions/runs/$RUN_ID/jobs" > "$jobs_json"
+          python3 scripts/kubernetes_evidence.py validate-provenance \
+            --run "$run_json" \
+            --jobs "$jobs_json" \
+            --commit "$CANDIDATE_COMMIT" \
+            --sha256 "$CANDIDATE_SHA256" \
+            --workflow-id "$workflow_id" \
+            --workflow-name "$PROVIDER_WORKFLOW_NAME" \
+            --job-name "$PROVIDER_EVIDENCE_JOB_NAME" \
+            --required-environment "$PROVIDER_EVIDENCE_ENVIRONMENT"
           gh run download "$RUN_ID" \
             --repo "$GITHUB_REPOSITORY" \
             --name "kubernetes-evidence-${GITHUB_SHA}" \
