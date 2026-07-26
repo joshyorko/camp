@@ -1,5 +1,22 @@
 # Local Lifecycle and Recovery
 
+Issue #3 crash evidence uses the machine-readable schema at
+`docs/evidence/crash-cut-ledger.schema.json` and the current ledger at
+`docs/evidence/issue-3-crash-cut-ledger.json`. Each cut records its durable
+precondition, injected death, recovery action, resulting journal state,
+publication/cleanup result, and evidence artifacts. A cut is runtime-proven
+only when its real gate runs against the exact `CAMP_TEST_BINARY`; unit tests
+and skipped capability gates do not upgrade its status. The ledger candidate
+records the exact commit and executable SHA-256, and runtime-proven entries
+must contain evidence artifacts.
+
+The current ledger intentionally marks the complete process-death matrix
+blocked. `integration/forwarder_crash_test.go` implements the
+forwarder-start-before-fact gate but does not provide current runtime proof.
+The crash matrix also includes initial `ServiceStart` separately from
+`ServiceRestart`. Required real capabilities must fail the gate explicitly;
+the local crash gate does not require rsync, while remote mirror gates do.
+
 ## Current boundary
 
 The production CLI exposes `init`, `open`, `sync`, `close`, `reopen`, `recover`, and an internal hidden `supervise` command owned by the Camp binary. Production read-write open must launch the hidden detached supervisor process, record the child claim as `ObservedPending`, compose heartbeat dependencies, then promote that exact supervisor record to `ObservedReady`; fail closed if the child identity never appears or if the child exits before readiness is recorded. Registry sealing models restart as a child intent authorized by the exact pending seal and preserves the newer service identity when the seal fact is composed from its older checkpoint snapshot.
