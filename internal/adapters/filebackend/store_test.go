@@ -268,6 +268,40 @@ func TestStorePersistsAMutationUniqueRevisionWithEachObject(t *testing.T) {
 	}
 }
 
+func TestStoreSourceIdentityReturnsCanonicalObjectLocation(t *testing.T) {
+	store, root := newStore(t)
+	ctx := context.Background()
+	key := "capsule/generations/1.tar.zst"
+	body := []byte("identity bytes")
+	meta, err := store.PutImmutable(ctx, key, byteSource(body), digest(body), int64(len(body)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	info, err := store.SourceIdentity(key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if info.Kind != "file" || info.Key != key || info.Revision != meta.Revision || info.Size != meta.Size || info.SHA256 != meta.SHA256 {
+		t.Fatalf("identity mismatch\n got: %#v\nwant key=%q rev=%q size=%d sha=%q", info, meta.Key, meta.Revision, meta.Size, meta.SHA256)
+	}
+	expectedPath := filepath.Join(root, filepath.FromSlash(key))
+	if info.CanonicalPath != expectedPath {
+		t.Fatalf("canonical path = %q, want %q", info.CanonicalPath, expectedPath)
+	}
+
+	stat, err := os.Stat(expectedPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	raw, ok := stat.Sys().(*syscall.Stat_t)
+	if !ok {
+		t.Fatalf("unexpected stat type %T", stat.Sys())
+	}
+	if info.Device != uint64(raw.Dev) || info.Inode != raw.Ino {
+		t.Fatalf("file identity mismatch: got dev=%d ino=%d want dev=%d ino=%d", info.Device, info.Inode, raw.Dev, raw.Ino)
+	}
+}
+
 func TestStoreDoesNotDeleteAfterContextCancellation(t *testing.T) {
 	store, _ := newStore(t)
 	ctx := context.Background()

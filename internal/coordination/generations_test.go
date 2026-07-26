@@ -1,9 +1,11 @@
 package coordination_test
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
+	"io"
 	"reflect"
 	"testing"
 	"time"
@@ -102,6 +104,105 @@ func TestGenerationRepositoryPutsVerifiesAndPreservesImmutableSidecar(t *testing
 	mutated.SessionID = "different-session"
 	if _, err := repository.PutAndVerify(ctx, mutated, byteSource(body)); !errors.Is(err, ports.ErrConflict) {
 		t.Fatalf("mutated sidecar error = %v, want immutable conflict", err)
+	}
+}
+
+func TestGenerationRepositoryResolvesExactGenerationByKey(t *testing.T) {
+	store := newObjectStore(t)
+	repository := coordination.NewGenerationRepository(store)
+	ctx := context.Background()
+	body := []byte("exact generation payload")
+	ref := domain.GenerationRef{Generation: 7, ArchiveSHA256: sha256String(body)}
+	metadata := generationMetadataFixture(t, "second-brain", domain.Lineage{Branch: "main"}, ref, nil, body, time.Date(2026, 7, 14, 12, 0, 0, 0, time.UTC))
+
+	record, err := repository.PutAndVerify(ctx, metadata, byteSource(body))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	exact, err := repository.ResolveExactGeneration(ctx, metadata.Capsule, metadata.Lineage, metadata.Generation)
+	if err != nil {
+		t.Fatal(err)
+	}
+	expectedMetadataBytes := mustMarshalJSON(t, record.Metadata)
+	if !bytes.Equal(exact.MetadataBytes, expectedMetadataBytes) {
+		t.Fatalf("metadata bytes mismatch")
+	}
+	if !reflect.DeepEqual(exact.Metadata, record.Metadata) {
+		t.Fatalf("exact metadata mismatch\n got: %#v\nwant: %#v", exact.Metadata, record.Metadata)
+	}
+	if exact.Archive.Key != record.Metadata.ObjectKey || exact.Sidecar.Key != record.Metadata.MetadataKey {
+		t.Fatalf("exact metadata keys mismatch\n got archive=%q/%q sidecar=%q/%q", exact.Archive.Key, record.Archive.Key, exact.Sidecar.Key, record.Sidecar.Key)
+	}
+	if exact.Archive.SHA256 != metadata.Generation.ArchiveSHA256 {
+		t.Fatalf("archive sha256 = %q, want %q", exact.Archive.SHA256, metadata.Generation.ArchiveSHA256)
+	}
+	if exact.ArchiveFingerprint.Key != metadata.ObjectKey || exact.ArchiveFingerprint.Size != metadata.Size {
+		t.Fatalf("archive fingerprint = %#v", exact.ArchiveFingerprint)
+	}
+	if exact.Sidecar.SHA256 == "" || exact.SidecarFingerprint.SHA256 == "" {
+		t.Fatal("missing metadata fingerprint")
+	}
+	archiveReader, err := exact.ArchiveSource.Open()
+	if err != nil {
+		t.Fatal(err)
+	}
+	sidecarReader, err := exact.SidecarSource.Open()
+	if err != nil {
+		archiveReader.Close()
+		t.Fatal(err)
+	}
+	defer archiveReader.Close()
+	defer sidecarReader.Close()
+	gotArchive, err := io.ReadAll(archiveReader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	gotSidecar, err := io.ReadAll(sidecarReader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(gotArchive, body) {
+		t.Fatalf("archive source mismatch")
+	}
+	if !bytes.Equal(gotSidecar, exact.MetadataBytes) {
+		t.Fatalf("sidecar source mismatch")
+	}
+}
+
+func mustMarshalJSON(t *testing.T, value any) []byte {
+	t.Helper()
+	body, err := json.Marshal(value)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return body
+}
+
+func TestGenerationRepositoryResolveExactGenerationRejectsUnverifiedMetadata(t *testing.T) {
+	store := newObjectStore(t)
+	repository := coordination.NewGenerationRepository(store)
+	ctx := context.Background()
+	body := []byte("verified archive")
+	ref := domain.GenerationRef{Generation: 11, ArchiveSHA256: sha256String(body)}
+	metadata := generationMetadataFixture(t, "second-brain", domain.Lineage{Branch: "main"}, ref, nil, body, time.Now())
+
+	record, err := repository.PutAndVerify(ctx, metadata, byteSource(body))
+	if err != nil {
+		t.Fatal(err)
+	}
+	mutated := record.Metadata
+	mutated.Verified.RemoteBytesVerified = false
+	encoded, err := json.Marshal(mutated)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.PutConditional(ctx, mutated.MetadataKey, encoded, ports.WriteCondition{MatchRevision: record.Sidecar.Revision}); err != nil {
+		t.Fatal(err)
+	}
+	_, err = repository.ResolveExactGeneration(ctx, metadata.Capsule, metadata.Lineage, metadata.Generation)
+	if !errors.Is(err, coordination.ErrGenerationVerification) {
+		t.Fatalf("ResolveExactGeneration error = %v, want generation verification", err)
 	}
 }
 

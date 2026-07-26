@@ -28,6 +28,17 @@ type ObjectMeta struct {
 	Modified time.Time
 }
 
+type ObjectSourceFingerprint struct {
+	Kind          string
+	Key           string
+	Revision      Revision
+	Size          int64
+	SHA256        string
+	CanonicalPath string `json:"-"`
+	Device        uint64 `json:"-"`
+	Inode         uint64 `json:"-"`
+}
+
 type WriteCondition struct {
 	MustBeAbsent  bool
 	MatchRevision Revision
@@ -44,4 +55,8 @@ type ObjectStore interface {
 	PutConditional(ctx context.Context, key string, body []byte, condition WriteCondition) (ObjectMeta, error)
 	DeleteConditional(ctx context.Context, key string, expected Revision) error
 	List(ctx context.Context, prefix, pageToken string) (items []ObjectMeta, nextPageToken string, err error)
+}
+
+type ObjectStoreIdentity interface {
+	SourceIdentity(key string) (ObjectSourceFingerprint, error)
 }

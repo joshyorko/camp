@@ -105,6 +105,37 @@ func (s *Store) Get(ctx context.Context, key string) (io.ReadCloser, ports.Objec
 	return file, meta, nil
 }
 
+func (s *Store) SourceIdentity(key string) (ports.ObjectSourceFingerprint, error) {
+	parentFD, name, err := s.openParent(key, false)
+	if err != nil {
+		return ports.ObjectSourceFingerprint{}, err
+	}
+	defer syscall.Close(parentFD)
+	file, err := openRegularAt(parentFD, name, key)
+	if err != nil {
+		return ports.ObjectSourceFingerprint{}, err
+	}
+	defer file.Close()
+	meta, err := metadataFromFile(file, key)
+	if err != nil {
+		return ports.ObjectSourceFingerprint{}, err
+	}
+	var stat syscall.Stat_t
+	if err := syscall.Fstat(int(file.Fd()), &stat); err != nil {
+		return ports.ObjectSourceFingerprint{}, fmt.Errorf("stat source identity %q: %w", key, err)
+	}
+	return ports.ObjectSourceFingerprint{
+		Kind:          "file",
+		Key:           key,
+		Revision:      meta.Revision,
+		Size:         meta.Size,
+		SHA256:       meta.SHA256,
+		CanonicalPath: filepath.Join(s.root, filepath.FromSlash(key)),
+		Device:       stat.Dev,
+		Inode:        stat.Ino,
+	}, nil
+}
+
 func (s *Store) Head(ctx context.Context, key string) (ports.ObjectMeta, error) {
 	file, meta, err := s.Get(ctx, key)
 	if err != nil {
