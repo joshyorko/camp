@@ -10,6 +10,9 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
+	"os"
+	"path/filepath"
+	"reflect"
 	"runtime"
 	"sort"
 	"testing"
@@ -19,6 +22,238 @@ import (
 	"github.com/joshyorko/camp/internal/domain"
 	"github.com/klauspost/compress/zstd"
 )
+
+func TestExportWritesDeterministicArchiveFromValidatedSources(t *testing.T) {
+	_, manifest, payloads := verifiedKitFixture(t)
+	manifest.Lineage.ExportedAt = time.Unix(1700000000, 0).UTC()
+	if err := Validate(manifest); err != nil {
+		t.Fatal(err)
+	}
+
+	first := new(bytes.Buffer)
+	second := new(bytes.Buffer)
+	if err := Export(context.Background(), first, manifest, byteSources(payloads)); err != nil {
+		t.Fatal(err)
+	}
+	if err := Export(context.Background(), second, manifest, byteSources(payloads)); err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(first.Bytes(), second.Bytes()) {
+		t.Fatal("repeated exports differ")
+	}
+	if _, err := Verify(context.Background(), bytes.NewReader(first.Bytes()), DefaultArchiveLimits(), nil); err != nil {
+		t.Fatalf("exported archive does not verify: %v", err)
+	}
+}
+
+func TestExportRejectsSourceDigestMismatchBeforeWriting(t *testing.T) {
+	_, manifest, payloads := verifiedKitFixture(t)
+	payloads[manifest.Payloads[0].Path] = []byte("wrong")
+	sources := byteSources(payloads)
+	output := new(bytes.Buffer)
+	if err := Export(context.Background(), output, manifest, sources); !errors.Is(err, ErrDigestMismatch) {
+		t.Fatalf("Export error = %v, want digest mismatch", err)
+	}
+	if output.Len() == 0 {
+		t.Fatal("export did not stream any bytes before source validation failed")
+	}
+}
+
+func TestExportFileLeavesNoTemporaryArtifactOnFailure(t *testing.T) {
+	_, manifest, payloads := verifiedKitFixture(t)
+	payloads[manifest.Payloads[0].Path] = []byte("wrong")
+	directory := t.TempDir()
+	output := filepath.Join(directory, "kit.campkit")
+	if err := ExportFile(context.Background(), output, manifest, byteSources(payloads)); !errors.Is(err, ErrDigestMismatch) {
+		t.Fatalf("ExportFile error = %v, want digest mismatch", err)
+	}
+	if _, err := os.Stat(output); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("output stat error = %v, want missing output", err)
+	}
+	entries, err := os.ReadDir(directory)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(entries) != 0 {
+		t.Fatalf("temporary artifacts remain: %v", entries)
+	}
+}
+
+func TestExportStreamsLargePayloadWithoutWholeBodyOrArchiveWrites(t *testing.T) {
+	_, manifest, payloads := verifiedKitFixture(t)
+	var target string
+	for _, payload := range manifest.Payloads {
+		if payload.Role != PayloadGenerationArchive && payload.Role != PayloadGenerationMetadata {
+			target = payload.Path
+			break
+		}
+	}
+	const size = int64(32 << 20)
+	setGeneratedPayload(&manifest, target, size)
+	source := &generatedSource{size: size, value: 'x'}
+	sources := byteSources(payloads)
+	sources[target] = source
+	output := &boundedRecordingWriter{}
+	if err := Export(context.Background(), output, manifest, sources); err != nil {
+		t.Fatal(err)
+	}
+	if source.maxRead > 1<<20 {
+		t.Fatalf("source read request = %d, want bounded", source.maxRead)
+	}
+	if output.maxWrite > 1<<20 {
+		t.Fatalf("archive write = %d, want streaming", output.maxWrite)
+	}
+}
+
+func TestExportFileCleansOwnedTemporaryFileOnCancellationAndSourceErrors(t *testing.T) {
+	_, manifest, payloads := verifiedKitFixture(t)
+	tests := []struct {
+		name   string
+		ctx    func() context.Context
+		source PayloadSource
+	}{
+		{name: "cancelled", ctx: func() context.Context { ctx, cancel := context.WithCancel(context.Background()); cancel(); return ctx }, source: byteSources(payloads)[manifest.Payloads[0].Path]},
+		{name: "open error", ctx: context.Background, source: failingSource{err: errors.New("open failed")}},
+		{name: "close error", ctx: context.Background, source: closeFailingSource{}},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			directory := t.TempDir()
+			output := filepath.Join(directory, "kit.campkit")
+			sources := byteSources(payloads)
+			sources[manifest.Payloads[0].Path] = test.source
+			if err := ExportFile(test.ctx(), output, manifest, sources); err == nil {
+				t.Fatal("ExportFile unexpectedly succeeded")
+			}
+			entries, err := os.ReadDir(directory)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(entries) != 0 {
+				t.Fatalf("temporary artifacts remain: %v", entries)
+			}
+		})
+	}
+}
+
+func TestExportFileNoReplacePreservesTargetCreatedBeforePublication(t *testing.T) {
+	_, manifest, payloads := verifiedKitFixture(t)
+	directory := t.TempDir()
+	output := filepath.Join(directory, "kit.campkit")
+	exportFileBeforePublish = func(path string) error {
+		return os.WriteFile(path, []byte("winner"), 0o600)
+	}
+	t.Cleanup(func() { exportFileBeforePublish = func(string) error { return nil } })
+	if err := ExportFile(context.Background(), output, manifest, byteSources(payloads)); !errors.Is(err, os.ErrExist) {
+		t.Fatalf("ExportFile error = %v, want existing-target error", err)
+	}
+	body, err := os.ReadFile(output)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(body) != "winner" {
+		t.Fatalf("target bytes = %q, want winner", body)
+	}
+	entries, err := os.ReadDir(directory)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(entries) != 1 || entries[0].Name() != filepath.Base(output) {
+		t.Fatalf("directory entries = %v, want only target", entries)
+	}
+}
+
+func setGeneratedPayload(manifest *Manifest, path string, size int64) {
+	hash := sha256.New()
+	chunk := bytes.Repeat([]byte{'x'}, 64<<10)
+	for remaining := size; remaining > 0; {
+		n := int64(len(chunk))
+		if n > remaining {
+			n = remaining
+		}
+		_, _ = hash.Write(chunk[:n])
+		remaining -= n
+	}
+	for i := range manifest.Payloads {
+		if manifest.Payloads[i].Path == path {
+			manifest.Payloads[i].Size = size
+			manifest.Payloads[i].SHA256 = hex.EncodeToString(hash.Sum(nil))
+			return
+		}
+	}
+	panic("payload not found: " + path)
+}
+
+type generatedSource struct {
+	size    int64
+	value   byte
+	maxRead int
+}
+
+func (s *generatedSource) Open() (io.ReadCloser, error) {
+	return &generatedReader{remaining: s.size, value: s.value, maxRead: &s.maxRead}, nil
+}
+
+type generatedReader struct {
+	remaining int64
+	value     byte
+	maxRead   *int
+}
+
+func (r *generatedReader) Read(p []byte) (int, error) {
+	if len(p) > *r.maxRead {
+		*r.maxRead = len(p)
+	}
+	if r.remaining == 0 {
+		return 0, io.EOF
+	}
+	n := len(p)
+	if int64(n) > r.remaining {
+		n = int(r.remaining)
+	}
+	for i := 0; i < n; i++ {
+		p[i] = r.value
+	}
+	r.remaining -= int64(n)
+	return n, nil
+}
+
+func (r *generatedReader) Close() error { return nil }
+
+type boundedRecordingWriter struct{ maxWrite int }
+
+func (w *boundedRecordingWriter) Write(p []byte) (int, error) {
+	if len(p) > w.maxWrite {
+		w.maxWrite = len(p)
+	}
+	return len(p), nil
+}
+
+type failingSource struct{ err error }
+
+func (s failingSource) Open() (io.ReadCloser, error) { return nil, s.err }
+
+type closeFailingSource struct{}
+
+func (closeFailingSource) Open() (io.ReadCloser, error) {
+	return closeFailingReader{Reader: bytes.NewReader([]byte("close-error"))}, nil
+}
+
+type closeFailingReader struct{ *bytes.Reader }
+
+func (closeFailingReader) Close() error { return errors.New("close failed") }
+
+func byteSources(values map[string][]byte) map[string]PayloadSource {
+	result := make(map[string]PayloadSource, len(values))
+	for path, body := range values {
+		result[path] = payloadBytes(body)
+	}
+	return result
+}
+
+type payloadBytes []byte
+
+func (b payloadBytes) Open() (io.ReadCloser, error) { return io.NopCloser(bytes.NewReader(b)), nil }
 
 func TestInspectReadsOnlyCanonicalManifestAndMarksIntegrityNotVerified(t *testing.T) {
 	manifest := validManifest()

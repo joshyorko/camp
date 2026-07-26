@@ -96,9 +96,10 @@ The file backend now surfaces local object-source identity through
 `Device`/`Inode` fields for drift detection. This is best-effort metadata;
 verifier semantics are still driven by generation metadata and archive hashing.
 `ResolveExactGeneration` validates object and sidecar fingerprints when it
-resolves a generation, but its returned sources reopen the backend later. An
-exporter must therefore revalidate those fingerprints before and after copying
-payloads and abort on drift; initial resolution alone is not a transfer lock.
+resolves a generation, but its returned sources reopen the backend later.
+`ExactGenerationRecord.RevalidateSources` repeats those checks and must be
+called by export orchestration before and after copying payloads; initial
+resolution alone is not a transfer lock.
 
 ## Verification and boundaries
 
@@ -115,8 +116,17 @@ strict decoding, schema classification, generation and metadata binding,
 platform/tool/Room closure, paths and bounds, OCI identity, semantic
 duplicates, trust matrices, hostile values, and exact round trips.
 
-Archive entry limits, compressed-byte safety, payload byte comparison,
-signature verification, authoritative artifact resolution, deterministic archive
-writing, publication, import recovery, image loading, and disconnected acceptance
-remain later lifecycle work. Do not treat
+Archive entry limits, compressed-byte safety, payload byte comparison, and
+deterministic archive writing are implemented in `campkit.Export`. It validates
+the manifest first, requires a restartable source for every declared payload,
+streams each source through bounded size counting and SHA-256 while writing the
+canonical manifest first and payloads in bytewise path order. `ExportFile` adds
+same-directory ownership-checked temporary output, fsync, rename, and
+parent-directory fsync; it refuses to replace an existing output and removes
+only its owned temporary file on failure. Raw `Export` may have written partial
+bytes to an arbitrary writer when it fails; only `ExportFile` is an atomic
+publication boundary. These functions do not resolve
+generations or publish/import Camp state. An application exporter must
+revalidate exact-generation fingerprints before and after transfer; initial
+source resolution is not a transfer lock. Do not treat
 a valid C0 manifest as proof that any of those operations exist or succeeded.

@@ -143,6 +143,9 @@ func TestGenerationRepositoryResolvesExactGenerationByKey(t *testing.T) {
 	if exact.Sidecar.SHA256 == "" || exact.SidecarFingerprint.SHA256 == "" {
 		t.Fatal("missing metadata fingerprint")
 	}
+	if err := exact.RevalidateSources(ctx); err != nil {
+		t.Fatalf("RevalidateSources: %v", err)
+	}
 	archiveReader, err := exact.ArchiveSource.Open()
 	if err != nil {
 		t.Fatal(err)
@@ -167,6 +170,12 @@ func TestGenerationRepositoryResolvesExactGenerationByKey(t *testing.T) {
 	}
 	if !bytes.Equal(gotSidecar, exact.MetadataBytes) {
 		t.Fatalf("sidecar source mismatch")
+	}
+	if err := store.DeleteConditional(ctx, exact.Archive.Key, exact.Archive.Revision); err != nil {
+		t.Fatal(err)
+	}
+	if err := exact.RevalidateSources(ctx); !errors.Is(err, ports.ErrNotFound) {
+		t.Fatalf("RevalidateSources after source removal = %v, want not found", err)
 	}
 }
 
