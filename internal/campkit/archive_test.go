@@ -54,8 +54,8 @@ func TestExportRejectsSourceDigestMismatchBeforeWriting(t *testing.T) {
 	if err := Export(context.Background(), output, manifest, sources); !errors.Is(err, ErrDigestMismatch) {
 		t.Fatalf("Export error = %v, want digest mismatch", err)
 	}
-	if output.Len() != 0 {
-		t.Fatal("export wrote bytes after source validation failed")
+	if output.Len() == 0 {
+		t.Fatal("export did not stream any bytes before source validation failed")
 	}
 }
 
@@ -133,6 +133,33 @@ func TestExportFileCleansOwnedTemporaryFileOnCancellationAndSourceErrors(t *test
 				t.Fatalf("temporary artifacts remain: %v", entries)
 			}
 		})
+	}
+}
+
+func TestExportFileNoReplacePreservesTargetCreatedBeforePublication(t *testing.T) {
+	_, manifest, payloads := verifiedKitFixture(t)
+	directory := t.TempDir()
+	output := filepath.Join(directory, "kit.campkit")
+	exportFileBeforePublish = func(path string) error {
+		return os.WriteFile(path, []byte("winner"), 0o600)
+	}
+	t.Cleanup(func() { exportFileBeforePublish = func(string) error { return nil } })
+	if err := ExportFile(context.Background(), output, manifest, byteSources(payloads)); !errors.Is(err, os.ErrExist) {
+		t.Fatalf("ExportFile error = %v, want existing-target error", err)
+	}
+	body, err := os.ReadFile(output)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(body) != "winner" {
+		t.Fatalf("target bytes = %q, want winner", body)
+	}
+	entries, err := os.ReadDir(directory)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(entries) != 1 || entries[0].Name() != filepath.Base(output) {
+		t.Fatalf("directory entries = %v, want only target", entries)
 	}
 }
 

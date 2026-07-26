@@ -60,6 +60,8 @@ type PayloadSource interface {
 	Open() (io.ReadCloser, error)
 }
 
+var exportFileBeforePublish = func(string) error { return nil }
+
 // Export writes one deterministic CampKit archive while streaming each source
 // through tar+zstd. ExportFile supplies the publication boundary that removes
 // the owned temporary file if this operation fails.
@@ -88,6 +90,13 @@ func Export(ctx context.Context, dst io.Writer, manifest Manifest, sources map[s
 		return fmt.Errorf("open CampKit encoder: %w", err)
 	}
 	tarWriter := tar.NewWriter(encoder)
+	archiveClosed := false
+	defer func() {
+		if !archiveClosed {
+			_ = tarWriter.Close()
+			_ = encoder.Close()
+		}
+	}()
 	writeHeader := func(name string, size int64) error {
 		header := &tar.Header{Name: name, Mode: 0o444, Size: size, ModTime: time.Unix(0, 0).UTC(), Typeflag: tar.TypeReg, Format: tar.FormatUSTAR}
 		if err := tarWriter.WriteHeader(header); err != nil {
@@ -145,6 +154,7 @@ func Export(ctx context.Context, dst io.Writer, manifest Manifest, sources map[s
 	if err := encoder.Close(); err != nil {
 		return fmt.Errorf("close CampKit encoder: %w", err)
 	}
+	archiveClosed = true
 	return nil
 }
 
@@ -205,7 +215,10 @@ func ExportFile(ctx context.Context, output string, manifest Manifest, sources m
 	if err := os.Chmod(temporaryName, 0o444); err != nil {
 		return err
 	}
-	if err := os.Rename(temporaryName, output); err != nil {
+	if err := exportFileBeforePublish(output); err != nil {
+		return err
+	}
+	if err := publishNoReplace(temporaryName, output); err != nil {
 		return err
 	}
 	cleanup = false

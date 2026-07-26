@@ -123,7 +123,9 @@ streams each source through bounded size counting and SHA-256 while writing the
 canonical manifest first and payloads in bytewise path order. `ExportFile` adds
 same-directory ownership-checked temporary output, fsync, rename, and
 parent-directory fsync; it refuses to replace an existing output and removes
-only its owned temporary file on failure. These functions do not resolve
+only its owned temporary file on failure. Raw `Export` may have written partial
+bytes to an arbitrary writer when it fails; only `ExportFile` is an atomic
+publication boundary. These functions do not resolve
 generations or publish/import Camp state. An application exporter must
 revalidate exact-generation fingerprints before and after transfer; initial
 source resolution is not a transfer lock. Do not treat
