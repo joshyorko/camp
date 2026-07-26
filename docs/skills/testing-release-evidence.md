@@ -104,6 +104,16 @@ Robot keywords. Gate manifests distinguish passed and failed gates; an absent
 named test, opt-in skip, Robot skip, missing executable, or candidate mutation
 is a failure.
 
+A clean-start rehearsal removes only Camp-owned state. Inventory `camp list
+--json` and DevPod workspaces first, run `camp strike --purge --yes` while the
+verified CLI still exists, then remove Camp's XDG config/data/runtime roots,
+repository `build/` and `dist/`, and `~/.local/bin/camp` only after proving that
+it is a symlink to this checkout's `build/camp`. Never delete the shared RCC
+Holotree, DevPod provider configuration, unrelated DevPod workspaces, or
+unrelated container-engine resources. After cleanup, `local` must run before
+`robot` because Robot consumes the exact candidate and manifest produced by
+`local`; it never rebuilds them.
+
 The race gate resolves either the conventional `gcc` command or conda-forge's
 `x86_64-conda-linux-gnu-cc` compiler shim and passes that exact path through
 `CC`, while explicitly setting `CGO_ENABLED=1` for that gate. RCC's surrounding
