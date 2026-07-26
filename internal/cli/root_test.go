@@ -98,6 +98,9 @@ func TestLifecycleCommandsDelegateWithStrictArgumentsAndInheritedMode(t *testing
 		{"kit", "inspect"},
 		{"kit", "inspect", inspectFile, "extra"},
 		{"kit", "verify", "extra", "path"},
+		{"kit", "export"},
+		{"kit", "export", "--generation", "42-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"},
+		{"kit", "export", "--output", "/tmp/out.campkit"},
 		{"kit", "inspect", tmp},
 		{"kit", "verify", tmp},
 	} {
@@ -116,6 +119,16 @@ func TestKitExportCommandDelegatesGenerationAndOutput(t *testing.T) {
 	}
 	if got, want := lifecycle.calls[len(lifecycle.calls)-1], "kit-export:42-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa:/tmp/out.campkit:human"; got != want {
 		t.Fatalf("export call = %q, want %q", got, want)
+	}
+}
+
+func TestProductionCommandTreeIncludesKitExport(t *testing.T) {
+	command, _, err := NewRoot().Find([]string{"kit", "export"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if command.CommandPath() != "camp kit export" {
+		t.Fatalf("command path = %q, want camp kit export", command.CommandPath())
 	}
 }
 

@@ -202,6 +202,23 @@ Global flags:
       --json   emit stable JSON output
 ```
 
+## `camp kit export`
+
+Export an exact CampKit generation
+
+```text
+Usage:
+  camp kit export [flags]
+
+Flags:
+      --generation string   exact generation reference
+  -h, --help                help for export
+      --output string       CampKit output file
+
+Global flags:
+      --json   emit stable JSON output
+```
+
 ## `camp kit inspect`
 
 Inspect a CampKit archive

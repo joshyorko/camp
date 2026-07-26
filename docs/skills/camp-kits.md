@@ -3,9 +3,12 @@
 CampKit schema version 2 is the current manifest-validation contract. The
 `internal/campkit` package validates, canonically encodes, and strictly decodes
 manifests. `Inspect` and `Verify` operate on `manifest.json`-first deterministic
-tar+zstd archives. CLI composition reserves `camp kit export --generation REF
---output FILE` for a lifecycle exporter with strict required flags; the
-production generation resolver is not wired yet. Camp still does not import,
+tar+zstd archives. The production tree exposes `camp kit export --generation
+NUMBER-SHA256 --output FILE` with strict required flags. It resolves that exact
+generation from the configured backend, selected capsule, and main lineage. If
+authoritative Camp/runtime/provider/tool/Room closure is absent, export fails
+with `incomplete CampKit closure` and lists every missing authority before
+creating an output. Camp still does not import,
 load, or accept kits via CLI; schema version 1 is intentionally unsupported because no
 public command consumed or emitted it.
 
@@ -13,6 +16,8 @@ public command consumed or emitted it.
 
 - `camp kit inspect FILE`: prints the decoded manifest summary (`inspect`)
 - `camp kit verify FILE`: verifies payload integrity and prints a success summary (`verify`)
+- `camp kit export --generation NUMBER-SHA256 --output FILE`: resolves one exact
+  immutable generation and exports only when its complete closure is authoritative.
 - `--json` is supported for both commands.
 - `FILE` must be a regular file path; `camp` rejects missing files, directories,
   and symlinks before attempting to inspect or verify.
