@@ -1345,23 +1345,34 @@ func (o *Open) completeWorkspaceOpen(ctx context.Context, snapshot domain.Journa
 		return OpenResult{}, err
 	}
 	if o.deps.Forwarders != nil {
-		existing := make(map[string]struct{}, len(snapshot.Recovery.Forwarding))
-		for _, record := range snapshot.Recovery.Forwarding {
-			existing[record.Name] = struct{}{}
+		indexByName := make(map[string]int, len(snapshot.Recovery.Forwarding))
+		for index, record := range snapshot.Recovery.Forwarding {
+			indexByName[record.Name] = index
 		}
 		for _, item := range []struct {
 			name string
 			port int
 		}{{"registry", snapshot.Recovery.Configuration.RegistryPort}, {"fileserver", snapshot.Recovery.Configuration.FileserverPort}} {
-			if _, ok := existing[item.name]; ok {
-				continue
-			}
-			endpoint := endpoint(item.port)
 			request := domain.ForwardingRequest{
 				Name: item.name, WorkspaceID: snapshot.Workspace.ID, Context: snapshot.Workspace.Context,
-				LocalEndpoint: endpoint, WorkspaceEndpoint: endpoint,
+				LocalEndpoint: endpoint(item.port), WorkspaceEndpoint: endpoint(item.port),
 				LogPath:      filepath.Join(snapshot.Recovery.Session.RuntimeRoot, item.name+"-forward.log"),
 				EvidencePath: filepath.Join(snapshot.Recovery.Session.RuntimeRoot, item.name+"-forward.json"),
+			}
+			if index, ok := indexByName[item.name]; ok {
+				record, err := o.deps.Forwarders.Observe(ctx, request)
+				if err == nil {
+					snapshot.Recovery.Forwarding[index] = record
+					continue
+				}
+				if stopErr := o.deps.Forwarders.Stop(context.WithoutCancel(ctx), snapshot.Recovery.Forwarding[index]); stopErr != nil {
+					return OpenResult{}, fmt.Errorf("reconcile existing %s workspace forwarder: %w", request.Name, stopErr)
+				}
+				snapshot.Recovery.Forwarding = append(snapshot.Recovery.Forwarding[:index], snapshot.Recovery.Forwarding[index+1:]...)
+				delete(indexByName, item.name)
+				for i := 0; i < len(snapshot.Recovery.Forwarding); i++ {
+					indexByName[snapshot.Recovery.Forwarding[i].Name] = i
+				}
 			}
 			var record domain.ForwardingRecord
 			if err := journal.phase(ctx, "ForwarderStarted:"+item.name, request, &record, func() error {
