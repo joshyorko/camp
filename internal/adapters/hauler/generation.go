@@ -12,6 +12,7 @@ import (
 	"path/filepath"
 	"strings"
 
+	"github.com/joshyorko/camp/internal/ports"
 	"gopkg.in/yaml.v3"
 )
 
@@ -51,19 +52,34 @@ func (a *GenerationAssembler) Assemble(ctx context.Context, manifest, workingDir
 	} else if !errors.Is(err, os.ErrNotExist) {
 		return GenerationArtifact{}, err
 	}
-	store, err := os.MkdirTemp(workingDirectory, "fresh-hauler-store-")
-	if err != nil {
-		return GenerationArtifact{}, err
+	var store string
+	var syncErrors []error
+	for attempt := 1; attempt <= 2; attempt++ {
+		candidate, err := os.MkdirTemp(workingDirectory, "fresh-hauler-store-")
+		if err != nil {
+			syncErrors = append(syncErrors, fmt.Errorf("attempt %d: create fresh store: %w", attempt, err))
+			break
+		}
+		defer os.RemoveAll(candidate)
+		result, runErr := a.client.SyncFrom(ctx, candidate, []string{manifest}, capsuleRoot)
+		if syncErr := generationSyncError(attempt, result, runErr); syncErr == nil {
+			store = candidate
+			break
+		} else {
+			syncErrors = append(syncErrors, syncErr)
+		}
+		if ctx.Err() != nil {
+			break
+		}
 	}
-	defer os.RemoveAll(store)
+	if store == "" {
+		return GenerationArtifact{}, fmt.Errorf("sync fresh Hauler store: %w", errors.Join(syncErrors...))
+	}
 	validation, err := os.MkdirTemp(workingDirectory, "validation-hauler-store-")
 	if err != nil {
 		return GenerationArtifact{}, err
 	}
 	defer os.RemoveAll(validation)
-	if result, err := a.client.SyncFrom(ctx, store, []string{manifest}, capsuleRoot); err != nil || result.ExitCode != 0 {
-		return GenerationArtifact{}, fmt.Errorf("sync fresh Hauler store: %w", err)
-	}
 	validated := false
 	defer func() {
 		if !validated {
@@ -94,6 +110,19 @@ func (a *GenerationAssembler) Assemble(ctx context.Context, manifest, workingDir
 	}
 	validated = true
 	return GenerationArtifact{Path: output, SHA256: digest, Size: size, Validated: true}, nil
+}
+
+func generationSyncError(attempt int, result ports.Result, err error) error {
+	if err == nil && result.ExitCode == 0 {
+		return nil
+	}
+	if err == nil {
+		err = fmt.Errorf("exit status %d", result.ExitCode)
+	}
+	if stderr := strings.TrimSpace(string(result.Stderr)); stderr != "" {
+		return fmt.Errorf("attempt %d: %w; stderr: %s", attempt, err, stderr)
+	}
+	return fmt.Errorf("attempt %d: %w", attempt, err)
 }
 
 type generationExpectations struct {

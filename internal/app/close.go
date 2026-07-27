@@ -50,7 +50,7 @@ func (u *Close) Run(ctx context.Context, request CloseRequest) (result CloseResu
 	if u == nil || u.journal == nil || u.locks == nil || u.publisher == nil || u.effects == nil || u.clock == nil || request.SessionID == "" {
 		return CloseResult{}, errors.New("close dependencies or request are incomplete")
 	}
-	result.RecoveryCommand = "camp recover " + request.SessionID
+	result.RecoveryCommand = "camp close --session " + request.SessionID
 	token, err := u.locks.Acquire(ctx, ports.OperationOwner{SessionID: request.SessionID, Operation: "close"})
 	if err != nil {
 		return result, err
@@ -92,6 +92,12 @@ func (u *Close) Run(ctx context.Context, request CloseRequest) (result CloseResu
 
 		if snapshot.Mode == domain.SessionReadWrite && !request.Discard {
 			published, err := u.publisher.Publish(ctx, token, snapshot.SessionID)
+			if published.Published {
+				result.PublicationSucceeded = true
+				result.Generation = published.Generation
+				result.RefreshError = published.RefreshError
+				result.RecoveryCommand = "camp recover " + request.SessionID
+			}
 			if err != nil {
 				return result, err
 			}
@@ -101,9 +107,6 @@ func (u *Close) Run(ctx context.Context, request CloseRequest) (result CloseResu
 			if loaded, _, loadErr := u.journal.Load(ctx, snapshot.SessionID); loadErr == nil {
 				snapshot = loaded
 			}
-			result.PublicationSucceeded = true
-			result.Generation = published.Generation
-			result.RefreshError = published.RefreshError
 			snapshot.Checkpoint.State = domain.CheckpointPublished
 			snapshot.Checkpoint.Generation = cloneGeneration(&published.Generation)
 			snapshot.Checkpoint.PublicationSucceeded = true

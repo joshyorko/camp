@@ -181,3 +181,13 @@ func TestLifecycleFailurePreservesCauseAndOneRecoveryCommand(t *testing.T) {
 		t.Fatalf("failure = %#v", err.Failure)
 	}
 }
+
+func TestSyncFailureRecoveryRetriesSyncBeforeCheckpointRecoveryExists(t *testing.T) {
+	t.Parallel()
+	if got := syncFailureRecovery(app.CheckpointResult{}, "session with space"); got != "camp sync --session 'session with space'" {
+		t.Fatalf("syncFailureRecovery() = %q", got)
+	}
+	if got := syncFailureRecovery(app.CheckpointResult{RecoveryCommand: "camp recover session-1"}, "session-1"); got != "camp recover session-1" {
+		t.Fatalf("syncFailureRecovery() = %q", got)
+	}
+}

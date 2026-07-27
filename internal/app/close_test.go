@@ -343,7 +343,7 @@ func TestCloseRemoteRetainsProviderAndStagingWhenPublicationConflicts(t *testing
 		&fakeCheckpointPublisher{events: &events, err: coordination.ErrPointerChanged},
 		&fakeCloseEffects{events: &events}, fixedAppClock{now: time.Unix(200, 0)},
 	).Run(context.Background(), CloseRequest{SessionID: snapshot.SessionID})
-	if !errors.Is(err, coordination.ErrPointerChanged) || result.PublicationSucceeded || result.CleanupSucceeded {
+	if !errors.Is(err, coordination.ErrPointerChanged) || result.PublicationSucceeded || result.CleanupSucceeded || result.RecoveryCommand != "camp close --session "+snapshot.SessionID {
 		t.Fatalf("Run() = %#v, %v", result, err)
 	}
 	want := []string{"lock:close", "publish:session-close:close", "unlock:close"}

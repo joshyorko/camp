@@ -837,16 +837,19 @@ func (p *ProductionLifecycle) Sync(ctx context.Context, mode OutputMode, out io.
 	ctx = app.WithProgressReporter(ctx, productionLifecycleProgressReporter(mode, out, "sync"))
 	result, err := app.NewSync(c.base.journal, c.locks, c.publisher).Run(ctx, session.SessionID)
 	if err != nil {
-		recovery := result.RecoveryCommand
-		if recovery == "" {
-			recovery = "camp recover " + shellQuoteArgument(session.SessionID)
-		}
-		return lifecycleFailure(err, recovery)
+		return lifecycleFailure(err, syncFailureRecovery(result, session.SessionID))
 	}
 	if mode == ModeHuman {
 		return writeHumanLifecycleResult(out, mode, "sync", syncTerminalEvents(result.Generation.Generation), "")
 	}
 	return writeSuccess(out, mode, "sync", result, fmt.Sprintf("Published checkpoint %d\n", result.Generation.Generation))
+}
+
+func syncFailureRecovery(result app.CheckpointResult, sessionID string) string {
+	if result.RecoveryCommand != "" {
+		return result.RecoveryCommand
+	}
+	return "camp sync --session " + shellQuoteArgument(sessionID)
 }
 
 func (p *ProductionLifecycle) Close(ctx context.Context, request CloseRequest, mode OutputMode, out io.Writer) error {

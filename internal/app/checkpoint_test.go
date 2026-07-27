@@ -1238,8 +1238,8 @@ func TestCheckpointPublisherResumesExactPendingRootSnapshotWithoutRepeatingEarli
 		SchemaVersion: domain.SchemaVersion, SessionID: lease.SessionID, Capsule: lease.Capsule, Lineage: lease.Lineage, Mode: domain.SessionReadWrite, State: domain.SessionOpen,
 		Lease: domain.LeaseRecord{Lease: &lease, Revision: "lease-r1"},
 		Workspace: domain.WorkspaceRecord{
-			ID: "camp-brain", Context: "default", Provider: "docker", LocalProvider: true, LocalFolder: root, StagingRoot: root,
-			Mirror: domain.MirrorAttemptRecord{LogicalAttempt: 1, AttemptID: attemptID, State: domain.MirrorCompleted, Root: root, Method: "local-noop"},
+			ID: "camp-brain", Context: "default", Provider: "ssh", LocalFolder: root, StagingRoot: root,
+			Mirror: domain.MirrorAttemptRecord{LogicalAttempt: 1, AttemptID: attemptID + "-tar", State: domain.MirrorCompleted, Root: root, Method: "tar-pipe"},
 		},
 		Images: domain.ImageInventory{SchemaVersion: domain.SchemaVersion, GeneratedAt: now, Images: []domain.Image{
 			{CapturedReference: "127.0.0.1:45001/hauler/camp-session-seed:latest", CapturedManifestDigest: "sha256:" + strings.Repeat("a", 64), Source: domain.ImageSourceRegistry},
@@ -1265,7 +1265,7 @@ func TestCheckpointPublisherResumesExactPendingRootSnapshotWithoutRepeatingEarli
 	mirror := &fakeMirror{}
 	fakes := newCheckpointFakes(now)
 	builder := &fakeCheckpointBuilder{}
-	publisher := NewCheckpointPublisher(log, &fakeLockValidator{}, &fakeLeaseValidator{}, localCheckpointTransports(mirror), fakes.pipeline(), builder, coordination.NewGenerationRepository(backend), coordination.NewPointerRepository(backend), fixedAppClock{now: now})
+	publisher := NewCheckpointPublisher(log, &fakeLockValidator{}, &fakeLeaseValidator{}, CheckpointTransports{Remote: mirror}, fakes.pipeline(), builder, coordination.NewGenerationRepository(backend), coordination.NewPointerRepository(backend), fixedAppClock{now: now})
 	token := ports.OperationToken{ID: "lock", Owner: ports.OperationOwner{SessionID: snapshot.SessionID, Operation: "sync"}}
 
 	result, err := publisher.Publish(ctx, token, snapshot.SessionID)

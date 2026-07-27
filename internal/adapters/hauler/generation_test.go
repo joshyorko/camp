@@ -2,6 +2,7 @@ package hauler
 
 import (
 	"context"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -14,12 +15,22 @@ type generationRunner struct {
 	commands []ports.Command
 	stores   []string
 	info     []byte
+	syncRuns []struct {
+		result ports.Result
+		err    error
+	}
+	syncCall int
 }
 
 func (r *generationRunner) Run(_ context.Context, command ports.Command) (ports.Result, error) {
 	r.commands = append(r.commands, command)
 	if len(command.Argv) >= 3 && command.Argv[0] == "store" && command.Argv[1] == "--store" {
 		r.stores = append(r.stores, command.Argv[2])
+	}
+	if len(command.Argv) >= 4 && command.Argv[3] == "sync" && r.syncCall < len(r.syncRuns) {
+		run := r.syncRuns[r.syncCall]
+		r.syncCall++
+		return run.result, run.err
 	}
 	for index, argument := range command.Argv {
 		if argument == "save" && index+2 < len(command.Argv) && command.Argv[index+1] == "--filename" {
@@ -34,18 +45,93 @@ func (r *generationRunner) Run(_ context.Context, command ports.Command) (ports.
 	return ports.Result{}, nil
 }
 
+func TestGenerationAssemblerRetriesSyncWithAnotherFreshStore(t *testing.T) {
+	t.Parallel()
+	root, manifest, build, output, info := generationFixture(t)
+	runner := &generationRunner{
+		info: info,
+		syncRuns: []struct {
+			result ports.Result
+			err    error
+		}{
+			{result: ports.Result{ExitCode: 1, Stderr: []byte("temporary oras failure")}, err: errors.New("exit status 1")},
+			{},
+		},
+	}
+
+	artifact, err := NewGenerationAssembler(NewClient("/opt/hauler", runner)).Assemble(context.Background(), manifest, build, output)
+	if err != nil {
+		t.Fatalf("Assemble() error = %v", err)
+	}
+	if !artifact.Validated {
+		t.Fatalf("artifact = %#v", artifact)
+	}
+	if len(runner.commands) != 5 {
+		t.Fatalf("commands = %#v", runner.commands)
+	}
+	if runner.stores[0] == runner.stores[1] || runner.stores[0] == "" || runner.stores[1] == "" {
+		t.Fatalf("sync retry reused a failed store: %#v", runner.stores)
+	}
+	if runner.commands[0].Directory != root || runner.commands[1].Directory != root {
+		t.Fatalf("Hauler sync directories = %q, %q; want %q", runner.commands[0].Directory, runner.commands[1].Directory, root)
+	}
+}
+
+func TestGenerationAssemblerReportsBothFailedSyncAttempts(t *testing.T) {
+	t.Parallel()
+	_, manifest, build, output, _ := generationFixture(t)
+	runner := &generationRunner{syncRuns: []struct {
+		result ports.Result
+		err    error
+	}{
+		{result: ports.Result{ExitCode: 1, Stderr: []byte("first store failed")}, err: errors.New("exit status 1")},
+		{result: ports.Result{ExitCode: 1, Stderr: []byte("second store failed")}, err: errors.New("exit status 1")},
+	}}
+
+	_, err := NewGenerationAssembler(NewClient("/opt/hauler", runner)).Assemble(context.Background(), manifest, build, output)
+	if err == nil || !strings.Contains(err.Error(), "first store failed") || !strings.Contains(err.Error(), "second store failed") {
+		t.Fatalf("Assemble() error = %v", err)
+	}
+	if len(runner.stores) != 2 || runner.stores[0] == runner.stores[1] {
+		t.Fatalf("sync attempts did not use distinct fresh stores: %#v", runner.stores)
+	}
+}
+
 func TestGenerationAssemblerUsesFreshStoresAndRealLoadInfoValidation(t *testing.T) {
 	t.Parallel()
-	root := t.TempDir()
+	root, manifest, build, output, info := generationFixture(t)
+	runner := &generationRunner{info: info}
+	assembler := NewGenerationAssembler(NewClient("/opt/hauler", runner))
+	artifact, err := assembler.Assemble(context.Background(), manifest, build, output)
+	if err != nil {
+		t.Fatalf("Assemble() error = %v", err)
+	}
+	if !artifact.Validated || artifact.Size != int64(len("verified-haul")) || len(artifact.SHA256) != 64 {
+		t.Fatalf("artifact = %#v", artifact)
+	}
+	if len(runner.commands) != 4 { // sync, save, load, info
+		t.Fatalf("commands = %#v", runner.commands)
+	}
+	if runner.stores[0] == runner.stores[2] || runner.stores[0] == "" || runner.stores[2] == "" {
+		t.Fatalf("generation/validation stores were not fresh: %#v", runner.stores)
+	}
+	if runner.commands[0].Directory != root {
+		t.Fatalf("Hauler sync directory = %q, want capsule root %q", runner.commands[0].Directory, root)
+	}
+}
+
+func generationFixture(t *testing.T) (root, manifest, build, output string, info []byte) {
+	t.Helper()
+	root = t.TempDir()
 	camp := filepath.Join(root, ".camp")
-	build := filepath.Join(camp, "build")
+	build = filepath.Join(camp, "build")
 	if err := os.MkdirAll(build, 0o700); err != nil {
 		t.Fatal(err)
 	}
 	if err := os.WriteFile(filepath.Join(build, "brain.tar.zst"), []byte("inner"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	manifest := filepath.Join(camp, "hauler-manifest.yaml")
+	manifest = filepath.Join(camp, "hauler-manifest.yaml")
 	digest := "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
 	manifestBody := `apiVersion: content.hauler.cattle.io/v1
 kind: Files
@@ -68,28 +154,12 @@ spec:
 	if err := os.WriteFile(manifest, []byte(manifestBody), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	runner := &generationRunner{info: []byte(`[
+	output = filepath.Join(build, "generation.tar.zst")
+	info = []byte(`[
   {"Reference":"hauler/brain.tar.zst:latest","Type":"file","Platform":"-","Digest":"sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"},
   {"Reference":"127.0.0.1:5000/camp/app:captured","Type":"image","Platform":"linux/amd64","Digest":"` + digest + `"}
-]`)}
-	assembler := NewGenerationAssembler(NewClient("/opt/hauler", runner))
-	output := filepath.Join(build, "generation.tar.zst")
-	artifact, err := assembler.Assemble(context.Background(), manifest, build, output)
-	if err != nil {
-		t.Fatalf("Assemble() error = %v", err)
-	}
-	if !artifact.Validated || artifact.Size != int64(len("verified-haul")) || len(artifact.SHA256) != 64 {
-		t.Fatalf("artifact = %#v", artifact)
-	}
-	if len(runner.commands) != 4 { // sync, save, load, info
-		t.Fatalf("commands = %#v", runner.commands)
-	}
-	if runner.stores[0] == runner.stores[2] || runner.stores[0] == "" || runner.stores[2] == "" {
-		t.Fatalf("generation/validation stores were not fresh: %#v", runner.stores)
-	}
-	if runner.commands[0].Directory != root {
-		t.Fatalf("Hauler sync directory = %q, want capsule root %q", runner.commands[0].Directory, root)
-	}
+]`)
+	return root, manifest, build, output, info
 }
 
 func TestGenerationAssemblerRejectsInfoMissingExpectedDigestAndRemovesInvalidHaul(t *testing.T) {

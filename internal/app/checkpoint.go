@@ -261,7 +261,8 @@ func (p *CheckpointPublisher) Publish(ctx context.Context, operation ports.Opera
 }
 
 func (p *CheckpointPublisher) resumePendingUpload(ctx context.Context, snapshot domain.JournalSnapshot, intent ports.IntentRecord, generation uint64, now time.Time) (CheckpointResult, error) {
-	if snapshot.Checkpoint.State != domain.CheckpointVerified || snapshot.Checkpoint.Generation == nil || snapshot.Checkpoint.Generation.Generation != generation || snapshot.Checkpoint.LocalHaulPath == "" || snapshot.Checkpoint.ObjectKey == "" || intent.ID != snapshot.Workspace.Mirror.AttemptID+"-5" || intent.SessionID != snapshot.SessionID {
+	attemptID, attemptErr := checkpointLogicalAttemptID(snapshot)
+	if attemptErr != nil || snapshot.Checkpoint.State != domain.CheckpointVerified || snapshot.Checkpoint.Generation == nil || snapshot.Checkpoint.Generation.Generation != generation || snapshot.Checkpoint.LocalHaulPath == "" || snapshot.Checkpoint.ObjectKey == "" || intent.ID != attemptID+"-5" || intent.SessionID != snapshot.SessionID {
 		return CheckpointResult{}, errors.New("pending generation upload does not match the durable checkpoint attempt")
 	}
 	var request struct {
@@ -289,7 +290,7 @@ func (p *CheckpointPublisher) resumePendingUpload(ctx context.Context, snapshot 
 		return CheckpointResult{Generation: metadata.Generation, RecoveryCommand: "camp recover " + snapshot.SessionID}, err
 	}
 	next := domain.LatestPointer{SchemaVersion: domain.SchemaVersion, Capsule: snapshot.Capsule, Lineage: snapshot.Lineage, Generation: metadata.Generation, Parent: cloneGeneration(snapshot.CurrentBase), ObjectKey: metadata.ObjectKey, Size: metadata.Size, CreatedAt: metadata.CreatedAt, Tools: metadata.Tools, SessionID: snapshot.SessionID}
-	pointerIntent := checkpointAttemptIntent(snapshot.SessionID, snapshot.Workspace.Mirror.AttemptID, "PointerCommitted", 6, now, next)
+	pointerIntent := checkpointAttemptIntent(snapshot.SessionID, attemptID, "PointerCommitted", 6, now, next)
 	if err := p.journal.RecordIntent(ctx, pointerIntent); err != nil {
 		return CheckpointResult{Generation: metadata.Generation, RecoveryCommand: "camp recover " + snapshot.SessionID}, err
 	}
@@ -298,7 +299,8 @@ func (p *CheckpointPublisher) resumePendingUpload(ctx context.Context, snapshot 
 }
 
 func (p *CheckpointPublisher) resumePendingPointer(ctx context.Context, snapshot domain.JournalSnapshot, intent ports.IntentRecord, generation uint64, now time.Time) (CheckpointResult, error) {
-	if snapshot.Checkpoint.State != domain.CheckpointUploaded || snapshot.Checkpoint.Generation == nil || snapshot.Checkpoint.Generation.Generation != generation || snapshot.Checkpoint.LocalHaulPath == "" || snapshot.Checkpoint.ObjectKey == "" || intent.ID != snapshot.Workspace.Mirror.AttemptID+"-6" || intent.SessionID != snapshot.SessionID {
+	attemptID, attemptErr := checkpointLogicalAttemptID(snapshot)
+	if attemptErr != nil || snapshot.Checkpoint.State != domain.CheckpointUploaded || snapshot.Checkpoint.Generation == nil || snapshot.Checkpoint.Generation.Generation != generation || snapshot.Checkpoint.LocalHaulPath == "" || snapshot.Checkpoint.ObjectKey == "" || intent.ID != attemptID+"-6" || intent.SessionID != snapshot.SessionID {
 		return CheckpointResult{}, errors.New("pending pointer commit does not match the durable checkpoint attempt")
 	}
 	var next domain.LatestPointer
@@ -361,7 +363,12 @@ func (p *CheckpointPublisher) commitPointerAndRefresh(ctx context.Context, snaps
 		SessionID: snapshot.SessionID, Generation: result.Generation, HaulPath: haulPath,
 		RegistrySnapshotRoot: cutRoot,
 	}
-	refreshIntent := checkpointAttemptIntent(snapshot.SessionID, snapshot.Workspace.Mirror.AttemptID, "ServingContentRefreshed", 7, now, refreshRequest)
+	attemptID, err := checkpointLogicalAttemptID(snapshot)
+	if err != nil {
+		result.RefreshError = err.Error()
+		return result, nil
+	}
+	refreshIntent := checkpointAttemptIntent(snapshot.SessionID, attemptID, "ServingContentRefreshed", 7, now, refreshRequest)
 	if err := p.journal.RecordIntent(context.WithoutCancel(ctx), refreshIntent); err != nil {
 		result.RefreshError = err.Error()
 		return result, nil
@@ -391,9 +398,9 @@ func (p *CheckpointPublisher) commitPointerAndRefresh(ctx context.Context, snaps
 }
 
 func (p *CheckpointPublisher) resumePendingImageCapture(ctx context.Context, snapshot domain.JournalSnapshot, intent ports.IntentRecord, generation uint64, now time.Time) (preparedRegistrySeal, error) {
-	attemptID := snapshot.Workspace.Mirror.AttemptID
+	attemptID, attemptErr := checkpointLogicalAttemptID(snapshot)
 	root := snapshot.Workspace.Mirror.Root
-	if attemptID == "" || snapshot.Workspace.Mirror.State != domain.MirrorCompleted || root == "" || intent.ID != attemptID+"-2" || intent.SessionID != snapshot.SessionID {
+	if attemptErr != nil || snapshot.Workspace.Mirror.State != domain.MirrorCompleted || root == "" || intent.ID != attemptID+"-2" || intent.SessionID != snapshot.SessionID {
 		return preparedRegistrySeal{}, errors.New("pending image capture does not match the durable checkpoint attempt")
 	}
 	runtime, err := checkpointRegistryRuntime(snapshot)
@@ -515,9 +522,9 @@ func hasPendingTransition(pending []ports.PendingIntent, transition string) bool
 }
 
 func preparePendingRootSnapshot(snapshot domain.JournalSnapshot, intent ports.IntentRecord, generation uint64) (string, string, ports.IntentRecord, error) {
-	attemptID := snapshot.Workspace.Mirror.AttemptID
+	attemptID, attemptErr := checkpointLogicalAttemptID(snapshot)
 	root := snapshot.Workspace.Mirror.Root
-	if attemptID == "" || snapshot.Workspace.Mirror.State != domain.MirrorCompleted || root == "" || intent.ID != attemptID+"-4" || intent.SessionID != snapshot.SessionID {
+	if attemptErr != nil || snapshot.Workspace.Mirror.State != domain.MirrorCompleted || root == "" || intent.ID != attemptID+"-4" || intent.SessionID != snapshot.SessionID {
 		return "", "", ports.IntentRecord{}, errors.New("pending root snapshot does not match the durable checkpoint attempt")
 	}
 	var request struct {
@@ -563,9 +570,9 @@ func (p *CheckpointPublisher) prepareRegistrySeal(ctx context.Context, snapshot 
 			return preparedRegistrySeal{}, errors.New("checkpoint has pending reconciliation work")
 		}
 		intent := pending[sealIndex].Intent
-		attemptID := snapshot.Workspace.Mirror.AttemptID
+		attemptID, attemptErr := checkpointLogicalAttemptID(snapshot)
 		root := snapshot.Workspace.Mirror.Root
-		if attemptID == "" || snapshot.Workspace.Mirror.State != domain.MirrorCompleted || root == "" || intent.ID != attemptID+"-3" || intent.SessionID != snapshot.SessionID {
+		if attemptErr != nil || snapshot.Workspace.Mirror.State != domain.MirrorCompleted || root == "" || intent.ID != attemptID+"-3" || intent.SessionID != snapshot.SessionID {
 			return preparedRegistrySeal{}, errors.New("pending registry seal does not match the durable checkpoint attempt")
 		}
 		var request registryadapter.SnapshotRequest
@@ -707,6 +714,18 @@ func mirrorAttemptRecord(logicalAttempt uint64, result ports.MirrorResult, state
 		LogicalAttempt: logicalAttempt, AttemptID: result.AttemptID, State: state, Root: result.Root, RemoteRoot: result.RemoteRoot,
 		Method: result.Method, Exclusions: append([]string(nil), result.Exclusions...),
 	}
+}
+
+func checkpointLogicalAttemptID(snapshot domain.JournalSnapshot) (string, error) {
+	mirror := snapshot.Workspace.Mirror
+	if snapshot.SessionID == "" || mirror.LogicalAttempt == 0 || mirror.AttemptID == "" {
+		return "", errors.New("checkpoint mirror attempt identity is incomplete")
+	}
+	attemptID := snapshot.SessionID + "-checkpoint-" + strconv.FormatUint(mirror.LogicalAttempt, 10)
+	if mirror.AttemptID != attemptID && mirror.AttemptID != attemptID+"-rsync" && mirror.AttemptID != attemptID+"-tar" {
+		return "", errors.New("checkpoint mirror transport attempt does not match its logical attempt")
+	}
+	return attemptID, nil
 }
 
 func validRemoteMirrorResult(result ports.MirrorResult, attemptID string) bool {
