@@ -20,6 +20,9 @@ const (
 	DefaultChunkSize      int64  = 1 << 30
 	manifestKind                 = "camp-hauler-kit"
 	maxManifestBytes             = 4 << 20
+	maxArchiveBytes       int64  = 64 << 30
+	maxChunkBytes         int64  = DefaultChunkSize
+	maxChunkCount                = 64
 )
 
 var ErrInvalidManifest = errors.New("invalid Camp Hauler kit manifest")
@@ -125,11 +128,17 @@ func Validate(manifest Manifest) error {
 	if !validSHA256(manifest.Archive.SHA256) || manifest.Archive.Size <= 0 || len(manifest.Chunks) == 0 {
 		return invalidManifest("invalid archive identity")
 	}
+	if manifest.Archive.Size > maxArchiveBytes || len(manifest.Chunks) > maxChunkCount {
+		return fmt.Errorf("%w: archive bytes or chunk count", ErrArchiveLimit)
+	}
 	var chunkBytes int64
 	for index, chunk := range manifest.Chunks {
 		if chunk.Index != uint32(index) || !safeRelativeName(chunk.Name) || !validSHA256(chunk.SHA256) ||
-			chunk.Size <= 0 || chunk.Size > DefaultChunkSize {
+			chunk.Size <= 0 {
 			return invalidManifest("invalid chunk identity")
+		}
+		if chunk.Size > maxChunkBytes {
+			return fmt.Errorf("%w: chunk bytes", ErrArchiveLimit)
 		}
 		if chunkBytes > manifest.Archive.Size-chunk.Size {
 			return invalidManifest("chunk size overflow")

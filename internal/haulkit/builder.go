@@ -61,11 +61,12 @@ type BuildRequest struct {
 }
 
 type Artifact struct {
-	ManifestPath string
-	ArchivePath  string
-	SHA256       string
-	Size         int64
-	Chunks       []ChunkIdentity
+	ManifestPath   string
+	ManifestSHA256 string
+	ArchivePath    string
+	SHA256         string
+	Size           int64
+	Chunks         []ChunkIdentity
 }
 
 type KitBuilder struct {
@@ -256,7 +257,11 @@ func (builder *KitBuilder) Build(ctx context.Context, request BuildRequest) (Art
 	if err := writePrivateAtomic(manifestPath, body); err != nil {
 		return Artifact{}, err
 	}
-	artifact := Artifact{ManifestPath: manifestPath, ArchivePath: archivePath, SHA256: archiveDigest, Size: archiveSize, Chunks: chunks}
+	manifestDigest := sha256Bytes(body)
+	artifact := Artifact{
+		ManifestPath: manifestPath, ManifestSHA256: manifestDigest,
+		ArchivePath: archivePath, SHA256: archiveDigest, Size: archiveSize, Chunks: chunks,
+	}
 	verifiedReady := filepath.Join(request.OutputDirectory, ".haulkit-verified-ready")
 	verifiedCleanup := false
 	defer func() {
@@ -265,11 +270,12 @@ func (builder *KitBuilder) Build(ctx context.Context, request BuildRequest) (Art
 		}
 	}()
 	if _, err := NewVerifier(builder.validator).Verify(ctx, VerifyRequest{
-		ManifestPath: manifestPath,
-		ArchivePath:  archivePath,
-		Architecture: architecture,
-		Tools:        tools,
-		Destination:  verifiedReady,
+		ManifestPath:           manifestPath,
+		ExpectedManifestSHA256: manifestDigest,
+		ArchivePath:            archivePath,
+		Architecture:           architecture,
+		Tools:                  tools,
+		Destination:            verifiedReady,
 	}); err != nil {
 		return Artifact{}, fmt.Errorf("verify completed Camp Hauler kit: %w", err)
 	}
