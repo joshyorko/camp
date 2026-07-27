@@ -11,11 +11,13 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/joshyorko/camp/internal/adapters/archive"
+	devpodadapter "github.com/joshyorko/camp/internal/adapters/devpod"
 	"github.com/joshyorko/camp/internal/adapters/hydration"
 	"github.com/joshyorko/camp/internal/capsule"
 	"github.com/joshyorko/camp/internal/config"
@@ -24,6 +26,8 @@ import (
 	imageops "github.com/joshyorko/camp/internal/images"
 	"github.com/joshyorko/camp/internal/journal"
 	"github.com/joshyorko/camp/internal/ports"
+	"github.com/joshyorko/camp/internal/remoteworker"
+	"github.com/joshyorko/camp/internal/target"
 )
 
 func TestOpenRemoteBranchUsesSourceGenerationAndReentryDoesNotRehydrate(t *testing.T) {
@@ -67,6 +71,160 @@ func TestOpenRemoteBranchUsesSourceGenerationAndReentryDoesNotRehydrate(t *testi
 	}
 	if second.Snapshot.SessionID != first.Snapshot.SessionID || environment.hydrator.calls != 1 || environment.leases.branchCalls != 1 || environment.leases.acquireCalls != 0 || len(environment.devpod.ups) != 1 {
 		t.Fatalf("re-entry repeated lifecycle: snapshot=%#v hydrate=%d leases=%#v ups=%d", second.Snapshot, environment.hydrator.calls, environment.leases, len(environment.devpod.ups))
+	}
+}
+
+func TestOpenRemoteUsesPreparedBootstrapSourceForExactlyOneDevPodUp(t *testing.T) {
+	t.Parallel()
+	environment := newRemoteOpenTestEnvironment(t)
+	dataPlane := &recordingRemoteDataPlane{bootstrapRoot: filepath.Join(environment.paths.DataRoot, "bootstrap")}
+	environment.open.deps.RemoteDataPlane = dataPlane
+	result, err := environment.open.Run(context.Background(), OpenRequest{
+		Capsule: "brain", Branch: "feature", SourceLineage: domain.Lineage{Branch: "main"}, Mode: domain.SessionReadWrite,
+		RemoteAvailable: true, Target: "MemoryD", EntryMode: domain.EntryTerminal, Context: "default", Provider: "ssh", Runtime: environment.runtime, Backend: environment.backend,
+	})
+	if err != nil {
+		t.Fatalf("remote Open() error = %v", err)
+	}
+	if dataPlane.calls != 1 {
+		t.Fatalf("remote data plane calls = %d, want 1", dataPlane.calls)
+	}
+	if dataPlane.requests[0].AttemptID != result.Snapshot.SessionID+"-hauler-kit-v1" {
+		t.Fatalf("remote data plane attempt = %q", dataPlane.requests[0].AttemptID)
+	}
+	if result.Snapshot.Recovery.RemoteDataPlane == nil || result.Snapshot.Recovery.RemoteDataPlane.Mode != domain.DataPlaneHaulerKitV1 {
+		t.Fatalf("remote data plane record = %#v", result.Snapshot.Recovery.RemoteDataPlane)
+	}
+	if len(environment.devpod.ups) != 1 {
+		t.Fatalf("DevPod up calls = %#v", environment.devpod.ups)
+	}
+	up := environment.devpod.ups[0]
+	if up.SourceMode != devpodadapter.SourceModeBootstrap || up.BootstrapPath != dataPlane.bootstrapRoot || up.WorkspacePath == dataPlane.bootstrapRoot {
+		t.Fatalf("DevPod source = %#v", up)
+	}
+}
+
+func TestOpenLocalProviderDoesNotSelectOrPrepareRemoteDataPlane(t *testing.T) {
+	t.Parallel()
+	environment := newRemoteOpenTestEnvironment(t)
+	dataPlane := &recordingRemoteDataPlane{bootstrapRoot: filepath.Join(environment.paths.DataRoot, "bootstrap")}
+	environment.open.deps.RemoteDataPlane = dataPlane
+	result, err := environment.open.Run(context.Background(), OpenRequest{
+		SessionID: "local-provider-open", Capsule: "brain", Branch: "feature", SourceLineage: domain.Lineage{Branch: "main"},
+		Mode: domain.SessionReadWrite, RemoteAvailable: true, Target: "MemoryD", EntryMode: domain.EntryTerminal,
+		Context: "default", Provider: "docker", LocalProvider: true, Runtime: environment.runtime, Backend: environment.backend,
+	})
+	if err != nil {
+		t.Fatalf("local-provider Open() error = %v", err)
+	}
+	if dataPlane.calls != 0 || result.Snapshot.Recovery.RemoteDataPlane != nil {
+		t.Fatalf("local-provider remote data plane = calls:%d record:%#v", dataPlane.calls, result.Snapshot.Recovery.RemoteDataPlane)
+	}
+	if len(environment.devpod.ups) != 1 || environment.devpod.ups[0].SourceMode == devpodadapter.SourceModeBootstrap {
+		t.Fatalf("local-provider DevPod up = %#v", environment.devpod.ups)
+	}
+}
+
+func TestOpenRemoteUnknownWorkspaceOutcomeReusesRecordedKitAttempt(t *testing.T) {
+	environment := newRemoteOpenTestEnvironment(t)
+	dataPlane := &recordingRemoteDataPlane{bootstrapRoot: filepath.Join(environment.paths.DataRoot, "bootstrap")}
+	environment.open.deps.RemoteDataPlane = dataPlane
+	devpod := &unknownOutcomeWorkspaceDevPod{
+		folder: "/workspaces/root", upResults: []ports.Result{{}}, upErrors: []error{ports.ErrAmbiguous},
+	}
+	environment.open.deps.DevPod = devpod
+	request := OpenRequest{
+		SessionID: "remote-unknown-up", Capsule: "brain", Branch: "feature", SourceLineage: domain.Lineage{Branch: "main"},
+		Mode: domain.SessionReadWrite, RemoteAvailable: true, Target: "MemoryD", EntryMode: domain.EntryTerminal,
+		Context: "default", Provider: "ssh", Runtime: environment.runtime, Backend: environment.backend,
+	}
+	if _, err := environment.open.Run(context.Background(), request); !errors.Is(err, ports.ErrAmbiguous) {
+		t.Fatalf("first Open() error = %v, want ambiguous", err)
+	}
+	if dataPlane.calls != 1 || len(devpod.ups) != 1 {
+		t.Fatalf("first attempt = preparations:%d ups:%d", dataPlane.calls, len(devpod.ups))
+	}
+	result, err := environment.open.Run(context.Background(), request)
+	if err != nil {
+		t.Fatalf("reconciled Open() error = %v", err)
+	}
+	if dataPlane.calls != 1 || len(devpod.ups) != 1 {
+		t.Fatalf("recovery repeated logical kit or DevPod up: preparations:%d ups:%d", dataPlane.calls, len(devpod.ups))
+	}
+	if result.Snapshot.Recovery.RemoteDataPlane == nil ||
+		result.Snapshot.Recovery.RemoteDataPlane.AttemptID != "remote-unknown-up-hauler-kit-v1" {
+		t.Fatalf("recovered remote data plane = %#v", result.Snapshot.Recovery.RemoteDataPlane)
+	}
+}
+
+func TestOpenRemoteDataPlaneFailurePreventsDevPodUp(t *testing.T) {
+	environment := newRemoteOpenTestEnvironment(t)
+	dataPlane := &recordingRemoteDataPlane{
+		bootstrapRoot: filepath.Join(environment.paths.DataRoot, "bootstrap"),
+		err:           errors.New("kit verification failed"),
+	}
+	environment.open.deps.RemoteDataPlane = dataPlane
+	_, err := environment.open.Run(context.Background(), OpenRequest{
+		SessionID: "remote-preparation-failure", Capsule: "brain", Branch: "feature", SourceLineage: domain.Lineage{Branch: "main"},
+		Mode: domain.SessionReadWrite, RemoteAvailable: true, Target: "MemoryD", EntryMode: domain.EntryTerminal,
+		Context: "default", Provider: "ssh", Runtime: environment.runtime, Backend: environment.backend,
+	})
+	if !errors.Is(err, dataPlane.err) {
+		t.Fatalf("Open() error = %v, want preparation failure", err)
+	}
+	if len(environment.devpod.ups) != 0 {
+		t.Fatalf("DevPod up called after preparation failure: %#v", environment.devpod.ups)
+	}
+}
+
+func TestOpenRemoteReentryReverifiesCompletedBootstrapBeforeDevPodUp(t *testing.T) {
+	environment := newRemoteOpenTestEnvironment(t)
+	dataPlane := &recordingRemoteDataPlane{bootstrapRoot: filepath.Join(environment.paths.DataRoot, "bootstrap")}
+	environment.open.deps.RemoteDataPlane = dataPlane
+	cut := errors.New("target cut")
+	environment.open.deps.Target = &failOnceOpenTarget{
+		next: &openTargetResolver{events: environment.devpod.events}, err: cut,
+	}
+	request := OpenRequest{
+		SessionID: "remote-bootstrap-reentry", Capsule: "brain", Branch: "feature", SourceLineage: domain.Lineage{Branch: "main"},
+		Mode: domain.SessionReadWrite, RemoteAvailable: true, Target: "MemoryD", EntryMode: domain.EntryTerminal,
+		Context: "default", Provider: "ssh", Runtime: environment.runtime, Backend: environment.backend,
+	}
+	if _, err := environment.open.Run(context.Background(), request); !errors.Is(err, cut) {
+		t.Fatalf("first Open() error = %v", err)
+	}
+	dataPlane.err = errors.New("tampered completed bootstrap")
+	if _, err := environment.open.Run(context.Background(), request); !errors.Is(err, dataPlane.err) {
+		t.Fatalf("reentry Open() error = %v, want bootstrap verification failure", err)
+	}
+	if dataPlane.calls != 2 || len(environment.devpod.ups) != 0 {
+		t.Fatalf("reentry verification boundary = calls:%d ups:%d", dataPlane.calls, len(environment.devpod.ups))
+	}
+}
+
+func TestOpenSchemaV1LegacySnapshotDoesNotUpgradeToHaulerKitInPlace(t *testing.T) {
+	environment := newRemoteOpenTestEnvironment(t)
+	legacy := &legacyRemoteDataPlaneJournal{Journal: environment.open.deps.Journal}
+	environment.open.deps.Journal = legacy
+	dataPlane := &recordingRemoteDataPlane{bootstrapRoot: filepath.Join(environment.paths.DataRoot, "bootstrap")}
+	environment.open.deps.RemoteDataPlane = dataPlane
+	request := OpenRequest{
+		SessionID: "legacy-schema-v1", Capsule: "brain", Branch: "feature", SourceLineage: domain.Lineage{Branch: "main"},
+		Mode: domain.SessionReadWrite, RemoteAvailable: true, Target: "MemoryD", EntryMode: domain.EntryTerminal,
+		Context: "default", Provider: "ssh", Runtime: environment.runtime, Backend: environment.backend,
+	}
+	if _, err := environment.open.Run(context.Background(), request); !errors.Is(err, errLegacyJournalCut) {
+		t.Fatalf("legacy setup Open() error = %v", err)
+	}
+	result, err := environment.open.Run(context.Background(), request)
+	if err != nil {
+		t.Fatalf("legacy Open() error = %v", err)
+	}
+	if dataPlane.calls != 0 || result.Snapshot.Recovery.RemoteDataPlane != nil {
+		t.Fatalf("legacy session was upgraded: calls:%d record:%#v", dataPlane.calls, result.Snapshot.Recovery.RemoteDataPlane)
+	}
+	if len(environment.devpod.ups) != 1 || environment.devpod.ups[0].SourceMode == devpodadapter.SourceModeBootstrap {
+		t.Fatalf("legacy DevPod source = %#v", environment.devpod.ups)
 	}
 }
 
@@ -973,6 +1131,71 @@ type remoteOpenTestEnvironment struct {
 	devpod    *openDevPod
 	hydrator  *recordingOpenHydrator
 	leases    *recordingOpenLeases
+}
+
+type recordingRemoteDataPlane struct {
+	bootstrapRoot string
+	calls         int
+	requests      []RemoteDataPlaneRequest
+	err           error
+}
+
+var errLegacyJournalCut = errors.New("legacy journal cut")
+
+type legacyRemoteDataPlaneJournal struct {
+	ports.Journal
+	cut bool
+}
+
+type failOnceOpenTarget struct {
+	next OpenTargetResolver
+	err  error
+}
+
+func (r *failOnceOpenTarget) Resolve(ctx context.Context, root, requested string) (target.Result, error) {
+	if r.err != nil {
+		err := r.err
+		r.err = nil
+		return target.Result{}, err
+	}
+	return r.next.Resolve(ctx, root, requested)
+}
+
+func (j *legacyRemoteDataPlaneJournal) Create(ctx context.Context, snapshot domain.JournalSnapshot) error {
+	snapshot.Recovery.RemoteDataPlane = nil
+	return j.Journal.Create(ctx, snapshot)
+}
+
+func (j *legacyRemoteDataPlaneJournal) RecordFact(ctx context.Context, fact ports.FactRecord, snapshot domain.JournalSnapshot) error {
+	snapshot.Recovery.RemoteDataPlane = nil
+	if err := j.Journal.RecordFact(ctx, fact, snapshot); err != nil {
+		return err
+	}
+	if !j.cut && fact.Transition == "DevcontainerResolved" {
+		j.cut = true
+		return errLegacyJournalCut
+	}
+	return nil
+}
+
+func (r *recordingRemoteDataPlane) Prepare(_ context.Context, request RemoteDataPlaneRequest) (RemoteDataPlaneResult, error) {
+	r.calls++
+	r.requests = append(r.requests, request)
+	if r.err != nil {
+		return RemoteDataPlaneResult{}, r.err
+	}
+	return RemoteDataPlaneResult{
+		BootstrapRoot: r.bootstrapRoot,
+		Record: domain.RemoteDataPlaneRecord{
+			Mode: domain.DataPlaneHaulerKitV1, AttemptID: request.AttemptID, BootstrapRoot: r.bootstrapRoot,
+			KitSHA256: strings.Repeat("a", 64), KitSize: 1, ManifestSHA256: strings.Repeat("b", 64), ManifestSize: 1,
+			OuterImage:    "example.test/room@sha256:" + strings.Repeat("c", 64),
+			RequestSchema: remoteworker.ProtocolSchemaVersion, RequestSession: request.SessionID,
+			WorkspaceRoot: "/workspaces/brain", RuntimeRoot: "/var/lib/camp/" + request.SessionID,
+			ManifestPath: "/var/lib/camp/" + request.SessionID + "/camp-hauler-kit.json", Architecture: "linux/" + runtime.GOARCH,
+			ConfigSHA256: strings.Repeat("d", 64), ConfigSize: 1,
+		},
+	}, nil
 }
 
 func newRemoteOpenTestEnvironment(t *testing.T) remoteOpenTestEnvironment {

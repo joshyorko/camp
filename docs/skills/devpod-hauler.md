@@ -9,6 +9,166 @@ Do not use Hauler v2.0.2's live `_catalog` response as proof that all direct reg
 ## Implemented adapter behavior
 
 - DevPod command construction preserves context, workspace identity, repeated public flags, environment variables, and argument boundaries through `ports.Command`.
+- The pinned v0.26.1 installed-tool contract supports one bounded local-folder
+  upload: construct `.camp-bootstrap/devcontainer.json` and the immutable
+  `camp-hauler-kit.tar.zst` completely before `devpod up`, pass only that
+  disposable bootstrap root, and perform no post-`up` mutation or ownership
+  repair of bootstrap contents; delete only the exact disposable root after
+  workspace cleanup. The real Docker-provider gate uploaded a valid kit larger
+  than 1 MiB, ran a
+  `postCreateCommand` that hashed it after upload, returned the matching receipt
+  through structured `devpod ssh`, independently matched the remote archive's
+  SHA-256, and recorded the bootstrap root rather than the capsule root as the
+  DevPod source. This proves upload and hook ordering only; selected capsule
+  devcontainer activation remains a later hydration concern.
+- Camp's remote bootstrap renderer publishes one new private source root with
+  `.camp-bootstrap/{devcontainer.json,camp-bootstrap,initialize-request.json,hydrate-request.json,services-request.json}`
+  and `camp-hauler-kit.tar.zst`; it refuses to replace an existing root. The
+  helper and kit are copied through their verified regular-file descriptors,
+  then the staged copies are independently reverified before publication. Input
+  ancestors and the output parent are opened component-by-component without
+  following symlinks; staging and no-replace publication stay anchored to
+  directory descriptors. After a failed parent fsync, rollback exchanges the
+  target with an owned placeholder and verifies the exchanged inode before
+  cleanup. An unchanged target is removed through that verified inode; a
+  replacement target is atomically restored and preserved. The generated config
+  pins the supplied immutable outer image, and all three operation
+  requests must share schema, session, workspace root, runtime root, manifest
+  path, and expected identities. Generated
+  `initializeCommand`, `onCreateCommand`, and `postStartCommand` run
+  `activateImage`, `hydrate`, and `startServices` respectively before the
+  corresponding user hook. String, argv-array, and named-object lifecycle values
+  retain their top-level JSON form, and each original command or argv appears
+  exactly once behind a fail-closed helper boundary. String hooks use a
+  same-shell `helper || exit $?` prelude followed by the original text; argv
+  hooks retain their argument boundaries. A named-object hook becomes one
+  reserved named entry. That entry runs the worker once, then launches every
+  original named string or argv as a separate concurrent child, waits for all
+  children, and returns failure if any child fails. The owner process therefore
+  supplies the lifecycle invocation identity: no mutable current-generation
+  file, waiter process, stale receipt, timing window, or inferred PID group can
+  authorize commands from another invocation. A worker failure or crash starts
+  no user child. Overlapping invocations own disjoint child sets and share only
+  their normal command output destinations.
+  Pinned DevPod v0.26.1 commit
+  `86b6f9f5d6713fecdeff5dd240e775a8c7e8d44e` decodes lifecycle objects in
+  `pkg/types/types.go` and executes decoded commands in
+  `pkg/devcontainer/setup/lifecyclehooks.go`; neither boundary exposes a stable
+  per-invocation token through command arguments or environment. Do not
+  reintroduce a cross-process named-hook gate without a newer authoritative
+  execution contract that supplies such an identity.
+  Sorting object keys does not establish lifecycle ordering. Null, mixed,
+  recursively duplicate-key, malformed, and build-only
+  configurations fail before publication, and the original devcontainer file
+  remains unchanged.
+  `internal/capsule/bootstrap_test.go` executes the generated commands using
+  concurrent object semantics and verifies crash isolation, stale-file
+  irrelevance, overlapping invocation ownership, concurrent completion,
+  aggregate failure, and command traces rather than inspecting renderer source.
+- Bootstrap acceptance and reentry re-open the published source and verify its
+  complete shape before `devpod up`: exactly the expected seven regular files and
+  one real private directory, no links or extra entries, the copied kit digest
+  and size, the exact executable helper digest and size, the immutable image,
+  all three operation-specific request files with one coherent scope, and the
+  generated lifecycle boundaries. The source stays below the 16-regular-file
+  limit. The devcontainer and three request documents have a combined 1 MiB
+  limit. The kit is the bulk capsule payload; the exact Camp helper is a
+  separately accounted runtime payload, excluded from that metadata budget and
+  independently identity-bound. The reviewed production helper was 20.1 MiB,
+  so guidance must not claim the kit is the source's only large regular file.
+  The durable data-plane record and completion marker also bind the remote
+  worker protocol schema, session, workspace root, runtime root, manifest path,
+  architecture, and the full generated `devcontainer.json` SHA-256 and size.
+  Reentry supplies those persisted expectations to bootstrap verification.
+  Three mutually coherent request files with a different scope, or any
+  lifecycle/config byte change, therefore fail even when their internal
+  identities and helper substrings remain plausible.
+- Production remote opens now persist the `haulerKitV1` data-plane selection
+  and stable attempt ID before preparation. The preparer snapshots the hydrated
+  root into a fresh Hauler store, adds the resolved immutable devcontainer
+  image, resolves the already-validated pasta executable through the
+  confinement boundary, builds and independently verifies Camp Hauler Kit v1,
+  then renders and completely verifies the disposable bootstrap source. Build,
+  kit verification, render, or bootstrap verification failure occurs before
+  `devpod up`. A durable completion marker is published only after every
+  artifact and bootstrap check succeeds. Reentry revalidates a completed
+  attempt before use. An incomplete attempt is rebuilt under the same persisted
+  attempt ID only after Camp verifies its owner marker, directory descriptor,
+  inode, and quarantine identity; unowned paths are preserved. The
+  `WorkspaceUp` intent records the bootstrap source root, so reconciliation
+  observes the exact DevPod source and never issues a second `up`.
+- A missing `Recovery.RemoteDataPlane` record is the legacy routing marker.
+  Existing schema-v1 sessions with no record keep the capsule-source lifecycle
+  and are not upgraded in place. This compatibility marker does not change the
+  shared domain schema version.
+- `camp __remote-worker` is a hidden, stdin/stdout-only protocol entrypoint. It
+  accepts one schema-v1 JSON request with strict unknown-field, recursively
+  duplicate-key, operation,
+  absolute-path, immutable-image, architecture, and helper/kit/manifest
+  identity validation. `activateImage` and `hydrate` are implemented; Task 7
+  service operations remain typed `unsupported`. The bootstrap carries the
+  canonical manifest as a seventh descriptor-verified file so provider-side
+  activation and container-side hydration can independently verify the uploaded
+  archive. `probe` verifies the running helper plus adjacent kit
+  and manifest bytes before reporting typed architecture, filesystem,
+  namespace, TUN, privilege, and loopback-port capabilities; an unsupported
+  capability returns a failing receipt. The namespace probe actually creates a
+  child user, network, and mount namespace mapped to the current user; the TUN
+  device must open and answer `TUNGETFEATURES`. The privilege receipt derives
+  from those operation results, not UID or blanket capability bits, so an
+  operation-capable rootless user is accepted. Loopback availability uses a
+  bind-only socket whose `SO_ACCEPTCONN` state remains false; the probe never
+  calls `listen`. Every accepted, malformed, or identity-rejected request
+  returns exactly one schema-v1 result envelope; failures use a typed receipt and
+  the `rejected` result operation when no request operation could be decoded.
+  Diagnostics are normalized to valid UTF-8 before their byte cap is applied.
+  Protocol output is capped at 64 KiB and never contains archive bytes.
+- Remote activation distinguishes the source manifest identity from the local
+  engine identity. The selected OCI manifest's config digest becomes the
+  generated devcontainer image (`sha256:<config-digest>`). Before DevPod's
+  Docker driver inspects that image, `initializeCommand` verifies and extracts
+  the complete Kit v1, exposes its ready store through an exact pinned-Hauler
+  registry behind pinned-pasta IPv4 loopback confinement, pulls the source
+  manifest digest, and requires Docker inspection to return the expected local
+  image ID. The temporary registry is stopped before a no-replace activation
+  receipt is published. A non-Docker provider engine fails as an unsupported
+  capability; there is no provider-plugin or network-pull fallback.
+- Container-side `hydrate` repeats helper, kit, manifest, tool, architecture,
+  store, and root verification. It extracts the root artifact through the
+  existing Hauler and archive adapters into a private stage, installs the exact
+  Camp, Hauler, and pasta bytes beneath `.camp/runtime`, and promotes entries
+  with descriptor-relative no-replace renames. The only preexisting workspace
+  paths it accepts are `.camp-bootstrap` and `.camp/runtime`; hydrated `.camp`
+  content is merged without replacing runtime. Each rename fsyncs both
+  directories, and the durable hydration receipt is published only after the
+  root is complete. The generated lifecycle boundary releases the preserved
+  user `onCreateCommand` only after that success. It never calls `devpod up`
+  again or falls back to the capsule source.
+- Do not attempt to activate a devcontainer configuration created only in the
+  remote workspace with a second local-folder `devpod up --recreate`. Pinned
+  v0.26.1 exposes no supported community command for that remote reconfiguration
+  seam, and the real second-up characterization resolved the selected config
+  beneath the recorded local source instead. The first Docker-provider `up`
+  changed that disposable source to `uid=0`, `gid=0`, mode `0700`; the recreate
+  failed `stat .../.devcontainer/devcontainer.json: permission denied` even
+  though structured remote hydration had succeeded. Treat the source as
+  disposable and clean it by exact ownership scope; do not chmod or chown it to
+  manufacture a recreate contract.
+- A local-provider or legacy terminal `camp open` constructs this ordered argv:
+  `devpod up --ide none --open-ide=false --context <context> --id <workspace-id>
+  --provider <provider> --devcontainer-path
+  <capsule-relative-devcontainer-path> --workspace-env
+  CAMP_REGISTRY=<registry-endpoint> --workspace-env
+  CAMP_FILESERVER=<fileserver-endpoint> --workspace-env CAMP_CAPSULE=<capsule>
+  --workspace-env CAMP_CHECKPOINT=<opened-generation-or-empty>
+  <resolved-root>`. A new non-local `haulerKitV1` open preserves the same
+  identity and environment arguments but supplies
+  `.camp-bootstrap/devcontainer.json` and the recorded disposable bootstrap
+  root. `internal/app/open_test.go:377` proves the capsule-relative local path;
+  `TestOpenRemoteUsesPreparedBootstrapSourceForExactlyOneDevPodUp` proves the
+  remote source switch; `TestTask3ScopedWorkspaceEnvironmentAndArgvExecution`
+  preserves ordered environment argv; and `TestExactDevPodArgv` preserves
+  terminal IDE selection.
 - Raw DevPod and Hauler passthrough is fail-closed. The adapters allow only exact, effect-free `version`, `help`, and `--help` invocations; known lifecycle, session, provider, store, and service commands are denied; reserved configuration, environment, identity, and store flags are conflicts; malformed and unknown argv is rejected before the runner. Passthrough accepts no environment map, so it cannot replace Camp-owned environment.
 - Remote return resolves the DevPod workspace folder, attempts an rsync mirror into a fresh local staging root, and permits tar-over-SSH fallback only for classified fallback-eligible failures. Failed staging attempts are discarded.
 - `sshtransfer.Executor` runs rsync without a shell and connects the SSH tar producer to the local tar consumer with an OS pipe. The tar consumer requires GNU tar options `--same-permissions` and `--delay-directory-restore`; BusyBox tar is not a valid fallback dependency.
@@ -82,5 +242,9 @@ Installed-tool tests in `integration/contracts_test.go` skip when the binaries a
 - `internal/adapters/sshtransfer/`
 - `internal/adapters/hauler/`
 - `internal/adapters/hauler/passthrough.go`
+- `internal/app/open_remote_data_plane.go`
+- `internal/capsule/bootstrap_verify.go`
+- `internal/domain/remote_data_plane.go`
+- `internal/haulkit/`
 - `internal/adapters/supervisor/confinement.go`
 - `integration/contracts_test.go`

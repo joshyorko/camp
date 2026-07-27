@@ -73,6 +73,25 @@ func (r *CommandDigestResolver) Resolve(ctx context.Context, reference string) (
 	return "", errors.New("Docker manifest output lacks a valid descriptor digest")
 }
 
+func (r *CommandDigestResolver) ResolveConfigDigest(ctx context.Context, reference string) (string, error) {
+	if r == nil || r.executable == "" || r.runner == nil || reference == "" {
+		return "", errors.New("Docker manifest resolver is unconfigured")
+	}
+	result, err := r.runner.Run(ctx, ports.Command{Executable: r.executable, Argv: []string{"manifest", "inspect", reference}})
+	if err != nil || result.ExitCode != 0 {
+		return "", fmt.Errorf("inspect Docker manifest config: %w", err)
+	}
+	var manifest struct {
+		Config struct {
+			Digest string `json:"digest"`
+		} `json:"config"`
+	}
+	if err := json.Unmarshal(result.Stdout, &manifest); err != nil || !digestPattern.MatchString(manifest.Config.Digest) {
+		return "", errors.New("Docker manifest output lacks a valid config digest")
+	}
+	return manifest.Config.Digest, nil
+}
+
 type Initializer struct {
 	clock    NowClock
 	resolver DigestResolver

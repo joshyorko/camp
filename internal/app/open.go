@@ -85,6 +85,25 @@ type OpenServiceStarter interface {
 	Start(context.Context, domain.JournalSnapshot) (domain.JournalSnapshot, error)
 }
 
+type OpenRemoteDataPlane interface {
+	Prepare(context.Context, RemoteDataPlaneRequest) (RemoteDataPlaneResult, error)
+}
+
+type RemoteDataPlaneRequest struct {
+	SessionID        string
+	AttemptID        string
+	Capsule          string
+	Lineage          domain.Lineage
+	Generation       *domain.GenerationRef
+	Materialization  string
+	DevcontainerPath string
+}
+
+type RemoteDataPlaneResult struct {
+	BootstrapRoot string
+	Record        domain.RemoteDataPlaneRecord
+}
+
 type OpenForwarderManager interface {
 	Start(context.Context, domain.ForwardingRequest) (domain.ForwardingRecord, error)
 	Observe(context.Context, domain.ForwardingRequest) (domain.ForwardingRecord, error)
@@ -114,6 +133,7 @@ type OpenDependencies struct {
 	Providers       OpenProviderEnsurer
 	Target          OpenTargetResolver
 	Services        OpenServiceStarter
+	RemoteDataPlane OpenRemoteDataPlane
 	Forwarders      OpenForwarderManager
 	Hardlinks       OpenHardlinkRestorer
 	Images          OpenImageRestorer
@@ -177,10 +197,11 @@ type openLeaseReceipt struct {
 }
 
 type openWorkspaceUpInput struct {
-	ID       string                        `json:"id"`
-	Context  string                        `json:"context"`
-	Provider string                        `json:"provider"`
-	Env      devpodadapter.CampEnvironment `json:"environment"`
+	ID         string                        `json:"id"`
+	Context    string                        `json:"context"`
+	Provider   string                        `json:"provider"`
+	SourceRoot string                        `json:"sourceRoot"`
+	Env        devpodadapter.CampEnvironment `json:"environment"`
 }
 
 type openWorkspaceRootInput struct {
@@ -293,6 +314,7 @@ func (o *Open) Reconcile(ctx context.Context, sessionID string) (domain.JournalS
 	reconciled, err := journalstore.Reconcile(ctx, o.deps.Journal, sessionID, map[string]journalstore.Observer{
 		"LocalLeaseAcquisition":       withOpenRecoveryObjective(o.observeRemoteLeaseAcquisition),
 		"RemoteLeaseAcquisition":      withOpenRecoveryObjective(o.observeRemoteLeaseAcquisition),
+		"RemoteDataPlanePrepared":     withOpenRecoveryObjective(o.observeRemoteDataPlanePrepared),
 		"WorkspaceUp":                 withOpenRecoveryObjective(o.observeWorkspaceUp),
 		"WorkspaceRootResolved":       withOpenRecoveryObjective(o.observeWorkspaceRootResolved),
 		"ForwarderStarted:registry":   withOpenRecoveryObjective(o.observeForwarderStarted),
@@ -309,6 +331,40 @@ func (o *Open) Reconcile(ctx context.Context, sessionID string) (domain.JournalS
 		return reconciled, err
 	}
 	return reconciled, nil
+}
+
+func (o *Open) observeRemoteDataPlanePrepared(ctx context.Context, snapshot domain.JournalSnapshot, intent ports.IntentRecord) (ports.FactRecord, domain.JournalSnapshot, error) {
+	if o.deps.RemoteDataPlane == nil || snapshot.Recovery.RemoteDataPlane == nil {
+		return ports.FactRecord{}, snapshot, errors.New("remote data-plane recovery dependency or selection is incomplete")
+	}
+	var selected domain.RemoteDataPlaneRecord
+	if err := json.Unmarshal(intent.Input, &selected); err != nil {
+		return ports.FactRecord{}, snapshot, fmt.Errorf("decode remote data-plane intent: %w", err)
+	}
+	if selected != *snapshot.Recovery.RemoteDataPlane || selected.Mode != domain.DataPlaneHaulerKitV1 ||
+		selected.AttemptID != snapshot.SessionID+"-hauler-kit-v1" || selected.BootstrapRoot != "" {
+		return ports.FactRecord{}, snapshot, errors.New("remote data-plane intent does not match the pending session")
+	}
+	prepared, err := o.deps.RemoteDataPlane.Prepare(ctx, RemoteDataPlaneRequest{
+		SessionID: snapshot.SessionID, AttemptID: selected.AttemptID, Capsule: snapshot.Capsule, Lineage: snapshot.Lineage,
+		Generation: cloneGeneration(snapshot.OpenedGeneration), Materialization: snapshot.Materialization.CanonicalPath,
+		DevcontainerPath: snapshot.Recovery.Configuration.DevcontainerPath,
+	})
+	if err != nil {
+		return ports.FactRecord{}, snapshot, err
+	}
+	if !validRemoteDataPlaneResult(prepared, selected, snapshot.Materialization.CanonicalPath) {
+		return ports.FactRecord{}, snapshot, errors.New("observed remote data plane does not match the pending intent")
+	}
+	next := snapshot
+	next.Recovery.RemoteDataPlane = &prepared.Record
+	now := o.deps.Clock.Now().UTC()
+	if now.IsZero() {
+		return ports.FactRecord{}, snapshot, errors.New("remote data-plane recovery clock returned zero time")
+	}
+	return ports.FactRecord{
+		IntentID: intent.ID, SessionID: intent.SessionID, Transition: intent.Transition, Timestamp: now, Output: safeJSON(prepared.Record),
+	}, next, nil
 }
 
 func (o *Open) observeForwarderStarted(ctx context.Context, snapshot domain.JournalSnapshot, intent ports.IntentRecord) (ports.FactRecord, domain.JournalSnapshot, error) {
@@ -402,6 +458,13 @@ func (o *Open) observeWorkspaceUp(ctx context.Context, snapshot domain.JournalSn
 		input.Provider == "" || input.Provider != snapshot.Workspace.Provider || input.Env != expectedEnvironment || root == "" {
 		return ports.FactRecord{}, snapshot, errors.New("workspace up intent does not match the pending session")
 	}
+	expectedSourceRoot := root
+	if record := snapshot.Recovery.RemoteDataPlane; record != nil && record.Mode == domain.DataPlaneHaulerKitV1 {
+		expectedSourceRoot = record.BootstrapRoot
+	}
+	if input.SourceRoot != expectedSourceRoot || !validRoot(input.SourceRoot) {
+		return ports.FactRecord{}, snapshot, errors.New("workspace up source does not match the pending session")
+	}
 	if err := o.deps.Ownership.Revalidate(snapshot.Materialization); err != nil {
 		return ports.FactRecord{}, snapshot, fmt.Errorf("revalidate workspace materialization: %w", err)
 	}
@@ -415,7 +478,7 @@ func (o *Open) observeWorkspaceUp(ctx context.Context, snapshot domain.JournalSn
 			continue
 		}
 		matches++
-		if candidate.Context != input.Context || candidate.Provider.Name != input.Provider || candidate.Source.LocalFolder != root {
+		if candidate.Context != input.Context || candidate.Provider.Name != input.Provider || candidate.Source.LocalFolder != input.SourceRoot {
 			return ports.FactRecord{}, snapshot, errors.New("observed DevPod workspace does not match the pending intent")
 		}
 	}
@@ -431,7 +494,7 @@ func (o *Open) observeWorkspaceUp(ctx context.Context, snapshot domain.JournalSn
 	}
 	next := snapshot
 	next.Workspace.ID = input.ID
-	next.Workspace.LocalFolder = root
+	next.Workspace.LocalFolder = input.SourceRoot
 	next.Workspace.StagingRoot = root
 	next.Workspace.Target = snapshot.Recovery.Entry.Target
 	now := o.deps.Clock.Now().UTC()
@@ -851,6 +914,12 @@ func (o *Open) create(ctx context.Context, request OpenRequest) (OpenResult, err
 			Cleanup:       domain.CleanupPolicy{WorkspaceAction: domain.WorkspaceCleanupDelete, RemoveSessionArtifacts: true},
 		},
 	}
+	if !request.LocalProvider && o.deps.RemoteDataPlane != nil {
+		snapshot.Recovery.RemoteDataPlane = &domain.RemoteDataPlaneRecord{
+			Mode:      domain.DataPlaneHaulerKitV1,
+			AttemptID: sessionID + "-hauler-kit-v1",
+		}
+	}
 	if err := o.deps.Journal.Create(ctx, snapshot); err != nil {
 		return OpenResult{}, err
 	}
@@ -1006,6 +1075,20 @@ func validResolvedBackend(backend config.Backend) bool {
 	}
 }
 
+func validRemoteDataPlaneResult(result RemoteDataPlaneResult, selected domain.RemoteDataPlaneRecord, materialization string) bool {
+	record := result.Record
+	return validRoot(result.BootstrapRoot) && filepath.Clean(result.BootstrapRoot) != materialization &&
+		result.BootstrapRoot == record.BootstrapRoot && record.Mode == domain.DataPlaneHaulerKitV1 &&
+		record.Mode == selected.Mode && record.AttemptID == selected.AttemptID &&
+		len(record.KitSHA256) == 64 && record.KitSize > 0 &&
+		len(record.ManifestSHA256) == 64 && record.ManifestSize > 0 &&
+		strings.Contains(record.OuterImage, "@sha256:") && len(record.OuterImage[strings.LastIndex(record.OuterImage, "@sha256:")+8:]) == 64 &&
+		record.RequestSchema != 0 && strings.HasSuffix(record.AttemptID, "-hauler-kit-v1") &&
+		record.RequestSession == strings.TrimSuffix(record.AttemptID, "-hauler-kit-v1") &&
+		validRoot(record.WorkspaceRoot) && validRoot(record.RuntimeRoot) && validRoot(record.ManifestPath) &&
+		strings.HasPrefix(record.Architecture, "linux/") && len(record.ConfigSHA256) == 64 && record.ConfigSize > 0
+}
+
 func validateSnapshotBackend(snapshot domain.JournalSnapshot, backend config.Backend) error {
 	configuration := snapshot.Recovery.Configuration
 	if configuration.BackendKind == "" && configuration.BackendURL == "" && configuration.BackendFingerprint == "" {
@@ -1042,6 +1125,46 @@ func (o *Open) continueOpeningFromMaterialization(ctx context.Context, snapshot 
 	}{Path: devcontainer.Path}), devcontainer, func() error { snapshot.Recovery.Configuration.DevcontainerPath = devcontainer.Path; return nil }); err != nil {
 		return OpenResult{}, err
 	}
+	bootstrapRoot := ""
+	dataPlane := snapshot.Recovery.RemoteDataPlane
+	if !request.LocalProvider && dataPlane != nil && dataPlane.Mode == domain.DataPlaneHaulerKitV1 {
+		if o.deps.RemoteDataPlane == nil {
+			return OpenResult{}, errors.New("remote Hauler data plane dependency is incomplete")
+		}
+		if !validRoot(dataPlane.BootstrapRoot) {
+			intent, err := journal.ensureIntent(ctx, "RemoteDataPlanePrepared", *dataPlane)
+			if err != nil {
+				return OpenResult{}, err
+			}
+			prepared, err := o.deps.RemoteDataPlane.Prepare(ctx, RemoteDataPlaneRequest{
+				SessionID: snapshot.SessionID, AttemptID: dataPlane.AttemptID, Capsule: snapshot.Capsule, Lineage: snapshot.Lineage, Generation: cloneGeneration(snapshot.OpenedGeneration),
+				Materialization: root, DevcontainerPath: devcontainer.Path,
+			})
+			if err != nil {
+				return OpenResult{}, fmt.Errorf("prepare remote Hauler data plane: %w", err)
+			}
+			if !validRemoteDataPlaneResult(prepared, *dataPlane, root) {
+				return OpenResult{}, errors.New("remote Hauler data plane returned an invalid bootstrap root")
+			}
+			bootstrapRoot = prepared.BootstrapRoot
+			snapshot.Recovery.RemoteDataPlane = &prepared.Record
+			if err := journal.recordFact(ctx, intent, prepared.Record, nil); err != nil {
+				return OpenResult{}, err
+			}
+		} else {
+			prepared, err := o.deps.RemoteDataPlane.Prepare(ctx, RemoteDataPlaneRequest{
+				SessionID: snapshot.SessionID, AttemptID: dataPlane.AttemptID, Capsule: snapshot.Capsule, Lineage: snapshot.Lineage, Generation: cloneGeneration(snapshot.OpenedGeneration),
+				Materialization: root, DevcontainerPath: devcontainer.Path,
+			})
+			if err != nil {
+				return OpenResult{}, fmt.Errorf("verify recorded remote Hauler data plane: %w", err)
+			}
+			if !validRemoteDataPlaneResult(prepared, *dataPlane, root) || prepared.Record != *dataPlane {
+				return OpenResult{}, errors.New("recorded remote Hauler data plane identity changed")
+			}
+			bootstrapRoot = prepared.BootstrapRoot
+		}
+	}
 	targetResult, err := o.deps.Target.Resolve(ctx, root, request.Target)
 	if err != nil {
 		return OpenResult{}, err
@@ -1066,14 +1189,23 @@ func (o *Open) continueOpeningFromMaterialization(ctx context.Context, snapshot 
 		return OpenResult{}, fmt.Errorf("derive capsule-relative devcontainer path: %w", capsule.ErrInvalidDevcontainer)
 	}
 	upOptions := devpodadapter.UpOptions{WorkspacePath: root, WorkspaceID: workspaceID, Context: request.Context, Provider: request.Provider, DevcontainerPath: devcontainerArgument, CampEnvironment: &devpodadapter.CampEnvironment{Registry: endpoint(snapshot.Recovery.Configuration.RegistryPort), Fileserver: endpoint(snapshot.Recovery.Configuration.FileserverPort), Capsule: request.Capsule, Checkpoint: checkpoint}}
+	if bootstrapRoot != "" {
+		upOptions.BootstrapPath = bootstrapRoot
+		upOptions.SourceMode = devpodadapter.SourceModeBootstrap
+		upOptions.DevcontainerPath = ".camp-bootstrap/devcontainer.json"
+	}
 	if o.deps.Providers != nil {
 		if err := o.deps.Providers.EnsureProvider(ctx, request.Context, request.Provider); err != nil {
 			return OpenResult{}, fmt.Errorf("ensure DevPod provider: %w", err)
 		}
 	}
-	workspaceRecord := domain.WorkspaceRecord{ID: workspaceID, Context: request.Context, Provider: request.Provider, LocalProvider: request.LocalProvider, LocalFolder: root, Target: targetResult.Relative, StagingRoot: root}
+	sourceRoot := root
+	if bootstrapRoot != "" {
+		sourceRoot = bootstrapRoot
+	}
+	workspaceRecord := domain.WorkspaceRecord{ID: workspaceID, Context: request.Context, Provider: request.Provider, LocalProvider: request.LocalProvider, LocalFolder: sourceRoot, Target: targetResult.Relative, StagingRoot: root}
 	var upResult ports.Result
-	upInput := openWorkspaceUpInput{ID: workspaceID, Context: request.Context, Provider: request.Provider, Env: *upOptions.CampEnvironment}
+	upInput := openWorkspaceUpInput{ID: workspaceID, Context: request.Context, Provider: request.Provider, SourceRoot: sourceRoot, Env: *upOptions.CampEnvironment}
 	intent, err := journal.ensureIntent(ctx, "WorkspaceUp", safeJSON(upInput))
 	if err != nil {
 		return OpenResult{}, err
@@ -1081,7 +1213,7 @@ func (o *Open) continueOpeningFromMaterialization(ctx context.Context, snapshot 
 	upResult, err = o.deps.DevPod.Up(ctx, upOptions)
 	if err != nil {
 		if upResult.ExitCode > 0 {
-			if settleErr := o.settleKnownWorkspaceUpFailure(ctx, intent, upInput, root, upResult); settleErr != nil {
+			if settleErr := o.settleKnownWorkspaceUpFailure(ctx, intent, upInput, upResult); settleErr != nil {
 				return OpenResult{}, errors.Join(err, settleErr)
 			}
 		}
@@ -1095,7 +1227,7 @@ func (o *Open) continueOpeningFromMaterialization(ctx context.Context, snapshot 
 	return o.completeWorkspaceOpen(ctx, snapshot, request, targetResult)
 }
 
-func (o *Open) settleKnownWorkspaceUpFailure(ctx context.Context, intent ports.IntentRecord, input openWorkspaceUpInput, root string, result ports.Result) error {
+func (o *Open) settleKnownWorkspaceUpFailure(ctx context.Context, intent ports.IntentRecord, input openWorkspaceUpInput, result ports.Result) error {
 	ctx = context.WithoutCancel(ctx)
 	workspaces, err := o.deps.DevPod.ListInContext(ctx, input.Context)
 	if err != nil {
@@ -1105,7 +1237,7 @@ func (o *Open) settleKnownWorkspaceUpFailure(ctx context.Context, intent ports.I
 		if candidate.ID != input.ID {
 			continue
 		}
-		if candidate.Context != input.Context || candidate.Provider.Name != input.Provider || candidate.Source.LocalFolder != root {
+		if candidate.Context != input.Context || candidate.Provider.Name != input.Provider || candidate.Source.LocalFolder != input.SourceRoot {
 			return errors.New("failed WorkspaceUp created a workspace with mismatched identity")
 		}
 		return ports.ErrAmbiguous
@@ -1523,8 +1655,12 @@ func (o *Open) validateOpenSession(snapshot domain.JournalSnapshot, requireEffec
 	if snapshot.Workspace.StagingRoot != snapshot.Materialization.CanonicalPath {
 		return errors.New("session workspace staging root does not match its materialization")
 	}
-	if snapshot.Workspace.LocalFolder != snapshot.Materialization.CanonicalPath {
-		return errors.New("session workspace local folder does not match its materialization")
+	expectedSourceRoot := snapshot.Materialization.CanonicalPath
+	if record := snapshot.Recovery.RemoteDataPlane; record != nil && record.Mode == domain.DataPlaneHaulerKitV1 {
+		expectedSourceRoot = record.BootstrapRoot
+	}
+	if snapshot.Workspace.LocalFolder != expectedSourceRoot {
+		return errors.New("session workspace local folder does not match its selected data plane")
 	}
 	if requireEffectiveRoot && !filepath.IsAbs(snapshot.Workspace.EffectiveRoot) {
 		return errors.New("session effective workspace root is missing or not absolute")

@@ -7,6 +7,7 @@ import (
 	"io"
 	"os"
 
+	"github.com/joshyorko/camp/internal/remoteworker"
 	"github.com/spf13/cobra"
 )
 
@@ -258,6 +259,10 @@ func NewRootWithLifecycle(lifecycle Lifecycle) *cobra.Command {
 		hiddenRequiredArgumentCommand("supervise", lifecycle.Supervise),
 	)
 	return root
+}
+
+func RunRemoteWorker(ctx context.Context, streams Streams) error {
+	return remoteworker.Run(ctx, streams.In, streams.Out, streams.ErrOut)
 }
 
 func newConfigCommand(operations ConfigOperations) *cobra.Command {

@@ -87,6 +87,13 @@ func (r *digestRunner) Run(_ context.Context, command ports.Command) (ports.Resu
 	return ports.Result{Stdout: []byte(`[{"Descriptor":{"digest":"sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"}}]`)}, nil
 }
 
+type configDigestRunner struct{ command ports.Command }
+
+func (r *configDigestRunner) Run(_ context.Context, command ports.Command) (ports.Result, error) {
+	r.command = command
+	return ports.Result{Stdout: []byte(`{"schemaVersion":2,"config":{"digest":"sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"}}`)}, nil
+}
+
 func TestCommandDigestResolverUsesDockerManifestWithoutShell(t *testing.T) {
 	t.Parallel()
 	runner := &digestRunner{}
@@ -96,5 +103,20 @@ func TestCommandDigestResolverUsesDockerManifestWithoutShell(t *testing.T) {
 	}
 	if digest != "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb" || runner.command.Executable != "/usr/bin/docker" || len(runner.command.Argv) != 4 || runner.command.Argv[3] != roomImage {
 		t.Fatalf("digest=%q command=%#v", digest, runner.command)
+	}
+}
+
+func TestCommandDigestResolverReturnsImmutableLocalImageIDFromManifestConfig(t *testing.T) {
+	t.Parallel()
+	runner := &configDigestRunner{}
+	imageID, err := NewCommandDigestResolver("/usr/bin/docker", runner).ResolveConfigDigest(context.Background(), roomImage+"@sha256:"+string(make([]byte, 64)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if imageID != "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc" ||
+		runner.command.Executable != "/usr/bin/docker" ||
+		len(runner.command.Argv) != 3 || runner.command.Argv[0] != "manifest" ||
+		runner.command.Argv[1] != "inspect" {
+		t.Fatalf("imageID=%q command=%#v", imageID, runner.command)
 	}
 }

@@ -642,6 +642,106 @@ func TestT3CodeUpUsesSafeTerminalDevPodSetup(t *testing.T) {
 	}
 }
 
+func TestUpUsesBootstrapRootInsteadOfCapsuleRoot(t *testing.T) {
+	t.Parallel()
+	runner := &recordingRunner{}
+	_, err := NewClient("devpod", runner).Up(context.Background(), UpOptions{
+		WorkspacePath:    "/tmp/capsule",
+		BootstrapPath:    "/tmp/session/devpod-bootstrap",
+		SourceMode:       SourceModeBootstrap,
+		WorkspaceID:      "camp",
+		Provider:         "docker",
+		DevcontainerPath: ".camp-bootstrap/devcontainer.json",
+	})
+	if err != nil {
+		t.Fatalf("Up() error = %v", err)
+	}
+	want := []string{
+		"up", "--ide", "none", "--open-ide=false", "--id", "camp", "--provider", "docker",
+		"--devcontainer-path", ".camp-bootstrap/devcontainer.json", "/tmp/session/devpod-bootstrap",
+	}
+	if len(runner.commands) != 1 || !reflect.DeepEqual(runner.commands[0].Argv, want) {
+		t.Fatalf("argv = %#v, want %#v", runner.commands, want)
+	}
+	for _, argument := range runner.commands[0].Argv {
+		if argument == "/tmp/capsule" {
+			t.Fatalf("argv exposed capsule root: %#v", runner.commands[0].Argv)
+		}
+	}
+}
+
+func TestUpRejectsInvalidBootstrapSourceModesWithoutExecution(t *testing.T) {
+	t.Parallel()
+	for _, test := range []struct {
+		name          string
+		workspacePath string
+		bootstrapPath string
+		sourceMode    SourceMode
+	}{
+		{name: "empty bootstrap path", workspacePath: "/tmp/capsule", sourceMode: SourceModeBootstrap},
+		{name: "bootstrap aliases capsule", workspacePath: "/tmp/capsule", bootstrapPath: "/tmp/capsule", sourceMode: SourceModeBootstrap},
+		{name: "unknown source mode", workspacePath: "/tmp/capsule", bootstrapPath: "/tmp/bootstrap", sourceMode: SourceMode("future")},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			runner := &recordingRunner{}
+			_, err := NewClient("devpod", runner).Up(context.Background(), UpOptions{
+				WorkspacePath: test.workspacePath,
+				BootstrapPath: test.bootstrapPath,
+				SourceMode:    test.sourceMode,
+				WorkspaceID:   "camp",
+			})
+			if err == nil {
+				t.Fatal("Up() error = nil, want invalid source mode rejection")
+			}
+			if len(runner.commands) != 0 {
+				t.Fatalf("Up() commands = %#v, want fail-closed before execution", runner.commands)
+			}
+		})
+	}
+}
+
+func TestUpPreservesLocalCapsuleSourceModesAndFallbackImage(t *testing.T) {
+	t.Parallel()
+	for _, test := range []struct {
+		name       string
+		provider   string
+		sourceMode SourceMode
+	}{
+		{name: "default Docker mode", provider: "docker"},
+		{name: "explicit capsule Podman mode", provider: "podman", sourceMode: SourceModeCapsule},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			runner := &recordingRunner{}
+			_, err := NewClient("devpod", runner).Up(context.Background(), UpOptions{
+				WorkspacePath:    "/tmp/capsule",
+				BootstrapPath:    "/tmp/disposable-bootstrap",
+				SourceMode:       test.sourceMode,
+				WorkspaceID:      "camp",
+				Provider:         test.provider,
+				FallbackImage:    "ghcr.io/example/room@sha256:abc",
+				DevcontainerPath: ".camp/runtime/devcontainer.json",
+			})
+			if err != nil {
+				t.Fatalf("Up() error = %v", err)
+			}
+			argv := runner.commands[0].Argv
+			if argv[len(argv)-1] != "/tmp/capsule" {
+				t.Fatalf("local %s source = %q, want capsule root; argv=%#v", test.provider, argv[len(argv)-1], argv)
+			}
+			foundFallback := false
+			for index := 0; index+1 < len(argv); index++ {
+				if argv[index] == "--fallback-image" && argv[index+1] == "ghcr.io/example/room@sha256:abc" {
+					foundFallback = true
+					break
+				}
+			}
+			if !foundFallback {
+				t.Fatalf("local %s argv lost generated Room fallback: %#v", test.provider, argv)
+			}
+		})
+	}
+}
+
 func TestTerminalAndT3UpRejectDevPodOpenIDETrue(t *testing.T) {
 	t.Parallel()
 	openIDE := true

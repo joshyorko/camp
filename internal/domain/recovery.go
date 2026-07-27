@@ -121,6 +121,7 @@ type RecoveryRecord struct {
 	Session         SessionArtifactPaths   `json:"session" yaml:"session"`
 	Source          SourceDecision         `json:"source" yaml:"source"`
 	Hydration       *HydrationPlan         `json:"hydration,omitempty" yaml:"hydration,omitempty"`
+	RemoteDataPlane *RemoteDataPlaneRecord `json:"remoteDataPlane,omitempty" yaml:"remoteDataPlane,omitempty"`
 	DesiredServices []DesiredServiceRecord `json:"desiredServices,omitempty" yaml:"desiredServices,omitempty"`
 	Entry           EntryRequestRecord     `json:"entry" yaml:"entry"`
 	Forwarding      []ForwardingRecord     `json:"forwarding,omitempty" yaml:"forwarding,omitempty"`

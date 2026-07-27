@@ -39,6 +39,7 @@ import (
 	"github.com/joshyorko/camp/internal/coordination"
 	"github.com/joshyorko/camp/internal/doctor"
 	"github.com/joshyorko/camp/internal/domain"
+	"github.com/joshyorko/camp/internal/haulkit"
 	"github.com/joshyorko/camp/internal/images"
 	journalstore "github.com/joshyorko/camp/internal/journal"
 	"github.com/joshyorko/camp/internal/ports"
@@ -813,6 +814,14 @@ func resolveMachineID(ctx context.Context, primary func(context.Context) (string
 }
 
 func composeOpen(ctx context.Context, composition productionComposition, services serviceBundle) (*app.Open, error) {
+	confinement := supervisor.NewConfinementResolver(composition.runner, exec.LookPath, func() string { return "host" })
+	remoteDataPlane := app.NewRemoteDataPlanePreparer(app.RemoteDataPlaneDependencies{
+		Root:     filepath.Join(composition.paths.DataRoot, "remote-data-planes"),
+		Archiver: archive.NewTarZstd(), Hauler: composition.hauler,
+		Builder: haulkit.NewBuilder(composition.hauler), Verifier: haulkit.NewVerifier(composition.hauler),
+		Images: capsule.NewCommandDigestResolver("docker", composition.runner), Confinement: confinement,
+		HaulerExecutable: composition.haulerExecutable, HaulerVersion: composition.haulerVersion,
+	})
 	return app.NewOpenWithBackend(ctx, app.OpenDependencies{
 		Journal: composition.journal, Paths: composition.paths, ResolvedBackend: composition.backend,
 		Ownership: composition.ownership, Initializer: composition.initializer,
@@ -820,7 +829,7 @@ func composeOpen(ctx context.Context, composition productionComposition, service
 		Hardlinks: workspace.NewHardlinkRestorer(composition.devpod),
 		Images:    images.NewRestorer(composition.devpod, registry.NewCatalog(http.DefaultClient, 100)),
 		Hydrator:  hydration.NewController(nil, composition.hauler, archive.NewTarZstd(), composition.ownership, hydration.Hooks{}),
-		DevPod:    composition.devpod, Providers: composition.devpod,
+		DevPod:    composition.devpod, Providers: composition.devpod, RemoteDataPlane: remoteDataPlane,
 		Target: target.Resolver{Zoxide: target.NewCommandZoxide("zoxide", composition.runner)}, Clock: composition.clock,
 	}, composition.backend, objectstore.Options{})
 }
@@ -1036,6 +1045,7 @@ type productionComposition struct {
 	devpod           *devpod.Client
 	devpodExecutable string
 	haulerExecutable string
+	haulerVersion    string
 	hauler           *hauler.Client
 }
 
@@ -1491,11 +1501,13 @@ func composeProductionWithSettings(ctx context.Context, settings productionSetti
 	}
 	devpodPath := toolPaths.devpod
 	haulerPath := toolPaths.hauler
+	haulerVersion := toolPaths.haulerVersion
 	return productionComposition{
 		productionBase: base,
 		initializer:    capsule.NewInitializer(base.clock, capsule.NewCommandDigestResolver("docker", runner)),
 		runner:         runner, devpod: devpod.NewClient(devpodPath, runner), devpodExecutable: devpodPath,
-		haulerExecutable: haulerPath, hauler: hauler.NewClient(haulerPath, runner),
+		haulerExecutable: haulerPath, haulerVersion: haulerVersion,
+		hauler: hauler.NewClientWithVersion(haulerPath, haulerVersion, runner),
 	}, nil
 }
 

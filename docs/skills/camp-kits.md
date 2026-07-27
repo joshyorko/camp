@@ -13,6 +13,53 @@ not create a backend pointer or claim disconnected lifecycle proof. Schema
 version 1 is intentionally unsupported because no
 public command consumed or emitted it.
 
+Camp Hauler Kit is a separate internal v1 delivery format in
+`internal/haulkit`; it does not change the public CampKit v2 contract above.
+Its archive is a deterministic ready directory containing only `bin/camp`,
+`bin/hauler`, `bin/pasta`, and the populated `store/` tree. The outer tar
+accepts only real directories and regular files: source symlinks, source
+hardlinks, traversal paths, archive links, and special files are rejected.
+The sidecar manifest binds the session, capsule, lineage, optional generation,
+Linux architecture, fresh `hauler store info --digests` inventory, root
+identity, exact runtime-tool bytes and versions, archive bytes, and ordered
+chunks. Production splitting uses exact 1 GiB chunks; acceptance reassembles
+and hashes the completed chunks before the builder returns.
+
+Hauler store identity is derived by the version-bound adapter from sorted JSON
+inventory returned by `hauler store info --output json --digests`, after the
+adapter executes the exact Hauler binary and observes the locked version.
+Before archiving, the adapter uses official `store save` then `store load` into
+a private fresh store; arbitrary unindexed files in the caller's store are not
+copied into the kit. On Linux, Camp opens `/proc/self/exe` once and copies from
+that stable file descriptor, so pathname replacement cannot change the running
+Camp bytes selected for the kit. The portable fallback proves pre-open,
+opened-file, and post-open `os.SameFile` continuity or fails closed. Camp then
+probes and hashes the same private snapshot. The exact Camp probe is
+`camp --version`; Hauler uses `hauler version`, and pasta uses
+`pasta --version`.
+
+Root references canonicalize to the exact Hauler file identity
+`hauler/<name>.tar.zst:latest`. The adapter extracts and hashes those observed
+root bytes, so the manifest always carries a positive byte size even when
+`store info --digests` omits `Size`; builder and verifier bind the canonical
+reference, digest, and independently observed size.
+
+Verification extracts into a private sibling stage, revalidates tool bytes and
+the extracted store, and publishes the ready directory no-replace only after
+all checks pass. Failure removes the stage and durably syncs its parent.
+Verification rejects architecture, version, digest, root, or post-manifest
+store drift. It bounds outer entry count, per-file and total expanded bytes,
+and zstd memory/window use from the compressed manifest identity under fixed
+hard ceilings.
+Fault tests address each durable boundary by name and occurrence. Injection is
+one-shot: recovery cleanup runs with the fault disarmed, removes visible
+outputs, and reaches a parent-directory fsync before the test accepts the
+failure path. A failure injected before removal performs no mutation; the
+owning defer retries removal only after the one-shot fault is disarmed.
+Permanent generations remain native `hauler store save --filename
+<generation>.tar.zst` artifacts; the ready-store kit does not replace that
+generation format.
+
 ## CLI usage
 
 - `camp kit inspect FILE`: prints the decoded manifest summary (`inspect`)

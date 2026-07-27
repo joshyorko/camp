@@ -797,9 +797,13 @@ func (d *openDevPod) Up(_ context.Context, options devpodadapter.UpOptions) (por
 func (d *openDevPod) ListInContext(_ context.Context, devpodContext string) ([]devpodadapter.Workspace, error) {
 	workspaces := make([]devpodadapter.Workspace, 0, len(d.ups))
 	for _, up := range d.ups {
+		source := up.WorkspacePath
+		if up.SourceMode == devpodadapter.SourceModeBootstrap {
+			source = up.BootstrapPath
+		}
 		workspaces = append(workspaces, devpodadapter.Workspace{
 			ID: up.WorkspaceID, Provider: devpodadapter.WorkspaceProvider{Name: up.Provider},
-			Source: devpodadapter.WorkspaceSource{LocalFolder: up.WorkspacePath}, Context: devpodContext,
+			Source: devpodadapter.WorkspaceSource{LocalFolder: source}, Context: devpodContext,
 		})
 	}
 	return workspaces, nil

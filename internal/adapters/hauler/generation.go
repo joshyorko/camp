@@ -10,8 +10,10 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 
+	"github.com/joshyorko/camp/internal/haulkit"
 	"github.com/joshyorko/camp/internal/ports"
 	"gopkg.in/yaml.v3"
 )
@@ -148,6 +150,160 @@ type generationInfoEntry struct {
 	Type      string `json:"Type"`
 	Platform  string `json:"Platform"`
 	Digest    string `json:"Digest"`
+	Size      int64  `json:"Size"`
+}
+
+func (c *Client) ValidateStore(ctx context.Context, store string) (haulkit.StoreIdentity, error) {
+	if c == nil || c.version == "" || !filepath.IsAbs(store) {
+		return haulkit.StoreIdentity{}, errors.New("Hauler store validation requires a locked version and absolute store path")
+	}
+	versionResult, err := c.run(ctx, []string{"version"})
+	if err != nil || versionResult.ExitCode != 0 {
+		return haulkit.StoreIdentity{}, fmt.Errorf("observe Hauler version: %w", err)
+	}
+	versionOutput := strings.TrimSpace(string(append(append([]byte(nil), versionResult.Stdout...), versionResult.Stderr...)))
+	versionObserved := false
+	for _, field := range strings.Fields(versionOutput) {
+		if field == c.version {
+			versionObserved = true
+			break
+		}
+	}
+	if !versionObserved {
+		return haulkit.StoreIdentity{}, fmt.Errorf("observed Hauler identity %q does not contain locked version %q", versionOutput, c.version)
+	}
+	result, err := c.Info(ctx, store)
+	if err != nil {
+		return haulkit.StoreIdentity{}, err
+	}
+	if result.ExitCode != 0 {
+		return haulkit.StoreIdentity{}, fmt.Errorf("Hauler store info exited %d", result.ExitCode)
+	}
+	var observed []generationInfoEntry
+	if len(result.Stdout) == 0 || json.Unmarshal(result.Stdout, &observed) != nil || len(observed) == 0 {
+		return haulkit.StoreIdentity{}, errors.New("Hauler store info did not return a non-empty JSON inventory")
+	}
+	entries := make([]haulkit.StoreEntry, 0, len(observed))
+	for _, entry := range observed {
+		if entry.Reference == "" || (entry.Type != "file" && entry.Type != "image") || !manifestDigestPattern.MatchString(entry.Digest) {
+			return haulkit.StoreIdentity{}, errors.New("Hauler store info contains an incomplete identity")
+		}
+		platform := entry.Platform
+		if platform == "-" {
+			platform = ""
+		}
+		entries = append(entries, haulkit.StoreEntry{
+			Reference: entry.Reference,
+			Type:      entry.Type,
+			Platform:  platform,
+			Digest:    strings.TrimPrefix(entry.Digest, "sha256:"),
+			Size:      entry.Size,
+		})
+	}
+	sort.Slice(entries, func(i, j int) bool {
+		if entries[i].Reference != entries[j].Reference {
+			return entries[i].Reference < entries[j].Reference
+		}
+		if entries[i].Type != entries[j].Type {
+			return entries[i].Type < entries[j].Type
+		}
+		return entries[i].Platform < entries[j].Platform
+	})
+	canonical, err := json.Marshal(entries)
+	if err != nil {
+		return haulkit.StoreIdentity{}, err
+	}
+	index := sha256.Sum256(canonical)
+	return haulkit.StoreIdentity{
+		HaulerVersion: c.version,
+		IndexSHA256:   hex.EncodeToString(index[:]),
+		Entries:       entries,
+	}, nil
+}
+
+func (c *Client) PrepareStore(ctx context.Context, source, destination string) (haulkit.StoreIdentity, error) {
+	if c == nil || !filepath.IsAbs(source) || !filepath.IsAbs(destination) {
+		return haulkit.StoreIdentity{}, errors.New("Hauler store preparation requires absolute paths")
+	}
+	temporaryDirectory, err := os.MkdirTemp(filepath.Dir(destination), ".haulkit-hauler-save-")
+	if err != nil {
+		return haulkit.StoreIdentity{}, err
+	}
+	defer os.RemoveAll(temporaryDirectory)
+	archive := filepath.Join(temporaryDirectory, "store.tar.zst")
+	result, err := c.Save(ctx, source, archive)
+	if err != nil || result.ExitCode != 0 {
+		return haulkit.StoreIdentity{}, fmt.Errorf("save source Hauler store: %w", err)
+	}
+	archiveFile, err := os.Open(archive)
+	if err != nil {
+		return haulkit.StoreIdentity{}, err
+	}
+	if err := archiveFile.Sync(); err != nil {
+		_ = archiveFile.Close()
+		return haulkit.StoreIdentity{}, err
+	}
+	if err := archiveFile.Close(); err != nil {
+		return haulkit.StoreIdentity{}, err
+	}
+	if err := os.Mkdir(destination, 0o700); err != nil {
+		return haulkit.StoreIdentity{}, err
+	}
+	accepted := false
+	defer func() {
+		if !accepted {
+			_ = os.RemoveAll(destination)
+		}
+	}()
+	result, err = c.Load(ctx, destination, []string{archive})
+	if err != nil || result.ExitCode != 0 {
+		return haulkit.StoreIdentity{}, fmt.Errorf("load private Hauler store: %w", err)
+	}
+	identity, err := c.ValidateStore(ctx, destination)
+	if err != nil {
+		return haulkit.StoreIdentity{}, err
+	}
+	accepted = true
+	return identity, nil
+}
+
+func (c *Client) ObserveRoot(ctx context.Context, store, reference string) (haulkit.RootIdentity, error) {
+	canonical, err := haulkit.NormalizeRootReference(reference)
+	if err != nil {
+		return haulkit.RootIdentity{}, err
+	}
+	identity, err := c.ValidateStore(ctx, store)
+	if err != nil {
+		return haulkit.RootIdentity{}, err
+	}
+	var entry *haulkit.StoreEntry
+	for index := range identity.Entries {
+		if identity.Entries[index].Type == "file" && identity.Entries[index].Reference == canonical {
+			entry = &identity.Entries[index]
+			break
+		}
+	}
+	if entry == nil {
+		return haulkit.RootIdentity{}, fmt.Errorf("Hauler store is missing root %q", canonical)
+	}
+	temporaryDirectory, err := os.MkdirTemp("", "camp-haulkit-root-")
+	if err != nil {
+		return haulkit.RootIdentity{}, err
+	}
+	defer os.RemoveAll(temporaryDirectory)
+	output := filepath.Join(temporaryDirectory, "root.tar.zst")
+	result, err := c.Extract(ctx, store, canonical, output)
+	if err != nil || result.ExitCode != 0 {
+		return haulkit.RootIdentity{}, fmt.Errorf("extract observed Hauler root: %w", err)
+	}
+	digest, size, err := hashFile(output)
+	if err != nil {
+		return haulkit.RootIdentity{}, err
+	}
+	if digest != entry.Digest || size <= 0 || (entry.Size > 0 && entry.Size != size) {
+		return haulkit.RootIdentity{}, errors.New("observed Hauler root bytes do not match store inventory")
+	}
+	return haulkit.RootIdentity{Reference: canonical, SHA256: digest, Size: size}, nil
 }
 
 func readGenerationExpectations(path string) (generationExpectations, error) {
