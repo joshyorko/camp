@@ -223,10 +223,10 @@ Usage:
 
 Flags:
       --backend string              camp backend URL (defaults to machine setup)
+      --devpod-context string       named DevPod configuration context (defaults to machine setup)
   -h, --help                        help for init
       --migrate                     migrate the legacy singleton configuration
       --name string                 stable camp ID
-      --workspace-context string    workspace runtime context (defaults to machine setup)
       --workspace-provider string   workspace runtime provider (defaults to machine setup)
 
 Global flags:

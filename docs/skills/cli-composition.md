@@ -2,7 +2,7 @@
 
 ## Current boundary
 
-The executable delegates process I/O and exit status to `internal/cli`. The production tree exposes `setup`, `init`, `open`, `attach`, `sync`, `close`, `reopen`, `recover`, `status`, `images list|capture|restore`, `serve status|logs|restart`, and the read-only `doctor` and `provider list` commands through concrete application and adapter composition, alongside deterministic help, global `--json`, and completion generation. `setup` composes the locked installer but does not execute a lifecycle; no command is real-tool lifecycle proof until the pinned tools complete it without skips. Registering only implemented production handlers keeps help and generated completions truthful.
+The executable delegates process I/O and exit status to `internal/cli`. The production tree exposes `setup`, `init`, `open`, `attach`, `sync`, `close`, `reopen`, `recover`, `status`, `images list|capture|restore`, `serve status|logs|restart`, and the read-only `doctor` and `provider list` commands through concrete application and adapter composition, alongside deterministic help, global `--json`, and completion generation. Human `setup` composes the locked installer and then delegates camp creation to the same production `init` boundary; JSON setup remains noninteractive and machine-scoped. No command is real-tool lifecycle proof until the pinned tools complete it without skips. Registering only implemented production handlers keeps help and generated completions truthful.
 
 `camp doctor` emits one versioned capability model in deterministic human or JSON form. Its stable statuses are `healthy`, `degraded`, `blocked`, and `skipped-not-configured`; `blocked` dominates the overall result, followed by `degraded`. A blocked aggregate is rendered exactly once and exits nonzero; it is not followed by a second generic failure envelope. Each probe is bounded independently. DevPod and Hauler are healthy only when the read-only managed-tool inspector proves the installed executable against the compiled lock; doctor never downloads or repairs them. Kernel evidence removes control bytes before its 256-byte display bound, and probe causes or credentials are never result evidence.
 
@@ -36,20 +36,23 @@ The regression test must keep `camp open` nonzero until a real `open` handler is
 
 Camp-owned user configuration persists only the typed non-secret fields in `config.Persistent`. Updates take an adjacent exclusive lock, write a mode-0600 temporary file, fsync it, rename it over the destination, and fsync the parent directory. URL userinfo and credential-shaped query parameters are rejected before effects. `CAMP_ACCESS_TOKEN` remains runtime-only; the legacy `accessToken` YAML field is rejected.
 
-Machine setup and camp initialization are separate:
+Machine defaults and camp manifests remain separate, but first-run human setup is one interaction:
 
 ```bash
 camp setup
+# setup asks for the root and name, then initializes the camp
+
+# direct command for additional camps and scripts
 camp init /absolute/camp/root \
   --name capsule-name \
   --backend file:///absolute/camp/backend \
   --workspace-provider room-of-requirement \
-  --workspace-context ror
+  --devpod-context ror
 ```
 
-`--name` is required outside migration. Backend and workspace settings default from machine setup and become explicit in the new manifest, so later machine-default changes cannot silently retarget an existing camp. Camp resolves the requested backend through the same strict `config.ResolveBackend` contract used by production open before creating Camp state or initializing the capsule. An S3 backend therefore requires effective endpoint, region, path-style, and insecure-policy values that pass the normal credential-free S3 checks.
+The positional `root` is the camp/project directory. `--devpod-context` selects a named DevPod configuration context; it is not a project path. The hidden `--workspace-context` compatibility spelling maps to the same value but cannot be combined with the canonical flag. `--name` is required outside migration. Backend and workspace settings default from machine setup and become explicit in the new manifest, so later machine-default changes cannot silently retarget an existing camp. Camp resolves the requested backend through the same strict `config.ResolveBackend` contract used by production open before creating Camp state or initializing the capsule. An S3 backend therefore requires effective endpoint, region, path-style, and insecure-policy values that pass the normal credential-free S3 checks.
 
-`camp setup` uses one `config.Store.Modify` transaction that holds the adjacent exclusive lock across read, mutation, validation, mode-0600 temporary-file publication, fsync, rename, and parent-directory fsync. It writes only machine defaults: backend, workspace provider/context, ports, and effective non-secret S3 compatibility settings. Camp identity and source are written atomically to `.camp/camp.yaml` by `camp init`; they are never persisted as an active selection in machine config. `camp open` resolves the selected manifest or journal into the typed `app.OpenRequest`, while credential-bearing environment values remain runtime-only. S3 endpoint userinfo, credential-shaped URL queries, access tokens, provider credentials, and provider option values are never persisted.
+`camp setup` validates the complete root/name/backend/provider/context request before effects, then uses one `config.Store.Modify` transaction that holds the adjacent exclusive lock across read, mutation, validation, mode-0600 temporary-file publication, fsync, rename, and parent-directory fsync. It writes only machine defaults: backend, workspace provider/context, ports, and effective non-secret S3 compatibility settings. The same setup pipeline then calls production init, which writes camp identity and source atomically to `.camp/camp.yaml`; they are never persisted as an active selection in machine config. A missing or non-directory camp root fails before the config transaction or tool setup. `camp open` resolves the selected manifest or journal into the typed `app.OpenRequest`, while credential-bearing environment values remain runtime-only. S3 endpoint userinfo, credential-shaped URL queries, access tokens, provider credentials, and provider option values are never persisted.
 
 Provider reads redact values using DevPod's option schema: any option marked `password: true` is redacted even when its name is innocuous. A missing provider reader is a composition error and returns a clear error instead of panicking. Provider add/use delegates persistence to DevPod, but Camp permits values only for the explicit non-secret Docker allowlist: `DOCKER_PATH` must be absolute and `HELPER` must be boolean. Unknown, password-shaped, and named-provider options fail before subprocess execution; rejected values must not appear in argv, errors, JSON, receipts, or transcripts. DevPod's provider file does not inherit Camp's atomic durability contract.
 
