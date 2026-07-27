@@ -9,11 +9,26 @@ import (
 )
 
 func TestBuilderCleansOwnedOutputsAfterEveryAtomicPublicationBoundary(t *testing.T) {
-	for _, boundary := range []string{"write", "file-fsync", "publish", "directory-fsync"} {
+	for _, boundary := range []string{
+		"archive-finalize",
+		"zstd-finalize",
+		"chunk-write",
+		"file-fsync",
+		"publish",
+		"directory-fsync",
+		"reassembly-write",
+		"manifest-write",
+		"extraction-write",
+		"extraction-file-fsync",
+		"extraction-directory-fsync",
+		"extraction-publish",
+		"cleanup-remove",
+	} {
 		t.Run(boundary, func(t *testing.T) {
 			request, validator := buildFixture(t)
 			builder := NewBuilder(validator)
 			builder.chunkSize = 64
+			builder.runtimeProbe = fixtureRuntimeProbe
 			previous := atomicBoundaryHook
 			t.Cleanup(func() { atomicBoundaryHook = previous })
 			atomicBoundaryHook = func(observed string) error {

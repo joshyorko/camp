@@ -50,6 +50,7 @@ type StoreEntry struct {
 	Type      string `json:"type"`
 	Platform  string `json:"platform,omitempty"`
 	Digest    string `json:"digest"`
+	Size      int64  `json:"size,omitempty"`
 }
 
 type RootIdentity struct {
@@ -103,7 +104,8 @@ func Validate(manifest Manifest) error {
 	for _, entry := range manifest.Store.Entries {
 		key := entry.Type + "\x00" + entry.Reference + "\x00" + entry.Platform
 		if entry.Reference == "" || unsafePath(entry.Reference) || (entry.Type != "file" && entry.Type != "image") ||
-			!validSHA256(entry.Digest) || (entry.Platform != "" && entry.Platform != "linux/amd64" && entry.Platform != "linux/arm64") {
+			!validSHA256(entry.Digest) || entry.Size < 0 ||
+			(entry.Platform != "" && entry.Platform != "linux/amd64" && entry.Platform != "linux/arm64") {
 			return invalidManifest("invalid store entry")
 		}
 		if _, exists := seenEntries[key]; exists {

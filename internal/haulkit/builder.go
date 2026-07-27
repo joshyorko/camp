@@ -9,8 +9,11 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"os/exec"
 	"path/filepath"
+	"runtime"
 	"sort"
+	"strings"
 	"syscall"
 	"time"
 
@@ -24,6 +27,10 @@ type Builder interface {
 
 type StoreValidator interface {
 	ValidateStore(context.Context, string) (StoreIdentity, error)
+}
+
+type StorePreparer interface {
+	PrepareStore(context.Context, string, string) (StoreIdentity, error)
 }
 
 type BuildRequest struct {
@@ -52,9 +59,11 @@ type Artifact struct {
 }
 
 type KitBuilder struct {
-	validator  StoreValidator
-	chunkSize  int64
-	afterSplit func(string, []ChunkIdentity) error
+	validator            StoreValidator
+	chunkSize            int64
+	afterSplit           func(string, []ChunkIdentity) error
+	runtimeProbe         func(context.Context, string, string) (string, error)
+	afterStoreValidation func() error
 }
 
 func NewBuilder(validator StoreValidator) *KitBuilder {
@@ -71,10 +80,68 @@ func (builder *KitBuilder) Build(ctx context.Context, request BuildRequest) (Art
 	if err != nil {
 		return Artifact{}, fmt.Errorf("validate fresh Hauler store: %w", err)
 	}
-	if store.HaulerVersion != request.HaulerVersion {
-		return Artifact{}, fmt.Errorf("validated Hauler version %q != locked %q", store.HaulerVersion, request.HaulerVersion)
+	if builder.afterStoreValidation != nil {
+		if err := builder.afterStoreValidation(); err != nil {
+			return Artifact{}, err
+		}
 	}
-	tools, err := identifyTools(request)
+	preparer, ok := builder.validator.(StorePreparer)
+	if !ok {
+		return Artifact{}, errors.New("Camp Hauler kit builder requires an official store preparer")
+	}
+	snapshotRoot, err := os.MkdirTemp(request.OutputDirectory, ".haulkit-snapshot-")
+	if err != nil {
+		return Artifact{}, err
+	}
+	defer func() {
+		_ = os.RemoveAll(snapshotRoot)
+		_ = syncDirectory(request.OutputDirectory)
+	}()
+	snapshotStore := filepath.Join(snapshotRoot, "store")
+	preparedStore, err := preparer.PrepareStore(ctx, request.StoreDirectory, snapshotStore)
+	if err != nil {
+		return Artifact{}, fmt.Errorf("prepare private Hauler store: %w", err)
+	}
+	if !storeIdentitiesEqual(store, preparedStore) {
+		return Artifact{}, fmt.Errorf("%w: prepared Hauler store differs from validated source", ErrIdentityMismatch)
+	}
+	preparedRequest := request
+	preparedRequest.StoreDirectory = snapshotStore
+	preparedRequest.CampExecutable = filepath.Join(snapshotRoot, "camp")
+	preparedRequest.HaulerExecutable = filepath.Join(snapshotRoot, "hauler")
+	preparedRequest.PastaExecutable = filepath.Join(snapshotRoot, "pasta")
+	for source, destination := range map[string]string{
+		request.CampExecutable:   preparedRequest.CampExecutable,
+		request.HaulerExecutable: preparedRequest.HaulerExecutable,
+		request.PastaExecutable:  preparedRequest.PastaExecutable,
+	} {
+		if err := snapshotRegular(source, destination); err != nil {
+			return Artifact{}, err
+		}
+	}
+	probe := builder.runtimeProbe
+	if probe == nil {
+		probe = probeRuntimeIdentity
+	}
+	architecture := "linux/" + runtime.GOARCH
+	if request.Architecture != architecture {
+		return Artifact{}, fmt.Errorf("%w: caller architecture %q != observed %q", ErrIdentityMismatch, request.Architecture, architecture)
+	}
+	preparedRequest.Architecture = architecture
+	observedVersions := make(map[string]string, 3)
+	expectedVersions := map[string]string{"camp": request.CampVersion, "hauler": request.HaulerVersion, "pasta": request.PastaVersion}
+	for kind, path := range map[string]string{"camp": preparedRequest.CampExecutable, "hauler": preparedRequest.HaulerExecutable, "pasta": preparedRequest.PastaExecutable} {
+		output, err := probe(ctx, path, kind)
+		if err != nil || !containsExactIdentity(output, expectedVersions[kind]) {
+			return Artifact{}, fmt.Errorf("probe %s runtime identity: %w", kind, err)
+		}
+		observedVersions[kind] = expectedVersions[kind]
+	}
+	if observedVersions["camp"] != request.CampVersion || observedVersions["hauler"] != request.HaulerVersion ||
+		observedVersions["pasta"] != request.PastaVersion || preparedStore.HaulerVersion != observedVersions["hauler"] {
+		return Artifact{}, fmt.Errorf("%w: caller and observed runtime versions differ", ErrIdentityMismatch)
+	}
+	tools, err := identifyTools(preparedRequest)
 	if err != nil {
 		return Artifact{}, err
 	}
@@ -94,9 +161,10 @@ func (builder *KitBuilder) Build(ctx context.Context, request BuildRequest) (Art
 			_ = os.Remove(archivePath)
 			_ = os.Remove(manifestPath)
 			_ = os.RemoveAll(chunkDirectory)
+			_ = syncDirectory(request.OutputDirectory)
 		}
 	}()
-	if err := writeReadyArchive(ctx, archivePath, request); err != nil {
+	if err := writeReadyArchive(ctx, archivePath, preparedRequest); err != nil {
 		return Artifact{}, err
 	}
 	archiveDigest, archiveSize, err := hashPath(archivePath)
@@ -142,8 +210,8 @@ func (builder *KitBuilder) Build(ctx context.Context, request BuildRequest) (Art
 		Capsule:       request.Capsule,
 		Lineage:       request.Lineage,
 		Generation:    request.Generation,
-		Architecture:  request.Architecture,
-		Store:         store,
+		Architecture:  architecture,
+		Store:         preparedStore,
 		Root:          request.Root,
 		Tools:         tools,
 		Archive:       ArchiveIdentity{SHA256: archiveDigest, Size: archiveSize},
@@ -160,13 +228,68 @@ func (builder *KitBuilder) Build(ctx context.Context, request BuildRequest) (Art
 	if _, err := NewVerifier(builder.validator).Verify(ctx, VerifyRequest{
 		ManifestPath: manifestPath,
 		ArchivePath:  archivePath,
-		Architecture: request.Architecture,
+		Architecture: architecture,
 		Tools:        tools,
+		Destination:  filepath.Join(request.OutputDirectory, ".haulkit-verified-ready"),
 	}); err != nil {
 		return Artifact{}, fmt.Errorf("verify completed Camp Hauler kit: %w", err)
 	}
+	if err := removeDurably(filepath.Join(request.OutputDirectory, ".haulkit-verified-ready"), request.OutputDirectory); err != nil {
+		return Artifact{}, err
+	}
 	cleanup = false
 	return artifact, nil
+}
+
+func containsExactIdentity(output, expected string) bool {
+	if expected == "" {
+		return false
+	}
+	if strings.TrimSpace(output) == expected {
+		return true
+	}
+	for _, field := range strings.Fields(output) {
+		if field == expected {
+			return true
+		}
+	}
+	return false
+}
+
+func probeRuntimeIdentity(ctx context.Context, path, kind string) (string, error) {
+	argument := "version"
+	if kind == "pasta" {
+		argument = "--version"
+	}
+	command := exec.CommandContext(ctx, path, argument)
+	body, err := command.CombinedOutput()
+	if err != nil {
+		return "", err
+	}
+	return strings.TrimSpace(string(body)), nil
+}
+
+func snapshotRegular(source, destination string) error {
+	input, err := openRegular(source)
+	if err != nil {
+		return err
+	}
+	defer input.Close()
+	output, err := os.OpenFile(destination, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o500)
+	if err != nil {
+		return err
+	}
+	if _, err := io.Copy(output, input); err != nil {
+		_ = output.Close()
+		_ = os.Remove(destination)
+		return err
+	}
+	if err := output.Sync(); err != nil {
+		_ = output.Close()
+		_ = os.Remove(destination)
+		return err
+	}
+	return output.Close()
 }
 
 func identifyTools(request BuildRequest) (ToolIdentities, error) {
@@ -242,7 +365,7 @@ func writeReadyArchive(ctx context.Context, output string, request BuildRequest)
 		if source.directory {
 			continue
 		}
-		file, err := os.Open(source.sourcePath)
+		file, err := openRegular(source.sourcePath)
 		if err != nil {
 			return err
 		}
@@ -258,7 +381,16 @@ func writeReadyArchive(ctx context.Context, output string, request BuildRequest)
 			return fmt.Errorf("source %q changed while archiving", source.sourcePath)
 		}
 	}
+	if err := runAtomicBoundaryHook("archive-finalize"); err != nil {
+		_ = writer.Close()
+		_ = encoder.Close()
+		return err
+	}
 	if err := writer.Close(); err != nil {
+		return err
+	}
+	if err := runAtomicBoundaryHook("zstd-finalize"); err != nil {
+		_ = encoder.Close()
 		return err
 	}
 	if err := encoder.Close(); err != nil {
@@ -344,12 +476,12 @@ func writePrivateAtomic(output string, body []byte) error {
 		_ = os.Remove(temporary.Name())
 		return err
 	}
-	if _, err := temporary.Write(body); err != nil {
+	if err := runAtomicBoundaryHook("manifest-write"); err != nil {
 		_ = temporary.Close()
 		_ = os.Remove(temporary.Name())
 		return err
 	}
-	if err := runAtomicBoundaryHook("write"); err != nil {
+	if _, err := temporary.Write(body); err != nil {
 		_ = temporary.Close()
 		_ = os.Remove(temporary.Name())
 		return err
@@ -358,6 +490,13 @@ func writePrivateAtomic(output string, body []byte) error {
 		return err
 	}
 	return syncDirectory(filepath.Dir(output))
+}
+
+func removeDurably(path, parent string) error {
+	injected := runAtomicBoundaryHook("cleanup-remove")
+	removeErr := os.RemoveAll(path)
+	syncErr := syncDirectory(parent)
+	return errors.Join(injected, removeErr, syncErr)
 }
 
 func hashPath(path string) (string, int64, error) {

@@ -26,9 +26,22 @@ chunks. Production splitting uses exact 1 GiB chunks; acceptance reassembles
 and hashes the completed chunks before the builder returns.
 
 Hauler store identity is derived by the version-bound adapter from sorted JSON
-inventory returned by `hauler store info --output json --digests`. Verification
-extracts into a private directory, revalidates tool bytes and the extracted
-store, and rejects architecture, version, digest, or post-manifest store drift.
+inventory returned by `hauler store info --output json --digests`, after the
+adapter executes the exact Hauler binary and observes the locked version.
+Before archiving, the adapter uses official `store save` then `store load` into
+a private fresh store; arbitrary unindexed files in the caller's store are not
+copied into the kit. Camp snapshots each runtime executable with no-follow
+regular-file opens, then probes and hashes that same private snapshot. The root
+reference, digest, and size must match one observed file entry in the prepared
+Hauler store.
+
+Verification extracts into a private sibling stage, revalidates tool bytes and
+the extracted store, and publishes the ready directory no-replace only after
+all checks pass. Failure removes the stage and durably syncs its parent.
+Verification rejects architecture, version, digest, root, or post-manifest
+store drift. It bounds outer entry count, per-file and total expanded bytes,
+and zstd memory/window use from the compressed manifest identity under fixed
+hard ceilings.
 Permanent generations remain native `hauler store save --filename
 <generation>.tar.zst` artifacts; the ready-store kit does not replace that
 generation format.

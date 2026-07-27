@@ -80,7 +80,7 @@ func validTestManifest() Manifest {
 		Store: StoreIdentity{
 			HaulerVersion: "v2.0.2",
 			IndexSHA256:   testDigest,
-			Entries:       []StoreEntry{{Reference: "root", Type: "file", Digest: testDigest}},
+			Entries:       []StoreEntry{{Reference: "root", Type: "file", Digest: testDigest, Size: 4}},
 		},
 		Root: RootIdentity{Reference: "root.tar.zst", SHA256: testDigest, Size: 4},
 		Tools: ToolIdentities{

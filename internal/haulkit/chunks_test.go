@@ -83,3 +83,39 @@ func TestReassembleRejectsHostileChunkSets(t *testing.T) {
 		}
 	}
 }
+
+func TestReassembleRejectsChunkSwappedToSameByteSymlinkAtOpenBoundary(t *testing.T) {
+	directory := t.TempDir()
+	source := filepath.Join(directory, "kit.tar.zst")
+	body := []byte("same-bytes")
+	if err := os.WriteFile(source, body, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	chunkDirectory := filepath.Join(directory, "chunks")
+	chunks, err := Split(context.Background(), source, chunkDirectory, 64)
+	if err != nil {
+		t.Fatal(err)
+	}
+	target := filepath.Join(directory, "attacker-controlled")
+	if err := os.WriteFile(target, body, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	chunkPath := filepath.Join(chunkDirectory, chunks[0].Name)
+	previous := beforeOpenRegular
+	t.Cleanup(func() { beforeOpenRegular = previous })
+	swapped := false
+	beforeOpenRegular = func(path string) error {
+		if path != chunkPath || swapped {
+			return nil
+		}
+		swapped = true
+		if err := os.Remove(path); err != nil {
+			return err
+		}
+		return os.Symlink(target, path)
+	}
+	err = Reassemble(context.Background(), chunkDirectory, chunks, filepath.Join(directory, "rebuilt"), 64)
+	if err == nil {
+		t.Fatal("Reassemble() accepted symlink swapped at open boundary")
+	}
+}

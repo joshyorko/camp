@@ -3,6 +3,7 @@ package haulkit
 import (
 	"context"
 	"errors"
+	"io"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -19,10 +20,30 @@ func (v staticStoreValidator) ValidateStore(context.Context, string) (StoreIdent
 	return v.identity, nil
 }
 
+func (v staticStoreValidator) PrepareStore(_ context.Context, source, destination string) (StoreIdentity, error) {
+	if err := os.Mkdir(destination, 0o700); err != nil {
+		return StoreIdentity{}, err
+	}
+	sourceFile, err := openRegular(filepath.Join(source, "index.json"))
+	if err != nil {
+		return StoreIdentity{}, err
+	}
+	defer sourceFile.Close()
+	body, err := io.ReadAll(sourceFile)
+	if err != nil {
+		return StoreIdentity{}, err
+	}
+	if err := os.WriteFile(filepath.Join(destination, "index.json"), body, 0o400); err != nil {
+		return StoreIdentity{}, err
+	}
+	return v.identity, nil
+}
+
 func TestBuilderProducesDeterministicVerifiedReadyStoreArchive(t *testing.T) {
 	request, validator := buildFixture(t)
 	builder := NewBuilder(validator)
 	builder.chunkSize = 64
+	builder.runtimeProbe = fixtureRuntimeProbe
 
 	first, err := builder.Build(context.Background(), request)
 	if err != nil {
@@ -50,7 +71,7 @@ func TestBuilderProducesDeterministicVerifiedReadyStoreArchive(t *testing.T) {
 	}
 }
 
-func TestBuilderRejectsOuterSymlinksAndHardlinks(t *testing.T) {
+func TestBuilderOfficialStorePreparationExcludesUntrackedLinks(t *testing.T) {
 	tests := []struct {
 		name  string
 		setup func(*testing.T, BuildRequest)
@@ -74,8 +95,9 @@ func TestBuilderRejectsOuterSymlinksAndHardlinks(t *testing.T) {
 			test.setup(t, request)
 			builder := NewBuilder(validator)
 			builder.chunkSize = 64
-			if _, err := builder.Build(context.Background(), request); err == nil {
-				t.Fatal("Build() error = nil")
+			builder.runtimeProbe = fixtureRuntimeProbe
+			if _, err := builder.Build(context.Background(), request); err != nil {
+				t.Fatalf("Build() error = %v", err)
 			}
 		})
 	}
@@ -85,6 +107,7 @@ func TestBuilderRejectsCorruptionAtChunkReassemblyAcceptanceBarrier(t *testing.T
 	request, validator := buildFixture(t)
 	builder := NewBuilder(validator)
 	builder.chunkSize = 64
+	builder.runtimeProbe = fixtureRuntimeProbe
 	builder.afterSplit = func(directory string, chunks []ChunkIdentity) error {
 		path := filepath.Join(directory, chunks[0].Name)
 		if err := os.Chmod(path, 0o600); err != nil {
@@ -99,6 +122,96 @@ func TestBuilderRejectsCorruptionAtChunkReassemblyAcceptanceBarrier(t *testing.T
 		if _, err := os.Stat(filepath.Join(request.OutputDirectory, name)); !errors.Is(err, os.ErrNotExist) {
 			t.Fatalf("failed build retained %s: %v", name, err)
 		}
+	}
+}
+
+func TestBuilderRejectsStoreFileSwappedToSymlinkAfterValidation(t *testing.T) {
+	request, validator := buildFixture(t)
+	secret := filepath.Join(t.TempDir(), "secret")
+	if err := os.WriteFile(secret, []byte("must-not-archive"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	builder := NewBuilder(validator)
+	builder.chunkSize = 64
+	builder.runtimeProbe = fixtureRuntimeProbe
+	builder.afterStoreValidation = func() error {
+		index := filepath.Join(request.StoreDirectory, "index.json")
+		if err := os.Remove(index); err != nil {
+			return err
+		}
+		return os.Symlink(secret, index)
+	}
+	if _, err := builder.Build(context.Background(), request); err == nil {
+		t.Fatal("Build() error = nil")
+	}
+}
+
+func TestBuilderDerivesRuntimeIdentityAndRejectsWrongCallerClaims(t *testing.T) {
+	request, validator := buildFixture(t)
+	builder := NewBuilder(validator)
+	builder.chunkSize = 64
+	builder.runtimeProbe = fixtureRuntimeProbe
+	request.Architecture = "linux/not-host"
+	if _, err := builder.Build(context.Background(), request); err == nil {
+		t.Fatal("Build() accepted caller architecture")
+	}
+	request.Architecture = "linux/" + runtime.GOARCH
+	request.HaulerVersion = "v0.0.0"
+	if _, err := builder.Build(context.Background(), request); err == nil {
+		t.Fatal("Build() accepted caller Hauler version")
+	}
+}
+
+func TestBuilderProbesAndHashesTheSamePrivateToolSnapshot(t *testing.T) {
+	request, validator := buildFixture(t)
+	originalDigest, _, err := hashPath(request.CampExecutable)
+	if err != nil {
+		t.Fatal(err)
+	}
+	replacement := filepath.Join(t.TempDir(), "replacement")
+	if err := os.WriteFile(replacement, []byte("attacker-controlled"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	builder := NewBuilder(validator)
+	builder.chunkSize = 64
+	builder.runtimeProbe = func(ctx context.Context, path, kind string) (string, error) {
+		if kind == "camp" {
+			if err := os.Remove(request.CampExecutable); err != nil {
+				return "", err
+			}
+			if err := os.Symlink(replacement, request.CampExecutable); err != nil {
+				return "", err
+			}
+		}
+		return fixtureRuntimeProbe(ctx, path, kind)
+	}
+	artifact, err := builder.Build(context.Background(), request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	body, err := os.ReadFile(artifact.ManifestPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	manifest, err := DecodeCanonical(body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if manifest.Tools.Camp.SHA256 != originalDigest {
+		t.Fatalf("Camp digest = %s, want snapshotted %s", manifest.Tools.Camp.SHA256, originalDigest)
+	}
+}
+
+func fixtureRuntimeProbe(_ context.Context, _ string, kind string) (string, error) {
+	switch kind {
+	case "camp":
+		return "dev", nil
+	case "hauler":
+		return "v2.0.2", nil
+	case "pasta":
+		return "pasta 1", nil
+	default:
+		return "", errors.New("unknown tool")
 	}
 }
 
@@ -133,7 +246,7 @@ func buildFixture(t *testing.T) (BuildRequest, StoreValidator) {
 	storeIdentity := StoreIdentity{
 		HaulerVersion: "v2.0.2",
 		IndexSHA256:   indexDigest,
-		Entries:       []StoreEntry{{Reference: "root.tar.zst", Type: "file", Digest: indexDigest}},
+		Entries:       []StoreEntry{{Reference: "root.tar.zst", Type: "file", Digest: indexDigest, Size: int64(len(indexBody))}},
 	}
 	return BuildRequest{
 		SessionID:        "session-1",

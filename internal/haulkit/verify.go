@@ -14,12 +14,21 @@ import (
 	"time"
 
 	"github.com/klauspost/compress/zstd"
+	"golang.org/x/sys/unix"
 )
 
 var (
 	ErrUnsafeKit        = errors.New("unsafe Camp Hauler kit")
 	ErrIdentityMismatch = errors.New("Camp Hauler kit identity mismatch")
+	ErrArchiveLimit     = errors.New("Camp Hauler kit archive limit exceeded")
 )
+
+type readyArchiveLimits struct {
+	MaxEntries       int
+	MaxFileBytes     int64
+	MaxExpandedBytes int64
+	MaxDecoderMemory uint64
+}
 
 type Verifier interface {
 	Verify(context.Context, VerifyRequest) (VerifiedKit, error)
@@ -41,6 +50,7 @@ type VerifiedKit struct {
 
 type KitVerifier struct {
 	validator StoreValidator
+	limits    readyArchiveLimits
 }
 
 func NewVerifier(validator StoreValidator) *KitVerifier {
@@ -69,27 +79,45 @@ func (verifier *KitVerifier) Verify(ctx context.Context, request VerifyRequest) 
 	if digest != manifest.Archive.SHA256 || size != manifest.Archive.Size {
 		return VerifiedKit{}, ErrIdentityMismatch
 	}
-	destination := request.Destination
-	temporary := false
-	if destination == "" {
-		destination, err = os.MkdirTemp("", "camp-haulkit-verify-")
-		if err != nil {
+	limits := verifier.limits
+	if limits == (readyArchiveLimits{}) {
+		limits = defaultReadyArchiveLimits(manifest.Archive.Size)
+	}
+	if limits.MaxEntries <= 0 || limits.MaxFileBytes <= 0 || limits.MaxExpandedBytes <= 0 || limits.MaxDecoderMemory < 1<<20 {
+		return VerifiedKit{}, ErrArchiveLimit
+	}
+	stageParent := ""
+	if request.Destination == "" {
+		stageParent = os.TempDir()
+	} else {
+		if _, err := os.Lstat(request.Destination); err == nil {
+			return VerifiedKit{}, os.ErrExist
+		} else if !errors.Is(err, os.ErrNotExist) {
 			return VerifiedKit{}, err
 		}
-		temporary = true
+		stageParent = filepath.Dir(request.Destination)
 	}
-	if temporary {
-		defer os.RemoveAll(destination)
-	} else if err := os.Mkdir(destination, 0o700); err != nil {
+	stage, err := os.MkdirTemp(stageParent, ".haulkit-stage-*")
+	if err != nil {
 		return VerifiedKit{}, err
 	}
-	if err := extractReadyArchive(ctx, request.ArchivePath, destination); err != nil {
+	published := false
+	defer func() {
+		if !published {
+			_ = os.RemoveAll(stage)
+			_ = syncDirectory(stageParent)
+		}
+	}()
+	if err := extractReadyArchive(ctx, request.ArchivePath, stage, limits); err != nil {
+		return VerifiedKit{}, err
+	}
+	if err := syncExtractedDirectories(stage); err != nil {
 		return VerifiedKit{}, err
 	}
 	for name, identity := range map[string]FileIdentity{
 		"camp": manifest.Tools.Camp, "hauler": manifest.Tools.Hauler, "pasta": manifest.Tools.Pasta,
 	} {
-		gotDigest, gotSize, err := hashPath(filepath.Join(destination, "bin", name))
+		gotDigest, gotSize, err := hashPath(filepath.Join(stage, "bin", name))
 		if err != nil {
 			return VerifiedKit{}, err
 		}
@@ -97,13 +125,16 @@ func (verifier *KitVerifier) Verify(ctx context.Context, request VerifyRequest) 
 			return VerifiedKit{}, fmt.Errorf("%w: %s tool", ErrIdentityMismatch, name)
 		}
 	}
-	storePath := filepath.Join(destination, "store")
+	storePath := filepath.Join(stage, "store")
 	currentStore, err := verifier.validator.ValidateStore(ctx, storePath)
 	if err != nil {
 		return VerifiedKit{}, err
 	}
 	if !storeIdentitiesEqual(currentStore, manifest.Store) {
 		return VerifiedKit{}, fmt.Errorf("%w: Hauler store drift", ErrIdentityMismatch)
+	}
+	if !rootMatchesStore(manifest.Root, currentStore) {
+		return VerifiedKit{}, fmt.Errorf("%w: root identity is not present in Hauler store", ErrIdentityMismatch)
 	}
 	if request.StoreDirectory != "" {
 		currentSource, err := verifier.validator.ValidateStore(ctx, request.StoreDirectory)
@@ -115,10 +146,32 @@ func (verifier *KitVerifier) Verify(ctx context.Context, request VerifyRequest) 
 		}
 	}
 	result := VerifiedKit{Manifest: manifest}
-	if !temporary {
-		result.ReadyDirectory = destination
+	if request.Destination != "" {
+		if err := runAtomicBoundaryHook("extraction-publish"); err != nil {
+			return VerifiedKit{}, err
+		}
+		if err := unix.Renameat2(unix.AT_FDCWD, stage, unix.AT_FDCWD, request.Destination, unix.RENAME_NOREPLACE); err != nil {
+			return VerifiedKit{}, err
+		}
+		if err := syncDirectory(stageParent); err != nil {
+			_ = os.RemoveAll(request.Destination)
+			_ = syncDirectory(stageParent)
+			return VerifiedKit{}, err
+		}
+		published = true
+		result.ReadyDirectory = request.Destination
 	}
 	return result, nil
+}
+
+func rootMatchesStore(root RootIdentity, store StoreIdentity) bool {
+	for _, entry := range store.Entries {
+		if entry.Type == "file" && entry.Reference == root.Reference &&
+			entry.Digest == root.SHA256 && entry.Size == root.Size {
+			return true
+		}
+	}
+	return false
 }
 
 func storeIdentitiesEqual(left, right StoreIdentity) bool {
@@ -139,19 +192,26 @@ func canonicalStore(identity StoreIdentity) StoreIdentity {
 	return identity
 }
 
-func extractReadyArchive(ctx context.Context, archive, destination string) error {
+func extractReadyArchive(ctx context.Context, archive, destination string, limits readyArchiveLimits) error {
 	file, err := openRegular(archive)
 	if err != nil {
 		return err
 	}
 	defer file.Close()
-	decoder, err := zstd.NewReader(file, zstd.WithDecoderConcurrency(1), zstd.WithDecoderLowmem(true))
+	decoder, err := zstd.NewReader(
+		file,
+		zstd.WithDecoderConcurrency(1),
+		zstd.WithDecoderLowmem(true),
+		zstd.WithDecoderMaxMemory(limits.MaxDecoderMemory),
+		zstd.WithDecoderMaxWindow(max(uint64(limits.MaxFileBytes), limits.MaxDecoderMemory)),
+	)
 	if err != nil {
 		return err
 	}
 	defer decoder.Close()
 	reader := tar.NewReader(decoder)
 	seen := make(map[string]struct{})
+	var expanded int64
 	for {
 		if err := ctx.Err(); err != nil {
 			return err
@@ -166,6 +226,13 @@ func extractReadyArchive(ctx context.Context, archive, destination string) error
 		if err := validateReadyHeader(header); err != nil {
 			return err
 		}
+		if len(seen) >= limits.MaxEntries {
+			return ErrArchiveLimit
+		}
+		if header.Size < 0 || header.Size > limits.MaxFileBytes || expanded > limits.MaxExpandedBytes-header.Size {
+			return ErrArchiveLimit
+		}
+		expanded += header.Size
 		if _, exists := seen[header.Name]; exists {
 			return fmt.Errorf("%w: duplicate entry", ErrUnsafeKit)
 		}
@@ -187,7 +254,17 @@ func extractReadyArchive(ctx context.Context, archive, destination string) error
 		if err != nil {
 			return err
 		}
+		if err := runAtomicBoundaryHook("extraction-write"); err != nil {
+			_ = output.Close()
+			_ = os.Remove(target)
+			return err
+		}
 		written, copyErr := io.CopyN(output, reader, header.Size)
+		if err := runAtomicBoundaryHook("extraction-file-fsync"); err != nil {
+			_ = output.Close()
+			_ = os.Remove(target)
+			return err
+		}
 		syncErr := output.Sync()
 		closeErr := output.Close()
 		if copyErr != nil || written != header.Size {
@@ -206,6 +283,55 @@ func extractReadyArchive(ctx context.Context, archive, destination string) error
 		}
 	}
 	return nil
+}
+
+func syncExtractedDirectories(root string) error {
+	var directories []string
+	err := filepath.Walk(root, func(path string, info os.FileInfo, err error) error {
+		if err != nil {
+			return err
+		}
+		if info.IsDir() {
+			directories = append(directories, path)
+		}
+		return nil
+	})
+	if err != nil {
+		return err
+	}
+	sort.Slice(directories, func(i, j int) bool { return len(directories[i]) > len(directories[j]) })
+	for _, directory := range directories {
+		if err := runAtomicBoundaryHook("extraction-directory-fsync"); err != nil {
+			return err
+		}
+		if err := syncDirectory(directory); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func defaultReadyArchiveLimits(compressedSize int64) readyArchiveLimits {
+	const (
+		maxExpanded = int64(256 << 30)
+		slack       = int64(64 << 20)
+		ratio       = int64(200)
+	)
+	expanded := maxExpanded
+	if compressedSize >= 0 && compressedSize <= (maxExpanded-slack)/ratio {
+		expanded = compressedSize*ratio + slack
+	}
+	file := min(expanded, int64(128<<30))
+	memory := uint64(min(file, int64(1<<30)))
+	if memory < 1<<20 {
+		memory = 1 << 20
+	}
+	return readyArchiveLimits{
+		MaxEntries:       1_000_000,
+		MaxFileBytes:     file,
+		MaxExpandedBytes: expanded,
+		MaxDecoderMemory: memory,
+	}
 }
 
 func validateReadyHeader(header *tar.Header) error {

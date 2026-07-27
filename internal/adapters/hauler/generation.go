@@ -150,11 +150,27 @@ type generationInfoEntry struct {
 	Type      string `json:"Type"`
 	Platform  string `json:"Platform"`
 	Digest    string `json:"Digest"`
+	Size      int64  `json:"Size"`
 }
 
 func (c *Client) ValidateStore(ctx context.Context, store string) (haulkit.StoreIdentity, error) {
 	if c == nil || c.version == "" || !filepath.IsAbs(store) {
 		return haulkit.StoreIdentity{}, errors.New("Hauler store validation requires a locked version and absolute store path")
+	}
+	versionResult, err := c.run(ctx, []string{"version"})
+	if err != nil || versionResult.ExitCode != 0 {
+		return haulkit.StoreIdentity{}, fmt.Errorf("observe Hauler version: %w", err)
+	}
+	versionOutput := strings.TrimSpace(string(append(append([]byte(nil), versionResult.Stdout...), versionResult.Stderr...)))
+	versionObserved := false
+	for _, field := range strings.Fields(versionOutput) {
+		if field == c.version {
+			versionObserved = true
+			break
+		}
+	}
+	if !versionObserved {
+		return haulkit.StoreIdentity{}, fmt.Errorf("observed Hauler identity %q does not contain locked version %q", versionOutput, c.version)
 	}
 	result, err := c.Info(ctx, store)
 	if err != nil {
@@ -181,6 +197,7 @@ func (c *Client) ValidateStore(ctx context.Context, store string) (haulkit.Store
 			Type:      entry.Type,
 			Platform:  platform,
 			Digest:    strings.TrimPrefix(entry.Digest, "sha256:"),
+			Size:      entry.Size,
 		})
 	}
 	sort.Slice(entries, func(i, j int) bool {
@@ -202,6 +219,52 @@ func (c *Client) ValidateStore(ctx context.Context, store string) (haulkit.Store
 		IndexSHA256:   hex.EncodeToString(index[:]),
 		Entries:       entries,
 	}, nil
+}
+
+func (c *Client) PrepareStore(ctx context.Context, source, destination string) (haulkit.StoreIdentity, error) {
+	if c == nil || !filepath.IsAbs(source) || !filepath.IsAbs(destination) {
+		return haulkit.StoreIdentity{}, errors.New("Hauler store preparation requires absolute paths")
+	}
+	temporaryDirectory, err := os.MkdirTemp(filepath.Dir(destination), ".haulkit-hauler-save-")
+	if err != nil {
+		return haulkit.StoreIdentity{}, err
+	}
+	defer os.RemoveAll(temporaryDirectory)
+	archive := filepath.Join(temporaryDirectory, "store.tar.zst")
+	result, err := c.Save(ctx, source, archive)
+	if err != nil || result.ExitCode != 0 {
+		return haulkit.StoreIdentity{}, fmt.Errorf("save source Hauler store: %w", err)
+	}
+	archiveFile, err := os.Open(archive)
+	if err != nil {
+		return haulkit.StoreIdentity{}, err
+	}
+	if err := archiveFile.Sync(); err != nil {
+		_ = archiveFile.Close()
+		return haulkit.StoreIdentity{}, err
+	}
+	if err := archiveFile.Close(); err != nil {
+		return haulkit.StoreIdentity{}, err
+	}
+	if err := os.Mkdir(destination, 0o700); err != nil {
+		return haulkit.StoreIdentity{}, err
+	}
+	accepted := false
+	defer func() {
+		if !accepted {
+			_ = os.RemoveAll(destination)
+		}
+	}()
+	result, err = c.Load(ctx, destination, []string{archive})
+	if err != nil || result.ExitCode != 0 {
+		return haulkit.StoreIdentity{}, fmt.Errorf("load private Hauler store: %w", err)
+	}
+	identity, err := c.ValidateStore(ctx, destination)
+	if err != nil {
+		return haulkit.StoreIdentity{}, err
+	}
+	accepted = true
+	return identity, nil
 }
 
 func readGenerationExpectations(path string) (generationExpectations, error) {

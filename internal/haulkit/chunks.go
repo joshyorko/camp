@@ -9,11 +9,14 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+
+	"golang.org/x/sys/unix"
 )
 
 var ErrInvalidChunks = errors.New("invalid Camp Hauler kit chunks")
 
 var atomicBoundaryHook func(string) error
+var beforeOpenRegular func(string) error
 
 func Split(ctx context.Context, archive, directory string, chunkSize int64) ([]ChunkIdentity, error) {
 	if chunkSize <= 0 || chunkSize > DefaultChunkSize || !filepath.IsAbs(archive) || !filepath.IsAbs(directory) {
@@ -31,6 +34,7 @@ func Split(ctx context.Context, archive, directory string, chunkSize int64) ([]C
 	defer func() {
 		if !success {
 			_ = os.RemoveAll(directory)
+			_ = syncDirectory(filepath.Dir(directory))
 		}
 	}()
 	var chunks []ChunkIdentity
@@ -45,6 +49,11 @@ func Split(ctx context.Context, archive, directory string, chunkSize int64) ([]C
 			return nil, err
 		}
 		hash := sha256.New()
+		if err := runAtomicBoundaryHook("chunk-write"); err != nil {
+			_ = temporary.Close()
+			_ = os.Remove(temporary.Name())
+			return nil, err
+		}
 		written, copyErr := io.CopyN(io.MultiWriter(temporary, hash), source, chunkSize)
 		if errors.Is(copyErr, io.EOF) {
 			copyErr = nil
@@ -93,6 +102,7 @@ func Reassemble(ctx context.Context, directory string, chunks []ChunkIdentity, o
 		if cleanup {
 			_ = temporary.Close()
 			_ = os.Remove(temporary.Name())
+			_ = syncDirectory(filepath.Dir(output))
 		}
 	}()
 	seen := make(map[string]struct{}, len(chunks))
@@ -113,6 +123,10 @@ func Reassemble(ctx context.Context, directory string, chunks []ChunkIdentity, o
 			return err
 		}
 		hash := sha256.New()
+		if err := runAtomicBoundaryHook("reassembly-write"); err != nil {
+			_ = chunk.Close()
+			return err
+		}
 		written, copyErr := io.Copy(io.MultiWriter(temporary, hash), io.LimitReader(chunk, identity.Size+1))
 		closeErr := chunk.Close()
 		if copyErr != nil {
@@ -137,24 +151,36 @@ func Reassemble(ctx context.Context, directory string, chunks []ChunkIdentity, o
 }
 
 func openRegular(path string) (*os.File, error) {
-	info, err := os.Lstat(path)
+	if beforeOpenRegular != nil {
+		if err := beforeOpenRegular(path); err != nil {
+			return nil, err
+		}
+	}
+	fd, err := unix.Open(path, unix.O_RDONLY|unix.O_CLOEXEC|unix.O_NOFOLLOW, 0)
 	if err != nil {
 		return nil, err
 	}
+	file := os.NewFile(uintptr(fd), path)
+	info, err := file.Stat()
+	if err != nil {
+		_ = file.Close()
+		return nil, err
+	}
 	if !info.Mode().IsRegular() {
+		_ = file.Close()
 		return nil, fmt.Errorf("%w: %q is not a regular file", ErrInvalidChunks, path)
 	}
-	return os.Open(path)
+	return file, nil
 }
 
 func syncPublish(temporary *os.File, output string) error {
 	name := temporary.Name()
-	if err := temporary.Sync(); err != nil {
+	if err := runAtomicBoundaryHook("file-fsync"); err != nil {
 		_ = temporary.Close()
 		_ = os.Remove(name)
 		return err
 	}
-	if err := runAtomicBoundaryHook("file-fsync"); err != nil {
+	if err := temporary.Sync(); err != nil {
 		_ = temporary.Close()
 		_ = os.Remove(name)
 		return err
@@ -168,12 +194,11 @@ func syncPublish(temporary *os.File, output string) error {
 		_ = os.Remove(name)
 		return err
 	}
-	if err := os.Link(name, output); err != nil {
+	if err := runAtomicBoundaryHook("publish"); err != nil {
 		_ = os.Remove(name)
 		return err
 	}
-	if err := runAtomicBoundaryHook("publish"); err != nil {
-		_ = os.Remove(output)
+	if err := os.Link(name, output); err != nil {
 		_ = os.Remove(name)
 		return err
 	}
@@ -190,10 +215,13 @@ func syncDirectory(path string) error {
 		return err
 	}
 	defer directory.Close()
+	if err := runAtomicBoundaryHook("directory-fsync"); err != nil {
+		return err
+	}
 	if err := directory.Sync(); err != nil {
 		return err
 	}
-	return runAtomicBoundaryHook("directory-fsync")
+	return nil
 }
 
 func runAtomicBoundaryHook(boundary string) error {

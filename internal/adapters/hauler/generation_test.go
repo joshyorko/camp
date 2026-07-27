@@ -5,6 +5,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 
@@ -17,6 +18,7 @@ type generationRunner struct {
 	commands []ports.Command
 	stores   []string
 	info     []byte
+	version  []byte
 	syncRuns []struct {
 		result ports.Result
 		err    error
@@ -26,6 +28,9 @@ type generationRunner struct {
 
 func (r *generationRunner) Run(_ context.Context, command ports.Command) (ports.Result, error) {
 	r.commands = append(r.commands, command)
+	if len(command.Argv) == 1 && command.Argv[0] == "version" {
+		return ports.Result{Stdout: r.version}, nil
+	}
 	if len(command.Argv) >= 3 && command.Argv[0] == "store" && command.Argv[1] == "--store" {
 		r.stores = append(r.stores, command.Argv[2])
 	}
@@ -218,7 +223,7 @@ func TestValidateGenerationInfoAcceptsPlatformResolvedDigestPinnedReference(t *t
 
 func TestClientValidatesStoreIntoStableHaulKitIdentity(t *testing.T) {
 	t.Parallel()
-	runner := &generationRunner{info: []byte(`[
+	runner := &generationRunner{version: []byte("v2.0.2\n"), info: []byte(`[
 	  {"Reference":"z/image:tag","Type":"image","Platform":"linux/amd64","Digest":"sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"},
 	  {"Reference":"hauler/root.tar.zst:latest","Type":"file","Platform":"-","Digest":"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}
 	]`)}
@@ -255,5 +260,48 @@ func TestClientValidatesStoreIntoStableHaulKitIdentity(t *testing.T) {
 		Chunks:  []haulkit.ChunkIdentity{{Index: 0, Name: "part", SHA256: strings.Repeat("a", 64), Size: 1}},
 	}); err != nil {
 		t.Fatalf("HaulKit rejected validated store identity: %v", err)
+	}
+}
+
+func TestClientPreparesStoreThroughOfficialSaveLoadAndObservedVersion(t *testing.T) {
+	t.Parallel()
+	root := t.TempDir()
+	source := filepath.Join(root, "source")
+	destination := filepath.Join(root, "destination")
+	if err := os.Mkdir(source, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	runner := &generationRunner{
+		version: []byte("v2.0.2\n"),
+		info:    []byte(`[{"Reference":"hauler/root.tar.zst:latest","Type":"file","Platform":"-","Digest":"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}]`),
+	}
+	client := NewClientWithVersion("/opt/hauler", "v2.0.2", runner)
+	identity, err := client.PrepareStore(context.Background(), source, destination)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if identity.HaulerVersion != "v2.0.2" {
+		t.Fatalf("identity = %#v", identity)
+	}
+	if len(runner.commands) != 4 {
+		t.Fatalf("commands = %#v", runner.commands)
+	}
+	if got := runner.commands[0].Argv; !reflect.DeepEqual(got[:4], []string{"store", "--store", source, "save"}) {
+		t.Fatalf("save argv = %#v", got)
+	}
+	if got := runner.commands[1].Argv; !reflect.DeepEqual(got[:4], []string{"store", "--store", destination, "load"}) {
+		t.Fatalf("load argv = %#v", got)
+	}
+}
+
+func TestClientRejectsConfiguredVersionNotObservedFromExecutable(t *testing.T) {
+	t.Parallel()
+	runner := &generationRunner{
+		version: []byte("v9.9.9\n"),
+		info:    []byte(`[{"Reference":"hauler/root.tar.zst:latest","Type":"file","Platform":"-","Digest":"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}]`),
+	}
+	_, err := NewClientWithVersion("/opt/hauler", "v2.0.2", runner).ValidateStore(context.Background(), "/tmp/store")
+	if err == nil {
+		t.Fatal("ValidateStore() accepted configured version not observed from executable")
 	}
 }
