@@ -157,6 +157,15 @@ func (s *Store) RecordIntent(ctx context.Context, intent ports.IntentRecord) err
 	if err := validateIntent(intent); err != nil {
 		return err
 	}
+	guard, err := os.OpenFile(filepath.Join(s.sessionDirectory(intent.SessionID), journalFilename), os.O_RDWR, 0o600)
+	if err != nil {
+		return fmt.Errorf("open journal intent lock: %w", err)
+	}
+	defer guard.Close()
+	if err := syscall.Flock(int(guard.Fd()), syscall.LOCK_EX); err != nil {
+		return fmt.Errorf("lock journal intent: %w", err)
+	}
+	defer syscall.Flock(int(guard.Fd()), syscall.LOCK_UN)
 	return s.append(intent.SessionID, envelope{Kind: "intent", Intent: &intent})
 }
 
@@ -232,6 +241,10 @@ func (s *Store) RecordFact(ctx context.Context, fact ports.FactRecord, snapshot 
 	if err != nil {
 		return err
 	}
+	if snapshot.ExecutionBinding != nil &&
+		(current.ExecutionBinding == nil || *snapshot.ExecutionBinding != *current.ExecutionBinding) {
+		return ErrExecutionRetarget
+	}
 	composed := composeFactSnapshot(current, snapshot, fact.Transition)
 	reduced, err := reduceFact(composed, fact)
 	if err != nil {
@@ -244,7 +257,8 @@ func (s *Store) RecordFact(ctx context.Context, fact ports.FactRecord, snapshot 
 }
 
 func composeFactSnapshot(current, candidate domain.JournalSnapshot, transition string) domain.JournalSnapshot {
-	if candidate.ExecutionBinding == nil && current.ExecutionBinding != nil {
+	candidate.ExecutionBinding = nil
+	if current.ExecutionBinding != nil {
 		binding := *current.ExecutionBinding
 		candidate.ExecutionBinding = &binding
 	}

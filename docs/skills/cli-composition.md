@@ -56,8 +56,12 @@ current, activate, and deactivate through one strictly decoded versioned JSON
 document. Updates hold an adjacent exclusive lock across validation and
 mode-0600 temporary-file publication, fsync, rename, and parent-directory
 fsync. The journal owns the optional execution binding: it accepts the first
-binding only while the journal has no effects, permits an exact idempotent
-repeat, rejects retargeting, and leaves legacy snapshots unbound.
+binding only through `BindExecution` while the journal has no effects, permits
+an exact idempotent repeat, rejects retargeting, and leaves legacy snapshots
+unbound. `BindExecution`, intent append, and fact composition take the same
+per-session journal lock. Facts preserve the exact durable binding and reject a
+non-nil caller snapshot that would establish or retarget it before journal
+append or snapshot publication.
 
 There is still no Cobra or production lifecycle composition. Therefore no
 controller, timeline, or profile command is implemented or advertised. A

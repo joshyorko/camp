@@ -244,6 +244,142 @@ func TestStorePreservesExecutionBindingAcrossFacts(t *testing.T) {
 	}
 }
 
+func TestStoreRecordFactCannotEstablishOrRetargetExecutionBinding(t *testing.T) {
+	for _, test := range []struct {
+		name       string
+		current    *domain.ExecutionBinding
+		candidate  domain.ExecutionBinding
+		wantExists bool
+	}{
+		{
+			name:      "unbound journal",
+			candidate: testExecutionBinding(t, "a", "b"),
+		},
+		{
+			name:       "bound journal",
+			current:    bindingPointer(testExecutionBinding(t, "a", "b")),
+			candidate:  testExecutionBinding(t, "c", "d"),
+			wantExists: true,
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			ctx := context.Background()
+			store, err := NewStore(t.TempDir())
+			if err != nil {
+				t.Fatal(err)
+			}
+			snapshot := domain.JournalSnapshot{
+				SchemaVersion:    domain.SchemaVersion,
+				SessionID:        "fact-binding",
+				ExecutionBinding: test.current,
+			}
+			if err := store.Create(ctx, snapshot); err != nil {
+				t.Fatal(err)
+			}
+			intent := ports.IntentRecord{
+				ID: "effect-1", SessionID: snapshot.SessionID, Transition: "WorkspaceUp",
+				Attempt: 1, Timestamp: time.Unix(100, 0).UTC(),
+			}
+			if err := store.RecordIntent(ctx, intent); err != nil {
+				t.Fatal(err)
+			}
+			candidate := snapshot
+			candidate.ExecutionBinding = bindingPointer(test.candidate)
+			err = store.RecordFact(ctx, ports.FactRecord{
+				IntentID: intent.ID, SessionID: snapshot.SessionID,
+				Transition: intent.Transition, Timestamp: time.Unix(101, 0).UTC(),
+			}, candidate)
+			if !errors.Is(err, ErrExecutionRetarget) {
+				t.Fatalf("RecordFact() error = %v, want ErrExecutionRetarget", err)
+			}
+			got, found, err := store.Binding(ctx, snapshot.SessionID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if found != test.wantExists {
+				t.Fatalf("Binding() found = %t, want %t", found, test.wantExists)
+			}
+			if test.current != nil && got != *test.current {
+				t.Fatalf("Binding() = %#v, want preserved %#v", got, *test.current)
+			}
+			_, pending, err := store.Load(ctx, snapshot.SessionID)
+			if err != nil || len(pending) != 1 || pending[0].Intent.ID != intent.ID {
+				t.Fatalf("Load() pending = %#v, error = %v; rejected fact must not append", pending, err)
+			}
+		})
+	}
+}
+
+func TestStoreSerializesFirstExecutionBindingWithIntentPublication(t *testing.T) {
+	ctx := context.Background()
+	renameReached := make(chan struct{})
+	releaseRename := make(chan struct{})
+	bindingWrite := false
+	store, err := NewStore(t.TempDir(), WithBeforeSnapshotRename(func() error {
+		if !bindingWrite {
+			return nil
+		}
+		close(renameReached)
+		<-releaseRename
+		return nil
+	}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	snapshot := domain.JournalSnapshot{SchemaVersion: domain.SchemaVersion, SessionID: "binding-cut"}
+	if err := store.Create(ctx, snapshot); err != nil {
+		t.Fatal(err)
+	}
+	bindingWrite = true
+
+	binding := testExecutionBinding(t, "a", "b")
+	bindResult := make(chan error, 1)
+	go func() {
+		bindResult <- store.BindExecution(ctx, snapshot.SessionID, binding)
+	}()
+	<-renameReached
+
+	intentResult := make(chan error, 1)
+	go func() {
+		intentResult <- store.RecordIntent(ctx, ports.IntentRecord{
+			ID: "effect-1", SessionID: snapshot.SessionID, Transition: "WorkspaceUp",
+			Attempt: 1, Timestamp: time.Unix(100, 0).UTC(),
+		})
+	}()
+	select {
+	case err := <-intentResult:
+		t.Fatalf("RecordIntent() completed before binding publication: %v", err)
+	case <-time.After(250 * time.Millisecond):
+	}
+
+	close(releaseRename)
+	if err := <-bindResult; err != nil {
+		t.Fatalf("BindExecution() error = %v", err)
+	}
+	if err := <-intentResult; err != nil {
+		t.Fatalf("RecordIntent() error = %v", err)
+	}
+}
+
+func testExecutionBinding(t *testing.T, blueprintDigit, profileDigit string) domain.ExecutionBinding {
+	t.Helper()
+	binding, err := domain.NewExecutionBinding(
+		domain.BlueprintRef{
+			SchemaVersion: domain.BlueprintRefSchemaVersion,
+			Digest:        strings.Repeat(blueprintDigit, 64),
+		},
+		strings.Repeat(profileDigit, 64),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return binding
+}
+
+func bindingPointer(binding domain.ExecutionBinding) *domain.ExecutionBinding {
+	return &binding
+}
+
 func TestStoreRejectsPointerCommittedFactWithoutCompletePointer(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
