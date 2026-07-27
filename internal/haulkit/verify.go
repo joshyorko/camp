@@ -13,7 +13,6 @@ import (
 	"reflect"
 	"sort"
 	"strings"
-	"syscall"
 	"time"
 
 	"github.com/klauspost/compress/zstd"
@@ -92,12 +91,19 @@ func (verifier *KitVerifier) Verify(ctx context.Context, request VerifyRequest) 
 		limits.MaxFileBytes <= 0 || limits.MaxExpandedBytes <= 0 || limits.MaxDecoderMemory < 1<<20 {
 		return VerifiedKit{}, ErrArchiveLimit
 	}
-	digest, size, err := hashPathBounded(request.ArchivePath, limits.MaxArchiveBytes)
+	archive, digest, size, err := openHashedArchive(request.ArchivePath, limits.MaxArchiveBytes)
 	if err != nil {
 		return VerifiedKit{}, err
 	}
+	defer archive.Close()
 	if digest != manifest.Archive.SHA256 || size != manifest.Archive.Size {
 		return VerifiedKit{}, ErrIdentityMismatch
+	}
+	if err := runAtomicBoundaryHook("archive-hash-complete"); err != nil {
+		return VerifiedKit{}, err
+	}
+	if _, err := archive.Seek(0, io.SeekStart); err != nil {
+		return VerifiedKit{}, err
 	}
 	stageParent := ""
 	if request.Destination == "" {
@@ -114,19 +120,20 @@ func (verifier *KitVerifier) Verify(ctx context.Context, request VerifyRequest) 
 	if err != nil {
 		return VerifiedKit{}, err
 	}
-	stageIdentity, err := identifyDirectory(stage)
+	stageOwner, err := openOwnedDirectory(stage)
 	if err != nil {
 		_ = os.Remove(stage)
 		return VerifiedKit{}, err
 	}
+	defer stageOwner.close()
 	published := false
 	defer func() {
 		if !published {
-			_ = removeOwnedTree(stage, stageIdentity)
+			_ = stageOwner.remove()
 			_ = syncDirectory(stageParent)
 		}
 	}()
-	if err := extractReadyArchive(ctx, request.ArchivePath, stage, limits); err != nil {
+	if err := extractReadyArchive(ctx, archive, stage, limits); err != nil {
 		return VerifiedKit{}, err
 	}
 	if err := syncExtractedDirectories(stage); err != nil {
@@ -176,8 +183,9 @@ func (verifier *KitVerifier) Verify(ctx context.Context, request VerifyRequest) 
 		if err := unix.Renameat2(unix.AT_FDCWD, stage, unix.AT_FDCWD, request.Destination, unix.RENAME_NOREPLACE); err != nil {
 			return VerifiedKit{}, err
 		}
+		stageOwner.name = filepath.Base(request.Destination)
 		if err := syncDirectory(stageParent); err != nil {
-			_ = removeOwnedTree(request.Destination, stageIdentity)
+			_ = stageOwner.remove()
 			_ = syncDirectory(stageParent)
 			return VerifiedKit{}, err
 		}
@@ -205,14 +213,9 @@ func canonicalStore(identity StoreIdentity) StoreIdentity {
 	return identity
 }
 
-func extractReadyArchive(ctx context.Context, archive, destination string, limits readyArchiveLimits) error {
-	file, err := openRegular(archive)
-	if err != nil {
-		return err
-	}
-	defer file.Close()
+func extractReadyArchive(ctx context.Context, archive *os.File, destination string, limits readyArchiveLimits) error {
 	decoder, err := zstd.NewReader(
-		file,
+		archive,
 		zstd.WithDecoderConcurrency(1),
 		zstd.WithDecoderLowmem(true),
 		zstd.WithDecoderMaxMemory(limits.MaxDecoderMemory),
@@ -412,28 +415,31 @@ func readBoundedRegular(path string, maxBytes int) ([]byte, error) {
 	return body, nil
 }
 
-func hashPathBounded(path string, maxBytes int64) (string, int64, error) {
+func openHashedArchive(path string, maxBytes int64) (*os.File, string, int64, error) {
 	file, err := openRegular(path)
 	if err != nil {
-		return "", 0, err
+		return nil, "", 0, err
 	}
-	defer file.Close()
 	info, err := file.Stat()
 	if err != nil {
-		return "", 0, err
+		_ = file.Close()
+		return nil, "", 0, err
 	}
 	if info.Size() > maxBytes {
-		return "", 0, ErrArchiveLimit
+		_ = file.Close()
+		return nil, "", 0, ErrArchiveLimit
 	}
 	hash := sha256.New()
 	size, err := io.Copy(hash, io.LimitReader(file, maxBytes+1))
 	if err != nil {
-		return "", 0, err
+		_ = file.Close()
+		return nil, "", 0, err
 	}
 	if size > maxBytes {
-		return "", 0, ErrArchiveLimit
+		_ = file.Close()
+		return nil, "", 0, ErrArchiveLimit
 	}
-	return hex.EncodeToString(hash.Sum(nil)), size, nil
+	return file, hex.EncodeToString(hash.Sum(nil)), size, nil
 }
 
 func sha256Bytes(body []byte) string {
@@ -441,38 +447,127 @@ func sha256Bytes(body []byte) string {
 	return hex.EncodeToString(sum[:])
 }
 
-type directoryIdentity struct {
-	device uint64
-	inode  uint64
+type ownedDirectory struct {
+	parentFD int
+	rootFD   int
+	name     string
+	device   uint64
+	inode    uint64
 }
 
-func identifyDirectory(path string) (directoryIdentity, error) {
-	info, err := os.Lstat(path)
+func openOwnedDirectory(path string) (*ownedDirectory, error) {
+	parentFD, err := unix.Open(filepath.Dir(path), unix.O_RDONLY|unix.O_DIRECTORY|unix.O_CLOEXEC|unix.O_NOFOLLOW, 0)
 	if err != nil {
-		return directoryIdentity{}, err
+		return nil, err
 	}
-	if !info.IsDir() {
-		return directoryIdentity{}, fmt.Errorf("%w: cleanup target is not a directory", ErrUnsafeKit)
+	name := filepath.Base(path)
+	rootFD, err := unix.Openat(parentFD, name, unix.O_RDONLY|unix.O_DIRECTORY|unix.O_CLOEXEC|unix.O_NOFOLLOW, 0)
+	if err != nil {
+		_ = unix.Close(parentFD)
+		return nil, err
 	}
-	stat, ok := info.Sys().(*syscall.Stat_t)
-	if !ok {
-		return directoryIdentity{}, errors.New("Camp Hauler kit directory identity unavailable")
+	var stat unix.Stat_t
+	if err := unix.Fstat(rootFD, &stat); err != nil {
+		_ = unix.Close(rootFD)
+		_ = unix.Close(parentFD)
+		return nil, err
 	}
-	return directoryIdentity{device: uint64(stat.Dev), inode: stat.Ino}, nil
+	return &ownedDirectory{
+		parentFD: parentFD, rootFD: rootFD, name: name,
+		device: uint64(stat.Dev), inode: stat.Ino,
+	}, nil
 }
 
-func removeOwnedTree(path string, expected directoryIdentity) error {
-	current, err := identifyDirectory(path)
-	if errors.Is(err, os.ErrNotExist) {
-		return nil
+func (owned *ownedDirectory) close() {
+	if owned == nil {
+		return
 	}
+	if owned.rootFD >= 0 {
+		_ = unix.Close(owned.rootFD)
+		owned.rootFD = -1
+	}
+	if owned.parentFD >= 0 {
+		_ = unix.Close(owned.parentFD)
+		owned.parentFD = -1
+	}
+}
+
+func (owned *ownedDirectory) remove() error {
+	if owned == nil || owned.rootFD < 0 || owned.parentFD < 0 {
+		return errors.New("Camp Hauler kit cleanup descriptor is closed")
+	}
+	if err := runAtomicBoundaryHook("cleanup-descriptor-open"); err != nil {
+		return err
+	}
+	if err := removeDirectoryContentsAt(owned.rootFD); err != nil {
+		return err
+	}
+	var named unix.Stat_t
+	if err := unix.Fstatat(owned.parentFD, owned.name, &named, unix.AT_SYMLINK_NOFOLLOW); err != nil {
+		if errors.Is(err, unix.ENOENT) {
+			return nil
+		}
+		return err
+	}
+	if uint64(named.Dev) != owned.device || named.Ino != owned.inode {
+		return fmt.Errorf("%w: cleanup target identity changed", ErrUnsafeKit)
+	}
+	return unix.Unlinkat(owned.parentFD, owned.name, unix.AT_REMOVEDIR)
+}
+
+func removeDirectoryContentsAt(directoryFD int) error {
+	if _, err := unix.Seek(directoryFD, 0, io.SeekStart); err != nil {
+		return err
+	}
+	readFD, err := unix.Dup(directoryFD)
 	if err != nil {
 		return err
 	}
-	if current != expected {
-		return fmt.Errorf("%w: cleanup target identity changed", ErrUnsafeKit)
+	reader := os.NewFile(uintptr(readFD), "owned-cleanup-directory")
+	entries, readErr := reader.ReadDir(-1)
+	closeErr := reader.Close()
+	if readErr != nil {
+		return readErr
 	}
-	return os.RemoveAll(path)
+	if closeErr != nil {
+		return closeErr
+	}
+	for _, entry := range entries {
+		name := entry.Name()
+		childFD, err := unix.Openat(directoryFD, name, unix.O_RDONLY|unix.O_DIRECTORY|unix.O_CLOEXEC|unix.O_NOFOLLOW, 0)
+		if err == nil {
+			var child unix.Stat_t
+			if err := unix.Fstat(childFD, &child); err != nil {
+				_ = unix.Close(childFD)
+				return err
+			}
+			if err := removeDirectoryContentsAt(childFD); err != nil {
+				_ = unix.Close(childFD)
+				return err
+			}
+			if err := unix.Close(childFD); err != nil {
+				return err
+			}
+			var named unix.Stat_t
+			if err := unix.Fstatat(directoryFD, name, &named, unix.AT_SYMLINK_NOFOLLOW); err != nil {
+				return err
+			}
+			if named.Dev != child.Dev || named.Ino != child.Ino {
+				return fmt.Errorf("%w: cleanup child identity changed", ErrUnsafeKit)
+			}
+			if err := unix.Unlinkat(directoryFD, name, unix.AT_REMOVEDIR); err != nil {
+				return err
+			}
+			continue
+		}
+		if !errors.Is(err, unix.ENOTDIR) && !errors.Is(err, unix.ELOOP) {
+			return err
+		}
+		if err := unix.Unlinkat(directoryFD, name, 0); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 func validateReadyHeader(header *tar.Header) error {

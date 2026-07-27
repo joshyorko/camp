@@ -255,7 +255,7 @@ func TestVerifierRequiresCallerTrustedManifestDigest(t *testing.T) {
 	request, validator := buildFixture(t)
 	builder := NewBuilder(validator)
 	builder.chunkSize = 64
-	builder.runtimeProbe = fixtureRuntimeProbe
+	builder.runtimeObserver = fakeRuntimeObserver{runningCamp: request.CampExecutable}
 	artifact, err := builder.Build(context.Background(), request)
 	if err != nil {
 		t.Fatal(err)
@@ -322,7 +322,7 @@ func TestVerifierEnforcesCompressedArchiveAndInodeLimits(t *testing.T) {
 	request, validator := buildFixture(t)
 	builder := NewBuilder(validator)
 	builder.chunkSize = 64
-	builder.runtimeProbe = fixtureRuntimeProbe
+	builder.runtimeObserver = fakeRuntimeObserver{runningCamp: request.CampExecutable}
 	artifact, err := builder.Build(context.Background(), request)
 	if err != nil {
 		t.Fatal(err)
@@ -364,7 +364,7 @@ func TestVerifierCleanupRefusesReplacedStage(t *testing.T) {
 	request, validator := buildFixture(t)
 	builder := NewBuilder(validator)
 	builder.chunkSize = 64
-	builder.runtimeProbe = fixtureRuntimeProbe
+	builder.runtimeObserver = fakeRuntimeObserver{runningCamp: request.CampExecutable}
 	artifact, err := builder.Build(context.Background(), request)
 	if err != nil {
 		t.Fatal(err)
@@ -380,8 +380,8 @@ func TestVerifierCleanupRefusesReplacedStage(t *testing.T) {
 	parent := t.TempDir()
 	destination := filepath.Join(parent, "ready")
 	var replacement, displaced string
-	atomicBoundaryHook = func(boundary string) error {
-		if boundary != "extraction-write" {
+	atomicBoundaryHook = func(event atomicBoundaryEvent) error {
+		if event.Name != "extraction-write" {
 			return nil
 		}
 		matches, globErr := filepath.Glob(filepath.Join(parent, ".haulkit-stage-*"))
@@ -412,6 +412,122 @@ func TestVerifierCleanupRefusesReplacedStage(t *testing.T) {
 	})
 	if err == nil {
 		t.Fatal("Verify() error = nil")
+	}
+	if _, statErr := os.Stat(filepath.Join(replacement, "sentinel")); statErr != nil {
+		t.Fatalf("replacement stage was removed: %v", statErr)
+	}
+	if removeErr := os.RemoveAll(displaced); removeErr != nil {
+		t.Fatal(removeErr)
+	}
+}
+
+func TestVerifierUsesSameOpenedArchiveAfterHash(t *testing.T) {
+	request, validator := buildFixture(t)
+	builder := NewBuilder(validator)
+	builder.chunkSize = 64
+	builder.runtimeObserver = fakeRuntimeObserver{runningCamp: request.CampExecutable}
+	artifact, err := builder.Build(context.Background(), request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	body, err := os.ReadFile(artifact.ManifestPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	manifest, err := DecodeCanonical(body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	trustedArchive := artifact.ArchivePath + ".trusted"
+	replaced := false
+	previousHook := atomicBoundaryHook
+	t.Cleanup(func() { atomicBoundaryHook = previousHook })
+	atomicBoundaryHook = func(event atomicBoundaryEvent) error {
+		if event.Name != "archive-hash-complete" {
+			return nil
+		}
+		if err := os.Rename(artifact.ArchivePath, trustedArchive); err != nil {
+			return err
+		}
+		writeHostileArchive(t, artifact.ArchivePath, "../substituted", tar.TypeReg, "")
+		replaced = true
+		return nil
+	}
+	destination := filepath.Join(t.TempDir(), "ready")
+	result, err := NewVerifier(validator).Verify(context.Background(), VerifyRequest{
+		ManifestPath:           artifact.ManifestPath,
+		ExpectedManifestSHA256: digestBytes(body),
+		ArchivePath:            artifact.ArchivePath,
+		Architecture:           manifest.Architecture,
+		Tools:                  manifest.Tools,
+		Destination:            destination,
+	})
+	if err != nil {
+		t.Fatalf("Verify() error = %v", err)
+	}
+	if !replaced {
+		t.Fatal("archive pathname was not replaced after hashing")
+	}
+	if result.ReadyDirectory != destination {
+		t.Fatalf("ReadyDirectory = %q, want %q", result.ReadyDirectory, destination)
+	}
+}
+
+func TestVerifierCleanupRemainsDescriptorAnchoredAfterNameReplacement(t *testing.T) {
+	request, validator := buildFixture(t)
+	builder := NewBuilder(validator)
+	builder.chunkSize = 64
+	builder.runtimeObserver = fakeRuntimeObserver{runningCamp: request.CampExecutable}
+	artifact, err := builder.Build(context.Background(), request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	body, err := os.ReadFile(artifact.ManifestPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	manifest, err := DecodeCanonical(body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	drifted := manifest.Store
+	drifted.IndexSHA256 = strings.Repeat("b", 64)
+	parent := t.TempDir()
+	destination := filepath.Join(parent, "ready")
+	var replacement, displaced string
+	previousHook := atomicBoundaryHook
+	t.Cleanup(func() { atomicBoundaryHook = previousHook })
+	atomicBoundaryHook = func(event atomicBoundaryEvent) error {
+		if event.Name != "cleanup-descriptor-open" {
+			return nil
+		}
+		matches, globErr := filepath.Glob(filepath.Join(parent, ".haulkit-stage-*"))
+		if globErr != nil || len(matches) != 1 {
+			return fmt.Errorf("find verifier stage: matches=%v err=%v", matches, globErr)
+		}
+		replacement = matches[0]
+		displaced = replacement + ".displaced"
+		if err := os.Rename(replacement, displaced); err != nil {
+			return err
+		}
+		if err := os.Mkdir(replacement, 0o700); err != nil {
+			return err
+		}
+		return os.WriteFile(filepath.Join(replacement, "sentinel"), []byte("keep"), 0o600)
+	}
+	_, err = NewVerifier(staticStoreValidator{identity: drifted}).Verify(context.Background(), VerifyRequest{
+		ManifestPath:           artifact.ManifestPath,
+		ExpectedManifestSHA256: digestBytes(body),
+		ArchivePath:            artifact.ArchivePath,
+		Architecture:           manifest.Architecture,
+		Tools:                  manifest.Tools,
+		Destination:            destination,
+	})
+	if err == nil {
+		t.Fatal("Verify() error = nil")
+	}
+	if replacement == "" {
+		t.Fatal("cleanup did not reach the descriptor-anchored replacement boundary")
 	}
 	if _, statErr := os.Stat(filepath.Join(replacement, "sentinel")); statErr != nil {
 		t.Fatalf("replacement stage was removed: %v", statErr)
