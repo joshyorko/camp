@@ -116,6 +116,18 @@ func TestWorkspaceSSHHostRejectsOverlongDNSLabel(t *testing.T) {
 	}
 }
 
+func TestWorkspaceSSHHostAcceptsMaximumDNSLabel(t *testing.T) {
+	t.Parallel()
+	workspaceID := strings.Repeat("a", 63)
+	host, err := WorkspaceSSHHost(workspaceID)
+	if err != nil {
+		t.Fatalf("WorkspaceSSHHost(%q) error = %v", workspaceID, err)
+	}
+	if want := workspaceID + ".devpod"; host != want {
+		t.Fatalf("WorkspaceSSHHost(%q) = %q, want %q", workspaceID, host, want)
+	}
+}
+
 func TestOpenNestedIDERunsOneDirectLauncherWithoutDevPodSSH(t *testing.T) {
 	t.Parallel()
 	runner := &recordingRunner{result: ports.Result{ExitCode: 17}}

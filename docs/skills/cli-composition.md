@@ -24,6 +24,12 @@ Nested VS Code entry derives its host only from a DevPod workspace ID that is a
 single DNS-label-shaped value of at most 63 ASCII characters. The adapter then
 constructs the direct `vscode-remote://ssh-remote+<workspace>.devpod/<target>`
 URI and invokes `code` or `code-insiders` without a DevPod SSH shell.
+`integration/ide_lifecycle_test.go` binds this public command surface to the
+orchestrator-provided `CAMP_TEST_BINARY`: it checks the exact attach help,
+stable JSON usage rejection for a conflicting `--insiders`/`--ide` pair, and
+that the matching Insiders pair crosses parsing into production composition
+under isolated XDG roots and an empty `PATH`. That credential-free contract is
+not evidence that a real editor connected to a live DevPod workspace.
 
 The subprocess runner keeps a command with all three terminal streams in Camp's foreground process group and passes those descriptors directly, without capture pipes, so DevPod SSH can detect, read, and write the controlling terminal. Non-interactive commands retain captured output and an isolated process group so cancellation can terminate their full subprocess tree.
 
