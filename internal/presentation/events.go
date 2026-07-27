@@ -28,6 +28,7 @@ const (
 	RichLifecycleCompleted
 	RichLifecycleSucceeded
 	RichLifecycleFailed
+	RichLifecycleTerminalFailed
 )
 
 // RichLifecycleEvent is the typed presentation contract for the interactive

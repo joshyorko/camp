@@ -52,9 +52,82 @@ import (
 type ProductionLifecycle struct {
 	setupToolRunner  func(context.Context, OutputMode, io.Writer, func(string, tooladapter.Resolution) error) error
 	setupInitializer func(context.Context, InitRequest, OutputMode, io.Writer) error
+	prepareSync      func(context.Context) (productionSyncRun, error)
+	prepareClose     func(context.Context) (productionCloseRun, error)
+	richAvailable    func(OutputMode, io.Reader, io.Writer, map[string]string, terminalProbe) bool
+	richRunner       richLifecycleRunner
+}
+
+type productionSyncRun struct {
+	sessionID string
+	run       func(context.Context, app.ProgressReporter) (app.CheckpointResult, error)
+}
+
+type productionCloseRun struct {
+	sessionID string
+	mode      domain.SessionMode
+	run       func(context.Context, CloseRequest, app.ProgressReporter) (app.CloseResult, error)
 }
 
 func NewProductionLifecycle() *ProductionLifecycle { return &ProductionLifecycle{} }
+
+func (p *ProductionLifecycle) prepareProductionSync(ctx context.Context) (productionSyncRun, error) {
+	if p.prepareSync != nil {
+		return p.prepareSync(ctx)
+	}
+	c, err := composeLifecycle(ctx)
+	if err != nil {
+		return productionSyncRun{}, err
+	}
+	session, err := app.SelectActiveSession(ctx, c.base.journal, productionSessionSelector(ctx, c.base.runtime))
+	if err != nil {
+		return productionSyncRun{}, err
+	}
+	usecase := app.NewSync(c.base.journal, c.locks, c.publisher)
+	return productionSyncRun{
+		sessionID: session.SessionID,
+		run: func(runCtx context.Context, reporter app.ProgressReporter) (app.CheckpointResult, error) {
+			return usecase.Run(app.WithProgressReporter(runCtx, reporter), session.SessionID)
+		},
+	}, nil
+}
+
+func (p *ProductionLifecycle) prepareProductionClose(ctx context.Context) (productionCloseRun, error) {
+	if p.prepareClose != nil {
+		return p.prepareClose(ctx)
+	}
+	c, err := composeLifecycle(ctx)
+	if err != nil {
+		return productionCloseRun{}, err
+	}
+	session, err := app.SelectActiveSession(ctx, c.base.journal, productionSessionSelector(ctx, c.base.runtime))
+	if err != nil {
+		return productionCloseRun{}, err
+	}
+	return productionCloseRun{
+		sessionID: session.SessionID,
+		mode:      session.Mode,
+		run: func(runCtx context.Context, request CloseRequest, reporter app.ProgressReporter) (app.CloseResult, error) {
+			return c.close.Run(app.WithProgressReporter(runCtx, reporter), app.CloseRequest{SessionID: session.SessionID, Discard: request.Discard})
+		},
+	}, nil
+}
+
+func (p *ProductionLifecycle) richLifecycleAvailable(mode OutputMode, in io.Reader, out io.Writer) bool {
+	available := p.richAvailable
+	if available == nil {
+		available = richLifecycleAvailable
+	}
+	return available(mode, in, out, environmentMap(os.Environ()), probeTerminal)
+}
+
+func (p *ProductionLifecycle) runRichLifecycle(ctx context.Context, out io.Writer, workflow setupui.LifecycleWorkflow, worker richLifecycleWorker) (string, error) {
+	runner := p.richRunner
+	if runner == nil {
+		runner = setupui.RunLifecycle
+	}
+	return runRichLifecycleOperationWithRunner(ctx, os.Stdin, out, workflow, worker, runner)
+}
 
 func (p *ProductionLifecycle) Strike(ctx context.Context, request StrikeRequest, mode OutputMode, out io.Writer) error {
 	settings, err := resolveProductionSettings()
@@ -828,17 +901,12 @@ func composeOpen(ctx context.Context, composition productionComposition, service
 }
 
 func (p *ProductionLifecycle) Sync(ctx context.Context, mode OutputMode, out io.Writer) error {
-	c, err := composeLifecycle(ctx)
+	operation, err := p.prepareProductionSync(ctx)
 	if err != nil {
 		return err
 	}
-	session, err := app.SelectActiveSession(ctx, c.base.journal, productionSessionSelector(ctx, c.base.runtime))
-	if err != nil {
-		return err
-	}
-	usecase := app.NewSync(c.base.journal, c.locks, c.publisher)
 	var result app.CheckpointResult
-	if richLifecycleAvailable(mode, os.Stdin, out, environmentMap(os.Environ()), probeTerminal) {
+	if p.richLifecycleAvailable(mode, os.Stdin, out) {
 		workflow := setupui.LifecycleWorkflow{
 			Operation: "sync", ReadyLine: "checkpoint published", NextCommand: "camp status",
 			Stages: []presentation.LifecycleStage{
@@ -846,21 +914,19 @@ func (p *ProductionLifecycle) Sync(ctx context.Context, mode OutputMode, out io.
 				presentation.StageUpload, presentation.StagePointer,
 			},
 		}
-		recovery, runErr := runRichLifecycleOperation(ctx, out, workflow, func(workerCtx context.Context, reporter app.ProgressReporter) richLifecycleWorkerResult {
-			workerCtx = app.WithProgressReporter(workerCtx, reporter)
+		_, runErr := p.runRichLifecycle(ctx, out, workflow, func(workerCtx context.Context, reporter app.ProgressReporter) richLifecycleWorkerResult {
 			var operationErr error
-			result, operationErr = usecase.Run(workerCtx, session.SessionID)
-			return richSyncOutcome(result, operationErr, session.SessionID)
+			result, operationErr = operation.run(workerCtx, reporter)
+			return richSyncOutcome(result, operationErr, operation.sessionID)
 		})
 		if runErr != nil {
-			return lifecycleFailure(runErr, recovery)
+			return renderedLifecycleFailure(runErr)
 		}
 		return nil
 	}
-	ctx = app.WithProgressReporter(ctx, productionLifecycleProgressReporter(mode, out, "sync"))
-	result, err = usecase.Run(ctx, session.SessionID)
+	result, err = operation.run(ctx, productionLifecycleProgressReporter(mode, out, "sync"))
 	if err != nil {
-		return lifecycleFailure(err, syncFailureRecovery(result, session.SessionID))
+		return lifecycleFailure(err, syncFailureRecovery(result, operation.sessionID))
 	}
 	if mode == ModeHuman {
 		return writeHumanLifecycleResult(out, mode, "sync", syncTerminalEvents(result.Generation.Generation), "")
@@ -876,33 +942,27 @@ func syncFailureRecovery(result app.CheckpointResult, sessionID string) string {
 }
 
 func (p *ProductionLifecycle) Close(ctx context.Context, request CloseRequest, mode OutputMode, out io.Writer) error {
-	c, err := composeLifecycle(ctx)
-	if err != nil {
-		return err
-	}
-	session, err := app.SelectActiveSession(ctx, c.base.journal, productionSessionSelector(ctx, c.base.runtime))
+	operation, err := p.prepareProductionClose(ctx)
 	if err != nil {
 		return err
 	}
 	var result app.CloseResult
-	if richLifecycleAvailable(mode, os.Stdin, out, environmentMap(os.Environ()), probeTerminal) {
+	if p.richLifecycleAvailable(mode, os.Stdin, out) {
 		workflow := setupui.LifecycleWorkflow{
 			Operation: "close", ReadyLine: "session closed", NextCommand: "camp reopen",
-			Stages: closeRichLifecycleStages(session.Mode, request.Discard),
+			Stages: closeRichLifecycleStages(operation.mode, request.Discard),
 		}
-		recovery, runErr := runRichLifecycleOperation(ctx, out, workflow, func(workerCtx context.Context, reporter app.ProgressReporter) richLifecycleWorkerResult {
-			workerCtx = app.WithProgressReporter(workerCtx, reporter)
+		_, runErr := p.runRichLifecycle(ctx, out, workflow, func(workerCtx context.Context, reporter app.ProgressReporter) richLifecycleWorkerResult {
 			var operationErr error
-			result, operationErr = c.close.Run(workerCtx, app.CloseRequest{SessionID: session.SessionID, Discard: request.Discard})
+			result, operationErr = operation.run(workerCtx, request, reporter)
 			return richCloseOutcome(result, operationErr)
 		})
 		if runErr != nil {
-			return lifecycleFailure(runErr, recovery)
+			return renderedLifecycleFailure(runErr)
 		}
 		return nil
 	}
-	ctx = app.WithProgressReporter(ctx, productionLifecycleProgressReporter(mode, out, "close"))
-	result, err = c.close.Run(ctx, app.CloseRequest{SessionID: session.SessionID, Discard: request.Discard})
+	result, err = operation.run(ctx, request, productionLifecycleProgressReporter(mode, out, "close"))
 	if err != nil {
 		return lifecycleFailure(err, result.RecoveryCommand)
 	}
@@ -912,7 +972,7 @@ func (p *ProductionLifecycle) Close(ctx context.Context, request CloseRequest, m
 		}
 		return writeHumanLifecycleResult(out, mode, "close", closeTerminalEvents(result.Generation.Generation, result.CleanupSucceeded), "")
 	}
-	return writeSuccess(out, mode, "close", result, fmt.Sprintf("Closed %s\n", session.SessionID))
+	return writeSuccess(out, mode, "close", result, fmt.Sprintf("Closed %s\n", operation.sessionID))
 }
 
 func (p *ProductionLifecycle) Reopen(ctx context.Context, value string, mode OutputMode, out io.Writer) error {

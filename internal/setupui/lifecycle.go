@@ -240,6 +240,16 @@ func (m LifecycleModel) apply(event presentation.RichLifecycleEvent) (tea.Model,
 		m.recovery = SafeText(event.RecoveryCommand, "")
 		m.phase = PhaseFailed
 		return m, nil
+	case presentation.RichLifecycleTerminalFailed:
+		m.activity = ""
+		if !m.completeSequence() {
+			m.protocolFailure("terminal lifecycle failure arrived before required stages completed")
+			return m, nil
+		}
+		m.failure = SafeText(event.Message, "lifecycle failed")
+		m.recovery = SafeText(event.RecoveryCommand, "")
+		m.phase = PhaseFailed
+		return m, nil
 	default:
 		return m, m.listen()
 	}

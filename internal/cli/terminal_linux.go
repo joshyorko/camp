@@ -30,10 +30,11 @@ type richLifecycleWorker func(context.Context, app.ProgressReporter) richLifecyc
 type richLifecycleRunner func(context.Context, io.Reader, io.Writer, setupui.Palette, map[string]setupui.Sprite, setupui.LifecycleWorkflow, <-chan presentation.RichLifecycleEvent, <-chan struct{}, func()) (setupui.Result, error)
 
 type richLifecycleWorkerResult struct {
-	recovery       string
-	err            error
-	failureStage   presentation.LifecycleStage
-	noStageSuccess string
+	recovery        string
+	err             error
+	failureStage    presentation.LifecycleStage
+	terminalFailure bool
+	noStageSuccess  string
 }
 
 type richLifecycleProgressReporter struct {
@@ -178,6 +179,14 @@ func runRichLifecycleOperationWithRunner(ctx context.Context, in io.Reader, out 
 		defer close(events)
 		workerResult := worker(workerCtx, reporter)
 		if workerResult.err != nil {
+			if workerResult.terminalFailure {
+				select {
+				case events <- presentation.RichLifecycleEvent{Kind: presentation.RichLifecycleTerminalFailed, Message: workerResult.err.Error(), RecoveryCommand: workerResult.recovery}:
+				case <-workerCtx.Done():
+				}
+				result <- workerResult
+				return
+			}
 			stage := reporter.expectedStage()
 			if workerResult.failureStage != "" {
 				stage = workerResult.failureStage
@@ -271,6 +280,7 @@ func richCloseOutcome(result app.CloseResult, runErr error) richLifecycleWorkerR
 	outcome := richLifecycleWorkerResult{recovery: result.RecoveryCommand, err: runErr}
 	if runErr == nil && result.RefreshError != "" {
 		outcome.err = fmt.Errorf("refresh Hauler serving content: %s", result.RefreshError)
+		outcome.terminalFailure = result.CleanupSucceeded
 		return outcome
 	}
 	if runErr == nil && result.CleanupSucceeded {

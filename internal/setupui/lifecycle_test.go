@@ -189,6 +189,32 @@ func TestLifecycleModelAcceptsTerminalFailureAfterAllStageFacts(t *testing.T) {
 	}
 }
 
+func TestLifecycleTerminalFailurePreservesCompletedWaypoints(t *testing.T) {
+	m := NewLifecycleModel(DefaultPalette(), loadForTest(t), LifecycleWorkflow{
+		Operation: "close",
+		Stages:    []presentation.LifecycleStage{presentation.StagePointer, presentation.StageCleanup},
+	})
+	for _, event := range []presentation.RichLifecycleEvent{
+		{Kind: presentation.RichLifecycleCompleted, Stage: presentation.StagePointer},
+		{Kind: presentation.RichLifecycleCompleted, Stage: presentation.StageCleanup},
+		{
+			Kind:            presentation.RichLifecycleTerminalFailed,
+			Message:         "refresh Hauler serving content: helper exited",
+			RecoveryCommand: "camp recover session-1",
+		},
+	} {
+		next, _ := m.Update(event)
+		m = next.(LifecycleModel)
+	}
+	failed, message, recovery := m.Failed()
+	if !failed || message != "refresh Hauler serving content: helper exited" || recovery != "camp recover session-1" {
+		t.Fatalf("terminal failure = (%t, %q, %q)", failed, message, recovery)
+	}
+	if got := m.states[presentation.StageCleanup]; got != WaypointCompleted {
+		t.Fatalf("cleanup state = %v, want completed", got)
+	}
+}
+
 func TestLifecycleModelRendersOnlyTruthfulResumedSuffix(t *testing.T) {
 	m := NewLifecycleModel(DefaultPalette(), loadForTest(t), LifecycleWorkflow{
 		Operation: "sync",
