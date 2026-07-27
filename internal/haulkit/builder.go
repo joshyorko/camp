@@ -33,6 +33,15 @@ type StorePreparer interface {
 	PrepareStore(context.Context, string, string) (StoreIdentity, error)
 }
 
+type RootObserver interface {
+	ObserveRoot(context.Context, string, string) (RootIdentity, error)
+}
+
+type RuntimeObserver interface {
+	RunningExecutable() (string, error)
+	Probe(context.Context, string, string) (string, error)
+}
+
 type BuildRequest struct {
 	SessionID        string
 	Capsule          string
@@ -62,7 +71,7 @@ type KitBuilder struct {
 	validator            StoreValidator
 	chunkSize            int64
 	afterSplit           func(string, []ChunkIdentity) error
-	runtimeProbe         func(context.Context, string, string) (string, error)
+	runtimeObserver      RuntimeObserver
 	afterStoreValidation func() error
 }
 
@@ -71,9 +80,10 @@ func NewBuilder(validator StoreValidator) *KitBuilder {
 }
 
 func (builder *KitBuilder) Build(ctx context.Context, request BuildRequest) (Artifact, error) {
+	resetAtomicBoundaryOccurrences()
 	if builder == nil || builder.validator == nil || !filepath.IsAbs(request.StoreDirectory) ||
-		!filepath.IsAbs(request.OutputDirectory) || !filepath.IsAbs(request.CampExecutable) ||
-		!filepath.IsAbs(request.HaulerExecutable) || !filepath.IsAbs(request.PastaExecutable) {
+		!filepath.IsAbs(request.OutputDirectory) || !filepath.IsAbs(request.HaulerExecutable) ||
+		!filepath.IsAbs(request.PastaExecutable) {
 		return Artifact{}, errors.New("Camp Hauler kit builder requires absolute paths and a store validator")
 	}
 	store, err := builder.validator.ValidateStore(ctx, request.StoreDirectory)
@@ -93,9 +103,11 @@ func (builder *KitBuilder) Build(ctx context.Context, request BuildRequest) (Art
 	if err != nil {
 		return Artifact{}, err
 	}
+	snapshotCleanup := true
 	defer func() {
-		_ = os.RemoveAll(snapshotRoot)
-		_ = syncDirectory(request.OutputDirectory)
+		if snapshotCleanup {
+			_ = removeDurably(snapshotRoot, request.OutputDirectory)
+		}
 	}()
 	snapshotStore := filepath.Join(snapshotRoot, "store")
 	preparedStore, err := preparer.PrepareStore(ctx, request.StoreDirectory, snapshotStore)
@@ -105,23 +117,39 @@ func (builder *KitBuilder) Build(ctx context.Context, request BuildRequest) (Art
 	if !storeIdentitiesEqual(store, preparedStore) {
 		return Artifact{}, fmt.Errorf("%w: prepared Hauler store differs from validated source", ErrIdentityMismatch)
 	}
+	rootObserver, ok := builder.validator.(RootObserver)
+	if !ok {
+		return Artifact{}, errors.New("Camp Hauler kit builder requires an observed root")
+	}
+	observedRoot, err := rootObserver.ObserveRoot(ctx, snapshotStore, request.Root.Reference)
+	if err != nil {
+		return Artifact{}, fmt.Errorf("observe prepared Hauler root: %w", err)
+	}
+	if request.Root.SHA256 != "" && request.Root.SHA256 != observedRoot.SHA256 ||
+		request.Root.Size > 0 && request.Root.Size != observedRoot.Size {
+		return Artifact{}, fmt.Errorf("%w: caller root expectation differs from observed root", ErrIdentityMismatch)
+	}
 	preparedRequest := request
 	preparedRequest.StoreDirectory = snapshotStore
 	preparedRequest.CampExecutable = filepath.Join(snapshotRoot, "camp")
 	preparedRequest.HaulerExecutable = filepath.Join(snapshotRoot, "hauler")
 	preparedRequest.PastaExecutable = filepath.Join(snapshotRoot, "pasta")
+	observer := builder.runtimeObserver
+	if observer == nil {
+		observer = productionRuntimeObserver{}
+	}
+	runningCamp, err := observer.RunningExecutable()
+	if err != nil || !filepath.IsAbs(runningCamp) {
+		return Artifact{}, fmt.Errorf("observe running Camp executable: %w", err)
+	}
 	for source, destination := range map[string]string{
-		request.CampExecutable:   preparedRequest.CampExecutable,
+		runningCamp:              preparedRequest.CampExecutable,
 		request.HaulerExecutable: preparedRequest.HaulerExecutable,
 		request.PastaExecutable:  preparedRequest.PastaExecutable,
 	} {
 		if err := snapshotRegular(source, destination); err != nil {
 			return Artifact{}, err
 		}
-	}
-	probe := builder.runtimeProbe
-	if probe == nil {
-		probe = probeRuntimeIdentity
 	}
 	architecture := "linux/" + runtime.GOARCH
 	if request.Architecture != architecture {
@@ -131,7 +159,7 @@ func (builder *KitBuilder) Build(ctx context.Context, request BuildRequest) (Art
 	observedVersions := make(map[string]string, 3)
 	expectedVersions := map[string]string{"camp": request.CampVersion, "hauler": request.HaulerVersion, "pasta": request.PastaVersion}
 	for kind, path := range map[string]string{"camp": preparedRequest.CampExecutable, "hauler": preparedRequest.HaulerExecutable, "pasta": preparedRequest.PastaExecutable} {
-		output, err := probe(ctx, path, kind)
+		output, err := observer.Probe(ctx, path, kind)
 		if err != nil || !containsExactIdentity(output, expectedVersions[kind]) {
 			return Artifact{}, fmt.Errorf("probe %s runtime identity: %w", kind, err)
 		}
@@ -212,7 +240,7 @@ func (builder *KitBuilder) Build(ctx context.Context, request BuildRequest) (Art
 		Generation:    request.Generation,
 		Architecture:  architecture,
 		Store:         preparedStore,
-		Root:          request.Root,
+		Root:          observedRoot,
 		Tools:         tools,
 		Archive:       ArchiveIdentity{SHA256: archiveDigest, Size: archiveSize},
 		Chunks:        chunks,
@@ -237,6 +265,10 @@ func (builder *KitBuilder) Build(ctx context.Context, request BuildRequest) (Art
 	if err := removeDurably(filepath.Join(request.OutputDirectory, ".haulkit-verified-ready"), request.OutputDirectory); err != nil {
 		return Artifact{}, err
 	}
+	if err := removeDurably(snapshotRoot, request.OutputDirectory); err != nil {
+		return Artifact{}, err
+	}
+	snapshotCleanup = false
 	cleanup = false
 	return artifact, nil
 }
@@ -256,9 +288,19 @@ func containsExactIdentity(output, expected string) bool {
 	return false
 }
 
-func probeRuntimeIdentity(ctx context.Context, path, kind string) (string, error) {
+type productionRuntimeObserver struct{}
+
+func (productionRuntimeObserver) RunningExecutable() (string, error) {
+	executable, err := os.Executable()
+	if err != nil {
+		return "", err
+	}
+	return filepath.EvalSymlinks(executable)
+}
+
+func (productionRuntimeObserver) Probe(ctx context.Context, path, kind string) (string, error) {
 	argument := "version"
-	if kind == "pasta" {
+	if kind == "camp" || kind == "pasta" {
 		argument = "--version"
 	}
 	command := exec.CommandContext(ctx, path, argument)
@@ -279,7 +321,17 @@ func snapshotRegular(source, destination string) error {
 	if err != nil {
 		return err
 	}
+	if err := runAtomicBoundaryHook("tool-snapshot-write"); err != nil {
+		_ = output.Close()
+		_ = os.Remove(destination)
+		return err
+	}
 	if _, err := io.Copy(output, input); err != nil {
+		_ = output.Close()
+		_ = os.Remove(destination)
+		return err
+	}
+	if err := runAtomicBoundaryHook("tool-snapshot-fsync"); err != nil {
 		_ = output.Close()
 		_ = os.Remove(destination)
 		return err
@@ -359,6 +411,9 @@ func writeReadyArchive(ctx context.Context, output string, request BuildRequest)
 			Name: source.name, Mode: mode, Size: source.size, Typeflag: typeflag,
 			ModTime: time.Unix(0, 0).UTC(), Format: tar.FormatUSTAR,
 		}
+		if err := runAtomicBoundaryHook("archive-header-write"); err != nil {
+			return err
+		}
 		if err := writer.WriteHeader(header); err != nil {
 			return err
 		}
@@ -367,6 +422,10 @@ func writeReadyArchive(ctx context.Context, output string, request BuildRequest)
 		}
 		file, err := openRegular(source.sourcePath)
 		if err != nil {
+			return err
+		}
+		if err := runAtomicBoundaryHook("archive-content-write"); err != nil {
+			_ = file.Close()
 			return err
 		}
 		written, copyErr := io.Copy(writer, &contextReader{ctx: ctx, reader: file})

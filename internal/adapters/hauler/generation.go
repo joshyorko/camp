@@ -267,6 +267,45 @@ func (c *Client) PrepareStore(ctx context.Context, source, destination string) (
 	return identity, nil
 }
 
+func (c *Client) ObserveRoot(ctx context.Context, store, reference string) (haulkit.RootIdentity, error) {
+	canonical, err := haulkit.NormalizeRootReference(reference)
+	if err != nil {
+		return haulkit.RootIdentity{}, err
+	}
+	identity, err := c.ValidateStore(ctx, store)
+	if err != nil {
+		return haulkit.RootIdentity{}, err
+	}
+	var entry *haulkit.StoreEntry
+	for index := range identity.Entries {
+		if identity.Entries[index].Type == "file" && identity.Entries[index].Reference == canonical {
+			entry = &identity.Entries[index]
+			break
+		}
+	}
+	if entry == nil {
+		return haulkit.RootIdentity{}, fmt.Errorf("Hauler store is missing root %q", canonical)
+	}
+	temporaryDirectory, err := os.MkdirTemp("", "camp-haulkit-root-")
+	if err != nil {
+		return haulkit.RootIdentity{}, err
+	}
+	defer os.RemoveAll(temporaryDirectory)
+	output := filepath.Join(temporaryDirectory, "root.tar.zst")
+	result, err := c.Extract(ctx, store, canonical, output)
+	if err != nil || result.ExitCode != 0 {
+		return haulkit.RootIdentity{}, fmt.Errorf("extract observed Hauler root: %w", err)
+	}
+	digest, size, err := hashFile(output)
+	if err != nil {
+		return haulkit.RootIdentity{}, err
+	}
+	if digest != entry.Digest || size <= 0 || (entry.Size > 0 && entry.Size != size) {
+		return haulkit.RootIdentity{}, errors.New("observed Hauler root bytes do not match store inventory")
+	}
+	return haulkit.RootIdentity{Reference: canonical, SHA256: digest, Size: size}, nil
+}
+
 func readGenerationExpectations(path string) (generationExpectations, error) {
 	file, err := os.Open(path)
 	if err != nil {

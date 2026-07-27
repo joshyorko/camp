@@ -15,7 +15,13 @@ import (
 
 var ErrInvalidChunks = errors.New("invalid Camp Hauler kit chunks")
 
-var atomicBoundaryHook func(string) error
+type atomicBoundaryEvent struct {
+	Name       string
+	Occurrence int
+}
+
+var atomicBoundaryHook func(atomicBoundaryEvent) error
+var atomicBoundaryOccurrences map[string]int
 var beforeOpenRegular func(string) error
 
 func Split(ctx context.Context, archive, directory string, chunkSize int64) ([]ChunkIdentity, error) {
@@ -228,5 +234,15 @@ func runAtomicBoundaryHook(boundary string) error {
 	if atomicBoundaryHook == nil {
 		return nil
 	}
-	return atomicBoundaryHook(boundary)
+	if atomicBoundaryOccurrences == nil {
+		atomicBoundaryOccurrences = make(map[string]int)
+	}
+	atomicBoundaryOccurrences[boundary]++
+	return atomicBoundaryHook(atomicBoundaryEvent{Name: boundary, Occurrence: atomicBoundaryOccurrences[boundary]})
+}
+
+func resetAtomicBoundaryOccurrences() {
+	if atomicBoundaryHook != nil {
+		atomicBoundaryOccurrences = make(map[string]int)
+	}
 }

@@ -2,6 +2,8 @@ package hauler
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"os"
 	"path/filepath"
@@ -19,6 +21,7 @@ type generationRunner struct {
 	stores   []string
 	info     []byte
 	version  []byte
+	extract  []byte
 	syncRuns []struct {
 		result ports.Result
 		err    error
@@ -42,6 +45,11 @@ func (r *generationRunner) Run(_ context.Context, command ports.Command) (ports.
 	for index, argument := range command.Argv {
 		if argument == "save" && index+2 < len(command.Argv) && command.Argv[index+1] == "--filename" {
 			if err := os.WriteFile(command.Argv[index+2], []byte("verified-haul"), 0o600); err != nil {
+				return ports.Result{}, err
+			}
+		}
+		if argument == "extract" && index+3 < len(command.Argv) && command.Argv[index+2] == "--output" {
+			if err := os.WriteFile(command.Argv[index+3], r.extract, 0o600); err != nil {
 				return ports.Result{}, err
 			}
 		}
@@ -250,7 +258,7 @@ func TestClientValidatesStoreIntoStableHaulKitIdentity(t *testing.T) {
 		Lineage:       domain.Lineage{Branch: "main"},
 		Architecture:  "linux/amd64",
 		Store:         first,
-		Root:          haulkit.RootIdentity{Reference: "root.tar.zst", SHA256: strings.Repeat("a", 64), Size: 1},
+		Root:          haulkit.RootIdentity{Reference: "hauler/root.tar.zst:latest", SHA256: strings.Repeat("a", 64), Size: 1},
 		Tools: haulkit.ToolIdentities{
 			Camp:   haulkit.FileIdentity{Name: "camp", Version: "dev", SHA256: strings.Repeat("a", 64), Size: 1},
 			Hauler: haulkit.FileIdentity{Name: "hauler", Version: "v2.0.2", SHA256: strings.Repeat("a", 64), Size: 1},
@@ -303,5 +311,25 @@ func TestClientRejectsConfiguredVersionNotObservedFromExecutable(t *testing.T) {
 	_, err := NewClientWithVersion("/opt/hauler", "v2.0.2", runner).ValidateStore(context.Background(), "/tmp/store")
 	if err == nil {
 		t.Fatal("ValidateStore() accepted configured version not observed from executable")
+	}
+}
+
+func TestClientObservesCanonicalRootBytesWhenInfoOmitsSize(t *testing.T) {
+	t.Parallel()
+	rootBytes := []byte("root-archive-bytes")
+	sum := sha256.Sum256(rootBytes)
+	digest := hex.EncodeToString(sum[:])
+	runner := &generationRunner{
+		version: []byte("v2.0.2\n"),
+		extract: rootBytes,
+		info:    []byte(`[{"Reference":"hauler/root.tar.zst:latest","Type":"file","Platform":"-","Digest":"sha256:` + digest + `"}]`),
+	}
+	identity, err := NewClientWithVersion("/opt/hauler", "v2.0.2", runner).
+		ObserveRoot(context.Background(), "/tmp/store", "root.tar.zst")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if identity.Reference != "hauler/root.tar.zst:latest" || identity.SHA256 != digest || identity.Size != int64(len(rootBytes)) {
+		t.Fatalf("root identity = %#v", identity)
 	}
 }

@@ -133,8 +133,13 @@ func (verifier *KitVerifier) Verify(ctx context.Context, request VerifyRequest) 
 	if !storeIdentitiesEqual(currentStore, manifest.Store) {
 		return VerifiedKit{}, fmt.Errorf("%w: Hauler store drift", ErrIdentityMismatch)
 	}
-	if !rootMatchesStore(manifest.Root, currentStore) {
-		return VerifiedKit{}, fmt.Errorf("%w: root identity is not present in Hauler store", ErrIdentityMismatch)
+	rootObserver, ok := verifier.validator.(RootObserver)
+	if !ok {
+		return VerifiedKit{}, errors.New("Camp Hauler kit verifier requires an observed root")
+	}
+	observedRoot, err := rootObserver.ObserveRoot(ctx, storePath, manifest.Root.Reference)
+	if err != nil || observedRoot != manifest.Root {
+		return VerifiedKit{}, fmt.Errorf("%w: root identity differs from extracted Hauler bytes", ErrIdentityMismatch)
 	}
 	if request.StoreDirectory != "" {
 		currentSource, err := verifier.validator.ValidateStore(ctx, request.StoreDirectory)
@@ -162,16 +167,6 @@ func (verifier *KitVerifier) Verify(ctx context.Context, request VerifyRequest) 
 		result.ReadyDirectory = request.Destination
 	}
 	return result, nil
-}
-
-func rootMatchesStore(root RootIdentity, store StoreIdentity) bool {
-	for _, entry := range store.Entries {
-		if entry.Type == "file" && entry.Reference == root.Reference &&
-			entry.Digest == root.SHA256 && entry.Size == root.Size {
-			return true
-		}
-	}
-	return false
 }
 
 func storeIdentitiesEqual(left, right StoreIdentity) bool {

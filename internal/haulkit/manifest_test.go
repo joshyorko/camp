@@ -68,6 +68,26 @@ func TestValidateRejectsMalformedIdentityAndPathFields(t *testing.T) {
 	}
 }
 
+func TestNormalizeRootReferenceUsesExactHaulerFileIdentity(t *testing.T) {
+	for input, want := range map[string]string{
+		"root.tar.zst":               "hauler/root.tar.zst:latest",
+		"hauler/root.tar.zst:latest": "hauler/root.tar.zst:latest",
+	} {
+		got, err := NormalizeRootReference(input)
+		if err != nil {
+			t.Fatalf("NormalizeRootReference(%q) error = %v", input, err)
+		}
+		if got != want {
+			t.Fatalf("NormalizeRootReference(%q) = %q, want %q", input, got, want)
+		}
+	}
+	for _, input := range []string{"../root.tar.zst", "hauler/root.tar.zst:other", "root"} {
+		if _, err := NormalizeRootReference(input); err == nil {
+			t.Fatalf("NormalizeRootReference(%q) error = nil", input)
+		}
+	}
+}
+
 func validTestManifest() Manifest {
 	return Manifest{
 		SchemaVersion: ManifestSchemaVersion,
@@ -82,7 +102,7 @@ func validTestManifest() Manifest {
 			IndexSHA256:   testDigest,
 			Entries:       []StoreEntry{{Reference: "root", Type: "file", Digest: testDigest, Size: 4}},
 		},
-		Root: RootIdentity{Reference: "root.tar.zst", SHA256: testDigest, Size: 4},
+		Root: RootIdentity{Reference: "hauler/root.tar.zst:latest", SHA256: testDigest, Size: 4},
 		Tools: ToolIdentities{
 			Camp:   FileIdentity{Name: "camp", Version: "dev", SHA256: testDigest, Size: 4},
 			Hauler: FileIdentity{Name: "hauler", Version: "v2.0.2", SHA256: testDigest, Size: 4},

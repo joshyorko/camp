@@ -3,37 +3,66 @@ package haulkit
 import (
 	"context"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"testing"
 )
 
 func TestBuilderCleansOwnedOutputsAfterEveryAtomicPublicationBoundary(t *testing.T) {
-	for _, boundary := range []string{
-		"archive-finalize",
-		"zstd-finalize",
-		"chunk-write",
-		"file-fsync",
-		"publish",
-		"directory-fsync",
-		"reassembly-write",
-		"manifest-write",
-		"extraction-write",
-		"extraction-file-fsync",
-		"extraction-directory-fsync",
-		"extraction-publish",
-		"cleanup-remove",
-	} {
-		t.Run(boundary, func(t *testing.T) {
+	request, validator := buildFixture(t)
+	builder := NewBuilder(validator)
+	builder.chunkSize = 64
+	builder.runtimeObserver = fakeRuntimeObserver{runningCamp: request.CampExecutable}
+	previous := atomicBoundaryHook
+	t.Cleanup(func() { atomicBoundaryHook = previous })
+	var trace []atomicBoundaryEvent
+	atomicBoundaryHook = func(observed atomicBoundaryEvent) error {
+		trace = append(trace, observed)
+		return nil
+	}
+	if _, err := builder.Build(context.Background(), request); err != nil {
+		t.Fatal(err)
+	}
+	required := []string{
+		"tool-snapshot-write", "tool-snapshot-fsync",
+		"archive-header-write", "archive-content-write", "archive-finalize", "zstd-finalize",
+		"chunk-write", "file-fsync", "publish", "directory-fsync",
+		"reassembly-write", "manifest-write",
+		"extraction-write", "extraction-file-fsync", "extraction-directory-fsync",
+		"extraction-publish", "cleanup-remove",
+	}
+	for _, requiredBoundary := range required {
+		found := false
+		for _, observed := range trace {
+			if observed.Name == requiredBoundary {
+				found = true
+				break
+			}
+		}
+		if !found {
+			t.Fatalf("durability trace missing %q: %v", requiredBoundary, trace)
+		}
+	}
+
+	for _, boundary := range trace {
+		t.Run(fmt.Sprintf("%s-%d", boundary.Name, boundary.Occurrence), func(t *testing.T) {
 			request, validator := buildFixture(t)
 			builder := NewBuilder(validator)
 			builder.chunkSize = 64
-			builder.runtimeProbe = fixtureRuntimeProbe
-			previous := atomicBoundaryHook
-			t.Cleanup(func() { atomicBoundaryHook = previous })
-			atomicBoundaryHook = func(observed string) error {
+			builder.runtimeObserver = fakeRuntimeObserver{runningCamp: request.CampExecutable}
+			fired := false
+			recoveryFsync := false
+			atomicBoundaryHook = func(observed atomicBoundaryEvent) error {
+				if fired {
+					if observed.Name == "directory-fsync" {
+						recoveryFsync = true
+					}
+					return nil
+				}
 				if observed == boundary {
-					return errors.New("injected " + boundary + " failure")
+					fired = true
+					return errors.New("injected " + boundary.Name + " failure")
 				}
 				return nil
 			}
@@ -41,9 +70,12 @@ func TestBuilderCleansOwnedOutputsAfterEveryAtomicPublicationBoundary(t *testing
 			if _, err := builder.Build(context.Background(), request); err == nil {
 				t.Fatal("Build() error = nil")
 			}
+			if !fired {
+				t.Fatal("targeted occurrence was not reached")
+			}
 			for _, name := range []string{"camp-hauler-kit.tar.zst", "camp-hauler-kit.json", "chunks"} {
 				if _, err := os.Stat(filepath.Join(request.OutputDirectory, name)); !errors.Is(err, os.ErrNotExist) {
-					t.Fatalf("failure at %s retained %s: %v", boundary, name, err)
+					t.Fatalf("failure at %s retained %s: %v", boundary.Name, name, err)
 				}
 			}
 			matches, err := filepath.Glob(filepath.Join(request.OutputDirectory, ".haulkit-*"))
@@ -51,7 +83,10 @@ func TestBuilderCleansOwnedOutputsAfterEveryAtomicPublicationBoundary(t *testing
 				t.Fatal(err)
 			}
 			if len(matches) != 0 {
-				t.Fatalf("failure at %s retained temporaries: %v", boundary, matches)
+				t.Fatalf("failure at %s retained temporaries: %v", boundary.Name, matches)
+			}
+			if !recoveryFsync {
+				t.Fatalf("failure at %s did not reach a disarmed recovery directory fsync", boundary.Name)
 			}
 		})
 	}

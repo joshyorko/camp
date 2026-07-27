@@ -30,10 +30,17 @@ inventory returned by `hauler store info --output json --digests`, after the
 adapter executes the exact Hauler binary and observes the locked version.
 Before archiving, the adapter uses official `store save` then `store load` into
 a private fresh store; arbitrary unindexed files in the caller's store are not
-copied into the kit. Camp snapshots each runtime executable with no-follow
-regular-file opens, then probes and hashes that same private snapshot. The root
-reference, digest, and size must match one observed file entry in the prepared
-Hauler store.
+copied into the kit. Camp derives its own source from the symlink-resolved
+`os.Executable()` result, snapshots each runtime executable with no-follow
+regular-file opens, then probes and hashes that same private snapshot. The
+exact Camp probe is `camp --version`; Hauler uses `hauler version`, and pasta
+uses `pasta --version`.
+
+Root references canonicalize to the exact Hauler file identity
+`hauler/<name>.tar.zst:latest`. The adapter extracts and hashes those observed
+root bytes, so the manifest always carries a positive byte size even when
+`store info --digests` omits `Size`; builder and verifier bind the canonical
+reference, digest, and independently observed size.
 
 Verification extracts into a private sibling stage, revalidates tool bytes and
 the extracted store, and publishes the ready directory no-replace only after
@@ -42,6 +49,10 @@ Verification rejects architecture, version, digest, root, or post-manifest
 store drift. It bounds outer entry count, per-file and total expanded bytes,
 and zstd memory/window use from the compressed manifest identity under fixed
 hard ceilings.
+Fault tests address each durable boundary by name and occurrence. Injection is
+one-shot: recovery cleanup runs with the fault disarmed, removes visible
+outputs, and reaches a parent-directory fsync before the test accepts the
+failure path.
 Permanent generations remain native `hauler store save --filename
 <generation>.tar.zst` artifacts; the ready-store kit does not replace that
 generation format.

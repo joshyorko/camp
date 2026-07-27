@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"strings"
 	"testing"
 
 	"github.com/joshyorko/camp/internal/domain"
@@ -39,11 +40,24 @@ func (v staticStoreValidator) PrepareStore(_ context.Context, source, destinatio
 	return v.identity, nil
 }
 
+func (v staticStoreValidator) ObserveRoot(_ context.Context, _ string, reference string) (RootIdentity, error) {
+	canonical, err := NormalizeRootReference(reference)
+	if err != nil {
+		return RootIdentity{}, err
+	}
+	for _, entry := range v.identity.Entries {
+		if entry.Type == "file" && entry.Reference == canonical {
+			return RootIdentity{Reference: canonical, SHA256: entry.Digest, Size: entry.Size}, nil
+		}
+	}
+	return RootIdentity{}, errors.New("root not found")
+}
+
 func TestBuilderProducesDeterministicVerifiedReadyStoreArchive(t *testing.T) {
 	request, validator := buildFixture(t)
 	builder := NewBuilder(validator)
 	builder.chunkSize = 64
-	builder.runtimeProbe = fixtureRuntimeProbe
+	builder.runtimeObserver = fakeRuntimeObserver{runningCamp: request.CampExecutable}
 
 	first, err := builder.Build(context.Background(), request)
 	if err != nil {
@@ -95,7 +109,7 @@ func TestBuilderOfficialStorePreparationExcludesUntrackedLinks(t *testing.T) {
 			test.setup(t, request)
 			builder := NewBuilder(validator)
 			builder.chunkSize = 64
-			builder.runtimeProbe = fixtureRuntimeProbe
+			builder.runtimeObserver = fakeRuntimeObserver{runningCamp: request.CampExecutable}
 			if _, err := builder.Build(context.Background(), request); err != nil {
 				t.Fatalf("Build() error = %v", err)
 			}
@@ -107,7 +121,7 @@ func TestBuilderRejectsCorruptionAtChunkReassemblyAcceptanceBarrier(t *testing.T
 	request, validator := buildFixture(t)
 	builder := NewBuilder(validator)
 	builder.chunkSize = 64
-	builder.runtimeProbe = fixtureRuntimeProbe
+	builder.runtimeObserver = fakeRuntimeObserver{runningCamp: request.CampExecutable}
 	builder.afterSplit = func(directory string, chunks []ChunkIdentity) error {
 		path := filepath.Join(directory, chunks[0].Name)
 		if err := os.Chmod(path, 0o600); err != nil {
@@ -133,7 +147,7 @@ func TestBuilderRejectsStoreFileSwappedToSymlinkAfterValidation(t *testing.T) {
 	}
 	builder := NewBuilder(validator)
 	builder.chunkSize = 64
-	builder.runtimeProbe = fixtureRuntimeProbe
+	builder.runtimeObserver = fakeRuntimeObserver{runningCamp: request.CampExecutable}
 	builder.afterStoreValidation = func() error {
 		index := filepath.Join(request.StoreDirectory, "index.json")
 		if err := os.Remove(index); err != nil {
@@ -150,7 +164,7 @@ func TestBuilderDerivesRuntimeIdentityAndRejectsWrongCallerClaims(t *testing.T) 
 	request, validator := buildFixture(t)
 	builder := NewBuilder(validator)
 	builder.chunkSize = 64
-	builder.runtimeProbe = fixtureRuntimeProbe
+	builder.runtimeObserver = fakeRuntimeObserver{runningCamp: request.CampExecutable}
 	request.Architecture = "linux/not-host"
 	if _, err := builder.Build(context.Background(), request); err == nil {
 		t.Fatal("Build() accepted caller architecture")
@@ -174,7 +188,7 @@ func TestBuilderProbesAndHashesTheSamePrivateToolSnapshot(t *testing.T) {
 	}
 	builder := NewBuilder(validator)
 	builder.chunkSize = 64
-	builder.runtimeProbe = func(ctx context.Context, path, kind string) (string, error) {
+	builder.runtimeObserver = fakeRuntimeObserver{runningCamp: request.CampExecutable, probe: func(ctx context.Context, path, kind string) (string, error) {
 		if kind == "camp" {
 			if err := os.Remove(request.CampExecutable); err != nil {
 				return "", err
@@ -184,7 +198,7 @@ func TestBuilderProbesAndHashesTheSamePrivateToolSnapshot(t *testing.T) {
 			}
 		}
 		return fixtureRuntimeProbe(ctx, path, kind)
-	}
+	}}
 	artifact, err := builder.Build(context.Background(), request)
 	if err != nil {
 		t.Fatal(err)
@@ -200,6 +214,76 @@ func TestBuilderProbesAndHashesTheSamePrivateToolSnapshot(t *testing.T) {
 	if manifest.Tools.Camp.SHA256 != originalDigest {
 		t.Fatalf("Camp digest = %s, want snapshotted %s", manifest.Tools.Camp.SHA256, originalDigest)
 	}
+}
+
+func TestProductionRuntimeObserverUsesCampDashDashVersion(t *testing.T) {
+	directory := t.TempDir()
+	arguments := filepath.Join(directory, "arguments")
+	executable := filepath.Join(directory, "camp")
+	script := "#!/bin/sh\nprintf '%s' \"$1\" > " + arguments + "\nprintf 'dev\\n'\n"
+	if err := os.WriteFile(executable, []byte(script), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	output, err := (productionRuntimeObserver{}).Probe(context.Background(), executable, "camp")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.TrimSpace(output) != "dev" {
+		t.Fatalf("output = %q", output)
+	}
+	body, err := os.ReadFile(arguments)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(body) != "--version" {
+		t.Fatalf("Camp argv = %q, want --version", body)
+	}
+}
+
+func TestBuilderUsesObservedRunningCampExecutableInsteadOfCallerPath(t *testing.T) {
+	request, validator := buildFixture(t)
+	runningCamp := filepath.Join(t.TempDir(), "running-camp")
+	if err := os.WriteFile(runningCamp, []byte("running-camp-bytes"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	runningDigest, _, err := hashPath(runningCamp)
+	if err != nil {
+		t.Fatal(err)
+	}
+	builder := NewBuilder(validator)
+	builder.chunkSize = 64
+	builder.runtimeObserver = fakeRuntimeObserver{runningCamp: runningCamp}
+	artifact, err := builder.Build(context.Background(), request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	body, err := os.ReadFile(artifact.ManifestPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	manifest, err := DecodeCanonical(body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if manifest.Tools.Camp.SHA256 != runningDigest {
+		t.Fatalf("Camp digest = %s, want running executable %s", manifest.Tools.Camp.SHA256, runningDigest)
+	}
+}
+
+type fakeRuntimeObserver struct {
+	runningCamp string
+	probe       func(context.Context, string, string) (string, error)
+}
+
+func (observer fakeRuntimeObserver) RunningExecutable() (string, error) {
+	return observer.runningCamp, nil
+}
+
+func (observer fakeRuntimeObserver) Probe(ctx context.Context, path, kind string) (string, error) {
+	if observer.probe != nil {
+		return observer.probe(ctx, path, kind)
+	}
+	return fixtureRuntimeProbe(ctx, path, kind)
 }
 
 func fixtureRuntimeProbe(_ context.Context, _ string, kind string) (string, error) {
@@ -246,7 +330,7 @@ func buildFixture(t *testing.T) (BuildRequest, StoreValidator) {
 	storeIdentity := StoreIdentity{
 		HaulerVersion: "v2.0.2",
 		IndexSHA256:   indexDigest,
-		Entries:       []StoreEntry{{Reference: "root.tar.zst", Type: "file", Digest: indexDigest, Size: int64(len(indexBody))}},
+		Entries:       []StoreEntry{{Reference: "hauler/root.tar.zst:latest", Type: "file", Digest: indexDigest, Size: int64(len(indexBody))}},
 	}
 	return BuildRequest{
 		SessionID:        "session-1",
@@ -255,7 +339,7 @@ func buildFixture(t *testing.T) (BuildRequest, StoreValidator) {
 		Generation:       &domain.GenerationRef{Generation: 1, ArchiveSHA256: indexDigest},
 		Architecture:     "linux/" + runtime.GOARCH,
 		StoreDirectory:   store,
-		Root:             RootIdentity{Reference: "root.tar.zst", SHA256: indexDigest, Size: int64(len(indexBody))},
+		Root:             RootIdentity{Reference: "hauler/root.tar.zst:latest", SHA256: indexDigest, Size: int64(len(indexBody))},
 		CampExecutable:   tools["camp"],
 		CampVersion:      "dev",
 		HaulerExecutable: tools["hauler"],

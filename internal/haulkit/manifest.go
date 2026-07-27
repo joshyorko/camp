@@ -113,7 +113,8 @@ func Validate(manifest Manifest) error {
 		}
 		seenEntries[key] = struct{}{}
 	}
-	if !safeRelativeName(manifest.Root.Reference) || !validSHA256(manifest.Root.SHA256) || manifest.Root.Size <= 0 {
+	normalizedRoot, err := NormalizeRootReference(manifest.Root.Reference)
+	if err != nil || normalizedRoot != manifest.Root.Reference || !validSHA256(manifest.Root.SHA256) || manifest.Root.Size <= 0 {
 		return invalidManifest("invalid root identity")
 	}
 	for _, tool := range []FileIdentity{manifest.Tools.Camp, manifest.Tools.Hauler, manifest.Tools.Pasta} {
@@ -139,6 +140,24 @@ func Validate(manifest Manifest) error {
 		return invalidManifest("chunk sizes do not match archive")
 	}
 	return nil
+}
+
+func NormalizeRootReference(reference string) (string, error) {
+	const (
+		prefix = "hauler/"
+		suffix = ":latest"
+	)
+	name := reference
+	if strings.HasPrefix(reference, prefix) {
+		if !strings.HasSuffix(reference, suffix) {
+			return "", invalidManifest("root reference tag")
+		}
+		name = strings.TrimSuffix(strings.TrimPrefix(reference, prefix), suffix)
+	}
+	if !safeRelativeName(name) || !strings.HasSuffix(name, ".tar.zst") {
+		return "", invalidManifest("root reference")
+	}
+	return prefix + name + suffix, nil
 }
 
 func MarshalCanonical(manifest Manifest) ([]byte, error) {

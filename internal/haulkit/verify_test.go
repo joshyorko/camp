@@ -16,7 +16,7 @@ func TestVerifierRejectsWrongArchitectureToolIdentityAndStoreDrift(t *testing.T)
 	request, validator := buildFixture(t)
 	builder := NewBuilder(validator)
 	builder.chunkSize = 64
-	builder.runtimeProbe = fixtureRuntimeProbe
+	builder.runtimeObserver = fakeRuntimeObserver{runningCamp: request.CampExecutable}
 	artifact, err := builder.Build(context.Background(), request)
 	if err != nil {
 		t.Fatal(err)
@@ -65,7 +65,7 @@ func TestVerifierBindsRootReferenceDigestAndSizeToObservedStore(t *testing.T) {
 		name   string
 		mutate func(*RootIdentity)
 	}{
-		{"reference", func(root *RootIdentity) { root.Reference = "other.tar.zst" }},
+		{"reference", func(root *RootIdentity) { root.Reference = "hauler/other.tar.zst:latest" }},
 		{"digest", func(root *RootIdentity) { root.SHA256 = strings.Repeat("b", 64) }},
 		{"size", func(root *RootIdentity) { root.Size++ }},
 	} {
@@ -73,7 +73,7 @@ func TestVerifierBindsRootReferenceDigestAndSizeToObservedStore(t *testing.T) {
 			request, validator := buildFixture(t)
 			builder := NewBuilder(validator)
 			builder.chunkSize = 64
-			builder.runtimeProbe = fixtureRuntimeProbe
+			builder.runtimeObserver = fakeRuntimeObserver{runningCamp: request.CampExecutable}
 			artifact, err := builder.Build(context.Background(), request)
 			if err != nil {
 				t.Fatal(err)
@@ -158,7 +158,7 @@ func TestVerifierStagesExtractionAndRemovesItOnLateStoreFailure(t *testing.T) {
 	request, validator := buildFixture(t)
 	builder := NewBuilder(validator)
 	builder.chunkSize = 64
-	builder.runtimeProbe = fixtureRuntimeProbe
+	builder.runtimeObserver = fakeRuntimeObserver{runningCamp: request.CampExecutable}
 	artifact, err := builder.Build(context.Background(), request)
 	if err != nil {
 		t.Fatal(err)
