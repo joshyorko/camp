@@ -37,6 +37,24 @@ The subprocess runner keeps a command with all three terminal streams in Camp's 
 
 Unknown commands and arbitrary arguments return the stable usage exit code 2. Human failures use stderr; JSON failures use stdout and the versioned presentation envelope. Command handlers must obtain the inherited mode through `cli.OutputModeFrom` so success and failure presentation do not invent separate flag plumbing.
 
+## Deferred controller and profile command composition
+
+The schema/application layer provides controller inspection, canonical blueprint
+inspection, journal-projected timelines, and immutable non-secret profile
+operations. It intentionally does not register Cobra commands until production
+composition owns both profile persistence and journal execution-binding writes.
+The proposed stable command surface is `camp inspect`, `camp timeline`, and
+`camp profile import|list|show|current|activate|deactivate`; each must use the
+existing JSON envelope and must not expose profile values that fail the
+non-secret validation.
+
+Before registering `profile activate`, composition must prove that open writes
+the selected profile digest into the session's execution binding before effects,
+and that attach, sync, close, and recover reject a different selected digest.
+Timeline must show legacy sessions without such a binding as
+`unknown-blueprint`, never synthesize a compatibility claim. Until those
+production dependencies exist, command help must not advertise this surface.
+
 Cobra's help flag and generated `help` command bypass normal positional validation. Keep strict help-path validation at the `cli.Execute` boundary: unavailable or unknown help topics, extra topic components, and garbage combined with `--help` must exit 2 in both human and JSON modes without emitting successful help. Valid root and completion help must remain available.
 
 Help preflight must normalize explicit values for both `--json` and `--help`/`-h` using every boolean spelling accepted by `strconv.ParseBool`, preserve final-flag-wins behavior, preserve explicit false, and stop interpreting flags after `--`; raw flag presence is not parsed state. Wrap Cobra flag-parse failures as typed usage errors at `FlagErrorFunc`, and classify only typed exit errors afterward. Never infer usage from message fragments such as `requires` or `accepts`, because application failures legitimately use those words.
