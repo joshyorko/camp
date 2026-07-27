@@ -30,8 +30,15 @@ func TestMinIOCredentialScanRejectsFixtureCredentials(t *testing.T) {
 	if err := scanMinIOCredentials("controller completed without credential output", access, secret); err != nil {
 		t.Fatalf("clean controller output: %v", err)
 	}
-	if err := scanMinIOCredentials("authorization leaked "+secret, access, secret); err == nil {
-		t.Fatal("credential scan accepted a secret")
+	for name, output := range map[string]string{
+		"access key": "authorization leaked " + access,
+		"secret key": "authorization leaked " + secret,
+	} {
+		t.Run(name, func(t *testing.T) {
+			if err := scanMinIOCredentials(output, access, secret); err == nil {
+				t.Fatalf("credential scan accepted the fixture %s", name)
+			}
+		})
 	}
 }
 
