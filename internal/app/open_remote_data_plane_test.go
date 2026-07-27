@@ -40,8 +40,11 @@ func TestRemoteDataPlanePreparerBuildsVerifiesThenRendersBootstrap(t *testing.T)
 	})
 	preparer.render = func(request capsule.BootstrapRequest) (capsule.Bootstrap, error) {
 		order = append(order, "render")
-		if request.OuterImage != "example.test/workspace:v1@sha256:"+strings.Repeat("d", 64) {
+		if request.OuterImage != "sha256:"+strings.Repeat("c", 64) {
 			t.Fatalf("outer image = %q", request.OuterImage)
+		}
+		if request.InitializeRequest.Expected.SourceImage != "example.test/workspace:v1@sha256:"+strings.Repeat("d", 64) {
+			t.Fatalf("source image = %q", request.InitializeRequest.Expected.SourceImage)
 		}
 		if request.InitializeRequest.Expected.Kit.SHA256 != digestString([]byte("kit")) {
 			t.Fatalf("expected kit = %#v", request.InitializeRequest.Expected.Kit)
@@ -393,6 +396,10 @@ func (fakeRemoteImageResolver) Resolve(context.Context, string) (string, error) 
 	return "sha256:" + strings.Repeat("d", 64), nil
 }
 
+func (fakeRemoteImageResolver) ResolveConfigDigest(context.Context, string) (string, error) {
+	return "sha256:" + strings.Repeat("c", 64), nil
+}
+
 type fakeRemoteConfinement struct{}
 
 func (fakeRemoteConfinement) Resolve(context.Context) (ports.ConfinementCapability, error) {
@@ -408,6 +415,13 @@ func writeFakeRenderedBootstrap(request capsule.BootstrapRequest) (capsule.Boots
 		return capsule.Bootstrap{}, err
 	}
 	if err := os.WriteFile(filepath.Join(private, "camp-bootstrap"), []byte("helper"), 0o700); err != nil {
+		return capsule.Bootstrap{}, err
+	}
+	manifest, err := os.ReadFile(request.ManifestPath)
+	if err != nil {
+		return capsule.Bootstrap{}, err
+	}
+	if err := os.WriteFile(filepath.Join(private, request.InitializeRequest.Expected.Manifest.Name), manifest, 0o600); err != nil {
 		return capsule.Bootstrap{}, err
 	}
 	for name, worker := range map[string]remoteworker.Request{

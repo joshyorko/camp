@@ -36,6 +36,17 @@ func TestRenderBootstrapExecutesHelperBeforeEveryLifecycleForm(t *testing.T) {
 			if got := entryNames(entries); strings.Join(got, ",") != ".camp-bootstrap,camp-hauler-kit.tar.zst" {
 				t.Fatalf("bootstrap root entries = %v", got)
 			}
+			publishedManifest, err := os.ReadFile(filepath.Join(result.Root, ".camp-bootstrap", fixture.request.InitializeRequest.Expected.Manifest.Name))
+			if err != nil {
+				t.Fatal(err)
+			}
+			sourceManifest, err := os.ReadFile(fixture.request.ManifestPath)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !bytes.Equal(publishedManifest, sourceManifest) {
+				t.Fatal("bootstrap manifest differs from verified source")
+			}
 			trace := filepath.Join(t.TempDir(), "trace")
 			t.Setenv("TRACE", trace)
 			document := readBootstrapDocument(t, result.DevcontainerPath)
@@ -387,12 +398,13 @@ func TestVerifyBootstrapAcceptsCompleteRenderedSourceAndAccountsPayloadClasses(t
 	if err != nil {
 		t.Fatal(err)
 	}
-	if verified.RegularFiles != 6 || verified.MetadataBytes <= 0 || verified.MetadataBytes > BootstrapMetadataLimit {
+	if verified.RegularFiles != 7 || verified.MetadataBytes <= 0 || verified.MetadataBytes > BootstrapMetadataLimit {
 		t.Fatalf("verified bootstrap accounting = %#v", verified)
 	}
 	if verified.Helper != fixture.request.InitializeRequest.Expected.Helper ||
-		verified.Kit != fixture.request.InitializeRequest.Expected.Kit {
-		t.Fatalf("verified runtime payloads = helper:%#v kit:%#v", verified.Helper, verified.Kit)
+		verified.Kit != fixture.request.InitializeRequest.Expected.Kit ||
+		verified.Manifest != fixture.request.InitializeRequest.Expected.Manifest {
+		t.Fatalf("verified runtime payloads = helper:%#v kit:%#v manifest:%#v", verified.Helper, verified.Kit, verified.Manifest)
 	}
 }
 
@@ -400,6 +412,12 @@ func TestVerifyBootstrapRejectsTamperedOrUnboundedRenderedSource(t *testing.T) {
 	tests := map[string]func(*testing.T, bootstrapTestFixture, Bootstrap){
 		"kit bytes": func(t *testing.T, _ bootstrapTestFixture, bootstrap Bootstrap) {
 			if err := os.WriteFile(filepath.Join(bootstrap.Root, "camp-hauler-kit.tar.zst"), []byte("tampered"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+		},
+		"manifest bytes": func(t *testing.T, fixture bootstrapTestFixture, bootstrap Bootstrap) {
+			path := filepath.Join(bootstrap.Root, ".camp-bootstrap", fixture.request.InitializeRequest.Expected.Manifest.Name)
+			if err := os.WriteFile(path, []byte("tampered"), 0o600); err != nil {
 				t.Fatal(err)
 			}
 		},
@@ -558,7 +576,8 @@ esac
 		Helper:       fileIdentity(t, "camp", helper),
 		Kit:          fileIdentity(t, "camp-hauler-kit.tar.zst", kit),
 		Manifest:     fileIdentity(t, "manifest.json", manifest),
-		Image:        "example/final@sha256:" + strings.Repeat("b", 64),
+		SourceImage:  "example/final@sha256:" + strings.Repeat("b", 64),
+		Image:        "sha256:" + strings.Repeat("c", 64),
 	}
 	requestFor := func(operation remoteworker.Operation) remoteworker.Request {
 		return remoteworker.Request{

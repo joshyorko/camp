@@ -2,6 +2,7 @@ package remoteworker
 
 import (
 	"bytes"
+	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
@@ -9,10 +10,117 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"strings"
 	"testing"
 
 	"golang.org/x/sys/unix"
 )
+
+type recordingWorkerOperations struct {
+	activated bool
+	hydrated  bool
+}
+
+type activationFixture struct {
+	order []string
+	id    string
+}
+
+func (fixture *activationFixture) Verify(context.Context, Request) (verifiedRuntimeKit, error) {
+	fixture.order = append(fixture.order, "verify")
+	return verifiedRuntimeKit{Store: "/runtime/store"}, nil
+}
+
+func (fixture *activationFixture) StartRegistry(context.Context, Request, verifiedRuntimeKit) (temporaryRegistry, error) {
+	fixture.order = append(fixture.order, "registry")
+	return temporaryRegistry{Reference: "127.0.0.1:45000/camp/workspace@sha256:" + strings.Repeat("c", 64), Stop: func() error {
+		fixture.order = append(fixture.order, "stop")
+		return nil
+	}}, nil
+}
+
+func (fixture *activationFixture) PullAndInspect(_ context.Context, reference string) (string, error) {
+	fixture.order = append(fixture.order, "pull:"+reference)
+	return fixture.id, nil
+}
+
+func (fixture *activationFixture) Publish(_ Request, receipt ActivationReceipt) error {
+	fixture.order = append(fixture.order, "receipt:"+receipt.Status)
+	return nil
+}
+
+func TestActivateImageVerifiesBeforeRegistryAndRequiresExactLocalImageID(t *testing.T) {
+	request := validRequest()
+	request.Operation = OperationActivateImage
+	fixture := &activationFixture{id: request.Expected.Image}
+	receipt, err := activateImage(t.Context(), request, fixture)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if receipt.Status != "completed" ||
+		strings.Join(fixture.order, ",") != "verify,registry,pull:127.0.0.1:45000/camp/workspace@sha256:"+strings.Repeat("c", 64)+",stop,receipt:completed" {
+		t.Fatalf("receipt=%#v order=%v", receipt, fixture.order)
+	}
+
+	fixture = &activationFixture{id: "sha256:" + strings.Repeat("f", 64)}
+	if _, err := activateImage(t.Context(), request, fixture); !errors.Is(err, ErrIdentityMismatch) {
+		t.Fatalf("activateImage() error = %v", err)
+	}
+	for _, item := range fixture.order {
+		if strings.HasPrefix(item, "receipt:") {
+			t.Fatalf("mismatch published success receipt: %v", fixture.order)
+		}
+	}
+}
+
+func (operations *recordingWorkerOperations) ActivateImage(context.Context, Request) (any, error) {
+	operations.activated = true
+	return map[string]string{"status": "completed"}, nil
+}
+
+func (operations *recordingWorkerOperations) Hydrate(context.Context, Request) (any, error) {
+	operations.hydrated = true
+	return map[string]string{"status": "completed"}, nil
+}
+
+func TestRunDispatchesTaskSixOperationsAndKeepsTaskSevenUnsupported(t *testing.T) {
+	for _, operation := range []Operation{OperationActivateImage, OperationHydrate, OperationStartServices} {
+		t.Run(string(operation), func(t *testing.T) {
+			request := validRequest()
+			request.Operation = operation
+			body, err := json.Marshal(request)
+			if err != nil {
+				t.Fatal(err)
+			}
+			operations := &recordingWorkerOperations{}
+			var output bytes.Buffer
+			runErr := runWithOperations(t.Context(), bytes.NewReader(body), &output, operations)
+			if operation == OperationStartServices {
+				if !errors.Is(runErr, ErrUnsupportedOperation) {
+					t.Fatalf("runWithOperations() error = %v", runErr)
+				}
+				if operations.activated || operations.hydrated {
+					t.Fatal("unsupported operation reached Task 6 implementation")
+				}
+				return
+			}
+			if runErr != nil {
+				t.Fatal(runErr)
+			}
+			if operations.activated != (operation == OperationActivateImage) ||
+				operations.hydrated != (operation == OperationHydrate) {
+				t.Fatalf("dispatch activate=%v hydrate=%v", operations.activated, operations.hydrated)
+			}
+			var result Result
+			if err := json.Unmarshal(output.Bytes(), &result); err != nil {
+				t.Fatal(err)
+			}
+			if result.Operation != operation {
+				t.Fatalf("result operation = %q", result.Operation)
+			}
+		})
+	}
+}
 
 func TestProbeReportsTypedCapabilitiesAfterVerifyingInputs(t *testing.T) {
 	root := t.TempDir()

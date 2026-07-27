@@ -128,10 +128,18 @@ func renderBootstrap(request BootstrapRequest, openHelper func() (*os.File, erro
 	if _, err := kit.Seek(0, io.SeekStart); err != nil {
 		return Bootstrap{}, err
 	}
-	if observed, err := observeRegular(request.ManifestPath, expected.Manifest.Name); err != nil {
+	manifest, err := openRegularBootstrap(request.ManifestPath)
+	if err != nil {
+		return Bootstrap{}, err
+	}
+	defer manifest.Close()
+	if observed, err := observeOpenFile(manifest, expected.Manifest.Name); err != nil {
 		return Bootstrap{}, err
 	} else if observed != expected.Manifest {
 		return Bootstrap{}, fmt.Errorf("%w: manifest identity", ErrInvalidBootstrap)
+	}
+	if _, err := manifest.Seek(0, io.SeekStart); err != nil {
+		return Bootstrap{}, err
 	}
 	helper, err := openHelper()
 	if err != nil {
@@ -208,6 +216,12 @@ func renderBootstrap(request BootstrapRequest, openHelper func() (*os.File, erro
 		return Bootstrap{}, err
 	}
 	if err := verifyRelativeIdentity(privateDirectory, "camp-bootstrap", expected.Helper); err != nil {
+		return Bootstrap{}, err
+	}
+	if err := copyOpenFileAt(manifest, privateDirectory, expected.Manifest.Name, 0o600); err != nil {
+		return Bootstrap{}, err
+	}
+	if err := verifyRelativeIdentity(privateDirectory, expected.Manifest.Name, expected.Manifest); err != nil {
 		return Bootstrap{}, err
 	}
 	if err := copyOpenFileAt(kit, stageDirectory, "camp-hauler-kit.tar.zst", 0o600); err != nil {

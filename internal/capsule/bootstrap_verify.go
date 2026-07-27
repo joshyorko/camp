@@ -40,6 +40,7 @@ type BootstrapVerification struct {
 	MetadataBytes int64
 	Helper        remoteworker.FileIdentity
 	Kit           remoteworker.FileIdentity
+	Manifest      remoteworker.FileIdentity
 	Config        remoteworker.FileIdentity
 	Initialize    remoteworker.Request
 	Hydrate       remoteworker.Request
@@ -73,11 +74,12 @@ func VerifyBootstrap(request BootstrapVerificationRequest) (BootstrapVerificatio
 	defer private.Close()
 	if err := verifyDirectoryEntries(private, map[string]bool{
 		"devcontainer.json": false, "camp-bootstrap": false,
-		"initialize-request.json": false, "hydrate-request.json": false, "services-request.json": false,
+		request.Expected.Manifest.Name: false,
+		"initialize-request.json":      false, "hydrate-request.json": false, "services-request.json": false,
 	}); err != nil {
 		return BootstrapVerification{}, err
 	}
-	result := BootstrapVerification{RegularFiles: 6}
+	result := BootstrapVerification{RegularFiles: 7}
 	if result.RegularFiles > BootstrapRegularFileLimit {
 		return BootstrapVerification{}, fmt.Errorf("%w: bootstrap file limit", ErrInvalidBootstrap)
 	}
@@ -90,6 +92,11 @@ func VerifyBootstrap(request BootstrapVerificationRequest) (BootstrapVerificatio
 		return BootstrapVerification{}, fmt.Errorf("%w: helper identity", ErrInvalidBootstrap)
 	}
 	result.Kit, result.Helper = kit, helper
+	manifest, err := observeRelativeFile(private, request.Expected.Manifest.Name, request.Expected.Manifest.Name)
+	if err != nil || manifest != request.Expected.Manifest {
+		return BootstrapVerification{}, fmt.Errorf("%w: manifest identity", ErrInvalidBootstrap)
+	}
+	result.Manifest = manifest
 	config, err := observeRelativeFile(private, "devcontainer.json", request.Config.Name)
 	if err != nil || config != request.Config {
 		return BootstrapVerification{}, fmt.Errorf("%w: devcontainer config identity", ErrInvalidBootstrap)

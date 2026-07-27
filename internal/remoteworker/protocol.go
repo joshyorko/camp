@@ -54,6 +54,7 @@ type ExpectedIdentity struct {
 	Helper       FileIdentity `json:"helper"`
 	Kit          FileIdentity `json:"kit"`
 	Manifest     FileIdentity `json:"manifest"`
+	SourceImage  string       `json:"sourceImage"`
 	Image        string       `json:"image"`
 }
 
@@ -142,8 +143,11 @@ func validateRequest(request Request) error {
 		return invalidRequest("invalid helper or kit identity")
 	}
 	const digestMarker = "@sha256:"
-	index := strings.LastIndex(request.Expected.Image, digestMarker)
-	if index <= 0 || !validDigest(request.Expected.Image[index+len(digestMarker):]) {
+	sourceIndex := strings.LastIndex(request.Expected.SourceImage, digestMarker)
+	if sourceIndex <= 0 || !validDigest(request.Expected.SourceImage[sourceIndex+len(digestMarker):]) {
+		return invalidRequest("source image is not immutable")
+	}
+	if !strings.HasPrefix(request.Expected.Image, "sha256:") || !validDigest(strings.TrimPrefix(request.Expected.Image, "sha256:")) {
 		return invalidRequest("image is not immutable")
 	}
 	return nil

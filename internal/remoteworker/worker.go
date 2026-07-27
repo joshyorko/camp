@@ -28,7 +28,16 @@ type ProbeReceipt struct {
 	Capabilities []CapabilityReceipt `json:"capabilities"`
 }
 
+type workerOperations interface {
+	ActivateImage(context.Context, Request) (any, error)
+	Hydrate(context.Context, Request) (any, error)
+}
+
 func Run(ctx context.Context, input io.Reader, output, _ io.Writer) error {
+	return runWithOperations(ctx, input, output, productionOperations{})
+}
+
+func runWithOperations(ctx context.Context, input io.Reader, output io.Writer, operations workerOperations) error {
 	request, err := DecodeRequest(input)
 	if err != nil {
 		if encodeErr := encodeErrorResult(output, OperationRejected, err); encodeErr != nil {
@@ -39,9 +48,27 @@ func Run(ctx context.Context, input io.Reader, output, _ io.Writer) error {
 	if request.Operation == OperationProbe {
 		return runProbe(ctx, request, output)
 	}
+	var receipt any
+	switch request.Operation {
+	case OperationActivateImage:
+		receipt, err = operations.ActivateImage(ctx, request)
+	case OperationHydrate:
+		receipt, err = operations.Hydrate(ctx, request)
+	default:
+		err = ErrUnsupportedOperation
+	}
+	if err == nil {
+		return encodeResult(output, request.Operation, receipt)
+	}
+	if !errors.Is(err, ErrUnsupportedOperation) {
+		if encodeErr := encodeErrorResult(output, request.Operation, err); encodeErr != nil {
+			return errors.Join(err, encodeErr)
+		}
+		return err
+	}
 	err = ErrUnsupportedOperation
-	receipt := UnsupportedReceipt{Status: "unsupported", Diagnostic: boundedDiagnostic(err)}
-	if encodeErr := encodeResult(output, request.Operation, receipt); encodeErr != nil {
+	unsupported := UnsupportedReceipt{Status: "unsupported", Diagnostic: boundedDiagnostic(err)}
+	if encodeErr := encodeResult(output, request.Operation, unsupported); encodeErr != nil {
 		return encodeErr
 	}
 	return err

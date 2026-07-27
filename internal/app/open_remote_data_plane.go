@@ -42,6 +42,10 @@ type RemoteImageResolver interface {
 	Resolve(context.Context, string) (string, error)
 }
 
+type remoteImageConfigResolver interface {
+	ResolveConfigDigest(context.Context, string) (string, error)
+}
+
 type RemoteConfinementResolver interface {
 	Resolve(context.Context) (ports.ConfinementCapability, error)
 }
@@ -128,6 +132,14 @@ func (p *RemoteDataPlanePreparer) Prepare(ctx context.Context, request RemoteDat
 	if err != nil {
 		return RemoteDataPlaneResult{}, err
 	}
+	configResolver, ok := p.deps.Images.(remoteImageConfigResolver)
+	if !ok {
+		return RemoteDataPlaneResult{}, errors.New("remote image resolver cannot derive the immutable local image ID")
+	}
+	localImage, err := configResolver.ResolveConfigDigest(ctx, outerImage)
+	if err != nil {
+		return RemoteDataPlaneResult{}, fmt.Errorf("resolve immutable local devcontainer image ID: %w", err)
+	}
 	if result, err := p.deps.Hauler.AddImage(ctx, storeRoot, hauleradapter.AddImageOptions{
 		Reference: outerImage, Platform: "linux/" + runtime.GOARCH,
 	}); err != nil {
@@ -176,9 +188,10 @@ func (p *RemoteDataPlanePreparer) Prepare(ctx context.Context, request RemoteDat
 		Helper: remoteworker.FileIdentity{
 			Name: "camp", SHA256: manifest.Tools.Camp.SHA256, Size: manifest.Tools.Camp.Size,
 		},
-		Kit:      remoteworker.FileIdentity{Name: "camp-hauler-kit.tar.zst", SHA256: artifact.SHA256, Size: artifact.Size},
-		Manifest: manifestIdentity,
-		Image:    outerImage,
+		Kit:         remoteworker.FileIdentity{Name: "camp-hauler-kit.tar.zst", SHA256: artifact.SHA256, Size: artifact.Size},
+		Manifest:    manifestIdentity,
+		SourceImage: outerImage,
+		Image:       localImage,
 	}
 	workspaceRoot := filepath.Join("/workspaces", request.Capsule)
 	runtimeRoot := filepath.Join("/var/lib/camp", request.SessionID)
@@ -192,7 +205,7 @@ func (p *RemoteDataPlanePreparer) Prepare(ctx context.Context, request RemoteDat
 	bootstrapRoot := filepath.Join(attemptRoot, "bootstrap")
 	bootstrap, err := p.render(capsule.BootstrapRequest{
 		Root: bootstrapRoot, DevcontainerPath: request.DevcontainerPath,
-		KitArchivePath: artifact.ArchivePath, ManifestPath: artifact.ManifestPath, OuterImage: outerImage,
+		KitArchivePath: artifact.ArchivePath, ManifestPath: artifact.ManifestPath, OuterImage: localImage,
 		InitializeRequest: workerRequest(remoteworker.OperationActivateImage),
 		HydrateRequest:    workerRequest(remoteworker.OperationHydrate),
 		ServicesRequest:   workerRequest(remoteworker.OperationStartServices),
@@ -219,7 +232,8 @@ func (p *RemoteDataPlanePreparer) Prepare(ctx context.Context, request RemoteDat
 	record := domain.RemoteDataPlaneRecord{
 		Mode: domain.DataPlaneHaulerKitV1, AttemptID: request.AttemptID, BootstrapRoot: bootstrap.Root,
 		KitSHA256: artifact.SHA256, KitSize: artifact.Size,
-		ManifestSHA256: manifestIdentity.SHA256, ManifestSize: manifestIdentity.Size, OuterImage: outerImage,
+		ManifestSHA256: manifestIdentity.SHA256, ManifestSize: manifestIdentity.Size,
+		SourceImage: outerImage, OuterImage: localImage,
 		RequestSchema: scope.SchemaVersion, RequestSession: scope.SessionID, WorkspaceRoot: scope.WorkspaceRoot,
 		RuntimeRoot: scope.RuntimeRoot, ManifestPath: scope.ManifestPath, Architecture: scope.Architecture,
 		ConfigSHA256: configIdentity.SHA256, ConfigSize: configIdentity.Size,
@@ -269,7 +283,7 @@ func (p *RemoteDataPlanePreparer) reusePrepared(ctx context.Context, request Rem
 		Kit: remoteworker.FileIdentity{
 			Name: "camp-hauler-kit.tar.zst", SHA256: completion.KitSHA256, Size: completion.KitSize,
 		},
-		Manifest: manifestIdentity, Image: completion.OuterImage,
+		Manifest: manifestIdentity, SourceImage: completion.SourceImage, Image: completion.OuterImage,
 	}
 	scope := capsule.BootstrapScope{
 		SchemaVersion: completion.RequestSchema, SessionID: completion.RequestSession, WorkspaceRoot: completion.WorkspaceRoot,
@@ -280,7 +294,8 @@ func (p *RemoteDataPlanePreparer) reusePrepared(ctx context.Context, request Rem
 		completion.BootstrapRoot != bootstrapRoot || completion.RequestSession != request.SessionID ||
 		completion.Architecture != manifest.Architecture || completion.KitSHA256 != manifest.Archive.SHA256 ||
 		completion.KitSize != manifest.Archive.Size || completion.ManifestSHA256 != manifestIdentity.SHA256 ||
-		completion.ManifestSize != manifestIdentity.Size || !immutableImage(completion.OuterImage) {
+		completion.ManifestSize != manifestIdentity.Size || !immutableImage(completion.SourceImage) ||
+		!localImageID(completion.OuterImage) {
 		return RemoteDataPlaneResult{}, errors.New("prior completion marker is not bound to the requested attempt")
 	}
 	if _, err := capsule.VerifyBootstrap(capsule.BootstrapVerificationRequest{
@@ -337,6 +352,14 @@ func immutableImage(image string) bool {
 		return false
 	}
 	_, err := hex.DecodeString(image[index+len(marker):])
+	return err == nil
+}
+
+func localImageID(image string) bool {
+	if !strings.HasPrefix(image, "sha256:") || len(image) != len("sha256:")+64 {
+		return false
+	}
+	_, err := hex.DecodeString(strings.TrimPrefix(image, "sha256:"))
 	return err == nil
 }
 

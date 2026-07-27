@@ -66,7 +66,7 @@ Do not use Hauler v2.0.2's live `_catalog` response as proof that all direct reg
   irrelevance, overlapping invocation ownership, concurrent completion,
   aggregate failure, and command traces rather than inspecting renderer source.
 - Bootstrap acceptance and reentry re-open the published source and verify its
-  complete shape before `devpod up`: exactly the expected six regular files and
+  complete shape before `devpod up`: exactly the expected seven regular files and
   one real private directory, no links or extra entries, the copied kit digest
   and size, the exact executable helper digest and size, the immutable image,
   all three operation-specific request files with one coherent scope, and the
@@ -105,8 +105,11 @@ Do not use Hauler v2.0.2's live `_catalog` response as proof that all direct reg
   accepts one schema-v1 JSON request with strict unknown-field, recursively
   duplicate-key, operation,
   absolute-path, immutable-image, architecture, and helper/kit/manifest
-  identity validation. Mutation operations currently return a typed
-  `unsupported` receipt. `probe` verifies the running helper plus adjacent kit
+  identity validation. `activateImage` and `hydrate` are implemented; Task 7
+  service operations remain typed `unsupported`. The bootstrap carries the
+  canonical manifest as a seventh descriptor-verified file so provider-side
+  activation and container-side hydration can independently verify the uploaded
+  archive. `probe` verifies the running helper plus adjacent kit
   and manifest bytes before reporting typed architecture, filesystem,
   namespace, TUN, privilege, and loopback-port capabilities; an unsupported
   capability returns a failing receipt. The namespace probe actually creates a
@@ -120,6 +123,27 @@ Do not use Hauler v2.0.2's live `_catalog` response as proof that all direct reg
   the `rejected` result operation when no request operation could be decoded.
   Diagnostics are normalized to valid UTF-8 before their byte cap is applied.
   Protocol output is capped at 64 KiB and never contains archive bytes.
+- Remote activation distinguishes the source manifest identity from the local
+  engine identity. The selected OCI manifest's config digest becomes the
+  generated devcontainer image (`sha256:<config-digest>`). Before DevPod's
+  Docker driver inspects that image, `initializeCommand` verifies and extracts
+  the complete Kit v1, exposes its ready store through an exact pinned-Hauler
+  registry behind pinned-pasta IPv4 loopback confinement, pulls the source
+  manifest digest, and requires Docker inspection to return the expected local
+  image ID. The temporary registry is stopped before a no-replace activation
+  receipt is published. A non-Docker provider engine fails as an unsupported
+  capability; there is no provider-plugin or network-pull fallback.
+- Container-side `hydrate` repeats helper, kit, manifest, tool, architecture,
+  store, and root verification. It extracts the root artifact through the
+  existing Hauler and archive adapters into a private stage, installs the exact
+  Camp, Hauler, and pasta bytes beneath `.camp/runtime`, and promotes entries
+  with descriptor-relative no-replace renames. The only preexisting workspace
+  paths it accepts are `.camp-bootstrap` and `.camp/runtime`; hydrated `.camp`
+  content is merged without replacing runtime. Each rename fsyncs both
+  directories, and the durable hydration receipt is published only after the
+  root is complete. The generated lifecycle boundary releases the preserved
+  user `onCreateCommand` only after that success. It never calls `devpod up`
+  again or falls back to the capsule source.
 - Do not attempt to activate a devcontainer configuration created only in the
   remote workspace with a second local-folder `devpod up --recreate`. Pinned
   v0.26.1 exposes no supported community command for that remote reconfiguration

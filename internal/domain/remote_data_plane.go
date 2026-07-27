@@ -15,6 +15,7 @@ type RemoteDataPlaneRecord struct {
 	KitSize        int64         `json:"kitSize,omitempty" yaml:"kitSize,omitempty"`
 	ManifestSHA256 string        `json:"manifestSHA256,omitempty" yaml:"manifestSHA256,omitempty"`
 	ManifestSize   int64         `json:"manifestSize,omitempty" yaml:"manifestSize,omitempty"`
+	SourceImage    string        `json:"sourceImage,omitempty" yaml:"sourceImage,omitempty"`
 	OuterImage     string        `json:"outerImage,omitempty" yaml:"outerImage,omitempty"`
 	RequestSchema  uint32        `json:"requestSchema,omitempty" yaml:"requestSchema,omitempty"`
 	RequestSession string        `json:"requestSession,omitempty" yaml:"requestSession,omitempty"`

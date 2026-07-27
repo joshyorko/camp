@@ -22,7 +22,8 @@ func validRequest() Request {
 			Helper:       FileIdentity{Name: "camp", SHA256: strings.Repeat("a", 64), Size: 123},
 			Kit:          FileIdentity{Name: "camp-hauler-kit.tar.zst", SHA256: strings.Repeat("b", 64), Size: 456},
 			Manifest:     FileIdentity{Name: "manifest.json", SHA256: strings.Repeat("d", 64), Size: 789},
-			Image:        "registry.example/camp@sha256:" + strings.Repeat("c", 64),
+			SourceImage:  "registry.example/camp@sha256:" + strings.Repeat("c", 64),
+			Image:        "sha256:" + strings.Repeat("e", 64),
 		},
 	}
 }
@@ -98,7 +99,7 @@ func TestBoundedDiagnosticNormalizesBeforeApplyingByteCap(t *testing.T) {
 
 func TestRunEmitsOneBoundedJSONResultForUnsupportedMutation(t *testing.T) {
 	request := validRequest()
-	request.Operation = OperationHydrate
+	request.Operation = OperationStartServices
 	body, err := json.Marshal(request)
 	if err != nil {
 		t.Fatal(err)
@@ -124,7 +125,7 @@ func TestRunEmitsOneBoundedJSONResultForUnsupportedMutation(t *testing.T) {
 	if err := json.Unmarshal(result.Receipt, &receipt); err != nil {
 		t.Fatal(err)
 	}
-	if result.SchemaVersion != ProtocolSchemaVersion || result.Operation != OperationHydrate ||
+	if result.SchemaVersion != ProtocolSchemaVersion || result.Operation != OperationStartServices ||
 		receipt.Status != "unsupported" || receipt.Diagnostic == "" {
 		t.Fatalf("result = %#v, receipt = %#v", result, receipt)
 	}
