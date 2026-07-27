@@ -414,8 +414,12 @@ func failureBlock(data SceneData, w int, pal Palette) string {
 	}
 	head := lipgloss.NewStyle().Foreground(pal.Fail).Bold(true).Render(headText)
 	msg := lipgloss.NewStyle().Foreground(pal.Fail).Render(data.Failure)
-	rec := lipgloss.NewStyle().Foreground(pal.LabelMeta).Render("next: " + data.Recovery)
-	return lipgloss.JoinVertical(lipgloss.Center, head, "", msg, "", rec)
+	parts := []string{head, "", msg}
+	if data.Recovery != "" {
+		rec := lipgloss.NewStyle().Foreground(pal.LabelMeta).Render("next: " + data.Recovery)
+		parts = append(parts, "", rec)
+	}
+	return lipgloss.JoinVertical(lipgloss.Center, parts...)
 }
 
 func ruleAround(label string, width int, pal Palette) string {

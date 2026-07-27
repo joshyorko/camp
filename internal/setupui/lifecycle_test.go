@@ -5,6 +5,7 @@ import (
 	stdhex "encoding/hex"
 	"strings"
 	"testing"
+	"time"
 
 	tea "charm.land/bubbletea/v2"
 	"github.com/charmbracelet/x/ansi"
@@ -52,7 +53,12 @@ func TestLifecycleStagesAreStableAndExhaustive(t *testing.T) {
 }
 
 func TestLifecycleModelAdvancesOnlyFromTypedCompletionEvents(t *testing.T) {
-	m := newLifecycleTestModel(t, "sync")
+	m := NewLifecycleModel(DefaultPalette(), loadForTest(t), LifecycleWorkflow{
+		Operation: "sync",
+		Stages:    []presentation.LifecycleStage{presentation.StageUpload, presentation.StagePointer},
+	})
+	sized, _ := m.Update(tea.WindowSizeMsg{Width: 120, Height: 40})
+	m = sized.(LifecycleModel)
 	m2, _ := m.Update(presentation.RichLifecycleEvent{
 		Kind:    presentation.RichLifecycleActivity,
 		Stage:   presentation.StageUpload,
@@ -75,13 +81,75 @@ func TestLifecycleModelAdvancesOnlyFromTypedCompletionEvents(t *testing.T) {
 	if got := m.StageState(presentation.StageUpload); got != WaypointCompleted {
 		t.Fatalf("upload state after completion = %v, want completed", got)
 	}
-	if got := m.StageState(presentation.StagePointer); got != WaypointActive {
-		t.Fatalf("pointer state after upload completion = %v, want active", got)
+	if got := m.StageState(presentation.StagePointer); got != WaypointPending {
+		t.Fatalf("pointer state after upload completion = %v, want pending until a typed activity event", got)
+	}
+}
+
+func TestLifecycleModelRejectsOutOfOrderAndIncompleteSuccess(t *testing.T) {
+	workflow := LifecycleWorkflow{
+		Operation: "sync",
+		Stages: []presentation.LifecycleStage{
+			presentation.StageUpload,
+			presentation.StagePointer,
+			presentation.StageCleanup,
+		},
+	}
+	m := NewLifecycleModel(DefaultPalette(), loadForTest(t), workflow)
+
+	next, _ := m.Update(presentation.RichLifecycleEvent{Kind: presentation.RichLifecycleCompleted, Stage: presentation.StagePointer})
+	m = next.(LifecycleModel)
+	if m.Phase() != PhaseFailed {
+		t.Fatalf("out-of-order completion phase = %v, want failed", m.Phase())
+	}
+
+	m = NewLifecycleModel(DefaultPalette(), loadForTest(t), workflow)
+	next, _ = m.Update(presentation.RichLifecycleEvent{Kind: presentation.RichLifecycleCompleted, Stage: presentation.StageUpload})
+	m = next.(LifecycleModel)
+	next, _ = m.Update(presentation.RichLifecycleEvent{Kind: presentation.RichLifecycleSucceeded})
+	m = next.(LifecycleModel)
+	if m.Phase() != PhaseFailed {
+		t.Fatalf("incomplete success phase = %v, want failed", m.Phase())
+	}
+}
+
+func TestLifecycleWorkflowRejectsNonCanonicalStageOrder(t *testing.T) {
+	m := NewLifecycleModel(DefaultPalette(), loadForTest(t), LifecycleWorkflow{
+		Operation: "sync",
+		Stages: []presentation.LifecycleStage{
+			presentation.StagePointer,
+			presentation.StageUpload,
+		},
+	})
+	if m.Phase() != PhaseFailed {
+		t.Fatalf("non-canonical workflow phase = %v, want failed", m.Phase())
+	}
+	failed, message, recovery := m.Failed()
+	if !failed || message != "invalid lifecycle workflow stage order" || recovery != "" {
+		t.Fatalf("invalid workflow failure = (%v, %q, %q)", failed, message, recovery)
+	}
+}
+
+func TestLifecycleModelAcceptsSuccessAfterRequiredStagesInOrder(t *testing.T) {
+	stages := []presentation.LifecycleStage{presentation.StageUpload, presentation.StagePointer}
+	m := NewLifecycleModel(DefaultPalette(), loadForTest(t), LifecycleWorkflow{Operation: "sync", Stages: stages})
+	for _, stage := range stages {
+		next, _ := m.Update(presentation.RichLifecycleEvent{Kind: presentation.RichLifecycleCompleted, Stage: stage})
+		m = next.(LifecycleModel)
+	}
+	next, _ := m.Update(presentation.RichLifecycleEvent{Kind: presentation.RichLifecycleSucceeded})
+	m = next.(LifecycleModel)
+	if m.Phase() != PhaseReady {
+		t.Fatalf("complete success phase = %v, want ready", m.Phase())
 	}
 }
 
 func TestLifecycleModelFailurePreservesOneSafeRecoveryCommand(t *testing.T) {
-	m := newLifecycleTestModel(t, "close")
+	m := NewLifecycleModel(DefaultPalette(), loadForTest(t), LifecycleWorkflow{
+		Operation: "close", Stages: []presentation.LifecycleStage{presentation.StageUpload},
+	})
+	sized, _ := m.Update(tea.WindowSizeMsg{Width: 120, Height: 40})
+	m = sized.(LifecycleModel)
 	m2, _ := m.Update(presentation.RichLifecycleEvent{
 		Kind:            presentation.RichLifecycleFailed,
 		Stage:           presentation.StageUpload,
@@ -106,6 +174,10 @@ func TestLifecycleModelFailurePreservesOneSafeRecoveryCommand(t *testing.T) {
 
 func TestLifecycleSuccessDoesNotClaimCampReadiness(t *testing.T) {
 	m := newLifecycleTestModel(t, "sync")
+	for _, stage := range presentation.VisualLifecycleStages() {
+		next, _ := m.Update(presentation.RichLifecycleEvent{Kind: presentation.RichLifecycleCompleted, Stage: stage})
+		m = next.(LifecycleModel)
+	}
 	next, _ := m.Update(presentation.RichLifecycleEvent{Kind: presentation.RichLifecycleSucceeded})
 	m = next.(LifecycleModel)
 	plain := ansi.Strip(m.View().Content)
@@ -119,6 +191,8 @@ func TestLifecycleSuccessDoesNotClaimCampReadiness(t *testing.T) {
 
 func TestLifecycleModelCancellationAndResizeStayTerminalNormal(t *testing.T) {
 	m := newLifecycleTestModel(t, "open")
+	exitCalls := 0
+	m = m.OnExit(func() { exitCalls++ })
 	sized, _ := m.Update(tea.WindowSizeMsg{Width: 80, Height: 24})
 	m = sized.(LifecycleModel)
 	resized, _ := m.Update(tea.WindowSizeMsg{Width: 160, Height: 48})
@@ -131,14 +205,55 @@ func TestLifecycleModelCancellationAndResizeStayTerminalNormal(t *testing.T) {
 	if !m.Canceled() || cmd == nil {
 		t.Fatal("ctrl+c must cancel the lifecycle model with a quit command")
 	}
+	second, _ := m.Update(tea.KeyPressMsg{Code: 'c', Mod: tea.ModCtrl})
+	m = second.(LifecycleModel)
+	if exitCalls != 1 {
+		t.Fatalf("cancellation callback calls = %d, want 1", exitCalls)
+	}
 	if strings.Contains(ansi.Strip(m.View().Content), "next: camp recover") {
 		t.Fatal("cancellation must not invent a recovery command")
 	}
 }
 
+func TestLifecycleWorkerJoinWaitsForWorkerExit(t *testing.T) {
+	done := make(chan struct{})
+	returned := make(chan struct{})
+	go func() {
+		waitForLifecycleWorker(done)
+		close(returned)
+	}()
+	select {
+	case <-returned:
+		t.Fatal("worker join returned before worker exit")
+	case <-time.After(25 * time.Millisecond):
+	}
+	close(done)
+	select {
+	case <-returned:
+	case <-time.After(time.Second):
+		t.Fatal("worker join did not return after worker exit")
+	}
+}
+
+func TestLifecycleFailureWithoutRecoveryOmitsNextAffordance(t *testing.T) {
+	m := newLifecycleTestModel(t, "open")
+	next, _ := m.Update(presentation.RichLifecycleEvent{
+		Kind: presentation.RichLifecycleFailed, Stage: presentation.StageHydrate, Message: "manifest unavailable",
+	})
+	m = next.(LifecycleModel)
+	plain := ansi.Strip(m.View().Content)
+	if strings.Contains(plain, "next:") {
+		t.Fatalf("failure without recovery rendered empty next affordance:\n%s", plain)
+	}
+}
+
 func TestLifecycleSceneWindowsCoverEveryStage(t *testing.T) {
-	m := newLifecycleTestModel(t, "sync")
 	for _, stage := range presentation.VisualLifecycleStages() {
+		m := NewLifecycleModel(DefaultPalette(), loadForTest(t), LifecycleWorkflow{
+			Operation: "sync", Stages: []presentation.LifecycleStage{stage},
+		})
+		sized, _ := m.Update(tea.WindowSizeMsg{Width: 120, Height: 40})
+		m = sized.(LifecycleModel)
 		next, _ := m.Update(presentation.RichLifecycleEvent{Kind: presentation.RichLifecycleActivity, Stage: stage, Message: "working"})
 		m = next.(LifecycleModel)
 		plain := ansi.Strip(m.View().Content)
