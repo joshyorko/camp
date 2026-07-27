@@ -43,21 +43,34 @@ func TestCIAddsRCCParityWithoutCachingPrivateRuntimeHomes(t *testing.T) {
 	requireContains(t, workflow,
 		"name: RCC local candidate",
 		"name: RCC source gates",
+		"name: RCC exact-candidate lifecycle evidence",
 		"./developer/rccw run -r developer/toolkit.yaml --dev -t local",
 		"./developer/rccw run -r developer/toolkit.yaml --dev -t test",
+		"./developer/rccw run -r developer/toolkit.yaml -t robot",
+		"actions/download-artifact@",
 		"developer/verify_pr_receipt.py",
 		"build/evidence/candidate.json",
 		"build/evidence/test-gates.json",
+		"build/evidence/robot-gates.json",
+		"build/evidence/robot/",
+		"build/evidence/ci-cleanup-receipt.json",
+		"name: rcc-robot-evidence-${{ github.sha }}",
+		"if: always()",
 		"name: Direct Go and RCC parity record",
-		"needs: [test, integration, minio, locked-tools, packaging, rcc-local, rcc-test]",
+		"needs: [test, integration, minio, locked-tools, packaging, rcc-local, rcc-test, rcc-robot]",
 		"candidateCommit",
 		"requiredConsecutiveCompleteRuns",
 		"qualifiedHistoricalRuns",
 		"build/evidence/parity.json",
-		"if: always()",
+		`"robot": os.environ["RCC_ROBOT"]`,
 	)
-	if strings.Contains(workflow, "./developer/rccw run -r developer/toolkit.yaml -t robot") {
-		t.Fatal("RCC Robot must not become mandatory CI before its roadmap-gated product evidence passes")
+	for _, directJob := range []string{"  test:", "  integration:", "  minio:", "  locked-tools:", "  packaging:"} {
+		if !strings.Contains(workflow, directJob) {
+			t.Errorf("direct parity lane %q was removed before two immutable complete run references exist", directJob)
+		}
+	}
+	if !strings.Contains(workflow, `"qualifiedHistoricalRuns": []`) {
+		t.Fatal("hosted parity history must remain empty until two real immutable complete run references exist")
 	}
 	if strings.Contains(workflow, "build/rcc-homes") && strings.Contains(workflow, "actions/cache") {
 		t.Fatal("CI must not cache private RCC homes")
@@ -68,7 +81,15 @@ func TestReleaseWorkflowVerifiesDownloadsBeforeProtectedPublication(t *testing.T
 	workflow := readWorkflow(t, "release.yml")
 	requireContains(t, workflow,
 		"workflow_dispatch:",
-		"tags:",
+		"candidate_ci_run_id:",
+		"candidate_commit:",
+		"candidate_sha256:",
+		"actions: read",
+		"gh run download",
+		"rcc-candidate-${CANDIDATE_COMMIT}",
+		"candidate.json",
+		"candidateSha256",
+		"Run RCC release packaging for verified candidate",
 		"environment: release",
 		"contents: write",
 		"id-token: write",
@@ -80,17 +101,20 @@ func TestReleaseWorkflowVerifiesDownloadsBeforeProtectedPublication(t *testing.T
 		"./developer/rccw run -r developer/toolkit.yaml -t package",
 		"name: RCC release package",
 		"name: Seal verified artifact set",
-		"verified-release-set-${{ github.sha }}",
+		"verified-release-set-${{ inputs.candidate_commit }}",
 		"verified_artifacts.py create dist",
 		"verified_artifacts.py recheck dist",
 		"dist/verified-artifacts.json",
-		"github.event_name == 'push' || inputs.publish == true",
+		"inputs.publish == true",
 		"retention-days:",
 	)
-	if strings.Contains(workflow, "pull_request:") {
-		t.Fatal("release.yml must not run on pull requests")
+	for _, forbiddenTrigger := range []string{"pull_request:", `push:
+    tags:`} {
+		if strings.Contains(workflow, forbiddenTrigger) {
+			t.Fatalf("release.yml contains release trigger that cannot supply exact CI evidence: %q", forbiddenTrigger)
+		}
 	}
-	if strings.Count(workflow, "github.event_name == 'push' || inputs.publish == true") != 2 {
+	if strings.Count(workflow, "inputs.publish == true") != 2 {
 		t.Fatal("manual dry runs must gate both attestation and publication")
 	}
 	if strings.Count(workflow, "verified_artifacts.py recheck dist") != 2 {

@@ -145,10 +145,91 @@ jobs:
           if-no-files-found: error
           retention-days: 30
 
+  rcc-robot:
+    name: RCC exact-candidate lifecycle evidence
+    needs: rcc-local
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: rcc-candidate-${{ github.sha }}
+          path: .
+      - name: Verify downloaded exact candidate
+        env:
+          CANDIDATE_COMMIT: ${{ github.sha }}
+        run: |
+          chmod +x build/camp
+          python3 - <<'PY'
+          import hashlib
+          import json
+          import os
+          import pathlib
+
+          candidate = pathlib.Path("build/camp")
+          manifest = json.loads(pathlib.Path("build/evidence/candidate.json").read_text())
+          digest = hashlib.sha256(candidate.read_bytes()).hexdigest()
+          if manifest.get("commit") != os.environ["CANDIDATE_COMMIT"]:
+              raise SystemExit("candidate manifest commit does not match workflow commit")
+          if manifest.get("dirty") is not False:
+              raise SystemExit("CI candidate must be built from a clean checkout")
+          if manifest.get("candidateSha256") != digest:
+              raise SystemExit("downloaded candidate digest does not match manifest")
+          PY
+      - name: Run mandatory exact-candidate Robot lifecycle
+        id: robot
+        run: ./developer/rccw run -r developer/toolkit.yaml -t robot
+      - name: Record RCC Robot cleanup receipt
+        if: always()
+        env:
+          CANDIDATE_COMMIT: ${{ github.sha }}
+          ROBOT_OUTCOME: ${{ steps.robot.outcome }}
+          RUN_ID: ${{ github.run_id }}
+          RUN_ATTEMPT: ${{ github.run_attempt }}
+        run: |
+          mkdir -p build/evidence
+          python3 - <<'PY'
+          import hashlib
+          import json
+          import os
+          import pathlib
+
+          candidate = pathlib.Path("build/camp")
+          receipt = {
+              "schemaVersion": 1,
+              "candidateCommit": os.environ["CANDIDATE_COMMIT"],
+              "candidateSha256": hashlib.sha256(candidate.read_bytes()).hexdigest() if candidate.is_file() else "",
+              "run": {
+                  "id": os.environ["RUN_ID"],
+                  "attempt": os.environ["RUN_ATTEMPT"],
+              },
+              "robotOutcome": os.environ["ROBOT_OUTCOME"],
+              "cleanupEvidence": "mandatory lifecycle gates and Robot teardown",
+              "result": "passed" if os.environ["ROBOT_OUTCOME"] == "success" else "failed",
+          }
+          pathlib.Path("build/evidence/ci-cleanup-receipt.json").write_text(
+              json.dumps(receipt, indent=2, sort_keys=True) + "\n",
+              encoding="utf-8",
+          )
+          PY
+      - name: Upload RCC Robot evidence and cleanup receipt
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: rcc-robot-evidence-${{ github.sha }}
+          path: |
+            build/evidence/candidate.json
+            build/evidence/robot-gates.json
+            build/evidence/robot/
+            build/evidence/ci-cleanup-receipt.json
+          if-no-files-found: warn
+          retention-days: 90
+
   parity-evidence:
     name: Direct Go and RCC parity record
     if: always()
-    needs: [test, integration, minio, locked-tools, packaging, rcc-local, rcc-test]
+    needs: [test, integration, minio, locked-tools, packaging, rcc-local, rcc-test, rcc-robot]
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     steps:
@@ -165,6 +246,7 @@ jobs:
           DIRECT_PACKAGING: ${{ needs.packaging.result }}
           RCC_LOCAL: ${{ needs.rcc-local.result }}
           RCC_TEST: ${{ needs.rcc-test.result }}
+          RCC_ROBOT: ${{ needs.rcc-robot.result }}
         run: |
           mkdir -p build/evidence
           python3 - <<'PY'
@@ -182,6 +264,7 @@ jobs:
           rcc = {
               "local": os.environ["RCC_LOCAL"],
               "test": os.environ["RCC_TEST"],
+              "robot": os.environ["RCC_ROBOT"],
           }
           complete = all(result == "success" for result in [*direct.values(), *rcc.values()])
           record = {

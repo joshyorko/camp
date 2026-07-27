@@ -1,10 +1,20 @@
 name: Release candidate and publication
 
 on:
-  push:
-    tags: ["v*"]
   workflow_dispatch:
     inputs:
+      candidate_ci_run_id:
+        description: Successful CI run containing mandatory exact-candidate lifecycle and parity evidence
+        required: true
+        type: string
+      candidate_commit:
+        description: Full commit SHA proven by the CI run
+        required: true
+        type: string
+      candidate_sha256:
+        description: Exact build/camp SHA-256 proven by the CI run
+        required: true
+        type: string
       version:
         description: Candidate version without a leading v
         required: true
@@ -29,10 +39,11 @@ on:
         type: string
 
 permissions:
+  actions: read
   contents: read
 
 concurrency:
-  group: release-${{ github.ref }}
+  group: release-${{ inputs.candidate_commit }}
   cancel-in-progress: false
 
 jobs:
@@ -42,21 +53,75 @@ jobs:
     timeout-minutes: 20
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          ref: ${{ inputs.candidate_commit }}
+          fetch-depth: 0
       - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
         with:
           go-version-file: go.mod
           cache: true
-      - name: Build release evidence
+      - name: Download and verify mandatory CI candidate evidence
         env:
-          VERSION: ${{ inputs.version || github.ref_name }}
-          COMMIT: ${{ github.sha }}
+          GH_TOKEN: ${{ github.token }}
+          CI_RUN_ID: ${{ inputs.candidate_ci_run_id }}
+          CANDIDATE_COMMIT: ${{ inputs.candidate_commit }}
+          CANDIDATE_SHA256: ${{ inputs.candidate_sha256 }}
+        run: |
+          test "$CANDIDATE_COMMIT" = "$(git rev-parse HEAD)"
+          run_json="$(mktemp)"
+          jobs_json="$(mktemp)"
+          gh api "repos/$GITHUB_REPOSITORY/actions/runs/$CI_RUN_ID" > "$run_json"
+          gh api "repos/$GITHUB_REPOSITORY/actions/runs/$CI_RUN_ID/jobs?per_page=100" > "$jobs_json"
+          python3 - "$run_json" "$jobs_json" <<'PY'
+          import json
+          import os
+          import sys
+
+          run = json.load(open(sys.argv[1], encoding="utf-8"))
+          jobs = json.load(open(sys.argv[2], encoding="utf-8"))["jobs"]
+          if run.get("head_sha") != os.environ["CANDIDATE_COMMIT"]:
+              raise SystemExit("CI run does not prove the requested candidate commit")
+          if run.get("conclusion") != "success" or run.get("path") != ".github/workflows/ci.yml":
+              raise SystemExit("candidate CI workflow is not a successful authoritative CI run")
+          conclusions = {job["name"]: job.get("conclusion") for job in jobs}
+          for required in (
+              "RCC exact-candidate lifecycle evidence",
+              "Direct Go and RCC parity record",
+          ):
+              if conclusions.get(required) != "success":
+                  raise SystemExit(f"mandatory CI job did not pass: {required}")
+          PY
+          gh run download "$CI_RUN_ID" \
+            --repo "$GITHUB_REPOSITORY" \
+            --name "rcc-candidate-${CANDIDATE_COMMIT}" \
+            --dir .
+          python3 - <<'PY'
+          import hashlib
+          import json
+          import os
+          import pathlib
+
+          candidate = pathlib.Path("build/camp")
+          manifest = json.loads(pathlib.Path("build/evidence/candidate.json").read_text())
+          digest = hashlib.sha256(candidate.read_bytes()).hexdigest()
+          if manifest.get("commit") != os.environ["CANDIDATE_COMMIT"]:
+              raise SystemExit("candidate manifest commit does not match requested commit")
+          if manifest.get("candidateSha256") != os.environ["CANDIDATE_SHA256"]:
+              raise SystemExit("candidate manifest digest does not match requested digest")
+          if digest != os.environ["CANDIDATE_SHA256"]:
+              raise SystemExit("downloaded candidate digest does not match requested digest")
+          PY
+      - name: Run RCC release packaging for verified candidate
+        env:
+          VERSION: ${{ inputs.version }}
+          COMMIT: ${{ inputs.candidate_commit }}
         run: |
           SOURCE_DATE_EPOCH="$(git show -s --format=%ct HEAD)"
           export SOURCE_DATE_EPOCH
           ./developer/rccw run -r developer/toolkit.yaml -t package
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
-          name: release-candidate-${{ github.sha }}
+          name: release-candidate-${{ inputs.candidate_commit }}
           path: dist/
           if-no-files-found: error
           retention-days: 30
@@ -76,14 +141,16 @@ jobs:
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          ref: ${{ inputs.candidate_commit }}
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with:
-          name: release-candidate-${{ github.sha }}
+          name: release-candidate-${{ inputs.candidate_commit }}
           path: dist
       - name: Verify downloaded checksums, SBOMs, and installed archives
         env:
-          VERSION: ${{ inputs.version || github.ref_name }}
-          COMMIT: ${{ github.sha }}
+          VERSION: ${{ inputs.version }}
+          COMMIT: ${{ inputs.candidate_commit }}
           VERIFY_ARCH: ${{ matrix.architecture }}
         run: |
           cd dist
@@ -92,7 +159,7 @@ jobs:
           ./packaging/build-release-evidence.sh verify
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
-          name: verified-release-evidence-${{ matrix.architecture }}-${{ github.sha }}
+          name: verified-release-evidence-${{ matrix.architecture }}-${{ inputs.candidate_commit }}
           path: |
             dist/evidence.json
             dist/verification-${{ matrix.architecture }}.json
@@ -106,20 +173,22 @@ jobs:
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          ref: ${{ inputs.candidate_commit }}
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with:
-          name: release-candidate-${{ github.sha }}
+          name: release-candidate-${{ inputs.candidate_commit }}
           path: dist
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with:
-          pattern: verified-release-evidence-*-${{ github.sha }}
+          pattern: verified-release-evidence-*-${{ inputs.candidate_commit }}
           path: dist
           merge-multiple: true
       - name: Create immutable verified-artifact manifest
         run: python3 packaging/verified_artifacts.py create dist
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
-          name: verified-release-set-${{ github.sha }}
+          name: verified-release-set-${{ inputs.candidate_commit }}
           path: dist/
           if-no-files-found: error
           retention-days: 90
@@ -142,7 +211,7 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           RUN_ID: ${{ inputs.kubernetes_evidence_run_id }}
-          CANDIDATE_COMMIT: ${{ github.sha }}
+          CANDIDATE_COMMIT: ${{ inputs.candidate_commit }}
           CANDIDATE_SHA256: ${{ inputs.kubernetes_candidate_sha256 }}
           PROVIDER_WORKFLOW_NAME: "Protected Kubernetes provider evidence"
           PROVIDER_WORKFLOW_PATH: ".github/workflows/provider-evidence.yml"
@@ -169,10 +238,11 @@ jobs:
             --required-environment "$PROVIDER_EVIDENCE_ENVIRONMENT"
           gh run download "$RUN_ID" \
             --repo "$GITHUB_REPOSITORY" \
-            --name "kubernetes-evidence-${GITHUB_SHA}" \
+            --name "kubernetes-evidence-${CANDIDATE_COMMIT}" \
             --dir kubernetes-evidence
       - name: Reject stale or mismatched Kubernetes support evidence
         env:
+          CANDIDATE_COMMIT: ${{ inputs.candidate_commit }}
           CANDIDATE_SHA256: ${{ inputs.kubernetes_candidate_sha256 }}
         run: |
           test -n "$CANDIDATE_SHA256"
@@ -186,7 +256,7 @@ jobs:
             .github/workflows/provider-evidence.yml)"
           python3 scripts/kubernetes_evidence.py validate \
             --directory kubernetes-evidence \
-            --commit "$GITHUB_SHA" \
+            --commit "$CANDIDATE_COMMIT" \
             --sha256 "$CANDIDATE_SHA256" \
             --relevant-change "$relevant_change" \
             --require-pass
@@ -197,7 +267,7 @@ jobs:
       always() &&
       needs.verified-artifacts.result == 'success' &&
       (inputs.claim_kubernetes_support != true || needs.kubernetes-evidence.result == 'success') &&
-      (github.event_name == 'push' || inputs.publish == true)
+      inputs.publish == true
     permissions:
       contents: read
       id-token: write
@@ -205,9 +275,11 @@ jobs:
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          ref: ${{ inputs.candidate_commit }}
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with:
-          name: verified-release-set-${{ github.sha }}
+          name: verified-release-set-${{ inputs.candidate_commit }}
           path: dist
       - name: Recheck verified archives before attestation
         run: python3 packaging/verified_artifacts.py recheck dist
@@ -217,16 +289,18 @@ jobs:
 
   publish:
     needs: attest
-    if: github.event_name == 'push' || inputs.publish == true
+    if: inputs.publish == true
     environment: release
     permissions:
       contents: write
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          ref: ${{ inputs.candidate_commit }}
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with:
-          name: verified-release-set-${{ github.sha }}
+          name: verified-release-set-${{ inputs.candidate_commit }}
           path: dist
       - name: Recheck verified archives before publication
         run: python3 packaging/verified_artifacts.py recheck dist

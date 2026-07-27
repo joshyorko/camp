@@ -153,7 +153,13 @@ compiler alone therefore does not prove that `go test -race` can use it.
 
 RCC-backed jobs run alongside the direct Go jobs during parity. The
 `parity-evidence` job always writes `build/evidence/parity.json` for the exact
-workflow commit and run URL, including every direct and RCC job result. Its
+workflow commit and run URL, including every direct and RCC job result. The
+mandatory RCC Robot job downloads the `rcc-local` artifact instead of
+rebuilding it, verifies the manifest commit and candidate SHA-256, and runs
+`robot` against that exact binary. Its always-running artifact upload retains
+the Robot gate ledger, Robot XML/log/report directory, candidate manifest, and
+`ci-cleanup-receipt.json`; a failed or interrupted Robot run is evidence of
+failure, not permission to omit the cleanup receipt. Its
 `qualifiedHistoricalRuns` starts empty: repository tests cannot populate it or
 claim hosted parity. Do not remove the direct jobs until two consecutive,
 actual complete PR/master runs have passed every recorded mandatory gate; add
@@ -346,10 +352,10 @@ These named tests remain executable product gates even while their requirements
 are `roadmap-gated`. The RCC `robot` task therefore fails when a current
 candidate cannot satisfy them; black-box Robot success alone must not overwrite
 that failure. Promote a requirement from `roadmap-gated` only after the same
-candidate produces the named real-tool evidence. During the initial parity
-phase, hosted CI runs RCC `local` and `test` but does not make this knowingly
-failing Robot task a required PR job. Add that job only after A2/A3 evidence is
-green.
+candidate produces the named real-tool evidence. Hosted CI now makes this
+failure-visible Robot task mandatory and retains its exact-candidate evidence;
+until the named gates pass, the workflow is expected to stay red and cannot be
+used as a release or parity claim.
 
 For filesystem-dependent safety tests, prove determinism with repeated focused execution when practical. The ownership-marker temporary-name substitution test requires injection of the named fallback because a Linux filesystem may support `O_TMPFILE`; the focused test passed 50 repetitions after that injection, and `go test ./internal/capsule -count=1` passed 52 tests.
 
@@ -488,7 +494,12 @@ resulting `verified-artifacts.json` binds the exact candidate version and
 commit plus each archive's architecture, relative path, byte size, SHA-256,
 verification-record path and SHA-256, and passed result. Creation fails for a
 missing native result, identity/digest mismatch, or an extra release archive.
-The sealed `verified-release-set-<commit>` is the only archive source for
+The release workflow is manual-only and requires the successful CI run ID,
+full candidate commit, and exact `build/camp` SHA-256. Before packaging it
+checks out that commit, verifies the CI run and its mandatory Robot/parity jobs,
+downloads `rcc-candidate-<commit>`, and matches both the manifest identity and
+binary digest. Tag pushes cannot supply that evidence identity and therefore do
+not start releases. The sealed `verified-release-set-<commit>` is the only archive source for
 attestation and publication. Both downstream jobs independently run
 `verified_artifacts.py recheck`; neither job invokes RCC, Go, or packaging build
 scripts, so a missing, changed, substituted, or newly added archive fails before
@@ -502,8 +513,8 @@ attestation.
 A manual release workflow with `publish=false` is the safe hosted validation
 lane: it builds, uploads, downloads, checksum-verifies, and natively exercises
 both architectures, but skips attestation and publication. Attestation is a
-public provenance side effect, so it runs only for a tag or an explicitly
-approved manual publication. A dry-run artifact proves candidate mechanics; it
+public provenance side effect, so it runs only for an explicitly approved
+manual publication. A dry-run artifact proves candidate mechanics; it
 does not prove attestation or a published release.
 
 Before closing issue #13, link the successful mandatory CI run, both native
