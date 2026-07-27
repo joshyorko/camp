@@ -127,18 +127,13 @@ rcc run -r developer/toolkit.yaml -t robot
 rcc run -r developer/toolkit.yaml -t robotKubernetes
 ```
 
-`local` creates one truthfully stamped `build/camp` and
-`build/evidence/candidate.json`, then atomically links that candidate at
-`~/.local/bin/camp` so subsequent commands are simply `camp setup`, `camp init`,
-and `camp open`. `install` remains a compatibility alias for `local`. Neither
-task edits shell startup files; Bluefin already includes `~/.local/bin` in
-PATH. `robot` verifies that candidate digest, asks
+`local` creates one truthfully stamped repository-only `build/camp` and `build/evidence/candidate.json`. `local` stops after repository-only candidate smoke verification. `install` verifies that exact candidate before atomically linking it at `~/.local/bin/camp` so subsequent commands are simply `camp setup`, `camp init`, and `camp open`. Neither task edits shell startup files; Bluefin already includes `~/.local/bin` in PATH. `robot` verifies that candidate digest, asks
 the candidate to install the exact DevPod and Hauler assets from
 `tools.lock.yaml`, runs named Go evidence directly, then runs black-box Robot
 Framework suites against the same executable. Go tests are not hidden inside
 Robot keywords. Gate manifests distinguish passed and failed gates; an absent
 named test, opt-in skip, Robot skip, missing executable, or candidate mutation
-is a failure.
+is a failure. RCC source-gate ledger records command identity, duration, result, and sanitized failure reason for every named mandatory gate. A missing mandatory gate is recorded as `missing` and fails the task rather than being hidden by a broad test command. The RCC and pip Robot Framework declarations are both 7.4.2; that current factory pin supersedes the older 6.1.1 planning reference.
 
 A clean-start rehearsal removes only Camp-owned state. Inventory `camp list
 --json` and DevPod workspaces first, run `camp strike --purge --yes` while the
