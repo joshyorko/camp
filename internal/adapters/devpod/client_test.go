@@ -670,6 +670,36 @@ func TestUpUsesBootstrapRootInsteadOfCapsuleRoot(t *testing.T) {
 	}
 }
 
+func TestUpRejectsInvalidBootstrapSourceModesWithoutExecution(t *testing.T) {
+	t.Parallel()
+	for _, test := range []struct {
+		name          string
+		workspacePath string
+		bootstrapPath string
+		sourceMode    SourceMode
+	}{
+		{name: "empty bootstrap path", workspacePath: "/tmp/capsule", sourceMode: SourceModeBootstrap},
+		{name: "bootstrap aliases capsule", workspacePath: "/tmp/capsule", bootstrapPath: "/tmp/capsule", sourceMode: SourceModeBootstrap},
+		{name: "unknown source mode", workspacePath: "/tmp/capsule", bootstrapPath: "/tmp/bootstrap", sourceMode: SourceMode("future")},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			runner := &recordingRunner{}
+			_, err := NewClient("devpod", runner).Up(context.Background(), UpOptions{
+				WorkspacePath: test.workspacePath,
+				BootstrapPath: test.bootstrapPath,
+				SourceMode:    test.sourceMode,
+				WorkspaceID:   "camp",
+			})
+			if err == nil {
+				t.Fatal("Up() error = nil, want invalid source mode rejection")
+			}
+			if len(runner.commands) != 0 {
+				t.Fatalf("Up() commands = %#v, want fail-closed before execution", runner.commands)
+			}
+		})
+	}
+}
+
 func TestUpPreservesLocalCapsuleSourceModesAndFallbackImage(t *testing.T) {
 	t.Parallel()
 	for _, test := range []struct {

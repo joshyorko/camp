@@ -141,6 +141,18 @@ func NewClient(executable string, runner ports.Runner) *Client {
 }
 
 func (c *Client) Up(ctx context.Context, options UpOptions) (ports.Result, error) {
+	switch options.SourceMode {
+	case "", SourceModeCapsule:
+	case SourceModeBootstrap:
+		if strings.TrimSpace(options.BootstrapPath) == "" {
+			return ports.Result{}, errors.New("DevPod bootstrap source path is required")
+		}
+		if filepath.Clean(options.BootstrapPath) == filepath.Clean(options.WorkspacePath) {
+			return ports.Result{}, errors.New("DevPod bootstrap source must differ from workspace path")
+		}
+	default:
+		return ports.Result{}, fmt.Errorf("unsupported DevPod source mode %q", options.SourceMode)
+	}
 	entry := IDEEntry{IDE: options.IDE}
 	if entry.IDE == "" {
 		entry.IDE = IDETerminal

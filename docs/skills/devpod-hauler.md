@@ -12,8 +12,10 @@ Do not use Hauler v2.0.2's live `_catalog` response as proof that all direct reg
 - The pinned v0.26.1 installed-tool contract supports one bounded local-folder
   upload: construct `.camp-bootstrap/devcontainer.json` and the immutable
   `camp-hauler-kit.tar.zst` completely before `devpod up`, pass only that
-  disposable bootstrap root, and perform no post-`up` host writes. The real
-  Docker-provider gate uploaded a valid kit larger than 1 MiB, ran a
+  disposable bootstrap root, and perform no post-`up` mutation or ownership
+  repair of bootstrap contents; delete only the exact disposable root after
+  workspace cleanup. The real Docker-provider gate uploaded a valid kit larger
+  than 1 MiB, ran a
   `postCreateCommand` that hashed it after upload, returned the matching receipt
   through structured `devpod ssh`, independently matched the remote archive's
   SHA-256, and recorded the bootstrap root rather than the capsule root as the
