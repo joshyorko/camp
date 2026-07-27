@@ -216,7 +216,8 @@ func (m LifecycleModel) apply(event presentation.RichLifecycleEvent) (tea.Model,
 		return m, nil
 	case presentation.RichLifecycleFailed:
 		m.activity = ""
-		if !m.isExpected(event.Stage) {
+		terminalFailure := m.completeSequence() && len(m.stages) > 0 && event.Stage == m.stages[len(m.stages)-1]
+		if !m.isExpected(event.Stage) && !terminalFailure {
 			m.protocolFailure("lifecycle failure arrived out of order")
 			return m, nil
 		}

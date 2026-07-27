@@ -172,6 +172,23 @@ func TestLifecycleModelFailurePreservesOneSafeRecoveryCommand(t *testing.T) {
 	}
 }
 
+func TestLifecycleModelAcceptsTerminalFailureAfterAllStageFacts(t *testing.T) {
+	stages := []presentation.LifecycleStage{presentation.StageUpload, presentation.StagePointer}
+	m := NewLifecycleModel(DefaultPalette(), loadForTest(t), LifecycleWorkflow{Operation: "sync", Stages: stages})
+	for _, stage := range stages {
+		next, _ := m.Update(presentation.RichLifecycleEvent{Kind: presentation.RichLifecycleCompleted, Stage: stage})
+		m = next.(LifecycleModel)
+	}
+	next, _ := m.Update(presentation.RichLifecycleEvent{
+		Kind: presentation.RichLifecycleFailed, Stage: presentation.StagePointer, Message: "finalization failed",
+	})
+	m = next.(LifecycleModel)
+	failed, message, _ := m.Failed()
+	if !failed || message != "finalization failed" {
+		t.Fatalf("terminal failure = (%v, %q)", failed, message)
+	}
+}
+
 func TestLifecycleSuccessDoesNotClaimCampReadiness(t *testing.T) {
 	m := newLifecycleTestModel(t, "sync")
 	for _, stage := range presentation.VisualLifecycleStages() {

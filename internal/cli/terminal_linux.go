@@ -11,6 +11,7 @@ import (
 
 	"github.com/joshyorko/camp/internal/app"
 	"github.com/joshyorko/camp/internal/presentation"
+	"github.com/joshyorko/camp/internal/setupui"
 	"golang.org/x/sys/unix"
 )
 
@@ -21,6 +22,116 @@ type lifecycleProgressReporter struct {
 	out        io.Writer
 	experience presentation.TerminalExperience
 	operation  string
+}
+
+type richLifecycleWorker func(context.Context, app.ProgressReporter) (string, error)
+
+type richLifecycleWorkerResult struct {
+	recovery string
+	err      error
+}
+
+type richLifecycleProgressReporter struct {
+	ctx      context.Context
+	events   chan<- presentation.RichLifecycleEvent
+	stages   []presentation.LifecycleStage
+	complete int
+}
+
+func (r *richLifecycleProgressReporter) Report(ctx context.Context, event app.ProgressEvent) error {
+	stage, ok := richLifecycleStage(event.Stage)
+	if !ok {
+		return nil
+	}
+	if r.complete >= len(r.stages) || r.stages[r.complete] != stage {
+		return fmt.Errorf("rich lifecycle progress %q arrived out of order", event.Stage)
+	}
+	message := lifecycleProgressMessage(event)
+	select {
+	case r.events <- presentation.RichLifecycleEvent{Kind: presentation.RichLifecycleCompleted, Stage: stage, Message: message}:
+		r.complete++
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+}
+
+func (r *richLifecycleProgressReporter) expectedStage() presentation.LifecycleStage {
+	if r.complete < len(r.stages) {
+		return r.stages[r.complete]
+	}
+	return ""
+}
+
+func richLifecycleStage(stage app.ProgressStage) (presentation.LifecycleStage, bool) {
+	switch stage {
+	case app.ProgressWorkspacePrepared:
+		return presentation.StageMirror, true
+	case app.ProgressImagesCaptured:
+		return presentation.StageImageCapture, true
+	case app.ProgressGenerationBuilt:
+		return presentation.StageArchive, true
+	case app.ProgressGenerationUploaded:
+		return presentation.StageUpload, true
+	case app.ProgressGenerationPublished:
+		return presentation.StagePointer, true
+	case app.ProgressMaterializationRemoved, app.ProgressMaterializationPreserved:
+		return presentation.StageCleanup, true
+	default:
+		return "", false
+	}
+}
+
+func richLifecycleAvailable(mode OutputMode, out io.Writer, environment map[string]string, probe terminalProbe) bool {
+	experience, width, height := resolveTerminalExperience(mode, out, environment, probe)
+	return experience == presentation.TerminalColor && width >= setupui.MinWidth && height >= setupui.MinHeight
+}
+
+func runRichLifecycleOperation(ctx context.Context, out io.Writer, workflow setupui.LifecycleWorkflow, worker richLifecycleWorker) (string, error) {
+	sprites, err := setupui.LoadSprites()
+	if err != nil {
+		return "", err
+	}
+	workerCtx, cancel := context.WithCancel(ctx)
+	events := make(chan presentation.RichLifecycleEvent, 32)
+	workerDone := make(chan struct{})
+	result := make(chan richLifecycleWorkerResult, 1)
+	reporter := &richLifecycleProgressReporter{ctx: workerCtx, events: events, stages: append([]presentation.LifecycleStage(nil), workflow.Stages...)}
+	go func() {
+		defer close(workerDone)
+		defer close(events)
+		recovery, runErr := worker(workerCtx, reporter)
+		if runErr != nil {
+			stage := reporter.expectedStage()
+			if stage == "" && len(reporter.stages) > 0 {
+				stage = reporter.stages[len(reporter.stages)-1]
+			}
+			if stage != "" {
+				select {
+				case events <- presentation.RichLifecycleEvent{Kind: presentation.RichLifecycleFailed, Stage: stage, Message: runErr.Error(), RecoveryCommand: recovery}:
+				case <-workerCtx.Done():
+				}
+			}
+		} else {
+			select {
+			case events <- presentation.RichLifecycleEvent{Kind: presentation.RichLifecycleSucceeded}:
+			case <-workerCtx.Done():
+				runErr = workerCtx.Err()
+			}
+		}
+		result <- richLifecycleWorkerResult{recovery: recovery, err: runErr}
+	}()
+	uiResult, uiErr := setupui.RunLifecycle(
+		ctx, os.Stdin, out, setupui.DefaultPalette(), sprites, workflow, events, workerDone, cancel,
+	)
+	workerResult := <-result
+	if uiErr != nil {
+		return workerResult.recovery, uiErr
+	}
+	if uiResult.Canceled {
+		return workerResult.recovery, context.Canceled
+	}
+	return workerResult.recovery, workerResult.err
 }
 
 func newLifecycleProgressReporter(mode OutputMode, out io.Writer, experience presentation.TerminalExperience, operation string) *lifecycleProgressReporter {

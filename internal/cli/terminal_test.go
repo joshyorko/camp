@@ -101,6 +101,67 @@ func TestResolveTerminalExperienceTreatsNonFilesAndFallbackSignalsAsPlain(t *tes
 	}
 }
 
+func TestRichLifecycleAvailableRequiresInteractiveTrueColorAndSceneFloor(t *testing.T) {
+	file, err := os.CreateTemp(t.TempDir(), "terminal")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer file.Close()
+	env := map[string]string{"TERM": "xterm-256color", "COLORTERM": "truecolor"}
+	if !richLifecycleAvailable(ModeHuman, file, env, func(uintptr) (bool, int, int) { return true, 120, 40 }) {
+		t.Fatal("interactive true-color terminal should enable rich lifecycle")
+	}
+	for _, probe := range []terminalProbe{
+		func(uintptr) (bool, int, int) { return true, 68, 40 },
+		func(uintptr) (bool, int, int) { return true, 120, 19 },
+		func(uintptr) (bool, int, int) { return false, 120, 40 },
+	} {
+		if richLifecycleAvailable(ModeHuman, file, env, probe) {
+			t.Fatal("insufficient terminal capability enabled rich lifecycle")
+		}
+	}
+	if richLifecycleAvailable(ModeJSON, file, env, func(uintptr) (bool, int, int) { return true, 120, 40 }) {
+		t.Fatal("JSON output enabled rich lifecycle")
+	}
+}
+
+func TestRichLifecycleProgressReporterEmitsOrderedTypedFacts(t *testing.T) {
+	events := make(chan presentation.RichLifecycleEvent, 2)
+	reporter := &richLifecycleProgressReporter{
+		events: events,
+		stages: []presentation.LifecycleStage{presentation.StageMirror, presentation.StageImageCapture},
+	}
+	for _, event := range []app.ProgressEvent{
+		{Stage: app.ProgressWorkspacePrepared},
+		{Stage: app.ProgressRegistrySealed},
+		{Stage: app.ProgressImagesCaptured, ImageCount: 2},
+	} {
+		if err := reporter.Report(context.Background(), event); err != nil {
+			t.Fatalf("Report(%q): %v", event.Stage, err)
+		}
+	}
+	for _, want := range []presentation.LifecycleStage{presentation.StageMirror, presentation.StageImageCapture} {
+		got := <-events
+		if got.Kind != presentation.RichLifecycleCompleted || got.Stage != want {
+			t.Fatalf("event = %#v, want completed %q", got, want)
+		}
+	}
+	if got := reporter.expectedStage(); got != "" {
+		t.Fatalf("expectedStage() = %q, want empty", got)
+	}
+}
+
+func TestRichLifecycleProgressReporterRejectsOutOfOrderFacts(t *testing.T) {
+	reporter := &richLifecycleProgressReporter{
+		events: make(chan presentation.RichLifecycleEvent, 1),
+		stages: []presentation.LifecycleStage{presentation.StageMirror, presentation.StageImageCapture},
+	}
+	err := reporter.Report(context.Background(), app.ProgressEvent{Stage: app.ProgressImagesCaptured})
+	if err == nil {
+		t.Fatal("Report() accepted out-of-order image capture")
+	}
+}
+
 func TestWriteLifecycleEventsUsesCompletedOpenSyncAndCloseState(t *testing.T) {
 	tests := []struct {
 		operation string
