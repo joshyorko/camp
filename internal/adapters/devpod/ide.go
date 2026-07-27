@@ -60,7 +60,7 @@ type IDEOpenOptions struct {
 var workspaceHostIDPattern = regexp.MustCompile(`^[A-Za-z0-9](?:[A-Za-z0-9-]*[A-Za-z0-9])?$`)
 
 func WorkspaceSSHHost(workspaceID string) (string, error) {
-	if !workspaceHostIDPattern.MatchString(workspaceID) {
+	if len(workspaceID) > 63 || !workspaceHostIDPattern.MatchString(workspaceID) {
 		return "", fmt.Errorf("%w: invalid DevPod workspace host ID", ErrInvalidIDEEntry)
 	}
 	return workspaceID + ".devpod", nil
