@@ -110,7 +110,20 @@ func (b *Builder) Build(ctx context.Context, request BuildRequest) (BuildResult,
 	if err != nil {
 		return BuildResult{}, err
 	}
-	artifact, err := b.assembler.Assemble(ctx, filepath.Join(campDirectory.path, "hauler-manifest.yaml"), buildDirectory.accessPath(), haulPath)
+	campPath, err := campDirectory.verifiedPath()
+	if err != nil {
+		return BuildResult{}, err
+	}
+	buildPath, err := buildDirectory.verifiedPath()
+	if err != nil {
+		return BuildResult{}, err
+	}
+	artifact, err := b.assembler.Assemble(
+		ctx,
+		filepath.Join(campPath, "hauler-manifest.yaml"),
+		buildPath,
+		filepath.Join(buildPath, haulName),
+	)
 	if err != nil {
 		return BuildResult{}, err
 	}
@@ -439,6 +452,38 @@ func (d checkpointDirectory) openOrCreateChild(name string) (checkpointDirectory
 
 func (d checkpointDirectory) accessPath() string {
 	return fmt.Sprintf("/proc/self/fd/%d", d.fd)
+}
+
+func (d checkpointDirectory) verifiedPath() (string, error) {
+	parentHow := &unix.OpenHow{
+		Flags:   unix.O_RDONLY | unix.O_DIRECTORY | unix.O_CLOEXEC | unix.O_NOFOLLOW,
+		Resolve: unix.RESOLVE_NO_SYMLINKS,
+	}
+	parentFD, err := unix.Openat2(unix.AT_FDCWD, filepath.Dir(d.path), parentHow)
+	if err != nil {
+		return "", fmt.Errorf("reopen checkpoint parent for %q: %w", d.path, err)
+	}
+	defer unix.Close(parentFD)
+	how := &unix.OpenHow{
+		Flags:   unix.O_RDONLY | unix.O_DIRECTORY | unix.O_CLOEXEC | unix.O_NOFOLLOW,
+		Resolve: unix.RESOLVE_BENEATH | unix.RESOLVE_NO_SYMLINKS | unix.RESOLVE_NO_XDEV,
+	}
+	currentFD, err := unix.Openat2(parentFD, filepath.Base(d.path), how)
+	if err != nil {
+		return "", fmt.Errorf("reopen checkpoint directory %q: %w", d.path, err)
+	}
+	defer unix.Close(currentFD)
+	var held, current unix.Stat_t
+	if err := unix.Fstat(d.fd, &held); err != nil {
+		return "", fmt.Errorf("inspect held checkpoint directory %q: %w", d.path, err)
+	}
+	if err := unix.Fstat(currentFD, &current); err != nil {
+		return "", fmt.Errorf("inspect reopened checkpoint directory %q: %w", d.path, err)
+	}
+	if held.Dev != current.Dev || held.Ino != current.Ino {
+		return "", fmt.Errorf("checkpoint directory %q changed identity", d.path)
+	}
+	return d.path, nil
 }
 
 func (d checkpointDirectory) close() {
