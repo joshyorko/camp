@@ -142,7 +142,7 @@ func buildFixture(t *testing.T) (BuildRequest, StoreValidator) {
 		Generation:       &domain.GenerationRef{Generation: 1, ArchiveSHA256: indexDigest},
 		Architecture:     "linux/" + runtime.GOARCH,
 		StoreDirectory:   store,
-		Root:             RootIdentity{Reference: "root.tar.zst", SHA256: indexDigest, Size: int64(len(indexBody))},
+		Root:             RootIdentity{Reference: "index.json", SHA256: indexDigest, Size: int64(len(indexBody))},
 		CampExecutable:   tools["camp"],
 		CampVersion:      "dev",
 		HaulerExecutable: tools["hauler"],

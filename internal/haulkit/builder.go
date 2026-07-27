@@ -158,10 +158,11 @@ func (builder *KitBuilder) Build(ctx context.Context, request BuildRequest) (Art
 	}
 	artifact := Artifact{ManifestPath: manifestPath, ArchivePath: archivePath, SHA256: archiveDigest, Size: archiveSize, Chunks: chunks}
 	if _, err := NewVerifier(builder.validator).Verify(ctx, VerifyRequest{
-		ManifestPath: manifestPath,
-		ArchivePath:  archivePath,
-		Architecture: request.Architecture,
-		Tools:        tools,
+		ManifestPath:           manifestPath,
+		ExpectedManifestSHA256: digestBody(body),
+		ArchivePath:            archivePath,
+		Architecture:           request.Architecture,
+		Tools:                  tools,
 	}); err != nil {
 		return Artifact{}, fmt.Errorf("verify completed Camp Hauler kit: %w", err)
 	}
