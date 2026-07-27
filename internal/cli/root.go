@@ -265,8 +265,8 @@ func RunRemoteWorker(ctx context.Context, streams Streams) error {
 	return remoteworker.Run(ctx, streams.In, streams.Out, streams.ErrOut)
 }
 
-func RunRemoteWorkerGate(ctx context.Context, requestPath, gate string, streams Streams) error {
-	return remoteworker.RunGate(ctx, requestPath, gate, streams.Out)
+func RunRemoteWorkerGate(ctx context.Context, requestPath, gate string, awaiters int, streams Streams) error {
+	return remoteworker.RunGate(ctx, requestPath, gate, awaiters, streams.Out)
 }
 
 func AwaitRemoteWorkerGate(ctx context.Context, directory, gate string) error {

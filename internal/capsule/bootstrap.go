@@ -12,6 +12,7 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
 
 	"github.com/joshyorko/camp/internal/jsonstrict"
@@ -471,7 +472,7 @@ func composeLifecycle(original json.RawMessage, requestName string) (json.RawMes
 			return nil, errors.New("reserved lifecycle command name")
 		}
 		gate := strings.TrimSuffix(requestName, ".json") + ".gate"
-		gateCommand := ".camp-bootstrap/camp-bootstrap __remote-worker-gate .camp-bootstrap/" + requestName + " " + gate
+		gateCommand := ".camp-bootstrap/camp-bootstrap __remote-worker-gate .camp-bootstrap/" + requestName + " " + gate + " " + strconv.Itoa(len(named))
 		awaitCommand := ".camp-bootstrap/camp-bootstrap __remote-worker-await .camp-bootstrap " + gate
 		composed := make(map[string]json.RawMessage, len(named)+1)
 		composed[helperKey] = json.RawMessage(mustJSON(gateCommand))

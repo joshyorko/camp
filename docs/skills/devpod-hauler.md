@@ -41,12 +41,17 @@ Do not use Hauler v2.0.2's live `_catalog` response as proof that all direct reg
   retain their top-level JSON form, and each original command or argv appears
   exactly once behind a fail-closed helper gate. Because Dev Container
   named-object entries execute concurrently, one reserved entry performs the
-  worker mutation exactly once and atomically publishes a durable success or
+  worker mutation exactly once per lifecycle invocation. It publishes a fresh
+  random generation, waits for that invocation's expected named entries to
+  register, and atomically publishes a generation-scoped durable success or
   failure receipt. Every original entry remains concurrent and uses only a
-  bounded Camp-owned await command before its original command. A helper failure,
-  crash, missing receipt, or unknown result prevents every user command without
-  an indefinite wait. String hooks use a same-shell `helper || exit $?` prelude
-  followed by the original text; argv hooks retain their argument boundaries.
+  bounded Camp-owned await command before its original command. Completed
+  generations are never accepted by a later invocation, so repeated
+  `postStartCommand` execution performs a new mutation. A helper failure, crash,
+  missing receipt, stale receipt, or unknown result prevents every user command
+  without an indefinite wait. String hooks use a same-shell
+  `helper || exit $?` prelude followed by the original text; argv hooks retain
+  their argument boundaries.
   Sorting object keys does not establish lifecycle ordering. Null, mixed,
   recursively duplicate-key, malformed, and build-only
   configurations fail before publication, and the original devcontainer file

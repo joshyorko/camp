@@ -3,12 +3,15 @@ package remoteworker
 import (
 	"bytes"
 	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
 
@@ -24,14 +27,14 @@ type gateReceipt struct {
 
 type gateRunner func(context.Context, io.Reader, io.Writer) error
 
-func RunGate(ctx context.Context, requestPath, gate string, output io.Writer) error {
-	return runGate(ctx, requestPath, gate, output, func(ctx context.Context, input io.Reader, result io.Writer) error {
+func RunGate(ctx context.Context, requestPath, gate string, awaiters int, output io.Writer) error {
+	return runGate(ctx, requestPath, gate, awaiters, output, func(ctx context.Context, input io.Reader, result io.Writer) error {
 		return Run(ctx, input, result, io.Discard)
 	})
 }
 
-func runGate(ctx context.Context, requestPath, gate string, output io.Writer, runner gateRunner) error {
-	if !safeSegment(gate) || filepath.Base(requestPath) == "." || filepath.Base(requestPath) == string(filepath.Separator) {
+func runGate(ctx context.Context, requestPath, gate string, awaiters int, output io.Writer, runner gateRunner) error {
+	if !safeSegment(gate) || awaiters < 0 || filepath.Base(requestPath) == "." || filepath.Base(requestPath) == string(filepath.Separator) {
 		return ErrInvalidRequest
 	}
 	directoryPath := filepath.Dir(requestPath)
@@ -45,11 +48,24 @@ func runGate(ctx context.Context, requestPath, gate string, output io.Writer, ru
 		return err
 	}
 	defer request.Close()
-	if err := writeGateFile(directory, gate+".intent", []byte("pending\n")); err != nil {
+	generation, err := randomGateID()
+	if err != nil {
 		return err
 	}
+	prefix := gate + "." + generation
+	if err := writeGateFile(directory, prefix+".intent", []byte("pending\n")); err != nil {
+		return err
+	}
+	if err := replaceGateFile(directory, gate+".current", []byte(generation+"\n")); err != nil {
+		return err
+	}
+	runCtx, cancel := boundedGateContext(ctx)
+	defer cancel()
+	if err := awaitGateWaiters(runCtx, directory, prefix, awaiters); err != nil {
+		return publishGateResult(directory, prefix, err)
+	}
 	var result bytes.Buffer
-	runErr := runner(ctx, request, &result)
+	runErr := runner(runCtx, request, &result)
 	if result.Len() > DiagnosticLimit {
 		runErr = errors.Join(runErr, errors.New("remote-worker gate result exceeds limit"))
 		result.Reset()
@@ -57,29 +73,7 @@ func runGate(ctx context.Context, requestPath, gate string, output io.Writer, ru
 	if output != nil {
 		_, _ = io.Copy(output, bytes.NewReader(result.Bytes()))
 	}
-	receipt := gateReceipt{Status: "success"}
-	if runErr != nil {
-		receipt.Status = "failure"
-		receipt.Diagnostic = boundedDiagnostic(runErr)
-	}
-	body, err := json.Marshal(receipt)
-	if err != nil {
-		return errors.Join(runErr, err)
-	}
-	body = append(body, '\n')
-	if err := writeGateFile(directory, gate+".result.partial", body); err != nil {
-		return errors.Join(runErr, err)
-	}
-	if err := unix.Linkat(int(directory.Fd()), gate+".result.partial", int(directory.Fd()), gate+".result", 0); err != nil {
-		return errors.Join(runErr, err)
-	}
-	if err := unix.Unlinkat(int(directory.Fd()), gate+".result.partial", 0); err != nil {
-		return errors.Join(runErr, err)
-	}
-	if err := directory.Sync(); err != nil {
-		return errors.Join(runErr, err)
-	}
-	return runErr
+	return publishGateResult(directory, prefix, runErr)
 }
 
 func AwaitGate(ctx context.Context, directoryPath, gate string) error {
@@ -91,25 +85,112 @@ func AwaitGate(ctx context.Context, directoryPath, gate string) error {
 		return err
 	}
 	defer directory.Close()
-	if _, hasDeadline := ctx.Deadline(); !hasDeadline {
-		var cancel context.CancelFunc
-		ctx, cancel = context.WithTimeout(ctx, gateAwaitTimeout)
-		defer cancel()
+	ctx, cancel := boundedGateContext(ctx)
+	defer cancel()
+	waiter, err := randomGateID()
+	if err != nil {
+		return err
 	}
 	ticker := time.NewTicker(10 * time.Millisecond)
 	defer ticker.Stop()
+	var joined string
 	for {
-		receipt, err := readGateReceipt(directory, gate+".result")
-		if err == nil {
-			if receipt.Status == "success" {
-				return nil
+		generation, currentErr := readGateGeneration(directory, gate+".current")
+		if currentErr == nil && generation != joined {
+			prefix := gate + "." + generation
+			if result, resultErr := openGateFile(directory, prefix+".result"); resultErr == nil {
+				_ = result.Close()
+				joined = ""
+			} else if !errors.Is(resultErr, os.ErrNotExist) {
+				return resultErr
+			} else {
+				if err := writeGateFile(directory, prefix+".wait."+waiter, []byte("waiting\n")); err != nil && !errors.Is(err, os.ErrExist) {
+					return err
+				}
+				if confirmed, err := readGateGeneration(directory, gate+".current"); err == nil && confirmed == generation {
+					joined = generation
+				}
 			}
-			if receipt.Status == "failure" {
-				return fmt.Errorf("remote-worker gate failed: %s", receipt.Diagnostic)
-			}
-			return ErrInvalidRequest
+		} else if currentErr != nil && !errors.Is(currentErr, os.ErrNotExist) {
+			return currentErr
 		}
-		if !errors.Is(err, os.ErrNotExist) {
+		if joined != "" {
+			receipt, err := readGateReceipt(directory, gate+"."+joined+".result")
+			if err == nil {
+				if receipt.Status == "success" {
+					return nil
+				}
+				if receipt.Status == "failure" {
+					return fmt.Errorf("remote-worker gate failed: %s", receipt.Diagnostic)
+				}
+				return ErrInvalidRequest
+			}
+			if !errors.Is(err, os.ErrNotExist) {
+				return err
+			}
+		}
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-ticker.C:
+		}
+	}
+}
+
+func boundedGateContext(ctx context.Context) (context.Context, context.CancelFunc) {
+	if _, hasDeadline := ctx.Deadline(); hasDeadline {
+		return context.WithCancel(ctx)
+	}
+	return context.WithTimeout(ctx, gateAwaitTimeout)
+}
+
+func randomGateID() (string, error) {
+	var value [16]byte
+	if _, err := rand.Read(value[:]); err != nil {
+		return "", err
+	}
+	return hex.EncodeToString(value[:]), nil
+}
+
+func readGateGeneration(directory *os.File, name string) (string, error) {
+	file, err := openGateFile(directory, name)
+	if err != nil {
+		return "", err
+	}
+	defer file.Close()
+	body, err := io.ReadAll(io.LimitReader(file, 34))
+	if err != nil {
+		return "", err
+	}
+	generation := strings.TrimSuffix(string(body), "\n")
+	if len(generation) != 32 {
+		return "", ErrInvalidRequest
+	}
+	if _, err := hex.DecodeString(generation); err != nil {
+		return "", ErrInvalidRequest
+	}
+	return generation, nil
+}
+
+func awaitGateWaiters(ctx context.Context, directory *os.File, prefix string, expected int) error {
+	ticker := time.NewTicker(10 * time.Millisecond)
+	defer ticker.Stop()
+	for {
+		names, err := directory.Readdirnames(-1)
+		if err != nil {
+			return err
+		}
+		count := 0
+		waitPrefix := prefix + ".wait."
+		for _, name := range names {
+			if strings.HasPrefix(name, waitPrefix) {
+				count++
+			}
+		}
+		if count >= expected {
+			return nil
+		}
+		if _, err := directory.Seek(0, io.SeekStart); err != nil {
 			return err
 		}
 		select {
@@ -118,6 +199,44 @@ func AwaitGate(ctx context.Context, directoryPath, gate string) error {
 		case <-ticker.C:
 		}
 	}
+}
+
+func replaceGateFile(directory *os.File, name string, body []byte) error {
+	temporary := name + ".partial." + strconv.FormatInt(time.Now().UnixNano(), 10)
+	if err := writeGateFile(directory, temporary, body); err != nil {
+		return err
+	}
+	if err := unix.Renameat(int(directory.Fd()), temporary, int(directory.Fd()), name); err != nil {
+		_ = unix.Unlinkat(int(directory.Fd()), temporary, 0)
+		return err
+	}
+	return directory.Sync()
+}
+
+func publishGateResult(directory *os.File, prefix string, runErr error) error {
+	receipt := gateReceipt{Status: "success"}
+	if runErr != nil {
+		receipt.Status = "failure"
+		receipt.Diagnostic = boundedDiagnostic(runErr)
+	}
+	body, err := json.Marshal(receipt)
+	if err != nil {
+		return errors.Join(runErr, err)
+	}
+	body = append(body, '\n')
+	if err := writeGateFile(directory, prefix+".result.partial", body); err != nil {
+		return errors.Join(runErr, err)
+	}
+	if err := unix.Linkat(int(directory.Fd()), prefix+".result.partial", int(directory.Fd()), prefix+".result", 0); err != nil {
+		return errors.Join(runErr, err)
+	}
+	if err := unix.Unlinkat(int(directory.Fd()), prefix+".result.partial", 0); err != nil {
+		return errors.Join(runErr, err)
+	}
+	if err := directory.Sync(); err != nil {
+		return errors.Join(runErr, err)
+	}
+	return runErr
 }
 
 func openGateDirectory(path string) (*os.File, error) {
