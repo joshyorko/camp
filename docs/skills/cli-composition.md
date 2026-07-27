@@ -42,11 +42,14 @@ Unknown commands and arbitrary arguments return the stable usage exit code 2. Hu
 The implemented domain/application slice validates controller identities,
 blueprints, blueprint references, execution bindings, provenance, and the
 closed profile schema. Blueprint identity accepts only the typed DevPod/Hauler
-tool-version fields, exact supported schema versions, portable identifiers, and
-canonical lowercase SHA-256 references. Profiles currently allow only
-`workspaceEngine: devpod`; there is no arbitrary setting map. Store-facing
-profile reads are revalidated, and timeline marks absent, zero, malformed, or
-unsupported bindings `unknown-blueprint`.
+tool-version fields using strict v-prefixed SemVer 2.0.0, exact supported schema
+versions, portable identifiers, and canonical lowercase SHA-256 references.
+Every standalone controller, blueprint, blueprint-reference, binding, and
+provenance JSON decoder rejects unknown fields and trailing JSON values.
+Profiles currently allow only `workspaceEngine: devpod`; there is no arbitrary
+setting map. Their decoder also rejects nested unknown fields before digest
+validation. Store-facing profile reads are revalidated, and timeline marks
+absent, zero, malformed, or unsupported bindings `unknown-blueprint`.
 
 This slice has no durable profile store, production binding reader/writer, or
 Cobra composition. Therefore no controller, timeline, or profile command is
@@ -134,4 +137,6 @@ A command is usable only when its handler is wired to production dependencies an
 - `internal/adapters/hauler/client_test.go`
 - `internal/cli/shell_recipe.go` and `shell_recipe_test.go`
 - `internal/config/store.go`, `bootstrap.go`, and their focused tests
+- `internal/domain/controller.go`, `blueprint.go`, `validation.go`, and `controller_test.go`
+- `internal/app/profile.go` and `profile_test.go`
 - pinned DevPod `cmd/provider/options.go`, `cmd/provider/set_options.go`, and `pkg/config/config.go` at `86b6f9f5`

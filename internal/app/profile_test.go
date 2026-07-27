@@ -3,6 +3,7 @@ package app
 import (
 	"context"
 	"errors"
+	"strings"
 	"testing"
 
 	"github.com/joshyorko/camp/internal/domain"
@@ -84,13 +85,31 @@ func TestProfilesValidateAndCopyStoreResults(t *testing.T) {
 
 func TestProfileDecoderRejectsUnknownFieldsAndDigestMismatch(t *testing.T) {
 	t.Parallel()
-	for _, body := range []string{
-		`{"schemaVersion":1,"name":"local","values":{"workspaceEngine":"devpod"},"digest":"` + string(make([]byte, 64)) + `"}`,
-		`{"schemaVersion":1,"name":"local","values":{"workspaceEngine":"devpod","token":"secret"},"digest":"` + string(make([]byte, 64)) + `"}`,
-	} {
-		if _, err := DecodeProfile([]byte(body)); err == nil {
-			t.Fatal("DecodeProfile succeeded, want error")
-		}
+	tests := []struct {
+		name    string
+		body    string
+		message string
+	}{
+		{
+			name:    "wrong digest",
+			body:    `{"schemaVersion":1,"name":"local","values":{"workspaceEngine":"devpod"},"digest":"` + strings.Repeat("0", 64) + `"}`,
+			message: "digest does not match canonical profile",
+		},
+		{
+			name:    "nested unknown field",
+			body:    `{"schemaVersion":1,"name":"local","values":{"workspaceEngine":"devpod","token":"secret"},"digest":"` + strings.Repeat("0", 64) + `"}`,
+			message: `unknown field "token"`,
+		},
+	}
+	for _, tt := range tests {
+		tt := tt
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			_, err := DecodeProfile([]byte(tt.body))
+			if !errors.Is(err, ErrInvalidProfile) || !strings.Contains(err.Error(), tt.message) {
+				t.Fatalf("DecodeProfile() error = %v, want ErrInvalidProfile containing %q", err, tt.message)
+			}
+		})
 	}
 }
 

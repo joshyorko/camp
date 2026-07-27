@@ -14,7 +14,11 @@ schema versions and strict JSON decoders. A validated blueprint's canonical
 JSON digest is its portable identity. Its closed schema contains only
 controller identity, portable capsule/lineage identifiers, the supported
 workspace-engine identity, and the existing typed DevPod/Hauler versions.
-Validation rejects unsupported schema versions, unknown JSON fields,
+Controller and tool versions use strict v-prefixed SemVer 2.0.0: numeric core
+identifiers cannot contain leading zeroes, prerelease identifiers cannot be
+empty or use leading zeroes when numeric, and build identifiers must be
+non-empty dot-separated values. Validation rejects unsupported schema versions,
+unknown JSON fields (including standalone blueprint-reference inputs),
 non-portable identifiers, and non-canonical SHA-256 references before an
 identity is computed.
 

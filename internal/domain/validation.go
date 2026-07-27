@@ -10,7 +10,7 @@ import (
 )
 
 var (
-	semanticVersionPattern = regexp.MustCompile(`^v[0-9]+\.[0-9]+\.[0-9]+(?:[-+][0-9A-Za-z.-]+)?$`)
+	semanticVersionPattern = regexp.MustCompile(`^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(?:-(?:0|[1-9][0-9]*|[0-9]*[A-Za-z-][0-9A-Za-z-]*)(?:\.(?:0|[1-9][0-9]*|[0-9]*[A-Za-z-][0-9A-Za-z-]*))*)?(?:\+[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?$`)
 	portableIDPattern      = regexp.MustCompile(`^[a-z0-9][a-z0-9._-]{0,62}$`)
 	lowerSHA256Pattern     = regexp.MustCompile(`^[0-9a-f]{64}$`)
 )

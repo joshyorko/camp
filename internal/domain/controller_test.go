@@ -72,6 +72,68 @@ func TestCampBlueprintRejectsRuntimeAndUnboundedIdentityInputs(t *testing.T) {
 	}
 }
 
+func TestPortableToolIdentitiesRequireStrictSemanticVersions(t *testing.T) {
+	t.Parallel()
+	valid := []string{
+		"v0.0.0",
+		"v1.2.3",
+		"v1.2.3-alpha",
+		"v1.2.3-alpha.1",
+		"v1.2.3+build.001",
+		"v1.2.3-alpha.1+build.001",
+	}
+	for _, version := range valid {
+		version := version
+		t.Run("valid/"+version, func(t *testing.T) {
+			t.Parallel()
+			if _, err := NewControllerIdentity(version); err != nil {
+				t.Fatalf("NewControllerIdentity(%q) error = %v", version, err)
+			}
+			if _, err := NewCampBlueprint(
+				ControllerIdentity{SchemaVersion: ControllerIdentitySchemaVersion, Name: ControllerNameCamp, Version: "v1.2.3"},
+				"brain",
+				"main",
+				WorkspaceEngineDevPod,
+				ToolVersions{DevPod: version, Hauler: version},
+			); err != nil {
+				t.Fatalf("NewCampBlueprint(tool version %q) error = %v", version, err)
+			}
+		})
+	}
+
+	invalid := []string{
+		"1.2.3",
+		"v01.2.3",
+		"v1.02.3",
+		"v1.2.03",
+		"v1.2.3-",
+		"v1.2.3-alpha..1",
+		"v1.2.3-01",
+		"v1.2.3+",
+		"v1.2.3+build..1",
+		"v1.2.3+build+other",
+		"v1.2.3-alpha_beta",
+	}
+	for _, version := range invalid {
+		version := version
+		t.Run("invalid/"+version, func(t *testing.T) {
+			t.Parallel()
+			if _, err := NewControllerIdentity(version); !errors.Is(err, ErrInvalidControllerIdentity) {
+				t.Fatalf("NewControllerIdentity(%q) error = %v, want ErrInvalidControllerIdentity", version, err)
+			}
+			if _, err := NewCampBlueprint(
+				ControllerIdentity{SchemaVersion: ControllerIdentitySchemaVersion, Name: ControllerNameCamp, Version: "v1.2.3"},
+				"brain",
+				"main",
+				WorkspaceEngineDevPod,
+				ToolVersions{DevPod: version, Hauler: version},
+			); !errors.Is(err, ErrInvalidBlueprint) {
+				t.Fatalf("NewCampBlueprint(tool version %q) error = %v, want ErrInvalidBlueprint", version, err)
+			}
+		})
+	}
+}
+
 func TestBlueprintDecodersRejectUnsupportedVersionsUnknownFieldsAndBadDigests(t *testing.T) {
 	t.Parallel()
 	tests := []struct {
@@ -88,6 +150,10 @@ func TestBlueprintDecodersRejectUnsupportedVersionsUnknownFieldsAndBadDigests(t 
 		}},
 		{"blueprint trailing document", func() error {
 			_, err := DecodeCampBlueprint([]byte(`{"schemaVersion":1} {}`))
+			return err
+		}},
+		{"blueprint reference unknown field", func() error {
+			_, err := DecodeBlueprintRef([]byte(`{"schemaVersion":1,"digest":"` + strings.Repeat("a", 64) + `","path":"/host/path"}`))
 			return err
 		}},
 		{"binding version", func() error {
@@ -111,6 +177,21 @@ func TestBlueprintDecodersRejectUnsupportedVersionsUnknownFieldsAndBadDigests(t 
 				t.Fatal("decode succeeded, want error")
 			}
 		})
+	}
+}
+
+func TestBlueprintRefDecoderRoundTripsValidatedReference(t *testing.T) {
+	t.Parallel()
+	want := BlueprintRef{
+		SchemaVersion: BlueprintRefSchemaVersion,
+		Digest:        strings.Repeat("a", 64),
+	}
+	decoded, err := DecodeBlueprintRef([]byte(`{"schemaVersion":1,"digest":"` + strings.Repeat("a", 64) + `"}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if decoded != want {
+		t.Fatalf("decoded = %#v, want %#v", decoded, want)
 	}
 }
 

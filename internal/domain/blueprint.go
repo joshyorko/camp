@@ -119,6 +119,17 @@ func (r BlueprintRef) Validate() error {
 	return nil
 }
 
+func DecodeBlueprintRef(encoded []byte) (BlueprintRef, error) {
+	var ref BlueprintRef
+	if err := decodeExactJSON(encoded, &ref); err != nil {
+		return BlueprintRef{}, fmt.Errorf("%w: %v", ErrInvalidBlueprintRef, err)
+	}
+	if err := ref.Validate(); err != nil {
+		return BlueprintRef{}, err
+	}
+	return ref, nil
+}
+
 func NewExecutionBinding(blueprint BlueprintRef, profileDigest string) (ExecutionBinding, error) {
 	binding := ExecutionBinding{
 		SchemaVersion: ExecutionBindingSchemaVersion,
