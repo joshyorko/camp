@@ -759,9 +759,13 @@ func (d *unknownOutcomeWorkspaceDevPod) ListInContext(_ context.Context, devpodC
 		return nil, nil
 	}
 	up := d.ups[0]
+	source := up.WorkspacePath
+	if up.SourceMode == devpodadapter.SourceModeBootstrap {
+		source = up.BootstrapPath
+	}
 	return []devpodadapter.Workspace{{
 		ID: up.WorkspaceID, Provider: devpodadapter.WorkspaceProvider{Name: up.Provider},
-		Source: devpodadapter.WorkspaceSource{LocalFolder: up.WorkspacePath}, Context: devpodContext,
+		Source: devpodadapter.WorkspaceSource{LocalFolder: source}, Context: devpodContext,
 	}}, nil
 }
 

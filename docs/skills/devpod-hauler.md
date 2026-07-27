@@ -65,6 +65,21 @@ Do not use Hauler v2.0.2's live `_catalog` response as proof that all direct reg
   concurrent object semantics and verifies crash isolation, stale-file
   irrelevance, overlapping invocation ownership, concurrent completion,
   aggregate failure, and command traces rather than inspecting renderer source.
+- Production remote opens now persist the `haulerKitV1` data-plane selection
+  and stable attempt ID before preparation. The preparer snapshots the hydrated
+  root into a fresh Hauler store, adds the resolved immutable devcontainer
+  image, resolves the already-validated pasta executable through the
+  confinement boundary, builds and independently verifies Camp Hauler Kit v1,
+  then renders the disposable bootstrap source. Build, verification, or render
+  failure occurs before `devpod up`. A completed attempt is revalidated and
+  reused after an unknown controller outcome; it is not rebuilt under a new
+  logical identity. The `WorkspaceUp` intent records the bootstrap source root,
+  so reconciliation observes the exact DevPod source and never issues a second
+  `up`.
+- A missing `Recovery.RemoteDataPlane` record is the legacy routing marker.
+  Existing schema-v1 sessions with no record keep the capsule-source lifecycle
+  and are not upgraded in place. This compatibility marker does not change the
+  shared domain schema version.
 - `camp __remote-worker` is a hidden, stdin/stdout-only protocol entrypoint. It
   accepts one schema-v1 JSON request with strict unknown-field, recursively
   duplicate-key, operation,
@@ -94,7 +109,21 @@ Do not use Hauler v2.0.2's live `_catalog` response as proof that all direct reg
   though structured remote hydration had succeeded. Treat the source as
   disposable and clean it by exact ownership scope; do not chmod or chown it to
   manufacture a recreate contract.
-- A terminal `camp open` constructs this ordered argv: `devpod up --ide none --open-ide=false --context <context> --id <workspace-id> --provider <provider> --devcontainer-path <capsule-relative-devcontainer-path> --workspace-env CAMP_REGISTRY=<registry-endpoint> --workspace-env CAMP_FILESERVER=<fileserver-endpoint> --workspace-env CAMP_CAPSULE=<capsule> --workspace-env CAMP_CHECKPOINT=<opened-generation-or-empty> <resolved-root>`. `internal/app/open_test.go:377` proves that the application supplies the capsule-relative devcontainer path; `TestTask3ScopedWorkspaceEnvironmentAndArgvExecution` preserves the adapter's ordered environment argv, and `TestExactDevPodArgv` preserves terminal IDE selection.
+- A local-provider or legacy terminal `camp open` constructs this ordered argv:
+  `devpod up --ide none --open-ide=false --context <context> --id <workspace-id>
+  --provider <provider> --devcontainer-path
+  <capsule-relative-devcontainer-path> --workspace-env
+  CAMP_REGISTRY=<registry-endpoint> --workspace-env
+  CAMP_FILESERVER=<fileserver-endpoint> --workspace-env CAMP_CAPSULE=<capsule>
+  --workspace-env CAMP_CHECKPOINT=<opened-generation-or-empty>
+  <resolved-root>`. A new non-local `haulerKitV1` open preserves the same
+  identity and environment arguments but supplies
+  `.camp-bootstrap/devcontainer.json` and the recorded disposable bootstrap
+  root. `internal/app/open_test.go:377` proves the capsule-relative local path;
+  `TestOpenRemoteUsesPreparedBootstrapSourceForExactlyOneDevPodUp` proves the
+  remote source switch; `TestTask3ScopedWorkspaceEnvironmentAndArgvExecution`
+  preserves ordered environment argv; and `TestExactDevPodArgv` preserves
+  terminal IDE selection.
 - Raw DevPod and Hauler passthrough is fail-closed. The adapters allow only exact, effect-free `version`, `help`, and `--help` invocations; known lifecycle, session, provider, store, and service commands are denied; reserved configuration, environment, identity, and store flags are conflicts; malformed and unknown argv is rejected before the runner. Passthrough accepts no environment map, so it cannot replace Camp-owned environment.
 - Remote return resolves the DevPod workspace folder, attempts an rsync mirror into a fresh local staging root, and permits tar-over-SSH fallback only for classified fallback-eligible failures. Failed staging attempts are discarded.
 - `sshtransfer.Executor` runs rsync without a shell and connects the SSH tar producer to the local tar consumer with an OS pipe. The tar consumer requires GNU tar options `--same-permissions` and `--delay-directory-restore`; BusyBox tar is not a valid fallback dependency.
@@ -168,5 +197,8 @@ Installed-tool tests in `integration/contracts_test.go` skip when the binaries a
 - `internal/adapters/sshtransfer/`
 - `internal/adapters/hauler/`
 - `internal/adapters/hauler/passthrough.go`
+- `internal/app/open_remote_data_plane.go`
+- `internal/domain/remote_data_plane.go`
+- `internal/haulkit/`
 - `internal/adapters/supervisor/confinement.go`
 - `integration/contracts_test.go`

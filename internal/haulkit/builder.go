@@ -164,12 +164,17 @@ func (builder *KitBuilder) Build(ctx context.Context, request BuildRequest) (Art
 	expectedVersions := map[string]string{"camp": request.CampVersion, "hauler": request.HaulerVersion, "pasta": request.PastaVersion}
 	for kind, path := range map[string]string{"camp": preparedRequest.CampExecutable, "hauler": preparedRequest.HaulerExecutable, "pasta": preparedRequest.PastaExecutable} {
 		output, err := observer.Probe(ctx, path, kind)
-		if err != nil || !containsExactIdentity(output, expectedVersions[kind]) {
+		observed := strings.TrimSpace(output)
+		if err != nil || observed == "" || expectedVersions[kind] != "" && !containsExactIdentity(output, expectedVersions[kind]) {
 			return Artifact{}, fmt.Errorf("probe %s runtime identity: %w", kind, err)
+		}
+		if expectedVersions[kind] == "" {
+			expectedVersions[kind] = observed
 		}
 		observedVersions[kind] = expectedVersions[kind]
 	}
-	if observedVersions["camp"] != request.CampVersion || observedVersions["hauler"] != request.HaulerVersion ||
+	preparedRequest.CampVersion = expectedVersions["camp"]
+	if observedVersions["camp"] != preparedRequest.CampVersion || observedVersions["hauler"] != request.HaulerVersion ||
 		observedVersions["pasta"] != request.PastaVersion || preparedStore.HaulerVersion != observedVersions["hauler"] {
 		return Artifact{}, fmt.Errorf("%w: caller and observed runtime versions differ", ErrIdentityMismatch)
 	}

@@ -67,8 +67,10 @@ type setupResult struct {
 }
 
 type managedToolPaths struct {
-	devpod string
-	hauler string
+	devpod        string
+	devpodVersion string
+	hauler        string
+	haulerVersion string
 }
 
 func resolveManagedToolPaths(ctx context.Context, ensurer toolEnsurer, goos, arch string) (managedToolPaths, error) {
@@ -80,7 +82,10 @@ func resolveManagedToolPaths(ctx context.Context, ensurer toolEnsurer, goos, arc
 	if err != nil {
 		return managedToolPaths{}, fmt.Errorf("prepare hauler: %w", err)
 	}
-	return managedToolPaths{devpod: devpodResolution.Path, hauler: haulerResolution.Path}, nil
+	return managedToolPaths{
+		devpod: devpodResolution.Path, devpodVersion: devpodResolution.Version,
+		hauler: haulerResolution.Path, haulerVersion: haulerResolution.Version,
+	}, nil
 }
 
 func (p *ProductionLifecycle) Setup(ctx context.Context, mode OutputMode, in io.Reader, out io.Writer) error {

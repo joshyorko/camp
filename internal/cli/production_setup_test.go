@@ -300,15 +300,16 @@ func TestDoctorManagedToolResolverMapsLockedIdentity(t *testing.T) {
 
 func TestResolveManagedToolPathsReturnsVerifiedExecutablesWithoutPATHMutation(t *testing.T) {
 	ensurer := &recordingToolEnsurer{resolutions: map[string]tooladapter.Resolution{
-		"devpod": {Path: "/managed/devpod", Managed: true},
-		"hauler": {Path: "/managed/hauler", Managed: true},
+		"devpod": {Path: "/managed/devpod", Version: "v0.26.1", Managed: true},
+		"hauler": {Path: "/managed/hauler", Version: "v2.0.2", Managed: true},
 	}}
 
 	got, err := resolveManagedToolPaths(context.Background(), ensurer, "linux", "amd64")
 	if err != nil {
 		t.Fatalf("resolveManagedToolPaths: %v", err)
 	}
-	if got.devpod != "/managed/devpod" || got.hauler != "/managed/hauler" {
+	if got.devpod != "/managed/devpod" || got.devpodVersion != "v0.26.1" ||
+		got.hauler != "/managed/hauler" || got.haulerVersion != "v2.0.2" {
 		t.Fatalf("managed paths = %+v", got)
 	}
 	if gotEnvironment := strings.Join(ensurer.calls, ","); gotEnvironment != "devpod:linux:amd64,hauler:linux:amd64" {
@@ -318,8 +319,8 @@ func TestResolveManagedToolPathsReturnsVerifiedExecutablesWithoutPATHMutation(t 
 
 func TestComposeProductionBootstrapsAndWiresManagedToolPaths(t *testing.T) {
 	ensurer := &recordingToolEnsurer{resolutions: map[string]tooladapter.Resolution{
-		"devpod": {Path: "/managed/devpod", Managed: true},
-		"hauler": {Path: "/managed/hauler", Managed: true},
+		"devpod": {Path: "/managed/devpod", Version: "v0.26.1", Managed: true},
+		"hauler": {Path: "/managed/hauler", Version: "v2.0.2", Managed: true},
 	}}
 	dataRoot := filepath.Join(t.TempDir(), "data")
 
@@ -332,7 +333,7 @@ func TestComposeProductionBootstrapsAndWiresManagedToolPaths(t *testing.T) {
 	if err != nil {
 		t.Fatalf("composeProductionWithSettings: %v", err)
 	}
-	if composition.devpodExecutable != "/managed/devpod" || composition.haulerExecutable != "/managed/hauler" {
+	if composition.devpodExecutable != "/managed/devpod" || composition.haulerExecutable != "/managed/hauler" || composition.haulerVersion != "v2.0.2" {
 		t.Fatalf("composition tool paths = devpod %q hauler %q", composition.devpodExecutable, composition.haulerExecutable)
 	}
 }

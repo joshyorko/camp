@@ -176,6 +176,34 @@ func TestBuilderDerivesRuntimeIdentityAndRejectsWrongCallerClaims(t *testing.T) 
 	}
 }
 
+func TestBuilderRecordsObservedCampIdentityWhenCallerDoesNotProvideOne(t *testing.T) {
+	request, validator := buildFixture(t)
+	request.CampVersion = ""
+	builder := NewBuilder(validator)
+	builder.chunkSize = 64
+	builder.runtimeObserver = fakeRuntimeObserver{runningCamp: request.CampExecutable, probe: func(_ context.Context, _ string, kind string) (string, error) {
+		if kind == "camp" {
+			return "camp 1.2.3\n", nil
+		}
+		return fixtureRuntimeProbe(context.Background(), "", kind)
+	}}
+	artifact, err := builder.Build(context.Background(), request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	body, err := os.ReadFile(artifact.ManifestPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	manifest, err := DecodeCanonical(body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if manifest.Tools.Camp.Version != "camp 1.2.3" {
+		t.Fatalf("Camp version = %q", manifest.Tools.Camp.Version)
+	}
+}
+
 func TestBuilderProbesAndHashesTheSamePrivateToolSnapshot(t *testing.T) {
 	request, validator := buildFixture(t)
 	originalDigest, _, err := hashPath(request.CampExecutable)
