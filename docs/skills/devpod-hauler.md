@@ -40,9 +40,13 @@ Do not use Hauler v2.0.2's live `_catalog` response as proof that all direct reg
   corresponding user hook. String, argv-array, and named-object lifecycle values
   retain their top-level JSON form, and each original command or argv appears
   exactly once behind a fail-closed helper gate. Because Dev Container
-  named-object entries execute concurrently, each original named entry invokes
-  the idempotent helper receipt independently before its own command; the user
-  entries remain concurrent. A helper failure prevents every gated user command.
+  named-object entries execute concurrently, one reserved entry performs the
+  worker mutation exactly once and atomically publishes a durable success or
+  failure receipt. Every original entry remains concurrent and uses only a
+  bounded Camp-owned await command before its original command. A helper failure,
+  crash, missing receipt, or unknown result prevents every user command without
+  an indefinite wait. String hooks use a same-shell `helper || exit $?` prelude
+  followed by the original text; argv hooks retain their argument boundaries.
   Sorting object keys does not establish lifecycle ordering. Null, mixed,
   recursively duplicate-key, malformed, and build-only
   configurations fail before publication, and the original devcontainer file

@@ -265,6 +265,14 @@ func RunRemoteWorker(ctx context.Context, streams Streams) error {
 	return remoteworker.Run(ctx, streams.In, streams.Out, streams.ErrOut)
 }
 
+func RunRemoteWorkerGate(ctx context.Context, requestPath, gate string, streams Streams) error {
+	return remoteworker.RunGate(ctx, requestPath, gate, streams.Out)
+}
+
+func AwaitRemoteWorkerGate(ctx context.Context, directory, gate string) error {
+	return remoteworker.AwaitGate(ctx, directory, gate)
+}
+
 func newConfigCommand(operations ConfigOperations) *cobra.Command {
 	command := &cobra.Command{Use: "config", Short: "Inspect and update Camp configuration", Args: usageArgs(cobra.NoArgs)}
 	showEffective := false

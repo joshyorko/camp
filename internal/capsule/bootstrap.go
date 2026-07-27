@@ -466,12 +466,20 @@ func composeLifecycle(original json.RawMessage, requestName string) (json.RawMes
 		if err != nil || len(named) == 0 {
 			return nil, errors.New("malformed named lifecycle command")
 		}
-		composed := make(map[string]json.RawMessage, len(named))
+		const helperKey = "00-camp-bootstrap"
+		if _, exists := named[helperKey]; exists {
+			return nil, errors.New("reserved lifecycle command name")
+		}
+		gate := strings.TrimSuffix(requestName, ".json") + ".gate"
+		gateCommand := ".camp-bootstrap/camp-bootstrap __remote-worker-gate .camp-bootstrap/" + requestName + " " + gate
+		awaitCommand := ".camp-bootstrap/camp-bootstrap __remote-worker-await .camp-bootstrap " + gate
+		composed := make(map[string]json.RawMessage, len(named)+1)
+		composed[helperKey] = json.RawMessage(mustJSON(gateCommand))
 		for _, key := range sortedKeys(named) {
 			if err := validateLifecycleLeaf(named[key]); err != nil {
 				return nil, err
 			}
-			command, err := composeLifecycleLeaf(named[key], helper)
+			command, err := composeLifecycleLeaf(named[key], awaitCommand)
 			if err != nil {
 				return nil, err
 			}
@@ -482,6 +490,13 @@ func composeLifecycle(original json.RawMessage, requestName string) (json.RawMes
 	}
 	if err := validateLifecycleLeaf(trimmed); err != nil {
 		return nil, err
+	}
+	var value any
+	if err := json.Unmarshal(trimmed, &value); err != nil {
+		return nil, err
+	}
+	if command, ok := value.(string); ok {
+		return json.RawMessage(mustJSON(helper + " || exit $?\n" + command)), nil
 	}
 	return composeLifecycleLeaf(trimmed, helper)
 }

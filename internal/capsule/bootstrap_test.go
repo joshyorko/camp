@@ -289,7 +289,47 @@ func bootstrapFixtureWithConfig(t *testing.T, config string) bootstrapTestFixtur
 	if err := os.WriteFile(devcontainer, []byte(config), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	helperBody := []byte("#!/bin/sh\nset -eu\nop=$(sed -n 's/.*\"operation\":\"\\([^\"]*\\)\".*/\\1/p')\n[ \"${HELPER_FAIL:-}\" != 1 ] || exit 42\nsleep 0.1\nprintf 'helper-%s\\n' \"$op\" >> \"$TRACE\"\n")
+	helperBody := []byte(`#!/bin/sh
+set -eu
+case "$1" in
+__remote-worker-gate)
+	request=$2
+	gate=$3
+	directory=${request%/*}
+	op=$(sed -n 's/.*"operation":"\([^"]*\)".*/\1/p' "$request")
+	status=success
+	[ "${HELPER_FAIL:-}" != 1 ] || status=failure
+	sleep 0.1
+	printf 'helper-%s\n' "$op" >> "$TRACE"
+	printf '%s\n' "$status" > "$directory/$gate.partial"
+	mv "$directory/$gate.partial" "$directory/$gate.result"
+	[ "$status" = success ]
+	;;
+__remote-worker-await)
+	directory=$2
+	gate=$3
+	count=0
+	while [ "$count" -lt 200 ]; do
+		if [ -f "$directory/$gate.result" ]; then
+			[ "$(cat "$directory/$gate.result")" = success ]
+			exit
+		fi
+		count=$((count + 1))
+		sleep 0.01
+	done
+	exit 124
+	;;
+__remote-worker)
+	op=$(sed -n 's/.*"operation":"\([^"]*\)".*/\1/p')
+	[ "${HELPER_FAIL:-}" != 1 ] || exit 42
+	sleep 0.1
+	printf 'helper-%s\n' "$op" >> "$TRACE"
+	;;
+*)
+	exit 2
+	;;
+esac
+`)
 	if err := os.WriteFile(helper, helperBody, 0o700); err != nil {
 		t.Fatal(err)
 	}
@@ -426,8 +466,12 @@ func assertLifecycleForm(t *testing.T, form string, raw json.RawMessage) {
 	}
 	switch form {
 	case "string":
-		if _, ok := value.(string); !ok {
+		command, ok := value.(string)
+		if !ok {
 			t.Fatalf("string lifecycle became %T", value)
+		}
+		if strings.Contains(command, "/bin/sh -c") {
+			t.Fatalf("string lifecycle gained a nested shell: %q", command)
 		}
 	case "argv":
 		if _, ok := value.([]any); !ok {
@@ -449,7 +493,6 @@ func assertLifecycleTrace(t *testing.T, form, trace string) {
 		helperCount := 1
 		wantUsers := map[string]int{"user": 1}
 		if form == "named" {
-			helperCount = 2
 			wantUsers = map[string]int{"user-a": 1, "user-b": 1}
 		}
 		seenHelpers := 0
@@ -468,7 +511,7 @@ func assertLifecycleTrace(t *testing.T, form, trace string) {
 			default:
 				t.Fatalf("%s lifecycle did not preserve %s commands: %q", form, operation, trace)
 			}
-			if seenUsers > seenHelpers {
+			if seenHelpers == 0 && seenUsers > 0 {
 				t.Fatalf("%s lifecycle ran a user before its helper for %s: %q", form, operation, trace)
 			}
 			index++

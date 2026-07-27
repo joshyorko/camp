@@ -23,6 +23,18 @@ func run(args []string, streams cli.Streams) int {
 		}
 		return int(cli.ExitSuccess)
 	}
+	if len(args) == 3 && args[0] == "__remote-worker-gate" {
+		if err := cli.RunRemoteWorkerGate(context.Background(), args[1], args[2], streams); err != nil {
+			return int(cli.ExitFailure)
+		}
+		return int(cli.ExitSuccess)
+	}
+	if len(args) == 3 && args[0] == "__remote-worker-await" {
+		if err := cli.AwaitRemoteWorkerGate(context.Background(), args[1], args[2]); err != nil {
+			return int(cli.ExitFailure)
+		}
+		return int(cli.ExitSuccess)
+	}
 	if len(args) == 3 && args[0] == "__doctor-listener" {
 		port, err := strconv.Atoi(args[1])
 		if err != nil {
