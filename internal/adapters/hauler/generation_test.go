@@ -8,6 +8,8 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/joshyorko/camp/internal/domain"
+	"github.com/joshyorko/camp/internal/haulkit"
 	"github.com/joshyorko/camp/internal/ports"
 )
 
@@ -211,5 +213,47 @@ func TestValidateGenerationInfoAcceptsPlatformResolvedDigestPinnedReference(t *t
 	)
 	if err != nil {
 		t.Fatalf("validateGenerationInfo() error = %v", err)
+	}
+}
+
+func TestClientValidatesStoreIntoStableHaulKitIdentity(t *testing.T) {
+	t.Parallel()
+	runner := &generationRunner{info: []byte(`[
+	  {"Reference":"z/image:tag","Type":"image","Platform":"linux/amd64","Digest":"sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"},
+	  {"Reference":"hauler/root.tar.zst:latest","Type":"file","Platform":"-","Digest":"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}
+	]`)}
+	client := NewClientWithVersion("/opt/hauler", "v2.0.2", runner)
+	first, err := client.ValidateStore(context.Background(), "/tmp/fresh-store")
+	if err != nil {
+		t.Fatal(err)
+	}
+	second, err := client.ValidateStore(context.Background(), "/tmp/fresh-store")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if first.HaulerVersion != "v2.0.2" || len(first.Entries) != 2 || first.Entries[0].Reference != "hauler/root.tar.zst:latest" {
+		t.Fatalf("identity = %#v", first)
+	}
+	if first.IndexSHA256 == "" || first.IndexSHA256 != second.IndexSHA256 {
+		t.Fatalf("unstable index identity: %#v != %#v", first, second)
+	}
+	if err := haulkit.Validate(haulkit.Manifest{
+		SchemaVersion: haulkit.ManifestSchemaVersion,
+		Kind:          "camp-hauler-kit",
+		SessionID:     "session",
+		Capsule:       "capsule",
+		Lineage:       domain.Lineage{Branch: "main"},
+		Architecture:  "linux/amd64",
+		Store:         first,
+		Root:          haulkit.RootIdentity{Reference: "root.tar.zst", SHA256: strings.Repeat("a", 64), Size: 1},
+		Tools: haulkit.ToolIdentities{
+			Camp:   haulkit.FileIdentity{Name: "camp", Version: "dev", SHA256: strings.Repeat("a", 64), Size: 1},
+			Hauler: haulkit.FileIdentity{Name: "hauler", Version: "v2.0.2", SHA256: strings.Repeat("a", 64), Size: 1},
+			Pasta:  haulkit.FileIdentity{Name: "pasta", Version: "1", SHA256: strings.Repeat("a", 64), Size: 1},
+		},
+		Archive: haulkit.ArchiveIdentity{SHA256: strings.Repeat("a", 64), Size: 1},
+		Chunks:  []haulkit.ChunkIdentity{{Index: 0, Name: "part", SHA256: strings.Repeat("a", 64), Size: 1}},
+	}); err != nil {
+		t.Fatalf("HaulKit rejected validated store identity: %v", err)
 	}
 }

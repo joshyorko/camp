@@ -10,8 +10,10 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 
+	"github.com/joshyorko/camp/internal/haulkit"
 	"github.com/joshyorko/camp/internal/ports"
 	"gopkg.in/yaml.v3"
 )
@@ -148,6 +150,58 @@ type generationInfoEntry struct {
 	Type      string `json:"Type"`
 	Platform  string `json:"Platform"`
 	Digest    string `json:"Digest"`
+}
+
+func (c *Client) ValidateStore(ctx context.Context, store string) (haulkit.StoreIdentity, error) {
+	if c == nil || c.version == "" || !filepath.IsAbs(store) {
+		return haulkit.StoreIdentity{}, errors.New("Hauler store validation requires a locked version and absolute store path")
+	}
+	result, err := c.Info(ctx, store)
+	if err != nil {
+		return haulkit.StoreIdentity{}, err
+	}
+	if result.ExitCode != 0 {
+		return haulkit.StoreIdentity{}, fmt.Errorf("Hauler store info exited %d", result.ExitCode)
+	}
+	var observed []generationInfoEntry
+	if len(result.Stdout) == 0 || json.Unmarshal(result.Stdout, &observed) != nil || len(observed) == 0 {
+		return haulkit.StoreIdentity{}, errors.New("Hauler store info did not return a non-empty JSON inventory")
+	}
+	entries := make([]haulkit.StoreEntry, 0, len(observed))
+	for _, entry := range observed {
+		if entry.Reference == "" || (entry.Type != "file" && entry.Type != "image") || !manifestDigestPattern.MatchString(entry.Digest) {
+			return haulkit.StoreIdentity{}, errors.New("Hauler store info contains an incomplete identity")
+		}
+		platform := entry.Platform
+		if platform == "-" {
+			platform = ""
+		}
+		entries = append(entries, haulkit.StoreEntry{
+			Reference: entry.Reference,
+			Type:      entry.Type,
+			Platform:  platform,
+			Digest:    strings.TrimPrefix(entry.Digest, "sha256:"),
+		})
+	}
+	sort.Slice(entries, func(i, j int) bool {
+		if entries[i].Reference != entries[j].Reference {
+			return entries[i].Reference < entries[j].Reference
+		}
+		if entries[i].Type != entries[j].Type {
+			return entries[i].Type < entries[j].Type
+		}
+		return entries[i].Platform < entries[j].Platform
+	})
+	canonical, err := json.Marshal(entries)
+	if err != nil {
+		return haulkit.StoreIdentity{}, err
+	}
+	index := sha256.Sum256(canonical)
+	return haulkit.StoreIdentity{
+		HaulerVersion: c.version,
+		IndexSHA256:   hex.EncodeToString(index[:]),
+		Entries:       entries,
+	}, nil
 }
 
 func readGenerationExpectations(path string) (generationExpectations, error) {

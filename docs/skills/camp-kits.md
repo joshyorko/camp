@@ -13,6 +13,26 @@ not create a backend pointer or claim disconnected lifecycle proof. Schema
 version 1 is intentionally unsupported because no
 public command consumed or emitted it.
 
+Camp Hauler Kit is a separate internal v1 delivery format in
+`internal/haulkit`; it does not change the public CampKit v2 contract above.
+Its archive is a deterministic ready directory containing only `bin/camp`,
+`bin/hauler`, `bin/pasta`, and the populated `store/` tree. The outer tar
+accepts only real directories and regular files: source symlinks, source
+hardlinks, traversal paths, archive links, and special files are rejected.
+The sidecar manifest binds the session, capsule, lineage, optional generation,
+Linux architecture, fresh `hauler store info --digests` inventory, root
+identity, exact runtime-tool bytes and versions, archive bytes, and ordered
+chunks. Production splitting uses exact 1 GiB chunks; acceptance reassembles
+and hashes the completed chunks before the builder returns.
+
+Hauler store identity is derived by the version-bound adapter from sorted JSON
+inventory returned by `hauler store info --output json --digests`. Verification
+extracts into a private directory, revalidates tool bytes and the extracted
+store, and rejects architecture, version, digest, or post-manifest store drift.
+Permanent generations remain native `hauler store save --filename
+<generation>.tar.zst` artifacts; the ready-store kit does not replace that
+generation format.
+
 ## CLI usage
 
 - `camp kit inspect FILE`: prints the decoded manifest summary (`inspect`)

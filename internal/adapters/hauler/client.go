@@ -31,11 +31,16 @@ type FileserverOptions struct {
 
 type Client struct {
 	executable string
+	version    string
 	runner     ports.Runner
 }
 
 func NewClient(executable string, runner ports.Runner) *Client {
 	return &Client{executable: executable, runner: runner}
+}
+
+func NewClientWithVersion(executable, version string, runner ports.Runner) *Client {
+	return &Client{executable: executable, version: version, runner: runner}
 }
 
 func (c *Client) Load(ctx context.Context, store string, filenames []string) (ports.Result, error) {
