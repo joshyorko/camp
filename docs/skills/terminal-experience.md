@@ -48,6 +48,14 @@ Rich-mode cancellation is terminal-normal: the shell is restored without failure
 
 When rich-mode provisioning fails, `camp setup` maps to the same lifecycle failure shape as the line-mode flow and reports exactly one recovery command.
 
+## Lifecycle scene event contract
+
+The reusable lifecycle scene consumes `presentation.RichLifecycleEvent`, not subprocess output. Its event kind makes activity, completion, terminal success, and failure distinct: activity may activate a stage and display its exact safe detail, but only a typed completion changes that waypoint to complete. A failure marks its typed stage failed, preserves one safe recovery command, and never renders a ready band. Unknown stage identifiers have no visual label and therefore cannot fabricate authoritative progress.
+
+The stable lifecycle stage IDs and labels are `hydrate`, `services`, `devpod`, `attach`, `mirror`, `image-capture`, `archive`, `upload`, `pointer`, `cleanup`, and `recovery`. The campsite still has four landmark slots, so the model shows the active four-stage window while retaining state for the complete sequence; the final window uses a non-progress `COMPLETE` slot only to fill unused scenery. Lifecycle adapters must emit these typed facts directly from application boundaries, and must not derive them by matching command output.
+
+`internal/setupui/scenedump` can render deterministic lifecycle sample states (`lifecycle-progress`, `lifecycle-ready`, and `lifecycle-failure`) for review. The tracked images in `docs/assets/lifecycle-scene/` are compositor review captures, not black-box CLI acceptance evidence. `TestLifecycleSceneGoldens` protects deterministic 80×24, 120×40, and 160×48 progress, ready, and failure frames; CLI capability selection and exact-candidate Robot captures remain separate integration gates.
+
 The Bubble Tea UI context and provisioning-worker context are separate. User exit cancels provisioning without killing Bubble Tea's restoration path, and the CLI does not return until a started worker has actually exited. Cancellation before submission is terminal: it closes the never-started completion and message streams, prevents a late start from launching effects, and repeated starts share the original message stream rather than creating an unclosed one.
 
 ## Lifecycle transcripts (non-setup)
