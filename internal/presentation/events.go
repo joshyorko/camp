@@ -24,6 +24,7 @@ type RichLifecycleEventKind uint8
 
 const (
 	RichLifecycleActivity RichLifecycleEventKind = iota
+	RichLifecycleResumed
 	RichLifecycleCompleted
 	RichLifecycleSucceeded
 	RichLifecycleFailed

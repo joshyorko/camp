@@ -838,7 +838,7 @@ func (p *ProductionLifecycle) Sync(ctx context.Context, mode OutputMode, out io.
 	}
 	usecase := app.NewSync(c.base.journal, c.locks, c.publisher)
 	var result app.CheckpointResult
-	if richLifecycleAvailable(mode, out, environmentMap(os.Environ()), probeTerminal) {
+	if richLifecycleAvailable(mode, os.Stdin, out, environmentMap(os.Environ()), probeTerminal) {
 		workflow := setupui.LifecycleWorkflow{
 			Operation: "sync", ReadyLine: "checkpoint published", NextCommand: "camp status",
 			Stages: []presentation.LifecycleStage{
@@ -846,11 +846,11 @@ func (p *ProductionLifecycle) Sync(ctx context.Context, mode OutputMode, out io.
 				presentation.StageUpload, presentation.StagePointer,
 			},
 		}
-		recovery, runErr := runRichLifecycleOperation(ctx, out, workflow, func(workerCtx context.Context, reporter app.ProgressReporter) (string, error) {
+		recovery, runErr := runRichLifecycleOperation(ctx, out, workflow, func(workerCtx context.Context, reporter app.ProgressReporter) richLifecycleWorkerResult {
 			workerCtx = app.WithProgressReporter(workerCtx, reporter)
 			var operationErr error
 			result, operationErr = usecase.Run(workerCtx, session.SessionID)
-			return syncFailureRecovery(result, session.SessionID), operationErr
+			return richSyncOutcome(result, operationErr, session.SessionID)
 		})
 		if runErr != nil {
 			return lifecycleFailure(runErr, recovery)
@@ -885,23 +885,16 @@ func (p *ProductionLifecycle) Close(ctx context.Context, request CloseRequest, m
 		return err
 	}
 	var result app.CloseResult
-	if richLifecycleAvailable(mode, out, environmentMap(os.Environ()), probeTerminal) {
-		stages := []presentation.LifecycleStage{presentation.StageCleanup}
-		if !request.Discard {
-			stages = []presentation.LifecycleStage{
-				presentation.StageMirror, presentation.StageImageCapture, presentation.StageArchive,
-				presentation.StageUpload, presentation.StagePointer, presentation.StageCleanup,
-			}
-		}
+	if richLifecycleAvailable(mode, os.Stdin, out, environmentMap(os.Environ()), probeTerminal) {
 		workflow := setupui.LifecycleWorkflow{
 			Operation: "close", ReadyLine: "session closed", NextCommand: "camp reopen",
-			Stages: stages,
+			Stages: closeRichLifecycleStages(session.Mode, request.Discard),
 		}
-		recovery, runErr := runRichLifecycleOperation(ctx, out, workflow, func(workerCtx context.Context, reporter app.ProgressReporter) (string, error) {
+		recovery, runErr := runRichLifecycleOperation(ctx, out, workflow, func(workerCtx context.Context, reporter app.ProgressReporter) richLifecycleWorkerResult {
 			workerCtx = app.WithProgressReporter(workerCtx, reporter)
 			var operationErr error
 			result, operationErr = c.close.Run(workerCtx, app.CloseRequest{SessionID: session.SessionID, Discard: request.Discard})
-			return result.RecoveryCommand, operationErr
+			return richCloseOutcome(result, operationErr)
 		})
 		if runErr != nil {
 			return lifecycleFailure(runErr, recovery)
