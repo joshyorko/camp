@@ -55,6 +55,121 @@ func TestExecuteProductionRichSyncFailureRendersOnceAndExitsNonzero(t *testing.T
 	}
 }
 
+func TestExecuteProductionRichSyncPreRenderFailuresUseNormalEnvelope(t *testing.T) {
+	tests := []struct {
+		name        string
+		configure   func(*ProductionLifecycle)
+		wantMessage string
+		wantNext    string
+	}{
+		{
+			name: "lifecycle-setup",
+			configure: func(lifecycle *ProductionLifecycle) {
+				lifecycle.prepareSync = func(context.Context) (productionSyncRun, error) {
+					return productionSyncRun{}, errors.New("compose lifecycle: backend unavailable")
+				}
+			},
+			wantMessage: "compose lifecycle: backend unavailable",
+		},
+		{
+			name: "sprite-loading",
+			configure: func(lifecycle *ProductionLifecycle) {
+				lifecycle.richSpriteLoader = func() (map[string]setupui.Sprite, error) {
+					return nil, errors.New("load lifecycle sprites: assets unavailable")
+				}
+			},
+			wantMessage: "load lifecycle sprites: assets unavailable",
+			wantNext:    "camp sync --session session-1",
+		},
+		{
+			name: "runner-startup",
+			configure: func(lifecycle *ProductionLifecycle) {
+				lifecycle.richRunner = func(context.Context, io.Reader, io.Writer, setupui.Palette, map[string]setupui.Sprite, setupui.LifecycleWorkflow, <-chan presentation.RichLifecycleEvent, <-chan struct{}, func()) (setupui.Result, error) {
+					return setupui.Result{}, errors.New("start Bubble Tea: terminal unavailable")
+				}
+			},
+			wantMessage: "start Bubble Tea: terminal unavailable",
+			wantNext:    "camp recover session-1",
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			lifecycle := productionRichSyncLifecycle()
+			test.configure(lifecycle)
+			var stdout, stderr bytes.Buffer
+			code := Execute(context.Background(), NewRootWithLifecycle(lifecycle), []string{"sync"}, Streams{
+				In: strings.NewReader(""), Out: &stdout, ErrOut: &stderr,
+			})
+			if code != int(ExitFailure) {
+				t.Fatalf("exit = %d, want failure", code)
+			}
+			if stdout.Len() != 0 {
+				t.Fatalf("stdout = %q, want empty", stdout.String())
+			}
+			want := "error ["
+			if test.name == "lifecycle-setup" {
+				want += "command_failed"
+			} else {
+				want += "lifecycle_failed"
+			}
+			want += "]: " + test.wantMessage + "\n"
+			if test.wantNext != "" {
+				want += "next: " + test.wantNext + "\n"
+			}
+			if stderr.String() != want {
+				t.Fatalf("stderr = %q, want %q", stderr.String(), want)
+			}
+		})
+	}
+}
+
+func productionRichSyncLifecycle() *ProductionLifecycle {
+	return &ProductionLifecycle{
+		prepareSync: func(context.Context) (productionSyncRun, error) {
+			return productionSyncRun{
+				sessionID: "session-1",
+				run: func(context.Context, app.ProgressReporter) (app.CheckpointResult, error) {
+					return app.CheckpointResult{RecoveryCommand: "camp recover session-1"}, errors.New("checkpoint upload failed")
+				},
+			}, nil
+		},
+		richAvailable: func(OutputMode, io.Reader, io.Writer, map[string]string, terminalProbe) bool { return true },
+		richRunner:    recordingRichLifecycleRunner(nil, nil),
+	}
+}
+
+func TestExecuteProductionRichCloseRunnerFailureUsesNormalEnvelope(t *testing.T) {
+	lifecycle := &ProductionLifecycle{
+		prepareClose: func(context.Context) (productionCloseRun, error) {
+			return productionCloseRun{
+				sessionID: "session-1",
+				mode:      domain.SessionReadWrite,
+				run: func(context.Context, CloseRequest, app.ProgressReporter) (app.CloseResult, error) {
+					return app.CloseResult{RecoveryCommand: "camp recover session-1"}, errors.New("close worker failed")
+				},
+			}, nil
+		},
+		richAvailable: func(OutputMode, io.Reader, io.Writer, map[string]string, terminalProbe) bool { return true },
+		richRunner: func(context.Context, io.Reader, io.Writer, setupui.Palette, map[string]setupui.Sprite, setupui.LifecycleWorkflow, <-chan presentation.RichLifecycleEvent, <-chan struct{}, func()) (setupui.Result, error) {
+			return setupui.Result{}, errors.New("start Bubble Tea: terminal unavailable")
+		},
+	}
+	var stdout, stderr bytes.Buffer
+	code := Execute(context.Background(), NewRootWithLifecycle(lifecycle), []string{"close"}, Streams{
+		In: strings.NewReader(""), Out: &stdout, ErrOut: &stderr,
+	})
+	if code != int(ExitFailure) {
+		t.Fatalf("exit = %d, want failure", code)
+	}
+	if stdout.Len() != 0 {
+		t.Fatalf("stdout = %q, want empty", stdout.String())
+	}
+	want := "error [lifecycle_failed]: start Bubble Tea: terminal unavailable\nnext: camp recover session-1\n"
+	if stderr.String() != want {
+		t.Fatalf("stderr = %q, want %q", stderr.String(), want)
+	}
+}
+
 func TestProductionRichCloseRefreshFailureEmitsTerminalFailure(t *testing.T) {
 	var events []presentation.RichLifecycleEvent
 	lifecycle := &ProductionLifecycle{

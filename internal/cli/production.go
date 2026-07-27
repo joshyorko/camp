@@ -56,6 +56,7 @@ type ProductionLifecycle struct {
 	prepareClose     func(context.Context) (productionCloseRun, error)
 	richAvailable    func(OutputMode, io.Reader, io.Writer, map[string]string, terminalProbe) bool
 	richRunner       richLifecycleRunner
+	richSpriteLoader richLifecycleSpriteLoader
 }
 
 type productionSyncRun struct {
@@ -126,7 +127,11 @@ func (p *ProductionLifecycle) runRichLifecycle(ctx context.Context, out io.Write
 	if runner == nil {
 		runner = setupui.RunLifecycle
 	}
-	return runRichLifecycleOperationWithRunner(ctx, os.Stdin, out, workflow, worker, runner)
+	loadSprites := p.richSpriteLoader
+	if loadSprites == nil {
+		loadSprites = setupui.LoadSprites
+	}
+	return runRichLifecycleOperationWithDependencies(ctx, os.Stdin, out, workflow, worker, loadSprites, runner)
 }
 
 func (p *ProductionLifecycle) Strike(ctx context.Context, request StrikeRequest, mode OutputMode, out io.Writer) error {
@@ -914,13 +919,16 @@ func (p *ProductionLifecycle) Sync(ctx context.Context, mode OutputMode, out io.
 				presentation.StageUpload, presentation.StagePointer,
 			},
 		}
-		_, runErr := p.runRichLifecycle(ctx, out, workflow, func(workerCtx context.Context, reporter app.ProgressReporter) richLifecycleWorkerResult {
+		recovery, runErr := p.runRichLifecycle(ctx, out, workflow, func(workerCtx context.Context, reporter app.ProgressReporter) richLifecycleWorkerResult {
 			var operationErr error
 			result, operationErr = operation.run(workerCtx, reporter)
 			return richSyncOutcome(result, operationErr, operation.sessionID)
 		})
 		if runErr != nil {
-			return renderedLifecycleFailure(runErr)
+			if richLifecycleFailureWasRendered(runErr) {
+				return renderedLifecycleFailure(runErr)
+			}
+			return lifecycleFailure(runErr, firstNonEmpty(recovery, syncFailureRecovery(result, operation.sessionID)))
 		}
 		return nil
 	}
@@ -952,13 +960,17 @@ func (p *ProductionLifecycle) Close(ctx context.Context, request CloseRequest, m
 			Operation: "close", ReadyLine: "session closed", NextCommand: "camp reopen",
 			Stages: closeRichLifecycleStages(operation.mode, request.Discard),
 		}
-		_, runErr := p.runRichLifecycle(ctx, out, workflow, func(workerCtx context.Context, reporter app.ProgressReporter) richLifecycleWorkerResult {
+		recovery, runErr := p.runRichLifecycle(ctx, out, workflow, func(workerCtx context.Context, reporter app.ProgressReporter) richLifecycleWorkerResult {
 			var operationErr error
 			result, operationErr = operation.run(workerCtx, request, reporter)
 			return richCloseOutcome(result, operationErr)
 		})
 		if runErr != nil {
-			return renderedLifecycleFailure(runErr)
+			if richLifecycleFailureWasRendered(runErr) {
+				return renderedLifecycleFailure(runErr)
+			}
+			fallback := "camp close --session " + shellQuoteArgument(operation.sessionID)
+			return lifecycleFailure(runErr, firstNonEmpty(recovery, result.RecoveryCommand, fallback))
 		}
 		return nil
 	}

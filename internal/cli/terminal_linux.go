@@ -28,6 +28,14 @@ type lifecycleProgressReporter struct {
 
 type richLifecycleWorker func(context.Context, app.ProgressReporter) richLifecycleWorkerResult
 type richLifecycleRunner func(context.Context, io.Reader, io.Writer, setupui.Palette, map[string]setupui.Sprite, setupui.LifecycleWorkflow, <-chan presentation.RichLifecycleEvent, <-chan struct{}, func()) (setupui.Result, error)
+type richLifecycleSpriteLoader func() (map[string]setupui.Sprite, error)
+
+type confirmedRenderedLifecycleError struct {
+	cause error
+}
+
+func (e *confirmedRenderedLifecycleError) Error() string { return e.cause.Error() }
+func (e *confirmedRenderedLifecycleError) Unwrap() error { return e.cause }
 
 type richLifecycleWorkerResult struct {
 	recovery        string
@@ -165,7 +173,11 @@ func runRichLifecycleOperation(ctx context.Context, out io.Writer, workflow setu
 }
 
 func runRichLifecycleOperationWithRunner(ctx context.Context, in io.Reader, out io.Writer, workflow setupui.LifecycleWorkflow, worker richLifecycleWorker, runner richLifecycleRunner) (string, error) {
-	sprites, err := setupui.LoadSprites()
+	return runRichLifecycleOperationWithDependencies(ctx, in, out, workflow, worker, setupui.LoadSprites, runner)
+}
+
+func runRichLifecycleOperationWithDependencies(ctx context.Context, in io.Reader, out io.Writer, workflow setupui.LifecycleWorkflow, worker richLifecycleWorker, loadSprites richLifecycleSpriteLoader, runner richLifecycleRunner) (string, error) {
+	sprites, err := loadSprites()
 	if err != nil {
 		return "", err
 	}
@@ -236,15 +248,20 @@ func finishRichLifecycleResult(uiResult setupui.Result, uiErr error, workerResul
 			recovery = workerResult.recovery
 		}
 		if workerResult.err != nil {
-			return recovery, workerResult.err
+			return recovery, &confirmedRenderedLifecycleError{cause: workerResult.err}
 		}
 		message := uiResult.FailMsg
 		if message == "" {
 			message = "rich lifecycle failed"
 		}
-		return recovery, errors.New(message)
+		return recovery, &confirmedRenderedLifecycleError{cause: errors.New(message)}
 	}
 	return workerResult.recovery, workerResult.err
+}
+
+func richLifecycleFailureWasRendered(err error) bool {
+	var rendered *confirmedRenderedLifecycleError
+	return errors.As(err, &rendered)
 }
 
 func richSyncOutcome(result app.CheckpointResult, runErr error, sessionID string) richLifecycleWorkerResult {
