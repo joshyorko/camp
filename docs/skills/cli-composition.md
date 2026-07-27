@@ -51,17 +51,26 @@ setting map. Their decoder also rejects nested unknown fields before digest
 validation. Store-facing profile reads are revalidated, and timeline marks
 absent, zero, malformed, or unsupported bindings `unknown-blueprint`.
 
-This slice has no durable profile store, production binding reader/writer, or
-Cobra composition. Therefore no controller, timeline, or profile command is
-implemented or advertised. A future surface may add `camp inspect`, `camp
-timeline`, and `camp profile import|list|show|current|activate|deactivate` only
-after production composition owns both profile persistence and journal
-execution-binding writes; each command must use the existing JSON envelope and
-must not expose a profile that fails validation.
+The durable profile adapter implements import, deterministic list, show,
+current, activate, and deactivate through one strictly decoded versioned JSON
+document. Updates hold an adjacent exclusive lock across validation and
+mode-0600 temporary-file publication, fsync, rename, and parent-directory
+fsync. The journal owns the optional execution binding: it accepts the first
+binding only while the journal has no effects, permits an exact idempotent
+repeat, rejects retargeting, and leaves legacy snapshots unbound.
 
-Before registering `profile activate`, composition must prove that open writes
-the selected profile digest into the session's execution binding before effects,
-and that attach, sync, close, and recover reject a different selected digest.
+There is still no Cobra or production lifecycle composition. Therefore no
+controller, timeline, or profile command is implemented or advertised. A
+future surface may add `camp inspect`, `camp timeline`, and `camp profile
+import|list|show|current|activate|deactivate` only after production composition
+selects the profile-store path, derives the blueprint, and routes lifecycle
+entry through the execution guard; each command must use the existing JSON
+envelope and must not expose a profile that fails validation.
+
+Before registering `profile activate`, composition must prove that open calls
+`ExecutionGuard.BeforeEffects` with the selected profile and blueprint digests,
+and that attach, sync, close, and recover call `ExecutionGuard.Require` before
+their effects.
 Timeline must show legacy sessions without such a binding as
 `unknown-blueprint`, never synthesize a compatibility claim. Until those
 production dependencies exist, command help must not advertise this surface.
@@ -139,4 +148,7 @@ A command is usable only when its handler is wired to production dependencies an
 - `internal/config/store.go`, `bootstrap.go`, and their focused tests
 - `internal/domain/controller.go`, `blueprint.go`, `validation.go`, and `controller_test.go`
 - `internal/app/profile.go` and `profile_test.go`
+- `internal/adapters/profilestore/store.go` and `store_test.go`
+- `internal/app/execution_binding.go` and `execution_binding_test.go`
+- `internal/journal/store.go` and `store_test.go`
 - pinned DevPod `cmd/provider/options.go`, `cmd/provider/set_options.go`, and `pkg/config/config.go` at `86b6f9f5`

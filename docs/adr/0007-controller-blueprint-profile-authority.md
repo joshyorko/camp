@@ -2,9 +2,9 @@
 
 ## Status
 
-Partially implemented on 2026-07-27. The domain and application validation
-slice exists; durable profile storage, journal binding writes, CLI composition,
-and lifecycle enforcement remain deferred.
+Partially implemented on 2026-07-27. Domain validation, durable profile
+storage, and the journal execution-binding contract exist; CLI composition and
+lifecycle enforcement remain deferred.
 
 ## Decision
 
@@ -25,21 +25,34 @@ identity is computed.
 An execution binding can reference a validated blueprint digest and an optional
 validated profile digest. The current profile schema allows only the explicit
 `workspaceEngine` field and only the supported `devpod` value; arbitrary value
-maps are not accepted. Application reads validate values returned by a future
-store, and the current value-only schema is copied at import/list/show
-boundaries. There is no durable store in this slice. A future journal writer
-must persist the selected binding before open effects and reject a different
-profile digest for attach, sync, close, or recover.
+maps are not accepted. Application reads validate values returned by the store,
+and the current value-only schema is copied at import/list/show boundaries. The
+profile adapter persists one closed, versioned JSON document behind an adjacent
+exclusive lock. It validates every profile and the active digest on read and
+before publication, writes a mode-0600 temporary file, fsyncs it, renames it
+over the destination, and fsyncs the parent directory. Imports are
+digest-idempotent, listing is deterministic, and activation cannot select a
+missing profile.
+
+Journal snapshots may contain one optional execution binding. Binding is
+allowed only while the session journal is empty, is idempotent for an exact
+match, and rejects a different blueprint or profile digest. The application
+`ExecutionGuard` persists that binding before invoking its supplied effects and
+provides the exact-match check lifecycle adapters need before attach, sync,
+close, or recover. Production lifecycle composition does not call this seam
+yet.
 
 The application timeline projection reports absent, zero, malformed, or
 unsupported bindings as `unknown-blueprint`; it marks only validated bindings
-as known. It does not infer a compatible portable blueprint from legacy journal
-state. No production binding reader is composed yet.
+as known. Legacy snapshots decode without the optional field and remain
+unknown. It does not infer a compatible portable blueprint from legacy journal
+state. No production timeline reader is composed yet.
 
 ## Consequences
 
 Portable artifacts can identify their controller and blueprint without leaking
-machine-specific runtime facts. CLI and production composition remain deferred
-until profile storage and journal binding persistence have one authoritative
-owner; exposing commands before that wiring would falsely imply durable
-activation and session freeze semantics.
+machine-specific runtime facts. Profile storage and journal binding each have
+one durability owner. CLI and production composition remain deferred because
+the lifecycle does not yet derive the selected blueprint/profile binding or
+enforce it at every entry point; exposing commands before that wiring would
+falsely imply complete session freeze semantics.

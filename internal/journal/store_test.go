@@ -121,6 +121,129 @@ func TestStoreFsyncsMode0600IntentAndReplaysFactAfterSnapshotRenameCrash(t *test
 	}
 }
 
+func TestStorePersistsExecutionBindingAndRejectsRetarget(t *testing.T) {
+	t.Parallel()
+	store, err := NewStore(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	snapshot := domain.JournalSnapshot{SchemaVersion: domain.SchemaVersion, SessionID: "session-binding"}
+	if err := store.Create(context.Background(), snapshot); err != nil {
+		t.Fatal(err)
+	}
+	blueprint := domain.BlueprintRef{SchemaVersion: domain.BlueprintRefSchemaVersion, Digest: strings.Repeat("a", 64)}
+	binding, err := domain.NewExecutionBinding(blueprint, strings.Repeat("b", 64))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.BindExecution(context.Background(), snapshot.SessionID, binding); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.BindExecution(context.Background(), snapshot.SessionID, binding); err != nil {
+		t.Fatalf("idempotent BindExecution() error = %v", err)
+	}
+	reopened, err := NewStore(store.root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, found, err := reopened.Binding(context.Background(), snapshot.SessionID)
+	if err != nil || !found || got != binding {
+		t.Fatalf("Binding() = %#v, %t, %v; want %#v, true, nil", got, found, err, binding)
+	}
+	retargeted, err := domain.NewExecutionBinding(blueprint, strings.Repeat("c", 64))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := reopened.BindExecution(context.Background(), snapshot.SessionID, retargeted); !errors.Is(err, ErrExecutionRetarget) {
+		t.Fatalf("BindExecution(retarget) error = %v, want ErrExecutionRetarget", err)
+	}
+}
+
+func TestStoreTreatsLegacySnapshotAsUnknownExecutionBinding(t *testing.T) {
+	t.Parallel()
+	store, err := NewStore(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Create(context.Background(), domain.JournalSnapshot{SchemaVersion: domain.SchemaVersion, SessionID: "legacy"}); err != nil {
+		t.Fatal(err)
+	}
+	binding, found, err := store.Binding(context.Background(), "legacy")
+	if err != nil || found || binding != (domain.ExecutionBinding{}) {
+		t.Fatalf("Binding(legacy) = %#v, %t, %v; want zero, false, nil", binding, found, err)
+	}
+}
+
+func TestStoreRejectsFirstExecutionBindingAfterEffectsBegin(t *testing.T) {
+	t.Parallel()
+	store, err := NewStore(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	snapshot := domain.JournalSnapshot{SchemaVersion: domain.SchemaVersion, SessionID: "already-started"}
+	if err := store.Create(context.Background(), snapshot); err != nil {
+		t.Fatal(err)
+	}
+	intent := ports.IntentRecord{
+		ID: "effect-1", SessionID: snapshot.SessionID, Transition: "WorkspaceUp", Attempt: 1, Timestamp: time.Now(),
+	}
+	if err := store.RecordIntent(context.Background(), intent); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.RecordFact(context.Background(), ports.FactRecord{
+		IntentID: intent.ID, SessionID: snapshot.SessionID, Transition: intent.Transition, Timestamp: intent.Timestamp,
+	}, snapshot); err != nil {
+		t.Fatal(err)
+	}
+	binding, err := domain.NewExecutionBinding(
+		domain.BlueprintRef{SchemaVersion: domain.BlueprintRefSchemaVersion, Digest: strings.Repeat("a", 64)},
+		strings.Repeat("b", 64),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.BindExecution(context.Background(), snapshot.SessionID, binding); !errors.Is(err, ErrExecutionAlreadyStarted) {
+		t.Fatalf("BindExecution() error = %v, want ErrExecutionAlreadyStarted", err)
+	}
+}
+
+func TestStorePreservesExecutionBindingAcrossFacts(t *testing.T) {
+	t.Parallel()
+	store, err := NewStore(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	snapshot := domain.JournalSnapshot{SchemaVersion: domain.SchemaVersion, SessionID: "bound-fact"}
+	if err := store.Create(context.Background(), snapshot); err != nil {
+		t.Fatal(err)
+	}
+	binding, err := domain.NewExecutionBinding(
+		domain.BlueprintRef{SchemaVersion: domain.BlueprintRefSchemaVersion, Digest: strings.Repeat("a", 64)},
+		strings.Repeat("b", 64),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.BindExecution(context.Background(), snapshot.SessionID, binding); err != nil {
+		t.Fatal(err)
+	}
+	intent := ports.IntentRecord{
+		ID: "effect-1", SessionID: snapshot.SessionID, Transition: "WorkspaceUp", Attempt: 1, Timestamp: time.Now(),
+	}
+	if err := store.RecordIntent(context.Background(), intent); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.RecordFact(context.Background(), ports.FactRecord{
+		IntentID: intent.ID, SessionID: snapshot.SessionID, Transition: intent.Transition, Timestamp: intent.Timestamp,
+	}, snapshot); err != nil {
+		t.Fatal(err)
+	}
+	got, found, err := store.Binding(context.Background(), snapshot.SessionID)
+	if err != nil || !found || got != binding {
+		t.Fatalf("Binding() after fact = %#v, %t, %v; want %#v, true, nil", got, found, err, binding)
+	}
+}
+
 func TestStoreRejectsPointerCommittedFactWithoutCompletePointer(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
