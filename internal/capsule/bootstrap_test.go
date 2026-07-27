@@ -377,6 +377,86 @@ func TestRenderBootstrapRejectsSymlinkedSourceAncestor(t *testing.T) {
 	}
 }
 
+func TestVerifyBootstrapAcceptsCompleteRenderedSourceAndAccountsPayloadClasses(t *testing.T) {
+	fixture := bootstrapFixture(t, json.RawMessage(`"true"`))
+	bootstrap, err := renderBootstrap(fixture.request, fixture.openHelper)
+	if err != nil {
+		t.Fatal(err)
+	}
+	verified, err := VerifyBootstrap(BootstrapVerificationRequest{
+		Root: bootstrap.Root, Expected: fixture.request.InitializeRequest.Expected,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if verified.RegularFiles != 6 || verified.MetadataBytes <= 0 || verified.MetadataBytes > BootstrapMetadataLimit {
+		t.Fatalf("verified bootstrap accounting = %#v", verified)
+	}
+	if verified.Helper != fixture.request.InitializeRequest.Expected.Helper ||
+		verified.Kit != fixture.request.InitializeRequest.Expected.Kit {
+		t.Fatalf("verified runtime payloads = helper:%#v kit:%#v", verified.Helper, verified.Kit)
+	}
+}
+
+func TestVerifyBootstrapRejectsTamperedOrUnboundedRenderedSource(t *testing.T) {
+	tests := map[string]func(*testing.T, bootstrapTestFixture, Bootstrap){
+		"kit bytes": func(t *testing.T, _ bootstrapTestFixture, bootstrap Bootstrap) {
+			if err := os.WriteFile(filepath.Join(bootstrap.Root, "camp-hauler-kit.tar.zst"), []byte("tampered"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+		},
+		"helper bytes": func(t *testing.T, _ bootstrapTestFixture, bootstrap Bootstrap) {
+			if err := os.WriteFile(filepath.Join(bootstrap.Root, ".camp-bootstrap", "camp-bootstrap"), []byte("tampered"), 0o700); err != nil {
+				t.Fatal(err)
+			}
+		},
+		"request operation": func(t *testing.T, fixture bootstrapTestFixture, bootstrap Bootstrap) {
+			request := fixture.request.InitializeRequest
+			request.Operation = remoteworker.OperationHydrate
+			body, _ := json.Marshal(request)
+			if err := os.WriteFile(filepath.Join(bootstrap.Root, ".camp-bootstrap", "initialize-request.json"), body, 0o600); err != nil {
+				t.Fatal(err)
+			}
+		},
+		"devcontainer": func(t *testing.T, _ bootstrapTestFixture, bootstrap Bootstrap) {
+			if err := os.WriteFile(filepath.Join(bootstrap.Root, ".camp-bootstrap", "devcontainer.json"), []byte(`{"image":"mutable:latest"}`), 0o600); err != nil {
+				t.Fatal(err)
+			}
+		},
+		"extra regular file": func(t *testing.T, _ bootstrapTestFixture, bootstrap Bootstrap) {
+			if err := os.WriteFile(filepath.Join(bootstrap.Root, "unexpected"), []byte("x"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+		},
+		"symlink": func(t *testing.T, _ bootstrapTestFixture, bootstrap Bootstrap) {
+			if err := os.Symlink("camp-hauler-kit.tar.zst", filepath.Join(bootstrap.Root, "unexpected-link")); err != nil {
+				t.Fatal(err)
+			}
+		},
+		"metadata budget": func(t *testing.T, fixture bootstrapTestFixture, bootstrap Bootstrap) {
+			body := []byte(`{"image":"` + fixture.request.OuterImage + `","padding":"` + strings.Repeat("x", BootstrapMetadataLimit) + `"}`)
+			if err := os.WriteFile(filepath.Join(bootstrap.Root, ".camp-bootstrap", "devcontainer.json"), body, 0o600); err != nil {
+				t.Fatal(err)
+			}
+		},
+	}
+	for name, mutate := range tests {
+		t.Run(name, func(t *testing.T) {
+			fixture := bootstrapFixture(t, json.RawMessage(`"true"`))
+			bootstrap, err := renderBootstrap(fixture.request, fixture.openHelper)
+			if err != nil {
+				t.Fatal(err)
+			}
+			mutate(t, fixture, bootstrap)
+			if _, err := VerifyBootstrap(BootstrapVerificationRequest{
+				Root: bootstrap.Root, Expected: fixture.request.InitializeRequest.Expected,
+			}); err == nil {
+				t.Fatal("VerifyBootstrap() error = nil")
+			}
+		})
+	}
+}
+
 type bootstrapTestFixture struct {
 	request    BootstrapRequest
 	openHelper func() (*os.File, error)

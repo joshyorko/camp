@@ -1127,9 +1127,7 @@ func (o *Open) continueOpeningFromMaterialization(ctx context.Context, snapshot 
 		if o.deps.RemoteDataPlane == nil {
 			return OpenResult{}, errors.New("remote Hauler data plane dependency is incomplete")
 		}
-		if validRoot(dataPlane.BootstrapRoot) {
-			bootstrapRoot = dataPlane.BootstrapRoot
-		} else {
+		if !validRoot(dataPlane.BootstrapRoot) {
 			intent, err := journal.ensureIntent(ctx, "RemoteDataPlanePrepared", *dataPlane)
 			if err != nil {
 				return OpenResult{}, err
@@ -1149,6 +1147,18 @@ func (o *Open) continueOpeningFromMaterialization(ctx context.Context, snapshot 
 			if err := journal.recordFact(ctx, intent, prepared.Record, nil); err != nil {
 				return OpenResult{}, err
 			}
+		} else {
+			prepared, err := o.deps.RemoteDataPlane.Prepare(ctx, RemoteDataPlaneRequest{
+				SessionID: snapshot.SessionID, AttemptID: dataPlane.AttemptID, Capsule: snapshot.Capsule, Lineage: snapshot.Lineage, Generation: cloneGeneration(snapshot.OpenedGeneration),
+				Materialization: root, DevcontainerPath: devcontainer.Path,
+			})
+			if err != nil {
+				return OpenResult{}, fmt.Errorf("verify recorded remote Hauler data plane: %w", err)
+			}
+			if !validRemoteDataPlaneResult(prepared, *dataPlane, root) || prepared.Record != *dataPlane {
+				return OpenResult{}, errors.New("recorded remote Hauler data plane identity changed")
+			}
+			bootstrapRoot = prepared.BootstrapRoot
 		}
 	}
 	targetResult, err := o.deps.Target.Resolve(ctx, root, request.Target)

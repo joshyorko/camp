@@ -38,3 +38,34 @@
 - The unit, composition, and repository-wide suites do not prove a real remote
   provider completed user hydration with the new kit path; that remains an
   installed pinned-tool lifecycle gate.
+
+## Review fix round 1
+
+- Reentry now verifies the complete bootstrap source before it can reach
+  `DevPod.Up`: exact tree and file types, kit bytes, helper bytes and executable
+  mode, immutable image, generated lifecycle configuration, and all three
+  coherent remote-worker requests.
+- Bootstrap sources enforce at most 16 regular files and at most 1 MiB combined
+  devcontainer/request metadata. The exact Camp helper is independently
+  identity- and size-bound and excluded from the metadata budget; the reviewed
+  helper was 20.1 MiB. The kit is the bulk capsule payload, not the only
+  potentially large regular file.
+- Attempt creation publishes an owner marker with the directory. A completion
+  marker is fsynced and published last. Recovery reuses verified complete
+  attempts; exact Camp-owned partial attempts are descriptor/inode checked,
+  quarantined, and removed before rebuilding the same attempt ID. Unowned
+  directories are preserved.
+- Production-seam coverage now runs the real root archiver, Kit v1
+  builder/verifier, bootstrap renderer/verifier, and DevPod command builder
+  using deterministic runtime/store/command seams. Tampered complete sources,
+  owned partial recovery, unowned preservation, and nonzero-exit diagnostics
+  have dedicated regressions.
+- RED evidence: complete-bootstrap tests initially failed because no reusable
+  verifier existed; the production preparer rejected fake incomplete renders
+  once verification was wired; and reentry coverage required the application
+  to call the preparer again for a recorded complete attempt.
+- GREEN evidence: the affected-package gate passed 672 tests across
+  `internal/app`, `internal/capsule`, `internal/cli`, `internal/domain`, and
+  `internal/haulkit`. `rtk go test ./... -count=1` passed 1,687 tests across 45
+  packages; `rtk go vet ./...`, `rtk go build ./cmd/camp`, and
+  `rtk git diff --check` passed.

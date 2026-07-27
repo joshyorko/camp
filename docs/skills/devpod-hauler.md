@@ -65,17 +65,31 @@ Do not use Hauler v2.0.2's live `_catalog` response as proof that all direct reg
   concurrent object semantics and verifies crash isolation, stale-file
   irrelevance, overlapping invocation ownership, concurrent completion,
   aggregate failure, and command traces rather than inspecting renderer source.
+- Bootstrap acceptance and reentry re-open the published source and verify its
+  complete shape before `devpod up`: exactly the expected six regular files and
+  one real private directory, no links or extra entries, the copied kit digest
+  and size, the exact executable helper digest and size, the immutable image,
+  all three operation-specific request files with one coherent scope, and the
+  generated lifecycle boundaries. The source stays below the 16-regular-file
+  limit. The devcontainer and three request documents have a combined 1 MiB
+  limit. The kit is the bulk capsule payload; the exact Camp helper is a
+  separately accounted runtime payload, excluded from that metadata budget and
+  independently identity-bound. The reviewed production helper was 20.1 MiB,
+  so guidance must not claim the kit is the source's only large regular file.
 - Production remote opens now persist the `haulerKitV1` data-plane selection
   and stable attempt ID before preparation. The preparer snapshots the hydrated
   root into a fresh Hauler store, adds the resolved immutable devcontainer
   image, resolves the already-validated pasta executable through the
   confinement boundary, builds and independently verifies Camp Hauler Kit v1,
-  then renders the disposable bootstrap source. Build, verification, or render
-  failure occurs before `devpod up`. A completed attempt is revalidated and
-  reused after an unknown controller outcome; it is not rebuilt under a new
-  logical identity. The `WorkspaceUp` intent records the bootstrap source root,
-  so reconciliation observes the exact DevPod source and never issues a second
-  `up`.
+  then renders and completely verifies the disposable bootstrap source. Build,
+  kit verification, render, or bootstrap verification failure occurs before
+  `devpod up`. A durable completion marker is published only after every
+  artifact and bootstrap check succeeds. Reentry revalidates a completed
+  attempt before use. An incomplete attempt is rebuilt under the same persisted
+  attempt ID only after Camp verifies its owner marker, directory descriptor,
+  inode, and quarantine identity; unowned paths are preserved. The
+  `WorkspaceUp` intent records the bootstrap source root, so reconciliation
+  observes the exact DevPod source and never issues a second `up`.
 - A missing `Recovery.RemoteDataPlane` record is the legacy routing marker.
   Existing schema-v1 sessions with no record keep the capsule-source lifecycle
   and are not upgraded in place. This compatibility marker does not change the
@@ -198,6 +212,7 @@ Installed-tool tests in `integration/contracts_test.go` skip when the binaries a
 - `internal/adapters/hauler/`
 - `internal/adapters/hauler/passthrough.go`
 - `internal/app/open_remote_data_plane.go`
+- `internal/capsule/bootstrap_verify.go`
 - `internal/domain/remote_data_plane.go`
 - `internal/haulkit/`
 - `internal/adapters/supervisor/confinement.go`

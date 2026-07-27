@@ -25,6 +25,7 @@ import (
 	imageops "github.com/joshyorko/camp/internal/images"
 	"github.com/joshyorko/camp/internal/journal"
 	"github.com/joshyorko/camp/internal/ports"
+	"github.com/joshyorko/camp/internal/target"
 )
 
 func TestOpenRemoteBranchUsesSourceGenerationAndReentryDoesNotRehydrate(t *testing.T) {
@@ -171,6 +172,31 @@ func TestOpenRemoteDataPlaneFailurePreventsDevPodUp(t *testing.T) {
 	}
 	if len(environment.devpod.ups) != 0 {
 		t.Fatalf("DevPod up called after preparation failure: %#v", environment.devpod.ups)
+	}
+}
+
+func TestOpenRemoteReentryReverifiesCompletedBootstrapBeforeDevPodUp(t *testing.T) {
+	environment := newRemoteOpenTestEnvironment(t)
+	dataPlane := &recordingRemoteDataPlane{bootstrapRoot: filepath.Join(environment.paths.DataRoot, "bootstrap")}
+	environment.open.deps.RemoteDataPlane = dataPlane
+	cut := errors.New("target cut")
+	environment.open.deps.Target = &failOnceOpenTarget{
+		next: &openTargetResolver{events: environment.devpod.events}, err: cut,
+	}
+	request := OpenRequest{
+		SessionID: "remote-bootstrap-reentry", Capsule: "brain", Branch: "feature", SourceLineage: domain.Lineage{Branch: "main"},
+		Mode: domain.SessionReadWrite, RemoteAvailable: true, Target: "MemoryD", EntryMode: domain.EntryTerminal,
+		Context: "default", Provider: "ssh", Runtime: environment.runtime, Backend: environment.backend,
+	}
+	if _, err := environment.open.Run(context.Background(), request); !errors.Is(err, cut) {
+		t.Fatalf("first Open() error = %v", err)
+	}
+	dataPlane.err = errors.New("tampered completed bootstrap")
+	if _, err := environment.open.Run(context.Background(), request); !errors.Is(err, dataPlane.err) {
+		t.Fatalf("reentry Open() error = %v, want bootstrap verification failure", err)
+	}
+	if dataPlane.calls != 2 || len(environment.devpod.ups) != 0 {
+		t.Fatalf("reentry verification boundary = calls:%d ups:%d", dataPlane.calls, len(environment.devpod.ups))
 	}
 }
 
@@ -1117,6 +1143,20 @@ var errLegacyJournalCut = errors.New("legacy journal cut")
 type legacyRemoteDataPlaneJournal struct {
 	ports.Journal
 	cut bool
+}
+
+type failOnceOpenTarget struct {
+	next OpenTargetResolver
+	err  error
+}
+
+func (r *failOnceOpenTarget) Resolve(ctx context.Context, root, requested string) (target.Result, error) {
+	if r.err != nil {
+		err := r.err
+		r.err = nil
+		return target.Result{}, err
+	}
+	return r.next.Resolve(ctx, root, requested)
 }
 
 func (j *legacyRemoteDataPlaneJournal) Create(ctx context.Context, snapshot domain.JournalSnapshot) error {

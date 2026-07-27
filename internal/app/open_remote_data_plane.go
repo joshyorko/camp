@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -19,6 +20,12 @@ import (
 	"github.com/joshyorko/camp/internal/haulkit"
 	"github.com/joshyorko/camp/internal/ports"
 	"github.com/joshyorko/camp/internal/remoteworker"
+	"golang.org/x/sys/unix"
+)
+
+const (
+	remoteAttemptOwnerMarker = ".camp-attempt-owner"
+	remoteAttemptComplete    = ".camp-attempt-complete"
 )
 
 type RemoteRootArchiver interface {
@@ -72,11 +79,22 @@ func (p *RemoteDataPlanePreparer) Prepare(ctx context.Context, request RemoteDat
 	if err := os.MkdirAll(p.deps.Root, 0o700); err != nil {
 		return RemoteDataPlaneResult{}, fmt.Errorf("create remote data-plane root: %w", err)
 	}
-	if err := os.Mkdir(attemptRoot, 0o700); err != nil {
+	if err := createOwnedAttempt(p.deps.Root, request.AttemptID); err != nil {
 		if errors.Is(err, os.ErrExist) {
-			return p.reusePrepared(ctx, request, attemptRoot)
+			if _, markerErr := os.Lstat(filepath.Join(attemptRoot, remoteAttemptComplete)); markerErr == nil {
+				return p.reusePrepared(ctx, request, attemptRoot)
+			} else if !errors.Is(markerErr, os.ErrNotExist) {
+				return RemoteDataPlaneResult{}, markerErr
+			}
+			if err := removeOwnedPartialAttempt(p.deps.Root, request.AttemptID); err != nil {
+				return RemoteDataPlaneResult{}, err
+			}
+			if err := createOwnedAttempt(p.deps.Root, request.AttemptID); err != nil {
+				return RemoteDataPlaneResult{}, fmt.Errorf("recreate remote data-plane attempt: %w", err)
+			}
+		} else {
+			return RemoteDataPlaneResult{}, fmt.Errorf("create remote data-plane attempt: %w", err)
 		}
-		return RemoteDataPlaneResult{}, fmt.Errorf("create remote data-plane attempt: %w", err)
 	}
 	cleanup := true
 	defer func() {
@@ -101,8 +119,10 @@ func (p *RemoteDataPlanePreparer) Prepare(ctx context.Context, request RemoteDat
 	if archiveInfo.Path != rootArchive || archiveInfo.Size <= 0 || len(archiveInfo.SHA256) != 64 {
 		return RemoteDataPlaneResult{}, errors.New("root archive identity is incomplete")
 	}
-	if result, err := p.deps.Hauler.AddFile(ctx, storeRoot, rootArchive, rootName); err != nil || result.ExitCode != 0 {
+	if result, err := p.deps.Hauler.AddFile(ctx, storeRoot, rootArchive, rootName); err != nil {
 		return RemoteDataPlaneResult{}, fmt.Errorf("add root archive to Hauler store: %w", err)
+	} else if result.ExitCode != 0 {
+		return RemoteDataPlaneResult{}, fmt.Errorf("add root archive to Hauler store exited %d", result.ExitCode)
 	}
 	outerImage, err := p.resolveOuterImage(ctx, request.DevcontainerPath)
 	if err != nil {
@@ -110,8 +130,10 @@ func (p *RemoteDataPlanePreparer) Prepare(ctx context.Context, request RemoteDat
 	}
 	if result, err := p.deps.Hauler.AddImage(ctx, storeRoot, hauleradapter.AddImageOptions{
 		Reference: outerImage, Platform: "linux/" + runtime.GOARCH,
-	}); err != nil || result.ExitCode != 0 {
+	}); err != nil {
 		return RemoteDataPlaneResult{}, fmt.Errorf("add immutable devcontainer image to Hauler store: %w", err)
+	} else if result.ExitCode != 0 {
+		return RemoteDataPlaneResult{}, fmt.Errorf("add immutable devcontainer image to Hauler store exited %d", result.ExitCode)
 	}
 	confinement, err := p.deps.Confinement.Resolve(ctx)
 	if err != nil {
@@ -181,10 +203,16 @@ func (p *RemoteDataPlanePreparer) Prepare(ctx context.Context, request RemoteDat
 	if bootstrap.Root != bootstrapRoot {
 		return RemoteDataPlaneResult{}, errors.New("bootstrap renderer returned an unexpected root")
 	}
+	if _, err := capsule.VerifyBootstrap(capsule.BootstrapVerificationRequest{Root: bootstrap.Root, Expected: expected}); err != nil {
+		return RemoteDataPlaneResult{}, fmt.Errorf("verify rendered remote bootstrap: %w", err)
+	}
 	record := domain.RemoteDataPlaneRecord{
 		Mode: domain.DataPlaneHaulerKitV1, AttemptID: request.AttemptID, BootstrapRoot: bootstrap.Root,
 		KitSHA256: artifact.SHA256, KitSize: artifact.Size,
 		ManifestSHA256: manifestIdentity.SHA256, ManifestSize: manifestIdentity.Size, OuterImage: outerImage,
+	}
+	if err := publishAttemptCompletion(attemptRoot, record); err != nil {
+		return RemoteDataPlaneResult{}, fmt.Errorf("publish remote data-plane completion: %w", err)
 	}
 	cleanup = false
 	return RemoteDataPlaneResult{BootstrapRoot: bootstrap.Root, Record: record}, nil
@@ -233,10 +261,22 @@ func (p *RemoteDataPlanePreparer) reusePrepared(ctx context.Context, request Rem
 		initialize.Expected.Helper.Size != manifest.Tools.Camp.Size || !immutableImage(initialize.Expected.Image) {
 		return RemoteDataPlaneResult{}, errors.New("prior bootstrap identity differs from verified kit")
 	}
+	expected := remoteworker.ExpectedIdentity{
+		Architecture: manifest.Architecture,
+		Helper:       remoteworker.FileIdentity{Name: "camp", SHA256: manifest.Tools.Camp.SHA256, Size: manifest.Tools.Camp.Size},
+		Kit:          initialize.Expected.Kit, Manifest: manifestIdentity, Image: initialize.Expected.Image,
+	}
+	if _, err := capsule.VerifyBootstrap(capsule.BootstrapVerificationRequest{Root: bootstrapRoot, Expected: expected}); err != nil {
+		return RemoteDataPlaneResult{}, fmt.Errorf("verify prior remote bootstrap: %w", err)
+	}
 	record := domain.RemoteDataPlaneRecord{
 		Mode: domain.DataPlaneHaulerKitV1, AttemptID: request.AttemptID, BootstrapRoot: bootstrapRoot,
 		KitSHA256: manifest.Archive.SHA256, KitSize: manifest.Archive.Size,
 		ManifestSHA256: manifestIdentity.SHA256, ManifestSize: manifestIdentity.Size, OuterImage: initialize.Expected.Image,
+	}
+	completion, err := readAttemptCompletion(attemptRoot)
+	if err != nil || completion != record {
+		return RemoteDataPlaneResult{}, errors.New("prior remote data-plane completion marker differs")
 	}
 	return RemoteDataPlaneResult{BootstrapRoot: bootstrapRoot, Record: record}, nil
 }
@@ -293,4 +333,241 @@ func immutableImage(image string) bool {
 func identityForBytes(name string, body []byte) remoteworker.FileIdentity {
 	digest := sha256.Sum256(body)
 	return remoteworker.FileIdentity{Name: name, SHA256: hex.EncodeToString(digest[:]), Size: int64(len(body))}
+}
+
+func createOwnedAttempt(parent, attemptID string) error {
+	stage, err := os.MkdirTemp(parent, ".remote-attempt-stage-")
+	if err != nil {
+		return err
+	}
+	published := false
+	defer func() {
+		if !published {
+			_ = os.RemoveAll(stage)
+		}
+	}()
+	marker := filepath.Join(stage, remoteAttemptOwnerMarker)
+	file, err := os.OpenFile(marker, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
+	if err != nil {
+		return err
+	}
+	if _, err = file.WriteString(attemptID + "\n"); err == nil {
+		err = file.Sync()
+	}
+	closeErr := file.Close()
+	if err != nil {
+		return err
+	}
+	if closeErr != nil {
+		return closeErr
+	}
+	directory, err := os.Open(stage)
+	if err != nil {
+		return err
+	}
+	err = directory.Sync()
+	_ = directory.Close()
+	if err != nil {
+		return err
+	}
+	if err := unix.Renameat2(unix.AT_FDCWD, stage, unix.AT_FDCWD, filepath.Join(parent, attemptID), unix.RENAME_NOREPLACE); err != nil {
+		return err
+	}
+	published = true
+	return syncRemoteDirectory(parent)
+}
+
+func removeOwnedPartialAttempt(parent, attemptID string) error {
+	parentDirectory, err := os.Open(parent)
+	if err != nil {
+		return err
+	}
+	defer parentDirectory.Close()
+	fd, err := unix.Openat(int(parentDirectory.Fd()), attemptID, unix.O_RDONLY|unix.O_CLOEXEC|unix.O_DIRECTORY|unix.O_NOFOLLOW, 0)
+	if err != nil {
+		return err
+	}
+	attempt := os.NewFile(uintptr(fd), attemptID)
+	defer attempt.Close()
+	pinned, err := attempt.Stat()
+	if err != nil {
+		return err
+	}
+	current, err := os.Lstat(filepath.Join(parent, attemptID))
+	if err != nil || current.Mode()&os.ModeSymlink != 0 || !os.SameFile(pinned, current) {
+		return errors.New("remote data-plane partial attempt identity changed")
+	}
+	owner, err := readRelativeAttemptFile(attempt, remoteAttemptOwnerMarker, 4096)
+	if err != nil || string(owner) != attemptID+"\n" {
+		return errors.New("remote data-plane partial attempt is not Camp-owned")
+	}
+	if _, err := os.Lstat(filepath.Join(parent, attemptID, remoteAttemptComplete)); err == nil {
+		return errors.New("completed remote data-plane attempt cannot be removed as partial")
+	} else if !errors.Is(err, os.ErrNotExist) {
+		return err
+	}
+	quarantine := ""
+	for range 10 {
+		placeholder, err := os.MkdirTemp(parent, "."+attemptID+".partial-")
+		if err != nil {
+			return err
+		}
+		candidate := filepath.Base(placeholder)
+		if err := os.Remove(placeholder); err != nil {
+			return err
+		}
+		err = unix.Renameat2(int(parentDirectory.Fd()), attemptID, int(parentDirectory.Fd()), candidate, unix.RENAME_NOREPLACE)
+		if err == nil {
+			quarantine = candidate
+			break
+		}
+		if !errors.Is(err, os.ErrExist) {
+			return err
+		}
+	}
+	if quarantine == "" {
+		return errors.New("could not allocate remote data-plane partial quarantine")
+	}
+	movedFD, err := unix.Openat(int(parentDirectory.Fd()), quarantine, unix.O_RDONLY|unix.O_CLOEXEC|unix.O_DIRECTORY|unix.O_NOFOLLOW, 0)
+	if err != nil {
+		return err
+	}
+	moved := os.NewFile(uintptr(movedFD), quarantine)
+	defer moved.Close()
+	movedInfo, movedErr := moved.Stat()
+	if movedErr != nil || !os.SameFile(pinned, movedInfo) {
+		return errors.New("quarantined remote data-plane attempt identity changed")
+	}
+	if err := syncRemoteDirectory(parent); err != nil {
+		return err
+	}
+	if err := removeDirectoryContents(moved); err != nil {
+		return err
+	}
+	currentFD, err := unix.Openat(int(parentDirectory.Fd()), quarantine, unix.O_RDONLY|unix.O_CLOEXEC|unix.O_DIRECTORY|unix.O_NOFOLLOW, 0)
+	if err != nil {
+		return err
+	}
+	currentFile := os.NewFile(uintptr(currentFD), quarantine)
+	currentInfo, currentErr := currentFile.Stat()
+	_ = currentFile.Close()
+	if currentErr != nil || !os.SameFile(movedInfo, currentInfo) {
+		return errors.New("quarantined remote data-plane attempt changed before removal")
+	}
+	if err := unix.Unlinkat(int(parentDirectory.Fd()), quarantine, unix.AT_REMOVEDIR); err != nil {
+		return err
+	}
+	return syncRemoteDirectory(parent)
+}
+
+func removeDirectoryContents(directory *os.File) error {
+	if _, err := directory.Seek(0, io.SeekStart); err != nil {
+		return err
+	}
+	entries, err := directory.ReadDir(-1)
+	if err != nil {
+		return err
+	}
+	for _, entry := range entries {
+		if entry.IsDir() {
+			fd, err := unix.Openat(int(directory.Fd()), entry.Name(), unix.O_RDONLY|unix.O_CLOEXEC|unix.O_DIRECTORY|unix.O_NOFOLLOW, 0)
+			if err != nil {
+				return err
+			}
+			child := os.NewFile(uintptr(fd), entry.Name())
+			err = removeDirectoryContents(child)
+			_ = child.Close()
+			if err != nil {
+				return err
+			}
+			if err := unix.Unlinkat(int(directory.Fd()), entry.Name(), unix.AT_REMOVEDIR); err != nil {
+				return err
+			}
+			continue
+		}
+		if entry.Type()&os.ModeSymlink != 0 || entry.Type().IsRegular() {
+			if err := unix.Unlinkat(int(directory.Fd()), entry.Name(), 0); err != nil {
+				return err
+			}
+			continue
+		}
+		return errors.New("remote data-plane partial attempt contains unsupported file type")
+	}
+	return directory.Sync()
+}
+
+func publishAttemptCompletion(attemptRoot string, record domain.RemoteDataPlaneRecord) error {
+	body, err := json.Marshal(record)
+	if err != nil {
+		return err
+	}
+	body = append(body, '\n')
+	temporary := filepath.Join(attemptRoot, "."+remoteAttemptComplete+".tmp")
+	file, err := os.OpenFile(temporary, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
+	if err != nil {
+		return err
+	}
+	if _, err = file.Write(body); err == nil {
+		err = file.Sync()
+	}
+	closeErr := file.Close()
+	if err != nil {
+		_ = os.Remove(temporary)
+		return err
+	}
+	if closeErr != nil {
+		_ = os.Remove(temporary)
+		return closeErr
+	}
+	if err := unix.Renameat2(unix.AT_FDCWD, temporary, unix.AT_FDCWD, filepath.Join(attemptRoot, remoteAttemptComplete), unix.RENAME_NOREPLACE); err != nil {
+		_ = os.Remove(temporary)
+		return err
+	}
+	return syncRemoteDirectory(attemptRoot)
+}
+
+func readAttemptCompletion(attemptRoot string) (domain.RemoteDataPlaneRecord, error) {
+	directory, err := os.Open(attemptRoot)
+	if err != nil {
+		return domain.RemoteDataPlaneRecord{}, err
+	}
+	defer directory.Close()
+	body, err := readRelativeAttemptFile(directory, remoteAttemptComplete, 1<<20)
+	if err != nil {
+		return domain.RemoteDataPlaneRecord{}, err
+	}
+	var record domain.RemoteDataPlaneRecord
+	decoder := json.NewDecoder(strings.NewReader(string(body)))
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(&record); err != nil {
+		return domain.RemoteDataPlaneRecord{}, err
+	}
+	var trailing any
+	if err := decoder.Decode(&trailing); !errors.Is(err, io.EOF) {
+		return domain.RemoteDataPlaneRecord{}, errors.New("remote data-plane completion marker has trailing JSON")
+	}
+	return record, nil
+}
+
+func readRelativeAttemptFile(parent *os.File, name string, limit int64) ([]byte, error) {
+	fd, err := unix.Openat(int(parent.Fd()), name, unix.O_RDONLY|unix.O_CLOEXEC|unix.O_NOFOLLOW, 0)
+	if err != nil {
+		return nil, err
+	}
+	file := os.NewFile(uintptr(fd), name)
+	defer file.Close()
+	info, err := file.Stat()
+	if err != nil || !info.Mode().IsRegular() || info.Size() > limit {
+		return nil, errors.New("remote data-plane marker is invalid")
+	}
+	return io.ReadAll(io.LimitReader(file, limit+1))
+}
+
+func syncRemoteDirectory(path string) error {
+	directory, err := os.Open(path)
+	if err != nil {
+		return err
+	}
+	defer directory.Close()
+	return directory.Sync()
 }

@@ -80,6 +80,10 @@ func NewBuilder(validator StoreValidator) *KitBuilder {
 	return &KitBuilder{validator: validator, chunkSize: DefaultChunkSize}
 }
 
+func NewBuilderWithRuntimeObserver(validator StoreValidator, observer RuntimeObserver) *KitBuilder {
+	return &KitBuilder{validator: validator, runtimeObserver: observer, chunkSize: DefaultChunkSize}
+}
+
 func (builder *KitBuilder) Build(ctx context.Context, request BuildRequest) (Artifact, error) {
 	resetAtomicBoundaryOccurrences()
 	if builder == nil || builder.validator == nil || !filepath.IsAbs(request.StoreDirectory) ||
