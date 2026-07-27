@@ -72,9 +72,47 @@ def verify_candidate(build_root, commit, expected_sha256=None):
         raise RuntimeError("downloaded candidate digest does not match requested digest")
 
 
-def verify_tag_target(tag, candidate_commit):
+def fetch_and_verify_tag_target(tag, candidate_commit, *, repository=None):
+    if (
+        not isinstance(tag, str)
+        or tag != tag.strip()
+        or tag.startswith("-")
+        or tag.startswith("refs/")
+    ):
+        raise RuntimeError(f"invalid release tag {tag!r}")
+    tag_ref = f"refs/tags/{tag}"
+    valid = subprocess.run(
+        ["git", "check-ref-format", tag_ref],
+        cwd=repository,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    if valid.returncode:
+        raise RuntimeError(f"invalid release tag {tag!r}")
+    verification_ref = f"refs/camp-release-tags/{tag}"
+    fetched = subprocess.run(
+        [
+            "git",
+            "fetch",
+            "--no-tags",
+            "--force",
+            "origin",
+            f"+{tag_ref}:{verification_ref}",
+        ],
+        cwd=repository,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    if fetched.returncode:
+        raise RuntimeError(
+            f"fetch requested release tag {tag!r} from origin: "
+            f"{fetched.stderr.strip()}"
+        )
     resolved = subprocess.run(
-        ["git", "rev-parse", f"{tag}^{{commit}}"],
+        ["git", "rev-parse", f"{verification_ref}^{{commit}}"],
+        cwd=repository,
         text=True,
         capture_output=True,
         check=False,
@@ -84,10 +122,16 @@ def verify_tag_target(tag, candidate_commit):
     target = resolved.stdout.strip()
     candidate = subprocess.run(
         ["git", "rev-parse", f"{candidate_commit}^{{commit}}"],
+        cwd=repository,
         text=True,
         capture_output=True,
-        check=True,
-    ).stdout.strip()
+        check=False,
+    )
+    if candidate.returncode:
+        raise RuntimeError(
+            f"candidate commit {candidate_commit!r} does not resolve to a commit"
+        )
+    candidate = candidate.stdout.strip()
     if target != candidate:
         raise RuntimeError(
             f"release tag target {target} does not equal candidate commit {candidate}"
@@ -109,7 +153,7 @@ def parse_arguments():
     parity.add_argument("--run-url", required=True)
     parity.add_argument("--direct", type=json.loads, required=True)
     parity.add_argument("--rcc", type=json.loads, required=True)
-    tag = commands.add_parser("verify-tag-target")
+    tag = commands.add_parser("fetch-verify-tag")
     tag.add_argument("--tag", required=True)
     tag.add_argument("--candidate-commit", required=True)
     return parser.parse_args()
@@ -132,7 +176,7 @@ def main():
             rcc=arguments.rcc,
         )
     else:
-        verify_tag_target(arguments.tag, arguments.candidate_commit)
+        fetch_and_verify_tag_target(arguments.tag, arguments.candidate_commit)
 
 
 if __name__ == "__main__":

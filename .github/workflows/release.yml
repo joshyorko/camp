@@ -302,7 +302,7 @@ jobs:
           if [[ "${GITHUB_EVENT_NAME}" == "workflow_dispatch" ]]; then
             release_tag="v${REQUESTED_VERSION#v}"
           fi
-          python3 developer/ci_release_evidence.py verify-tag-target \
+          python3 developer/ci_release_evidence.py fetch-verify-tag \
             --tag "$release_tag" \
             --candidate-commit "$CANDIDATE_COMMIT"
           gh release create "$release_tag" \

@@ -140,7 +140,7 @@ func TestReleaseWorkflowVerifiesDownloadsBeforeProtectedPublication(t *testing.T
 		"verified_artifacts.py recheck dist",
 		"dist/verified-artifacts.json",
 		"inputs.publish == true",
-		"ci_release_evidence.py verify-tag-target",
+		"ci_release_evidence.py fetch-verify-tag",
 		"retention-days:",
 	)
 	for _, forbiddenTrigger := range []string{"pull_request:", `push:
@@ -163,6 +163,14 @@ func TestReleaseWorkflowVerifiesDownloadsBeforeProtectedPublication(t *testing.T
 			strings.Contains(job, "-t package") {
 			t.Errorf("%s job can rebuild release archives", name)
 		}
+	}
+	document := parseWorkflow(t, workflow)
+	publishStep := findStepByName(t, document, "publish", "Publish verified assets")
+	publishRun := publishStep["run"].(string)
+	verifyIndex := strings.Index(publishRun, "ci_release_evidence.py fetch-verify-tag")
+	publishIndex := strings.Index(publishRun, "gh release create")
+	if verifyIndex < 0 || publishIndex < 0 || verifyIndex >= publishIndex {
+		t.Fatal("release tag fetch and exact target verification must finish before publication")
 	}
 	assertActionsPinned(t, workflow)
 }

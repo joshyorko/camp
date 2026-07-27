@@ -176,10 +176,15 @@ not a verified immutable cache seed.
 
 Parity records translate Actions conclusions into the gate vocabulary
 `passed`, `failed`, `missing`, `skipped`, or `gated`; raw values such as
-`success` and `cancelled` are not ledger results. Before publication, resolve
-the requested release tag to a commit and require it to equal
-`candidate_commit`; `gh release create --verify-tag` alone proves that a tag
-exists, not that it targets the candidate proven by CI.
+`success` and `cancelled` are not ledger results. Before publication, validate
+the requested tag name, fetch only
+`+refs/tags/<tag>:refs/camp-release-tags/<tag>` from `origin` with automatic tag
+following disabled, peel that fetched private ref to its commit, and require it
+to equal `candidate_commit`. This handles annotated and lightweight tags,
+refreshes a moved tag instead of trusting a stale local ref, and fails closed
+when the exact remote tag is missing or malformed. Only then may publication
+run; `gh release create --verify-tag` alone proves that a tag exists, not that
+it targets the candidate proven by CI.
 
 Developer workstations use the `rcc` already on PATH and its configured
 `ROBOCORP_HOME`; this is the ordinary interactive interface. CI and release
