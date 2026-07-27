@@ -47,7 +47,10 @@ import (
 	"github.com/joshyorko/camp/internal/workspace"
 )
 
-type ProductionLifecycle struct{}
+type ProductionLifecycle struct {
+	setupToolRunner  func(context.Context, OutputMode, io.Writer, func(string, tooladapter.Resolution) error) error
+	setupInitializer func(context.Context, InitRequest, OutputMode, io.Writer) error
+}
 
 func NewProductionLifecycle() *ProductionLifecycle { return &ProductionLifecycle{} }
 

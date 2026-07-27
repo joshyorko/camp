@@ -8,8 +8,10 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"path/filepath"
 	"strings"
 	"sync/atomic"
@@ -19,6 +21,99 @@ import (
 	"github.com/joshyorko/camp/internal/config"
 	"github.com/joshyorko/camp/internal/presentation"
 )
+
+func TestProductionSetupContinuesThroughCampInitialization(t *testing.T) {
+	stateRoot := t.TempDir()
+	campRoot := filepath.Join(t.TempDir(), "test-camp-robot")
+	if err := os.MkdirAll(campRoot, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	bin := filepath.Join(t.TempDir(), "bin")
+	if err := os.MkdirAll(bin, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	digest := strings.Repeat("a", 64)
+	docker := filepath.Join(bin, "docker")
+	if err := os.WriteFile(docker, []byte("#!/bin/sh\nprintf '[{\"Descriptor\":{\"digest\":\"sha256:"+digest+"\"}}]'\n"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", bin)
+	t.Setenv("XDG_CONFIG_HOME", filepath.Join(stateRoot, "config"))
+	t.Setenv("XDG_DATA_HOME", filepath.Join(stateRoot, "data"))
+	t.Setenv("XDG_CACHE_HOME", filepath.Join(stateRoot, "cache"))
+
+	lifecycle := &ProductionLifecycle{
+		setupToolRunner: func(context.Context, OutputMode, io.Writer, func(string, tooladapter.Resolution) error) error {
+			return nil
+		},
+	}
+	input := strings.NewReader(strings.Join([]string{
+		campRoot,
+		"test_camp",
+		"file://" + filepath.Join(stateRoot, "backend"),
+		"room-of-requirement",
+		"default",
+		"",
+	}, "\n"))
+	var output bytes.Buffer
+	if err := lifecycle.Setup(context.Background(), ModeHuman, input, &output); err != nil {
+		t.Fatalf("Setup: %v", err)
+	}
+
+	manifest, err := os.ReadFile(filepath.Join(campRoot, ".camp", "camp.yaml"))
+	if err != nil {
+		t.Fatalf("read camp manifest: %v", err)
+	}
+	for _, want := range []string{"id: test_camp", "provider: room-of-requirement", "context: default"} {
+		if !strings.Contains(string(manifest), want) {
+			t.Fatalf("manifest = %q, want %q", manifest, want)
+		}
+	}
+	if _, err := os.Stat(filepath.Join(campRoot, ".camp", "capsule.yaml")); err != nil {
+		t.Fatalf("capsule initialization: %v", err)
+	}
+	machine, err := config.NewStore(filepath.Join(stateRoot, "config", "camp", "config.yaml")).Read()
+	if err != nil {
+		t.Fatalf("read machine config: %v", err)
+	}
+	if machine.Source != "" || machine.DefaultCapsule != "" || machine.DevPodContext != "default" {
+		t.Fatalf("machine config = %#v", machine)
+	}
+	if !strings.Contains(output.String(), "next: cd "+campRoot+" && camp open") {
+		t.Fatalf("output = %q", output.String())
+	}
+}
+
+func TestProductionSetupRejectsMissingRootBeforePersistingMachineDefaults(t *testing.T) {
+	stateRoot := t.TempDir()
+	t.Setenv("XDG_CONFIG_HOME", filepath.Join(stateRoot, "config"))
+	t.Setenv("XDG_DATA_HOME", filepath.Join(stateRoot, "data"))
+	t.Setenv("XDG_CACHE_HOME", filepath.Join(stateRoot, "cache"))
+
+	lifecycle := &ProductionLifecycle{
+		setupToolRunner: func(context.Context, OutputMode, io.Writer, func(string, tooladapter.Resolution) error) error {
+			t.Fatal("tool setup ran before camp root validation")
+			return nil
+		},
+	}
+	missingRoot := filepath.Join(stateRoot, "missing-camp")
+	input := strings.NewReader(strings.Join([]string{
+		missingRoot,
+		"missing",
+		"file://" + filepath.Join(stateRoot, "backend"),
+		"docker",
+		"default",
+		"",
+	}, "\n"))
+	err := lifecycle.Setup(context.Background(), ModeHuman, input, io.Discard)
+	if err == nil || !strings.Contains(err.Error(), "camp root") {
+		t.Fatalf("Setup error = %v", err)
+	}
+	configPath := filepath.Join(stateRoot, "config", "camp", "config.yaml")
+	if _, statErr := os.Stat(configPath); !os.IsNotExist(statErr) {
+		t.Fatalf("invalid setup wrote machine config: %v", statErr)
+	}
+}
 
 func TestRunProductionToolSetupInstallsLockedFixturesUnderXDGData(t *testing.T) {
 	devpod := []byte("devpod fixture")

@@ -12,8 +12,10 @@ import (
 )
 
 type setupPromptDefaults struct {
-	Source  string
-	Backend string
+	Source   string
+	Backend  string
+	Provider string
+	Context  string
 }
 
 func promptSetupRequest(in io.Reader, out io.Writer, defaults setupPromptDefaults, experience presentation.TerminalExperience, size presentation.ScreenSize) (InitRequest, error) {
@@ -57,11 +59,11 @@ func promptSetupRequest(in io.Reader, out io.Writer, defaults setupPromptDefault
 	if err != nil {
 		return InitRequest{}, fmt.Errorf("read backend URL: %w", err)
 	}
-	provider, err := read("DevPod provider", "docker")
+	provider, err := read("DevPod provider", firstNonEmpty(defaults.Provider, "docker"))
 	if err != nil {
 		return InitRequest{}, fmt.Errorf("read DevPod provider: %w", err)
 	}
-	devpodContext, err := read("DevPod context", "default")
+	devpodContext, err := read("DevPod context", firstNonEmpty(defaults.Context, "default"))
 	if err != nil {
 		return InitRequest{}, fmt.Errorf("read DevPod context: %w", err)
 	}

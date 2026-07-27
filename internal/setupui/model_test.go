@@ -213,3 +213,26 @@ func TestWorkflowModelUsesInitFieldsAndWaypoints(t *testing.T) {
 		t.Fatalf("init workflow model = subtitle %q waypoints %#v", m.subtitle, m.waypoints)
 	}
 }
+
+func TestSetupModelCollectsCampIdentityBeforeMachineDefaults(t *testing.T) {
+	sprites, err := LoadSprites()
+	if err != nil {
+		t.Fatal(err)
+	}
+	m := NewModel(DefaultPalette(), sprites, map[string]string{
+		"root":     "/home/test/test-camp-robot",
+		"name":     "test_camp",
+		"backend":  "file:///backend",
+		"provider": "room-of-requirement",
+		"context":  "default",
+	}, &stubPipeline{})
+	values := m.form.Values()
+	if len(values) != 5 ||
+		values["root"] != "/home/test/test-camp-robot" ||
+		values["name"] != "test_camp" ||
+		values["backend"] != "file:///backend" ||
+		values["provider"] != "room-of-requirement" ||
+		values["context"] != "default" {
+		t.Fatalf("setup form values = %#v", values)
+	}
+}

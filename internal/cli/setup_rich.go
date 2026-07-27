@@ -9,7 +9,7 @@ import (
 	"fmt"
 	"io"
 	"os"
-	"runtime"
+	"path/filepath"
 	"sync"
 
 	tea "charm.land/bubbletea/v2"
@@ -47,9 +47,11 @@ func (p *ProductionLifecycle) runRichSetup(ctx context.Context, in io.Reader, ou
 	pipelineCtx, pipelineCancel := context.WithCancel(ctx)
 	pipeline := newRichSetupPipeline(p, pipelineCtx)
 	result, err := setupui.RunWithExit(ctx, in, out, setupui.DefaultPalette(), sprites, map[string]string{
+		"root":     defaults.Source,
+		"name":     filepath.Base(filepath.Clean(defaults.Source)),
 		"backend":  defaults.Backend,
-		"provider": "docker",
-		"context":  "default",
+		"provider": firstNonEmpty(defaults.Provider, "docker"),
+		"context":  firstNonEmpty(defaults.Context, "default"),
 	}, pipeline, pipelineCancel)
 	pipelineCancel()
 	pipeline.markDoneIfNotStarted()
@@ -162,6 +164,8 @@ func (p *richSetupPipeline) run(values map[string]string, out chan<- tea.Msg) {
 	}
 
 	request := InitRequest{
+		Root:           values["root"],
+		Capsule:        values["name"],
 		Backend:        values["backend"],
 		DevPodProvider: values["provider"],
 		DevPodContext:  values["context"],
@@ -173,6 +177,20 @@ func (p *richSetupPipeline) run(values map[string]string, out chan<- tea.Msg) {
 	paths, err := config.ResolveXDGPaths(config.XDGInput{Environment: environmentMap(os.Environ())})
 	if err != nil {
 		fail(setupui.StageToolchain, err, "camp setup")
+		return
+	}
+	settings, err := resolveProductionSettings()
+	if err != nil {
+		fail(setupui.StageToolchain, err, "camp setup")
+		return
+	}
+	request.Root, err = validateSetupRoot(request.Root)
+	if err != nil {
+		fail(setupui.StageToolchain, err, initRecoveryCommand(request))
+		return
+	}
+	if _, err := resolveInitManifest(settings, request, request.Root); err != nil {
+		fail(setupui.StageToolchain, err, initRecoveryCommand(request))
 		return
 	}
 	// Persist machine defaults (validates + writes atomically). A failure here is
@@ -190,57 +208,72 @@ func (p *richSetupPipeline) run(values map[string]string, out chan<- tea.Msg) {
 	}
 
 	// Toolchain: resolve DevPod and Hauler for real.
-	environment := environmentMap(os.Environ())
 	if !emit(setupui.ActivityMsg{Stage: setupui.StageToolchain, Message: "Installing DevPod and Hauler…"}) {
 		return
 	}
-	if err := runProductionToolSetup(p.ctx, ModeHuman, discardWriter{}, lockBytes, "", environment, runtime.GOOS, runtime.GOARCH); err != nil {
+	if err := p.lifecycle.runSetupTools(p.ctx, ModeHuman, discardWriter{}, nil); err != nil {
 		fail(setupui.StageToolchain, err, "camp setup")
 		return
 	}
 	// Publish toolchain completion and persisted factset after DevPod/Hauler are
 	// actually ready so the UI does not claim completion before the real setup is
 	// done.
+	if !emit(setupui.ConfigAcceptedMsg{
+		Waypoints: setupInitializationWaypoints(lock, request),
+		NextCmd:   "cd " + shellQuoteArgument(request.Root) + " && camp open",
+		ReadyLine: request.Capsule + " is initialized",
+	}) {
+		return
+	}
 	if !emit(setupui.WaypointCompletedMsg{Stage: setupui.StageToolchain, Meta: []string{
 		fmt.Sprintf("devpod %s", lock.Tools["devpod"].Version),
 		fmt.Sprintf("hauler %s", lock.Tools["hauler"].Version),
 	}}) {
 		return
 	}
-	if !emit(setupui.ConfigAcceptedMsg{
-		Waypoints: machineSetupWaypoints(lock, request),
-		NextCmd:   "camp init --name <id>",
-		ReadyLine: "machine ready · no camp selected",
-	}) {
-		return
-	}
 
-	// Runtime, Capsule, Storage are authoritative facts derived from the
-	// persisted configuration; emit them in order once established.
-	if !emit(setupui.WaypointCompletedMsg{Stage: setupui.StageRuntime, Meta: []string{
-		request.DevPodProvider,
-		"context " + request.DevPodContext,
+	report := func(message string) error {
+		var event tea.Msg
+		switch message {
+		case "Writing camp manifest…":
+			event = setupui.ActivityMsg{Stage: setupui.StageRuntime, Message: message}
+		case "Camp manifest written.":
+			event = setupui.WaypointCompletedMsg{Stage: setupui.StageRuntime, Meta: []string{request.Capsule, request.Root}}
+		case "Initializing capsule…":
+			event = setupui.ActivityMsg{Stage: setupui.StageCapsule, Message: message}
+		case "Capsule initialized.":
+			event = setupui.WaypointCompletedMsg{Stage: setupui.StageCapsule, Meta: []string{request.Capsule}}
+		default:
+			return nil
+		}
+		if emit(event) {
+			return nil
+		}
+		return p.ctx.Err()
+	}
+	initCtx := context.WithValue(p.ctx, initActivityContextKey{}, report)
+	if err := p.lifecycle.initializeFromSetup(initCtx, request, ModeHuman, discardWriter{}); err != nil {
+		fail(setupui.StageCapsule, err, initRecoveryCommand(request))
+		return
+	}
+	if !emit(setupui.WaypointCompletedMsg{Stage: setupui.StageStorage, Meta: []string{
+		request.DevPodProvider + " · context " + request.DevPodContext,
+		request.Backend,
 	}}) {
-		return
-	}
-	if !emit(setupui.WaypointCompletedMsg{Stage: setupui.StageCapsule, Meta: []string{"no camp selected", "run camp init"}}) {
-		return
-	}
-	if !emit(setupui.WaypointCompletedMsg{Stage: setupui.StageStorage, Meta: []string{"default backend", request.Backend}}) {
 		return
 	}
 	emit(setupui.AllReadyMsg{})
 }
 
-func machineSetupWaypoints(lock tooladapter.Lock, request InitRequest) [4]setupui.Waypoint {
+func setupInitializationWaypoints(lock tooladapter.Lock, request InitRequest) [4]setupui.Waypoint {
 	return [4]setupui.Waypoint{
 		{Label: "TOOLCHAIN", Landmark: "crate", Meta: []string{
 			fmt.Sprintf("devpod %s", lock.Tools["devpod"].Version),
 			fmt.Sprintf("hauler %s", lock.Tools["hauler"].Version),
 		}},
-		{Label: "RUNTIME", Landmark: "helm", Meta: []string{request.DevPodProvider, "context " + request.DevPodContext}},
-		{Label: "CAMP", Landmark: "tent", Meta: []string{"no camp selected", "run camp init"}},
-		{Label: "STORAGE", Landmark: "campfire", Meta: []string{"default backend", request.Backend}},
+		{Label: "MANIFEST", Landmark: "tent", Meta: []string{request.Capsule, request.Root}},
+		{Label: "CAPSULE", Landmark: "helm", Meta: []string{request.Capsule}},
+		{Label: "READY", Landmark: "campfire", Meta: []string{request.DevPodProvider + " · context " + request.DevPodContext, request.Backend}},
 	}
 }
 

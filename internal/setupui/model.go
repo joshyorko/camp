@@ -121,6 +121,8 @@ func NewModel(pal Palette, sprites map[string]Sprite, defaults map[string]string
 	return NewWorkflowModel(pal, sprites, defaults, pipeline, Workflow{
 		Title: "⌂ CAMP", Subtitle: "trailhead setup",
 		Fields: []FormFieldSpec{
+			{Key: "root", Label: "Camp root", Placeholder: "/path/to/camp"},
+			{Key: "name", Label: "Camp name", Placeholder: "camp-name"},
 			{Key: "backend", Label: "Default backend", Placeholder: "file://…"},
 			{Key: "provider", Label: "DevPod provider", Placeholder: "docker"},
 			{Key: "context", Label: "DevPod context", Placeholder: "default"},

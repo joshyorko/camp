@@ -5,6 +5,7 @@ package cli
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -14,6 +15,7 @@ import (
 
 	campcontract "github.com/joshyorko/camp"
 	tooladapter "github.com/joshyorko/camp/internal/adapters/tools"
+	"github.com/joshyorko/camp/internal/campconfig"
 	"github.com/joshyorko/camp/internal/config"
 	"github.com/joshyorko/camp/internal/doctor"
 	journalstore "github.com/joshyorko/camp/internal/journal"
@@ -88,10 +90,24 @@ func (p *ProductionLifecycle) Setup(ctx context.Context, mode OutputMode, in io.
 		return err
 	}
 	experience, width, height := resolveTerminalExperience(mode, out, environment, probeTerminal)
+	var setupRequest InitRequest
+	initializeCamp := false
 	if mode == ModeHuman {
-		if _, statErr := os.Stat(paths.ConfigPath); statErr != nil {
-			if !os.IsNotExist(statErr) {
-				return statErr
+		cwd, err := os.Getwd()
+		if err != nil {
+			return err
+		}
+		if _, discoverErr := campconfig.Discover(cwd); errors.Is(discoverErr, campconfig.ErrManifestNotFound) {
+			initializeCamp = true
+			settings, err := resolveProductionSettings()
+			if err != nil {
+				return err
+			}
+			defaults := setupPromptDefaults{
+				Source:   cwd,
+				Backend:  settings.runtime.Backend,
+				Provider: settings.runtime.DevPodProvider,
+				Context:  settings.runtime.DevPodContext,
 			}
 			// Rich interactive path: a truecolor TTY with a real keyboard and
 			// minimum dimensions runs the full-screen Trailhead scene from the
@@ -99,22 +115,27 @@ func (p *ProductionLifecycle) Setup(ctx context.Context, mode OutputMode, in io.
 			// non-TTY, piped input, undersized terminals) keeps the
 			// deterministic line-based flow below.
 			if canUseRichSetup(experience, width, height) && inputIsTTY(in) {
-				handled, err := p.runRichSetup(ctx, in, out, setupPromptDefaults{
-					Backend: "file://" + filepath.Join(paths.DataRoot, "backend"),
-				})
+				handled, err := p.runRichSetup(ctx, in, out, defaults)
 				if handled {
 					return err
 				}
 			}
-			request, err := promptSetupRequest(in, out, setupPromptDefaults{
-				Backend: "file://" + filepath.Join(paths.DataRoot, "backend"),
-			}, experience, presentation.ScreenSize{Width: width, Height: height})
+			setupRequest, err = promptSetupRequest(in, out, defaults, experience, presentation.ScreenSize{Width: width, Height: height})
 			if err != nil {
 				return err
 			}
-			if _, err := persistSetupDefaults(paths.ConfigPath, request); err != nil {
+			setupRequest.Root, err = validateSetupRoot(setupRequest.Root)
+			if err != nil {
+				return UsageError(err)
+			}
+			if _, err := resolveInitManifest(settings, setupRequest, setupRequest.Root); err != nil {
+				return UsageError(err)
+			}
+			if _, err := persistSetupDefaults(paths.ConfigPath, setupRequest); err != nil {
 				return err
 			}
+		} else if discoverErr != nil {
+			return discoverErr
 		}
 	}
 	lockBytes := campcontract.DistributionToolLock()
@@ -124,13 +145,45 @@ func (p *ProductionLifecycle) Setup(ctx context.Context, mode OutputMode, in io.
 	if mode == ModeJSON {
 		completed = nil
 	}
-	if err := runProductionToolSetupWithEvents(ctx, mode, out, lockBytes, "", environment, runtime.GOOS, runtime.GOARCH, completed); err != nil || mode == ModeJSON {
+	if err := p.runSetupTools(ctx, mode, out, completed); err != nil || mode == ModeJSON {
 		if err != nil && mode == ModeHuman {
 			_ = renderProductionSetupFailure(ctx, out, lockBytes, experience, width, height, err)
 		}
 		return err
 	}
+	if initializeCamp {
+		return p.initializeFromSetup(ctx, setupRequest, ModeHuman, out)
+	}
 	return renderProductionSetupCampsite(ctx, out, lockBytes, experience, width, height)
+}
+
+func validateSetupRoot(root string) (string, error) {
+	info, err := os.Stat(root)
+	if err != nil {
+		return "", fmt.Errorf("validate camp root %q: %w", root, err)
+	}
+	if !info.IsDir() {
+		return "", fmt.Errorf("validate camp root %q: not a directory", root)
+	}
+	canonical, err := filepath.EvalSymlinks(root)
+	if err != nil {
+		return "", fmt.Errorf("validate camp root %q: %w", root, err)
+	}
+	return canonical, nil
+}
+
+func (p *ProductionLifecycle) runSetupTools(ctx context.Context, mode OutputMode, out io.Writer, completed func(string, tooladapter.Resolution) error) error {
+	if p != nil && p.setupToolRunner != nil {
+		return p.setupToolRunner(ctx, mode, out, completed)
+	}
+	return runProductionToolSetupWithEvents(ctx, mode, out, campcontract.DistributionToolLock(), "", environmentMap(os.Environ()), runtime.GOOS, runtime.GOARCH, completed)
+}
+
+func (p *ProductionLifecycle) initializeFromSetup(ctx context.Context, request InitRequest, mode OutputMode, out io.Writer) error {
+	if p != nil && p.setupInitializer != nil {
+		return p.setupInitializer(ctx, request, mode, out)
+	}
+	return p.Init(ctx, request, mode, out)
 }
 
 func persistSetupDefaults(path string, request InitRequest) (config.Persistent, error) {
