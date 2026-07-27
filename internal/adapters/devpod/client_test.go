@@ -4,6 +4,8 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"os"
+	"path/filepath"
 	"reflect"
 	"strings"
 	"testing"
@@ -643,11 +645,18 @@ func TestT3CodeUpUsesSafeTerminalDevPodSetup(t *testing.T) {
 }
 
 func TestUpUsesBootstrapRootInsteadOfCapsuleRoot(t *testing.T) {
-	t.Parallel()
+	root := t.TempDir()
+	capsuleRoot := filepath.Join(root, "capsule")
+	bootstrapRoot := filepath.Join(root, "session", "devpod-bootstrap")
+	for _, path := range []string{capsuleRoot, bootstrapRoot} {
+		if err := os.MkdirAll(path, 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
 	runner := &recordingRunner{}
 	_, err := NewClient("devpod", runner).Up(context.Background(), UpOptions{
-		WorkspacePath:    "/tmp/capsule",
-		BootstrapPath:    "/tmp/session/devpod-bootstrap",
+		WorkspacePath:    capsuleRoot,
+		BootstrapPath:    bootstrapRoot,
 		SourceMode:       SourceModeBootstrap,
 		WorkspaceID:      "camp",
 		Provider:         "docker",
@@ -658,19 +667,75 @@ func TestUpUsesBootstrapRootInsteadOfCapsuleRoot(t *testing.T) {
 	}
 	want := []string{
 		"up", "--ide", "none", "--open-ide=false", "--id", "camp", "--provider", "docker",
-		"--devcontainer-path", ".camp-bootstrap/devcontainer.json", "/tmp/session/devpod-bootstrap",
+		"--devcontainer-path", ".camp-bootstrap/devcontainer.json", bootstrapRoot,
 	}
 	if len(runner.commands) != 1 || !reflect.DeepEqual(runner.commands[0].Argv, want) {
 		t.Fatalf("argv = %#v, want %#v", runner.commands, want)
 	}
 	for _, argument := range runner.commands[0].Argv {
-		if argument == "/tmp/capsule" {
+		if argument == capsuleRoot {
 			t.Fatalf("argv exposed capsule root: %#v", runner.commands[0].Argv)
 		}
 	}
 }
 
-func TestUpRejectsInvalidBootstrapSourceModesWithoutExecution(t *testing.T) {
+func TestUpRejectsNonDisjointBootstrapSourcesWithoutExecution(t *testing.T) {
+	root := t.TempDir()
+	capsule := filepath.Join(root, "capsule")
+	bootstrap := filepath.Join(root, "bootstrap")
+	nestedBootstrap := filepath.Join(capsule, "bootstrap")
+	nestedCapsule := filepath.Join(bootstrap, "capsule")
+	for _, path := range []string{capsule, bootstrap, nestedBootstrap, nestedCapsule} {
+		if err := os.MkdirAll(path, 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	capsuleAlias := filepath.Join(root, "capsule-link")
+	if err := os.Symlink(capsule, capsuleAlias); err != nil {
+		t.Fatal(err)
+	}
+	workingDirectory, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	relativeCapsule, err := filepath.Rel(workingDirectory, capsule)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	for _, test := range []struct {
+		name          string
+		workspacePath string
+		bootstrapPath string
+	}{
+		{name: "equal paths", workspacePath: capsule, bootstrapPath: capsule},
+		{name: "cleaned direct alias", workspacePath: capsule, bootstrapPath: filepath.Join(capsule, "..", "capsule")},
+		{name: "relative alias", workspacePath: capsule, bootstrapPath: relativeCapsule},
+		{name: "symlink alias", workspacePath: capsule, bootstrapPath: capsuleAlias},
+		{name: "bootstrap nested beneath capsule", workspacePath: capsule, bootstrapPath: nestedBootstrap},
+		{name: "capsule nested beneath bootstrap", workspacePath: nestedCapsule, bootstrapPath: bootstrap},
+		{name: "missing capsule", workspacePath: filepath.Join(root, "missing-capsule"), bootstrapPath: bootstrap},
+		{name: "missing bootstrap", workspacePath: capsule, bootstrapPath: filepath.Join(root, "missing-bootstrap")},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			runner := &recordingRunner{}
+			_, err := NewClient("devpod", runner).Up(context.Background(), UpOptions{
+				WorkspacePath: test.workspacePath,
+				BootstrapPath: test.bootstrapPath,
+				SourceMode:    SourceModeBootstrap,
+				WorkspaceID:   "camp",
+			})
+			if err == nil {
+				t.Fatal("Up() error = nil, want non-disjoint source rejection")
+			}
+			if len(runner.commands) != 0 {
+				t.Fatalf("Up() commands = %#v, want fail-closed before execution", runner.commands)
+			}
+		})
+	}
+}
+
+func TestUpRejectsIncompleteOrUnknownBootstrapModeWithoutExecution(t *testing.T) {
 	t.Parallel()
 	for _, test := range []struct {
 		name          string
@@ -679,7 +744,6 @@ func TestUpRejectsInvalidBootstrapSourceModesWithoutExecution(t *testing.T) {
 		sourceMode    SourceMode
 	}{
 		{name: "empty bootstrap path", workspacePath: "/tmp/capsule", sourceMode: SourceModeBootstrap},
-		{name: "bootstrap aliases capsule", workspacePath: "/tmp/capsule", bootstrapPath: "/tmp/capsule", sourceMode: SourceModeBootstrap},
 		{name: "unknown source mode", workspacePath: "/tmp/capsule", bootstrapPath: "/tmp/bootstrap", sourceMode: SourceMode("future")},
 	} {
 		t.Run(test.name, func(t *testing.T) {

@@ -9,7 +9,12 @@ Do not use Hauler v2.0.2's live `_catalog` response as proof that all direct reg
 ## Implemented adapter behavior
 
 - DevPod command construction preserves context, workspace identity, repeated public flags, environment variables, and argument boundaries through `ports.Command`.
-- The pinned v0.26.1 installed-tool contract supports one bounded local-folder
+- Bootstrap source mode is currently an adapter-only contract; production
+  `app.Open` still uses capsule mode and does not construct, select, journal, or
+  clean a bootstrap root. The adapter resolves both source identities before
+  execution and rejects missing, aliased, or nested bootstrap/capsule roots.
+  Default and explicit capsule modes retain the existing capsule source.
+- The pinned v0.26.1 installed-tool contract proves one bounded local-folder
   upload: construct `.camp-bootstrap/devcontainer.json` and the immutable
   `camp-hauler-kit.tar.zst` completely before `devpod up`, pass only that
   disposable bootstrap root, and perform no post-`up` mutation or ownership
