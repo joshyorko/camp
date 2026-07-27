@@ -28,20 +28,23 @@ Do not use Hauler v2.0.2's live `_catalog` response as proof that all direct reg
   then the staged copies are independently reverified before publication. Input
   ancestors and the output parent are opened component-by-component without
   following symlinks; staging and no-replace publication stay anchored to
-  directory descriptors. A failed parent fsync after rename rolls the exact
-  published inode back into its owned staging name before cleanup. The generated
-  config pins the supplied immutable outer image, and all three operation
+  directory descriptors. After a failed parent fsync, rollback exchanges the
+  target with an owned placeholder and verifies the exchanged inode before
+  cleanup. An unchanged target is removed through that verified inode; a
+  replacement target is atomically restored and preserved. The generated config
+  pins the supplied immutable outer image, and all three operation
   requests must share schema, session, workspace root, runtime root, manifest
   path, and expected identities. Generated
   `initializeCommand`, `onCreateCommand`, and `postStartCommand` run
   `activateImage`, `hydrate`, and `startServices` respectively before the
-  corresponding user hook. String, argv-array, and named-object user hooks
-  retain their shell text or argv boundaries and execute exactly once after the
-  helper succeeds. Because Dev Container named-object entries execute
-  concurrently, the generated lifecycle value is one sequential shell boundary:
-  it waits for the helper, then launches the original named commands in parallel
-  and waits for all of them. Sorting object keys does not establish lifecycle
-  ordering. Null, mixed, recursively duplicate-key, malformed, and build-only
+  corresponding user hook. String, argv-array, and named-object lifecycle values
+  retain their top-level JSON form, and each original command or argv appears
+  exactly once behind a fail-closed helper gate. Because Dev Container
+  named-object entries execute concurrently, each original named entry invokes
+  the idempotent helper receipt independently before its own command; the user
+  entries remain concurrent. A helper failure prevents every gated user command.
+  Sorting object keys does not establish lifecycle ordering. Null, mixed,
+  recursively duplicate-key, malformed, and build-only
   configurations fail before publication, and the original devcontainer file
   remains unchanged.
   `internal/capsule/bootstrap_test.go` executes the generated commands using
@@ -55,11 +58,13 @@ Do not use Hauler v2.0.2's live `_catalog` response as proof that all direct reg
   `unsupported` receipt. `probe` verifies the running helper plus adjacent kit
   and manifest bytes before reporting typed architecture, filesystem,
   namespace, TUN, privilege, and loopback-port capabilities; an unsupported
-  capability returns a failing receipt. Namespace descriptors must open, the TUN
-  device must answer `TUNGETFEATURES`, privilege is established from effective
-  `CAP_NET_ADMIN` and `CAP_SYS_ADMIN` rather than UID, and loopback availability
-  uses a bind-only socket whose `SO_ACCEPTCONN` state remains false. The probe
-  never calls `listen`. Every accepted, malformed, or identity-rejected request
+  capability returns a failing receipt. The namespace probe actually creates a
+  child user, network, and mount namespace mapped to the current user; the TUN
+  device must open and answer `TUNGETFEATURES`. The privilege receipt derives
+  from those operation results, not UID or blanket capability bits, so an
+  operation-capable rootless user is accepted. Loopback availability uses a
+  bind-only socket whose `SO_ACCEPTCONN` state remains false; the probe never
+  calls `listen`. Every accepted, malformed, or identity-rejected request
   returns exactly one schema-v1 result envelope; failures use a typed receipt and
   the `rejected` result operation when no request operation could be decoded.
   Diagnostics are normalized to valid UTF-8 before their byte cap is applied.

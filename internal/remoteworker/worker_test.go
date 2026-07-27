@@ -9,7 +9,6 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
-	"strings"
 	"testing"
 
 	"golang.org/x/sys/unix"
@@ -91,21 +90,29 @@ func TestLoopbackProbeBindsWithoutListening(t *testing.T) {
 	}
 }
 
-func TestPrivilegeProbeUsesEffectiveCapabilitiesNotUserID(t *testing.T) {
-	const status = "Name:\tcamp\nUid:\t1000\t1000\t1000\t1000\nCapEff:\t0000000000201000\n"
-	if err := probePrivilegeFrom(strings.NewReader(status)); err != nil {
-		t.Fatalf("probePrivilegeFrom() error = %v", err)
+func TestPrivilegeProbeAcceptsCurrentUserWhenRequiredOperationsWork(t *testing.T) {
+	if err := probeNamespaces(); err != nil {
+		t.Skipf("user/network namespace operation unavailable: %v", err)
 	}
-	for name, status := range map[string]string{
-		"missing net admin": "CapEff:\t0000000000200000\n",
-		"missing sys admin": "CapEff:\t0000000000001000\n",
-		"malformed":         "CapEff:\tnot-hex\n",
-	} {
-		t.Run(name, func(t *testing.T) {
-			if err := probePrivilegeFrom(strings.NewReader(status)); err == nil {
-				t.Fatal("probePrivilegeFrom() error = nil")
-			}
-		})
+	if err := probeTUN(); err != nil {
+		t.Skipf("TUN operation unavailable: %v", err)
+	}
+	if err := probePrivilege(); err != nil {
+		t.Fatalf("operation-capable user was rejected: %v", err)
+	}
+}
+
+func TestPrivilegeReceiptDerivesFromOperationResultsWithoutCapabilityGate(t *testing.T) {
+	if err := privilegeFromOperations(nil, nil); err != nil {
+		t.Fatalf("successful operations were rejected: %v", err)
+	}
+	namespaceErr := errors.New("namespace operation failed")
+	if err := privilegeFromOperations(namespaceErr, nil); !errors.Is(err, namespaceErr) {
+		t.Fatalf("namespace error = %v", err)
+	}
+	tunErr := errors.New("TUN operation failed")
+	if err := privilegeFromOperations(nil, tunErr); !errors.Is(err, tunErr) {
+		t.Fatalf("TUN error = %v", err)
 	}
 }
 

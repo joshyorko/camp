@@ -235,10 +235,8 @@ func renderBootstrap(request BootstrapRequest, openHelper func() (*os.File, erro
 		return Bootstrap{}, err
 	}
 	if err := bootstrapDirectorySync(parentDirectory); err != nil {
-		rollbackErr := unix.Renameat2(int(parentDirectory.Fd()), targetName, int(parentDirectory.Fd()), stageName, unix.RENAME_NOREPLACE)
-		syncErr := parentDirectory.Sync()
-		if rollbackErr != nil || syncErr != nil {
-			return Bootstrap{}, fmt.Errorf("%w: parent sync failed and rollback was incomplete: rename=%v sync=%v", ErrInvalidBootstrap, rollbackErr, syncErr)
+		if rollbackErr := rollbackPublishedBootstrap(parentDirectory, targetName, stageDirectory, &stageName, &stage); rollbackErr != nil {
+			return Bootstrap{}, fmt.Errorf("%w: parent sync failed and rollback was incomplete: %v", ErrInvalidBootstrap, rollbackErr)
 		}
 		return Bootstrap{}, err
 	}
@@ -247,6 +245,69 @@ func renderBootstrap(request BootstrapRequest, openHelper func() (*os.File, erro
 		Root:             request.Root,
 		DevcontainerPath: filepath.Join(request.Root, ".camp-bootstrap", "devcontainer.json"),
 	}, nil
+}
+
+func rollbackPublishedBootstrap(parent *os.File, target string, published *os.File, stageName, stagePath *string) error {
+	placeholderName, placeholderPath, placeholder, err := createBootstrapStage(parent)
+	if err != nil {
+		return err
+	}
+	defer placeholder.Close()
+	placeholderOwned := true
+	defer func() {
+		if placeholderOwned {
+			_ = os.RemoveAll(placeholderPath)
+		}
+	}()
+	if err := unix.Renameat2(int(parent.Fd()), target, int(parent.Fd()), placeholderName, unix.RENAME_EXCHANGE); err != nil {
+		return err
+	}
+	placeholderOwned = false
+	exchanged, err := openRelativeDirectory(parent, placeholderName)
+	if err != nil {
+		return err
+	}
+	exchangedInfo, infoErr := exchanged.Stat()
+	publishedInfo, publishedErr := published.Stat()
+	_ = exchanged.Close()
+	if infoErr != nil || publishedErr != nil {
+		return errors.Join(infoErr, publishedErr)
+	}
+	if !os.SameFile(exchangedInfo, publishedInfo) {
+		if err := unix.Renameat2(int(parent.Fd()), target, int(parent.Fd()), placeholderName, unix.RENAME_EXCHANGE); err != nil {
+			return fmt.Errorf("restore replacement after inode mismatch: %w", err)
+		}
+		if err := removeOwnedEmptyDirectory(parent, placeholderName, placeholder); err != nil {
+			return err
+		}
+		if err := parent.Sync(); err != nil {
+			return err
+		}
+		return errors.New("bootstrap target was replaced before rollback")
+	}
+	if err := removeOwnedEmptyDirectory(parent, target, placeholder); err != nil {
+		return err
+	}
+	*stageName = placeholderName
+	*stagePath = placeholderPath
+	return parent.Sync()
+}
+
+func removeOwnedEmptyDirectory(parent *os.File, name string, expected *os.File) error {
+	current, err := openRelativeDirectory(parent, name)
+	if err != nil {
+		return err
+	}
+	currentInfo, currentErr := current.Stat()
+	expectedInfo, expectedErr := expected.Stat()
+	_ = current.Close()
+	if currentErr != nil || expectedErr != nil {
+		return errors.Join(currentErr, expectedErr)
+	}
+	if !os.SameFile(currentInfo, expectedInfo) {
+		return errors.New("rollback placeholder identity changed")
+	}
+	return unix.Unlinkat(int(parent.Fd()), name, unix.AT_REMOVEDIR)
 }
 
 var bootstrapDirectorySync = func(directory *os.File) error {
@@ -405,54 +466,48 @@ func composeLifecycle(original json.RawMessage, requestName string) (json.RawMes
 		if err != nil || len(named) == 0 {
 			return nil, errors.New("malformed named lifecycle command")
 		}
-		var buffer bytes.Buffer
-		buffer.WriteString(helper)
-		buffer.WriteString("\npids=")
+		composed := make(map[string]json.RawMessage, len(named))
 		for _, key := range sortedKeys(named) {
 			if err := validateLifecycleLeaf(named[key]); err != nil {
 				return nil, err
 			}
-			command, err := lifecycleCommandScript(named[key])
+			command, err := composeLifecycleLeaf(named[key], helper)
 			if err != nil {
 				return nil, err
 			}
-			buffer.WriteString("\n( ")
-			buffer.WriteString(command)
-			buffer.WriteString(" ) &\npids=\"$pids $!\"")
+			composed[key] = command
 		}
-		buffer.WriteString("\nstatus=0\nfor pid in $pids; do wait \"$pid\" || status=$?; done\nexit \"$status\"")
-		return json.RawMessage(mustJSON(buffer.String())), nil
+		body, err := json.Marshal(composed)
+		return body, err
 	}
 	if err := validateLifecycleLeaf(trimmed); err != nil {
 		return nil, err
 	}
-	command, err := lifecycleCommandScript(trimmed)
-	if err != nil {
-		return nil, err
-	}
-	return json.RawMessage(mustJSON(helper + "\nexec " + command)), nil
+	return composeLifecycleLeaf(trimmed, helper)
 }
 
-func lifecycleCommandScript(raw json.RawMessage) (string, error) {
+func composeLifecycleLeaf(raw json.RawMessage, helper string) (json.RawMessage, error) {
 	var value any
 	if err := json.Unmarshal(raw, &value); err != nil {
-		return "", errors.New("malformed lifecycle command")
+		return nil, errors.New("malformed lifecycle command")
 	}
 	switch command := value.(type) {
 	case string:
-		return "/bin/sh -c " + shellQuote(command), nil
+		return json.RawMessage(mustJSON(helper + " && /bin/sh -c " + shellQuote(command))), nil
 	case []any:
-		arguments := make([]string, len(command))
-		for index, argument := range command {
+		arguments := make([]string, 0, len(command)+4)
+		arguments = append(arguments, "/bin/sh", "-c", helper+` && exec "$@"`, "camp-user")
+		for _, argument := range command {
 			value, ok := argument.(string)
 			if !ok {
-				return "", errors.New("mixed lifecycle argv")
+				return nil, errors.New("mixed lifecycle argv")
 			}
-			arguments[index] = shellQuote(value)
+			arguments = append(arguments, value)
 		}
-		return strings.Join(arguments, " "), nil
+		body, err := json.Marshal(arguments)
+		return body, err
 	default:
-		return "", errors.New("unsupported lifecycle command form")
+		return nil, errors.New("unsupported lifecycle command form")
 	}
 }
 

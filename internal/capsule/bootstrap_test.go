@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -38,6 +39,7 @@ func TestRenderBootstrapExecutesHelperBeforeEveryLifecycleForm(t *testing.T) {
 			trace := filepath.Join(t.TempDir(), "trace")
 			t.Setenv("TRACE", trace)
 			document := readBootstrapDocument(t, result.DevcontainerPath)
+			assertLifecycleForm(t, name, document["initializeCommand"])
 			runLifecycle(t, result.Root, document["initializeCommand"])
 			runLifecycle(t, result.Root, document["onCreateCommand"])
 			runLifecycle(t, result.Root, document["postStartCommand"])
@@ -46,6 +48,33 @@ func TestRenderBootstrapExecutesHelperBeforeEveryLifecycleForm(t *testing.T) {
 				t.Fatal(err)
 			}
 			assertLifecycleTrace(t, name, string(body))
+		})
+	}
+}
+
+func TestRenderBootstrapHelperFailurePreventsEveryUserHook(t *testing.T) {
+	for name, lifecycle := range map[string]json.RawMessage{
+		"string": json.RawMessage(`"printf 'user\\n' >> \"$TRACE\""`),
+		"argv":   json.RawMessage(`["/bin/sh","-c","printf 'user\\n' >> \"$TRACE\""]`),
+		"named":  json.RawMessage(`{"a":"printf 'user-a\\n' >> \"$TRACE\"","b":["/bin/sh","-c","printf 'user-b\\n' >> \"$TRACE\""]}`),
+	} {
+		t.Run(name, func(t *testing.T) {
+			fixture := bootstrapFixture(t, lifecycle)
+			result, err := renderBootstrap(fixture.request, fixture.openHelper)
+			if err != nil {
+				t.Fatal(err)
+			}
+			trace := filepath.Join(t.TempDir(), "trace")
+			t.Setenv("TRACE", trace)
+			t.Setenv("HELPER_FAIL", "1")
+			document := readBootstrapDocument(t, result.DevcontainerPath)
+			assertLifecycleForm(t, name, document["initializeCommand"])
+			if err := executeLifecycle(result.Root, document["initializeCommand"]); err == nil {
+				t.Fatal("lifecycle succeeded after helper failure")
+			}
+			if body, err := os.ReadFile(trace); err == nil && strings.Contains(string(body), "user") {
+				t.Fatalf("user hook ran after helper failure: %q", body)
+			}
 		})
 	}
 }
@@ -183,6 +212,46 @@ func TestRenderBootstrapRollsBackPublishedInodeWhenParentSyncFails(t *testing.T)
 	}
 }
 
+func TestRenderBootstrapRollbackPreservesReplacementTarget(t *testing.T) {
+	fixture := bootstrapFixture(t, json.RawMessage(`"true"`))
+	parent := filepath.Dir(fixture.request.Root)
+	displaced := filepath.Join(parent, "displaced-bootstrap")
+	previous := bootstrapDirectorySync
+	t.Cleanup(func() { bootstrapDirectorySync = previous })
+	injected := false
+	bootstrapDirectorySync = func(directory *os.File) error {
+		if directory.Name() == parent && !injected {
+			if _, err := os.Lstat(fixture.request.Root); err == nil {
+				injected = true
+				if err := os.Rename(fixture.request.Root, displaced); err != nil {
+					return err
+				}
+				if err := os.Mkdir(fixture.request.Root, 0o700); err != nil {
+					return err
+				}
+				if err := os.WriteFile(filepath.Join(fixture.request.Root, "replacement"), []byte("keep"), 0o600); err != nil {
+					return err
+				}
+				return errors.New("injected parent sync failure after replacement")
+			}
+		}
+		return directory.Sync()
+	}
+	if _, err := renderBootstrap(fixture.request, fixture.openHelper); err == nil {
+		t.Fatal("renderBootstrap() error = nil")
+	}
+	if !injected {
+		t.Fatal("replacement race was not injected")
+	}
+	body, err := os.ReadFile(filepath.Join(fixture.request.Root, "replacement"))
+	if err != nil || string(body) != "keep" {
+		t.Fatalf("replacement target was not preserved: body=%q err=%v", body, err)
+	}
+	if _, err := os.Stat(filepath.Join(displaced, ".camp-bootstrap", "devcontainer.json")); err != nil {
+		t.Fatalf("displaced published inode was not preserved for recovery: %v", err)
+	}
+}
+
 func TestRenderBootstrapRejectsSymlinkedSourceAncestor(t *testing.T) {
 	fixture := bootstrapFixture(t, json.RawMessage(`"true"`))
 	linkParent := t.TempDir()
@@ -220,7 +289,7 @@ func bootstrapFixtureWithConfig(t *testing.T, config string) bootstrapTestFixtur
 	if err := os.WriteFile(devcontainer, []byte(config), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	helperBody := []byte("#!/bin/sh\nset -eu\nop=$(sed -n 's/.*\"operation\":\"\\([^\"]*\\)\".*/\\1/p')\nsleep 0.1\nprintf 'helper-%s\\n' \"$op\" >> \"$TRACE\"\n")
+	helperBody := []byte("#!/bin/sh\nset -eu\nop=$(sed -n 's/.*\"operation\":\"\\([^\"]*\\)\".*/\\1/p')\n[ \"${HELPER_FAIL:-}\" != 1 ] || exit 42\nsleep 0.1\nprintf 'helper-%s\\n' \"$op\" >> \"$TRACE\"\n")
 	if err := os.WriteFile(helper, helperBody, 0o700); err != nil {
 		t.Fatal(err)
 	}
@@ -288,36 +357,49 @@ func readBootstrapDocument(t *testing.T, path string) map[string]json.RawMessage
 
 func runLifecycle(t *testing.T, root string, raw json.RawMessage) {
 	t.Helper()
+	if err := executeLifecycle(root, raw); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func executeLifecycle(root string, raw json.RawMessage) error {
 	var command any
 	if err := json.Unmarshal(raw, &command); err != nil {
-		t.Fatal(err)
+		return err
 	}
 	switch value := command.(type) {
 	case map[string]any:
 		processes := make([]*exec.Cmd, 0, len(value))
 		for _, nested := range value {
-			processes = append(processes, lifecycleProcess(t, root, nested))
+			process, err := lifecycleProcess(root, nested)
+			if err != nil {
+				return err
+			}
+			processes = append(processes, process)
 		}
 		for _, process := range processes {
 			if err := process.Start(); err != nil {
-				t.Fatal(err)
+				return err
 			}
 		}
 		for _, process := range processes {
 			if err := process.Wait(); err != nil {
-				t.Fatalf("execute lifecycle object: %v", err)
+				return err
 			}
 		}
 	default:
-		process := lifecycleProcess(t, root, command)
+		process, err := lifecycleProcess(root, command)
+		if err != nil {
+			return err
+		}
 		if output, err := process.CombinedOutput(); err != nil {
-			t.Fatalf("execute lifecycle: %v: %s", err, output)
+			return fmt.Errorf("execute lifecycle: %w: %s", err, output)
 		}
 	}
+	return nil
 }
 
-func lifecycleProcess(t *testing.T, root string, command any) *exec.Cmd {
-	t.Helper()
+func lifecycleProcess(root string, command any) (*exec.Cmd, error) {
 	var process *exec.Cmd
 	switch value := command.(type) {
 	case string:
@@ -329,11 +411,33 @@ func lifecycleProcess(t *testing.T, root string, command any) *exec.Cmd {
 		}
 		process = exec.Command(argv[0], argv[1:]...)
 	default:
-		t.Fatalf("unsupported generated command %#v", command)
+		return nil, fmt.Errorf("unsupported generated command %#v", command)
 	}
 	process.Dir = root
 	process.Env = os.Environ()
-	return process
+	return process, nil
+}
+
+func assertLifecycleForm(t *testing.T, form string, raw json.RawMessage) {
+	t.Helper()
+	var value any
+	if err := json.Unmarshal(raw, &value); err != nil {
+		t.Fatal(err)
+	}
+	switch form {
+	case "string":
+		if _, ok := value.(string); !ok {
+			t.Fatalf("string lifecycle became %T", value)
+		}
+	case "argv":
+		if _, ok := value.([]any); !ok {
+			t.Fatalf("argv lifecycle became %T", value)
+		}
+	case "named":
+		if _, ok := value.(map[string]any); !ok {
+			t.Fatalf("named lifecycle became %T", value)
+		}
+	}
 }
 
 func assertLifecycleTrace(t *testing.T, form, trace string) {
@@ -342,20 +446,35 @@ func assertLifecycleTrace(t *testing.T, form, trace string) {
 	operations := []string{"activateImage", "hydrate", "startServices"}
 	index := 0
 	for _, operation := range operations {
-		if index >= len(lines) || lines[index] != "helper-"+operation {
-			t.Fatalf("%s lifecycle did not run helper first for %s: %q", form, operation, trace)
-		}
-		index++
+		helperCount := 1
 		wantUsers := map[string]int{"user": 1}
 		if form == "named" {
+			helperCount = 2
 			wantUsers = map[string]int{"user-a": 1, "user-b": 1}
 		}
-		for range wantUsers {
-			if index >= len(lines) || wantUsers[lines[index]] == 0 {
-				t.Fatalf("%s lifecycle did not preserve user commands after %s: %q", form, operation, trace)
+		seenHelpers := 0
+		seenUsers := 0
+		for range helperCount + len(wantUsers) {
+			if index >= len(lines) {
+				t.Fatalf("%s lifecycle ended during %s: %q", form, operation, trace)
 			}
-			wantUsers[lines[index]]--
+			line := lines[index]
+			switch {
+			case line == "helper-"+operation:
+				seenHelpers++
+			case wantUsers[line] > 0:
+				seenUsers++
+				wantUsers[line]--
+			default:
+				t.Fatalf("%s lifecycle did not preserve %s commands: %q", form, operation, trace)
+			}
+			if seenUsers > seenHelpers {
+				t.Fatalf("%s lifecycle ran a user before its helper for %s: %q", form, operation, trace)
+			}
 			index++
+		}
+		if seenHelpers != helperCount || seenUsers != len(wantUsers) {
+			t.Fatalf("%s lifecycle counts differ for %s: %q", form, operation, trace)
 		}
 	}
 	if index != len(lines) {

@@ -1,7 +1,6 @@
 package remoteworker
 
 import (
-	"bufio"
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
@@ -9,10 +8,10 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"runtime"
-	"strconv"
-	"strings"
+	"syscall"
 
 	"golang.org/x/sys/unix"
 )
@@ -56,6 +55,8 @@ func runProbe(_ context.Context, request Request, output io.Writer) error {
 		return err
 	}
 	architecture := "linux/" + runtime.GOARCH
+	namespaceErr := probeNamespaces()
+	tunErr := probeTUN()
 	capabilities := []CapabilityReceipt{
 		capability("architecture", func() error {
 			if runtime.GOOS != "linux" || architecture != request.Expected.Architecture {
@@ -64,9 +65,9 @@ func runProbe(_ context.Context, request Request, output io.Writer) error {
 			return nil
 		}),
 		capability("filesystem", func() error { return probeFilesystem(request.RuntimeRoot) }),
-		capability("namespaces", probeNamespaces),
-		capability("tun", probeTUN),
-		capability("privilege", probePrivilege),
+		capabilityFromError("namespaces", namespaceErr),
+		capabilityFromError("tun", tunErr),
+		capabilityFromError("privilege", privilegeFromOperations(namespaceErr, tunErr)),
 		capability("loopback-port", probeLoopbackPort),
 	}
 	status := "supported"
@@ -160,6 +161,13 @@ func capability(name string, probe func() error) CapabilityReceipt {
 	return CapabilityReceipt{Name: name, Status: "supported"}
 }
 
+func capabilityFromError(name string, err error) CapabilityReceipt {
+	if err != nil {
+		return CapabilityReceipt{Name: name, Status: "unsupported", Diagnostic: boundedDiagnostic(err)}
+	}
+	return CapabilityReceipt{Name: name, Status: "supported"}
+}
+
 func probeFilesystem(root string) error {
 	file, err := os.CreateTemp(root, ".camp-probe-*")
 	if err != nil {
@@ -179,14 +187,15 @@ func probeFilesystem(root string) error {
 }
 
 func probeNamespaces() error {
-	for _, name := range []string{"mnt", "net", "user"} {
-		fd, err := unix.Open(filepath.Join("/proc/self/ns", name), unix.O_RDONLY|unix.O_CLOEXEC, 0)
-		if err != nil {
-			return err
-		}
-		if err := unix.Close(fd); err != nil {
-			return err
-		}
+	command := exec.Command("/bin/true")
+	command.SysProcAttr = &syscall.SysProcAttr{
+		Cloneflags:                 unix.CLONE_NEWUSER | unix.CLONE_NEWNET | unix.CLONE_NEWNS,
+		UidMappings:                []syscall.SysProcIDMap{{ContainerID: 0, HostID: os.Geteuid(), Size: 1}},
+		GidMappings:                []syscall.SysProcIDMap{{ContainerID: 0, HostID: os.Getegid(), Size: 1}},
+		GidMappingsEnableSetgroups: false,
+	}
+	if output, err := command.CombinedOutput(); err != nil {
+		return fmt.Errorf("create user, network, and mount namespaces: %w: %s", err, output)
 	}
 	return nil
 }
@@ -204,35 +213,17 @@ func probeTUN() error {
 }
 
 func probePrivilege() error {
-	status, err := os.Open("/proc/self/status")
-	if err != nil {
-		return err
-	}
-	defer status.Close()
-	return probePrivilegeFrom(status)
+	return privilegeFromOperations(probeNamespaces(), probeTUN())
 }
 
-func probePrivilegeFrom(status io.Reader) error {
-	scanner := bufio.NewScanner(status)
-	for scanner.Scan() {
-		key, value, found := strings.Cut(scanner.Text(), ":")
-		if !found || key != "CapEff" {
-			continue
-		}
-		effective, err := strconv.ParseUint(strings.TrimSpace(value), 16, 64)
-		if err != nil {
-			return fmt.Errorf("parse effective capabilities: %w", err)
-		}
-		const required = uint64(1<<unix.CAP_NET_ADMIN | 1<<unix.CAP_SYS_ADMIN)
-		if effective&required != required {
-			return fmt.Errorf("effective capabilities lack CAP_NET_ADMIN or CAP_SYS_ADMIN")
-		}
-		return nil
+func privilegeFromOperations(namespaceErr, tunErr error) error {
+	if namespaceErr != nil {
+		return namespaceErr
 	}
-	if err := scanner.Err(); err != nil {
-		return err
+	if tunErr != nil {
+		return tunErr
 	}
-	return fmt.Errorf("effective capabilities are unavailable")
+	return nil
 }
 
 func openLoopbackProbeSocket() (int, error) {
