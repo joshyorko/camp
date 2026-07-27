@@ -142,15 +142,18 @@ func NewClient(executable string, runner ports.Runner) *Client {
 }
 
 func (c *Client) Up(ctx context.Context, options UpOptions) (ports.Result, error) {
+	bootstrapSourcePath := options.BootstrapPath
 	switch options.SourceMode {
 	case "", SourceModeCapsule:
 	case SourceModeBootstrap:
 		if strings.TrimSpace(options.BootstrapPath) == "" {
 			return ports.Result{}, errors.New("DevPod bootstrap source path is required")
 		}
-		if err := validateBootstrapSourceIsolation(options.WorkspacePath, options.BootstrapPath); err != nil {
+		canonicalBootstrapPath, err := validateBootstrapSourceIsolation(options.WorkspacePath, options.BootstrapPath)
+		if err != nil {
 			return ports.Result{}, err
 		}
+		bootstrapSourcePath = canonicalBootstrapPath
 	default:
 		return ports.Result{}, fmt.Errorf("unsupported DevPod source mode %q", options.SourceMode)
 	}
@@ -256,7 +259,7 @@ func (c *Client) Up(ctx context.Context, options UpOptions) (ports.Result, error
 	argv = append(argv, options.ForwardedArgv...)
 	sourcePath := options.WorkspacePath
 	if options.SourceMode == SourceModeBootstrap {
-		sourcePath = options.BootstrapPath
+		sourcePath = bootstrapSourcePath
 	}
 	argv = append(argv, sourcePath)
 	return c.run(ctx, argv)
@@ -267,21 +270,21 @@ type sourceIdentity struct {
 	info os.FileInfo
 }
 
-func validateBootstrapSourceIsolation(workspacePath, bootstrapPath string) error {
+func validateBootstrapSourceIsolation(workspacePath, bootstrapPath string) (string, error) {
 	workspace, err := resolveSourceIdentity(workspacePath)
 	if err != nil {
-		return fmt.Errorf("establish DevPod capsule source identity: %w", err)
+		return "", fmt.Errorf("establish DevPod capsule source identity: %w", err)
 	}
 	bootstrap, err := resolveSourceIdentity(bootstrapPath)
 	if err != nil {
-		return fmt.Errorf("establish DevPod bootstrap source identity: %w", err)
+		return "", fmt.Errorf("establish DevPod bootstrap source identity: %w", err)
 	}
 	if sameSourceIdentity(workspace.info, bootstrap.info) ||
 		sourceContains(workspace.path, bootstrap.path) ||
 		sourceContains(bootstrap.path, workspace.path) {
-		return errors.New("DevPod bootstrap and capsule sources must be canonically disjoint")
+		return "", errors.New("DevPod bootstrap and capsule sources must be canonically disjoint")
 	}
-	return nil
+	return bootstrap.path, nil
 }
 
 func resolveSourceIdentity(path string) (sourceIdentity, error) {

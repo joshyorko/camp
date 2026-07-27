@@ -679,6 +679,57 @@ func TestUpUsesBootstrapRootInsteadOfCapsuleRoot(t *testing.T) {
 	}
 }
 
+func TestUpCanonicalizesAcceptedDisjointBootstrapSources(t *testing.T) {
+	root := t.TempDir()
+	capsule := filepath.Join(root, "capsule")
+	bootstrap := filepath.Join(root, "bootstrap")
+	for _, path := range []string{capsule, bootstrap} {
+		if err := os.MkdirAll(path, 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	bootstrapAlias := filepath.Join(root, "bootstrap-link")
+	if err := os.Symlink(bootstrap, bootstrapAlias); err != nil {
+		t.Fatal(err)
+	}
+	workingDirectory, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	relativeBootstrap, err := filepath.Rel(workingDirectory, bootstrap)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	for _, test := range []struct {
+		name          string
+		bootstrapPath string
+	}{
+		{name: "relative spelling", bootstrapPath: relativeBootstrap},
+		{name: "symlink spelling", bootstrapPath: bootstrapAlias},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			runner := &recordingRunner{}
+			_, err := NewClient("devpod", runner).Up(context.Background(), UpOptions{
+				WorkspacePath: capsule,
+				BootstrapPath: test.bootstrapPath,
+				SourceMode:    SourceModeBootstrap,
+				WorkspaceID:   "camp",
+			})
+			if err != nil {
+				t.Fatalf("Up() error = %v", err)
+			}
+			if len(runner.commands) != 1 {
+				t.Fatalf("Up() commands = %#v, want one execution", runner.commands)
+			}
+			argv := runner.commands[0].Argv
+			if got := argv[len(argv)-1]; got != bootstrap {
+				t.Fatalf("bootstrap argv = %q, want canonical path %q; argv=%#v", got, bootstrap, argv)
+			}
+		})
+	}
+}
+
 func TestUpRejectsNonDisjointBootstrapSourcesWithoutExecution(t *testing.T) {
 	root := t.TempDir()
 	capsule := filepath.Join(root, "capsule")
@@ -692,6 +743,30 @@ func TestUpRejectsNonDisjointBootstrapSourcesWithoutExecution(t *testing.T) {
 	}
 	capsuleAlias := filepath.Join(root, "capsule-link")
 	if err := os.Symlink(capsule, capsuleAlias); err != nil {
+		t.Fatal(err)
+	}
+	capsuleFile := filepath.Join(root, "capsule-file")
+	if err := os.WriteFile(capsuleFile, []byte("not a directory"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	bootstrapFile := filepath.Join(root, "bootstrap-file")
+	if err := os.WriteFile(bootstrapFile, []byte("not a directory"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	danglingCapsule := filepath.Join(root, "dangling-capsule")
+	if err := os.Symlink(filepath.Join(root, "missing-capsule-target"), danglingCapsule); err != nil {
+		t.Fatal(err)
+	}
+	danglingBootstrap := filepath.Join(root, "dangling-bootstrap")
+	if err := os.Symlink(filepath.Join(root, "missing-bootstrap-target"), danglingBootstrap); err != nil {
+		t.Fatal(err)
+	}
+	cyclicCapsule := filepath.Join(root, "cyclic-capsule")
+	if err := os.Symlink(cyclicCapsule, cyclicCapsule); err != nil {
+		t.Fatal(err)
+	}
+	cyclicBootstrap := filepath.Join(root, "cyclic-bootstrap")
+	if err := os.Symlink(cyclicBootstrap, cyclicBootstrap); err != nil {
 		t.Fatal(err)
 	}
 	workingDirectory, err := os.Getwd()
@@ -716,6 +791,12 @@ func TestUpRejectsNonDisjointBootstrapSourcesWithoutExecution(t *testing.T) {
 		{name: "capsule nested beneath bootstrap", workspacePath: nestedCapsule, bootstrapPath: bootstrap},
 		{name: "missing capsule", workspacePath: filepath.Join(root, "missing-capsule"), bootstrapPath: bootstrap},
 		{name: "missing bootstrap", workspacePath: capsule, bootstrapPath: filepath.Join(root, "missing-bootstrap")},
+		{name: "capsule is not a directory", workspacePath: capsuleFile, bootstrapPath: bootstrap},
+		{name: "bootstrap is not a directory", workspacePath: capsule, bootstrapPath: bootstrapFile},
+		{name: "dangling capsule identity", workspacePath: danglingCapsule, bootstrapPath: bootstrap},
+		{name: "dangling bootstrap identity", workspacePath: capsule, bootstrapPath: danglingBootstrap},
+		{name: "cyclic capsule identity", workspacePath: cyclicCapsule, bootstrapPath: bootstrap},
+		{name: "cyclic bootstrap identity", workspacePath: capsule, bootstrapPath: cyclicBootstrap},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			runner := &recordingRunner{}

@@ -12,8 +12,14 @@ Do not use Hauler v2.0.2's live `_catalog` response as proof that all direct reg
 - Bootstrap source mode is currently an adapter-only contract; production
   `app.Open` still uses capsule mode and does not construct, select, journal, or
   clean a bootstrap root. The adapter resolves both source identities before
-  execution and rejects missing, aliased, or nested bootstrap/capsule roots.
-  Default and explicit capsule modes retain the existing capsule source.
+  execution, rejects missing, non-directory, aliased, or nested
+  bootstrap/capsule roots, and passes the canonical absolute bootstrap path to
+  DevPod. `os.SameFile` proves exact observable filesystem identity and
+  resolved paths prove lexical nesting; this does not prove isolation from
+  privileged bind-mounted descendants or mount/path replacement after
+  validation. Production `app.Open` must close that ownership and time-of-use
+  boundary before selecting bootstrap mode. Default and explicit capsule modes
+  retain the existing capsule source.
 - The pinned v0.26.1 installed-tool contract proves one bounded local-folder
   upload: construct `.camp-bootstrap/devcontainer.json` and the immutable
   `camp-hauler-kit.tar.zst` completely before `devpod up`, pass only that
