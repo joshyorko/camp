@@ -3,14 +3,18 @@ package haulkit
 import (
 	"archive/tar"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"io"
 	"os"
+	"path"
 	"path/filepath"
 	"reflect"
 	"sort"
 	"strings"
+	"syscall"
 	"time"
 
 	"github.com/klauspost/compress/zstd"
@@ -26,12 +30,13 @@ type Verifier interface {
 }
 
 type VerifyRequest struct {
-	ManifestPath   string
-	ArchivePath    string
-	Architecture   string
-	Tools          ToolIdentities
-	StoreDirectory string
-	Destination    string
+	ManifestPath           string
+	ExpectedManifestSHA256 string
+	ArchivePath            string
+	Architecture           string
+	Tools                  ToolIdentities
+	StoreDirectory         string
+	Destination            string
 }
 
 type VerifiedKit struct {
@@ -41,19 +46,26 @@ type VerifiedKit struct {
 
 type KitVerifier struct {
 	validator StoreValidator
+	limits    verifyLimits
 }
 
 func NewVerifier(validator StoreValidator) *KitVerifier {
-	return &KitVerifier{validator: validator}
+	return &KitVerifier{validator: validator, limits: defaultVerifyLimits()}
 }
 
 func (verifier *KitVerifier) Verify(ctx context.Context, request VerifyRequest) (VerifiedKit, error) {
 	if verifier == nil || verifier.validator == nil || !filepath.IsAbs(request.ManifestPath) || !filepath.IsAbs(request.ArchivePath) {
 		return VerifiedKit{}, errors.New("Camp Hauler kit verifier requires absolute paths and a store validator")
 	}
-	body, err := os.ReadFile(request.ManifestPath)
+	if !validSHA256(request.ExpectedManifestSHA256) {
+		return VerifiedKit{}, errors.New("Camp Hauler kit verifier requires a trusted manifest SHA-256")
+	}
+	body, err := readBoundedRegular(request.ManifestPath, maxManifestBytes)
 	if err != nil {
 		return VerifiedKit{}, err
+	}
+	if digestBody(body) != request.ExpectedManifestSHA256 {
+		return VerifiedKit{}, fmt.Errorf("%w: manifest authority", ErrIdentityMismatch)
 	}
 	manifest, err := DecodeCanonical(body)
 	if err != nil {
@@ -62,7 +74,7 @@ func (verifier *KitVerifier) Verify(ctx context.Context, request VerifyRequest) 
 	if request.Architecture != manifest.Architecture || !reflect.DeepEqual(request.Tools, manifest.Tools) {
 		return VerifiedKit{}, ErrIdentityMismatch
 	}
-	digest, size, err := hashPath(request.ArchivePath)
+	digest, size, err := hashPathBounded(request.ArchivePath, maxArchiveBytes)
 	if err != nil {
 		return VerifiedKit{}, err
 	}
@@ -71,19 +83,36 @@ func (verifier *KitVerifier) Verify(ctx context.Context, request VerifyRequest) 
 	}
 	destination := request.Destination
 	temporary := false
+	created := false
+	var owned destinationIdentity
 	if destination == "" {
 		destination, err = os.MkdirTemp("", "camp-haulkit-verify-")
 		if err != nil {
 			return VerifiedKit{}, err
 		}
 		temporary = true
+		created = true
+	} else if !filepath.IsAbs(destination) {
+		return VerifiedKit{}, errors.New("Camp Hauler kit verifier requires an absolute destination")
 	}
-	if temporary {
-		defer os.RemoveAll(destination)
-	} else if err := os.Mkdir(destination, 0o700); err != nil {
+	if !temporary {
+		if err := os.Mkdir(destination, 0o700); err != nil {
+			return VerifiedKit{}, err
+		}
+		created = true
+	}
+	owned, err = identifyDestination(destination)
+	if err != nil {
+		_ = os.Remove(destination)
 		return VerifiedKit{}, err
 	}
-	if err := extractReadyArchive(ctx, request.ArchivePath, destination); err != nil {
+	success := false
+	defer func() {
+		if created && (temporary || !success) {
+			_ = removeOwnedDestination(destination, owned)
+		}
+	}()
+	if err := extractReadyArchive(ctx, request.ArchivePath, destination, verifier.limits); err != nil {
 		return VerifiedKit{}, err
 	}
 	for name, identity := range map[string]FileIdentity{
@@ -114,10 +143,18 @@ func (verifier *KitVerifier) Verify(ctx context.Context, request VerifyRequest) 
 			return VerifiedKit{}, fmt.Errorf("%w: source Hauler store drift", ErrIdentityMismatch)
 		}
 	}
+	rootDigest, rootSize, err := hashPathBounded(filepath.Join(storePath, manifest.Root.Reference), verifier.limits.maxExtractedBytes)
+	if err != nil {
+		return VerifiedKit{}, err
+	}
+	if rootDigest != manifest.Root.SHA256 || rootSize != manifest.Root.Size {
+		return VerifiedKit{}, fmt.Errorf("%w: root", ErrIdentityMismatch)
+	}
 	result := VerifiedKit{Manifest: manifest}
 	if !temporary {
 		result.ReadyDirectory = destination
 	}
+	success = true
 	return result, nil
 }
 
@@ -139,19 +176,45 @@ func canonicalStore(identity StoreIdentity) StoreIdentity {
 	return identity
 }
 
-func extractReadyArchive(ctx context.Context, archive, destination string) error {
+type verifyLimits struct {
+	maxExtractedBytes int64
+	maxEntries        int
+	maxInodes         int
+}
+
+func defaultVerifyLimits() verifyLimits {
+	return verifyLimits{
+		maxExtractedBytes: 64 << 30,
+		maxEntries:        100_000,
+		maxInodes:         100_000,
+	}
+}
+
+func extractReadyArchive(ctx context.Context, archive, destination string, limits verifyLimits) error {
+	if limits.maxExtractedBytes <= 0 || limits.maxEntries <= 0 || limits.maxInodes <= 0 {
+		return resourceLimit("invalid verifier limits")
+	}
 	file, err := openRegular(archive)
 	if err != nil {
 		return err
 	}
 	defer file.Close()
-	decoder, err := zstd.NewReader(file, zstd.WithDecoderConcurrency(1), zstd.WithDecoderLowmem(true))
+	decoder, err := zstd.NewReader(
+		file,
+		zstd.WithDecoderConcurrency(1),
+		zstd.WithDecoderLowmem(true),
+		zstd.WithDecoderMaxMemory(128<<20),
+		zstd.WithDecoderMaxWindow(64<<20),
+	)
 	if err != nil {
 		return err
 	}
 	defer decoder.Close()
 	reader := tar.NewReader(decoder)
 	seen := make(map[string]struct{})
+	var extractedBytes int64
+	entries := 0
+	inodes := 0
 	for {
 		if err := ctx.Err(); err != nil {
 			return err
@@ -166,10 +229,28 @@ func extractReadyArchive(ctx context.Context, archive, destination string) error
 		if err := validateReadyHeader(header); err != nil {
 			return err
 		}
+		entries++
+		if entries > limits.maxEntries {
+			return resourceLimit("archive entries")
+		}
 		if _, exists := seen[header.Name]; exists {
 			return fmt.Errorf("%w: duplicate entry", ErrUnsafeKit)
 		}
+		parent := path.Dir(header.Name)
+		if parent != "." {
+			if _, exists := seen[parent]; !exists {
+				return fmt.Errorf("%w: parent directory is not an earlier archive entry", ErrUnsafeKit)
+			}
+		}
 		seen[header.Name] = struct{}{}
+		inodes++
+		if inodes > limits.maxInodes {
+			return resourceLimit("extracted inodes")
+		}
+		if header.Size < 0 || extractedBytes > limits.maxExtractedBytes-header.Size {
+			return resourceLimit("extracted bytes")
+		}
+		extractedBytes += header.Size
 		target := filepath.Join(destination, filepath.FromSlash(header.Name))
 		if !strings.HasPrefix(target, destination+string(filepath.Separator)) {
 			return fmt.Errorf("%w: path escapes destination", ErrUnsafeKit)
@@ -179,9 +260,6 @@ func extractReadyArchive(ctx context.Context, archive, destination string) error
 				return err
 			}
 			continue
-		}
-		if err := os.MkdirAll(filepath.Dir(target), 0o700); err != nil {
-			return err
 		}
 		output, err := os.OpenFile(target, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
 		if err != nil {
@@ -206,6 +284,89 @@ func extractReadyArchive(ctx context.Context, archive, destination string) error
 		}
 	}
 	return nil
+}
+
+func readBoundedRegular(path string, maxBytes int) ([]byte, error) {
+	file, err := openRegular(path)
+	if err != nil {
+		return nil, err
+	}
+	defer file.Close()
+	info, err := file.Stat()
+	if err != nil {
+		return nil, err
+	}
+	if info.Size() > int64(maxBytes) {
+		return nil, resourceLimit("manifest bytes")
+	}
+	body, err := io.ReadAll(io.LimitReader(file, int64(maxBytes)+1))
+	if err != nil {
+		return nil, err
+	}
+	if len(body) > maxBytes {
+		return nil, resourceLimit("manifest bytes")
+	}
+	return body, nil
+}
+
+func hashPathBounded(path string, maxBytes int64) (string, int64, error) {
+	file, err := openRegular(path)
+	if err != nil {
+		return "", 0, err
+	}
+	defer file.Close()
+	info, err := file.Stat()
+	if err != nil {
+		return "", 0, err
+	}
+	if info.Size() > maxBytes {
+		return "", 0, resourceLimit("file bytes")
+	}
+	hash := sha256.New()
+	size, err := io.Copy(hash, io.LimitReader(file, maxBytes+1))
+	if err != nil {
+		return "", 0, err
+	}
+	if size > maxBytes {
+		return "", 0, resourceLimit("file bytes")
+	}
+	return hex.EncodeToString(hash.Sum(nil)), size, nil
+}
+
+func digestBody(body []byte) string {
+	sum := sha256.Sum256(body)
+	return hex.EncodeToString(sum[:])
+}
+
+type destinationIdentity struct {
+	device uint64
+	inode  uint64
+}
+
+func identifyDestination(path string) (destinationIdentity, error) {
+	info, err := os.Lstat(path)
+	if err != nil {
+		return destinationIdentity{}, err
+	}
+	if !info.IsDir() {
+		return destinationIdentity{}, fmt.Errorf("%w: destination is not a directory", ErrUnsafeKit)
+	}
+	stat, ok := info.Sys().(*syscall.Stat_t)
+	if !ok {
+		return destinationIdentity{}, errors.New("Camp Hauler kit destination identity unavailable")
+	}
+	return destinationIdentity{device: uint64(stat.Dev), inode: stat.Ino}, nil
+}
+
+func removeOwnedDestination(path string, expected destinationIdentity) error {
+	current, err := identifyDestination(path)
+	if errors.Is(err, os.ErrNotExist) {
+		return nil
+	}
+	if err != nil || current != expected {
+		return err
+	}
+	return os.RemoveAll(path)
 }
 
 func validateReadyHeader(header *tar.Header) error {

@@ -2,6 +2,7 @@ package haulkit
 
 import (
 	"bytes"
+	"errors"
 	"strings"
 	"testing"
 
@@ -65,6 +66,48 @@ func TestValidateRejectsMalformedIdentityAndPathFields(t *testing.T) {
 				t.Fatal("Validate() error = nil")
 			}
 		})
+	}
+}
+
+func TestValidateRejectsResourceCeilingViolations(t *testing.T) {
+	tests := []struct {
+		name   string
+		mutate func(*Manifest)
+	}{
+		{"archive bytes", func(m *Manifest) {
+			m.Archive.Size = maxArchiveBytes + 1
+			m.Chunks = []ChunkIdentity{{Index: 0, Name: "kit.part", SHA256: testDigest, Size: maxArchiveBytes + 1}}
+		}},
+		{"chunk bytes", func(m *Manifest) {
+			m.Archive.Size = maxChunkBytes + 1
+			m.Chunks = []ChunkIdentity{{Index: 0, Name: "kit.part", SHA256: testDigest, Size: maxChunkBytes + 1}}
+		}},
+		{"chunk count", func(m *Manifest) {
+			m.Archive.Size = int64(maxChunkCount + 1)
+			m.Chunks = make([]ChunkIdentity, maxChunkCount+1)
+			for index := range m.Chunks {
+				m.Chunks[index] = ChunkIdentity{
+					Index: uint32(index), Name: "part-" + strings.Repeat("x", index%3),
+					SHA256: testDigest, Size: 1,
+				}
+			}
+		}},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			manifest := validTestManifest()
+			test.mutate(&manifest)
+			if err := Validate(manifest); !errors.Is(err, ErrResourceLimit) {
+				t.Fatalf("Validate() error = %v, want ErrResourceLimit", err)
+			}
+		})
+	}
+}
+
+func TestDecodeCanonicalRejectsOversizedManifestBeforeDecode(t *testing.T) {
+	body := bytes.Repeat([]byte(" "), maxManifestBytes+1)
+	if _, err := DecodeCanonical(body); !errors.Is(err, ErrResourceLimit) {
+		t.Fatalf("DecodeCanonical() error = %v, want ErrResourceLimit", err)
 	}
 }
 

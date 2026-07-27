@@ -27,8 +27,16 @@ and hashes the completed chunks before the builder returns.
 
 Hauler store identity is derived by the version-bound adapter from sorted JSON
 inventory returned by `hauler store info --output json --digests`. Verification
-extracts into a private directory, revalidates tool bytes and the extracted
-store, and rejects architecture, version, digest, or post-manifest store drift.
+requires the caller's trusted canonical-manifest SHA-256 before it accepts any
+manifest-declared identity. It extracts into a newly created private directory,
+revalidates root and tool bytes plus the extracted store, and rejects
+architecture, version, digest, or post-manifest store drift. Verification
+rejects manifests over 4 MiB, archives over 64 GiB, more than 64 chunks, or
+chunks over 1 GiB. Streaming extraction is capped at 64 GiB, 100,000 archive
+entries, and 100,000 created inodes, with a 64 MiB zstd window and 128 MiB
+decoder-memory ceiling. A failed verification removes a caller-selected
+destination only when the verifier created it and its device/inode identity
+still matches; a preexisting destination is never used or removed.
 Permanent generations remain native `hauler store save --filename
 <generation>.tar.zst` artifacts; the ready-store kit does not replace that
 generation format.

@@ -20,9 +20,15 @@ const (
 	DefaultChunkSize      int64  = 1 << 30
 	manifestKind                 = "camp-hauler-kit"
 	maxManifestBytes             = 4 << 20
+	maxArchiveBytes       int64  = 64 << 30
+	maxChunkBytes         int64  = DefaultChunkSize
+	maxChunkCount                = 64
 )
 
-var ErrInvalidManifest = errors.New("invalid Camp Hauler kit manifest")
+var (
+	ErrInvalidManifest = errors.New("invalid Camp Hauler kit manifest")
+	ErrResourceLimit   = errors.New("Camp Hauler kit resource limit exceeded")
+)
 
 type Manifest struct {
 	SchemaVersion uint32                `json:"schemaVersion"`
@@ -122,11 +128,17 @@ func Validate(manifest Manifest) error {
 	if !validSHA256(manifest.Archive.SHA256) || manifest.Archive.Size <= 0 || len(manifest.Chunks) == 0 {
 		return invalidManifest("invalid archive identity")
 	}
+	if manifest.Archive.Size > maxArchiveBytes || len(manifest.Chunks) > maxChunkCount {
+		return resourceLimit("archive bytes or chunk count")
+	}
 	var chunkBytes int64
 	for index, chunk := range manifest.Chunks {
 		if chunk.Index != uint32(index) || !safeRelativeName(chunk.Name) || !validSHA256(chunk.SHA256) ||
-			chunk.Size <= 0 || chunk.Size > DefaultChunkSize {
+			chunk.Size <= 0 {
 			return invalidManifest("invalid chunk identity")
+		}
+		if chunk.Size > maxChunkBytes {
+			return resourceLimit("chunk bytes")
 		}
 		if chunkBytes > manifest.Archive.Size-chunk.Size {
 			return invalidManifest("chunk size overflow")
@@ -163,6 +175,9 @@ func MarshalCanonical(manifest Manifest) ([]byte, error) {
 func DecodeCanonical(body []byte) (Manifest, error) {
 	var manifest Manifest
 	if len(body) == 0 || len(body) > maxManifestBytes {
+		if len(body) > maxManifestBytes {
+			return manifest, resourceLimit("manifest bytes")
+		}
 		return manifest, invalidManifest("manifest size")
 	}
 	decoder := json.NewDecoder(bytes.NewReader(body))
@@ -185,6 +200,10 @@ func DecodeCanonical(body []byte) (Manifest, error) {
 
 func invalidManifest(reason string) error {
 	return fmt.Errorf("%w: %s", ErrInvalidManifest, reason)
+}
+
+func resourceLimit(reason string) error {
+	return fmt.Errorf("%w: %s", ErrResourceLimit, reason)
 }
 
 func validSHA256(value string) bool {

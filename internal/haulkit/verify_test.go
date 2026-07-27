@@ -3,6 +3,8 @@ package haulkit
 import (
 	"archive/tar"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"os"
 	"path/filepath"
@@ -45,11 +47,12 @@ func TestVerifierRejectsWrongArchitectureToolIdentityAndStoreDrift(t *testing.T)
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
 			verifyRequest := VerifyRequest{
-				ManifestPath:   artifact.ManifestPath,
-				ArchivePath:    artifact.ArchivePath,
-				Architecture:   manifest.Architecture,
-				Tools:          manifest.Tools,
-				StoreDirectory: request.StoreDirectory,
+				ManifestPath:           artifact.ManifestPath,
+				ExpectedManifestSHA256: digestBytes(manifestBody),
+				ArchivePath:            artifact.ArchivePath,
+				Architecture:           manifest.Architecture,
+				Tools:                  manifest.Tools,
+				StoreDirectory:         request.StoreDirectory,
 			}
 			test.mutate(&verifyRequest)
 			if _, err := NewVerifier(test.validator).Verify(context.Background(), verifyRequest); err == nil {
@@ -91,16 +94,176 @@ func TestVerifierRejectsMaliciousPathsAndOuterLinks(t *testing.T) {
 				t.Fatal(err)
 			}
 			_, err = NewVerifier(staticStoreValidator{identity: manifest.Store}).Verify(context.Background(), VerifyRequest{
-				ManifestPath: manifestPath,
-				ArchivePath:  archive,
-				Architecture: manifest.Architecture,
-				Tools:        manifest.Tools,
+				ManifestPath:           manifestPath,
+				ExpectedManifestSHA256: digestBytes(body),
+				ArchivePath:            archive,
+				Architecture:           manifest.Architecture,
+				Tools:                  manifest.Tools,
 			})
 			if !errors.Is(err, ErrUnsafeKit) {
 				t.Fatalf("Verify() error = %v, want ErrUnsafeKit", err)
 			}
 		})
 	}
+}
+
+func TestVerifierRequiresTrustedManifestAuthority(t *testing.T) {
+	request, validator := buildFixture(t)
+	artifact, err := NewBuilder(validator).Build(context.Background(), request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	trustedBody, err := os.ReadFile(artifact.ManifestPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	manifest, err := DecodeCanonical(trustedBody)
+	if err != nil {
+		t.Fatal(err)
+	}
+	manifest.Capsule = "substituted"
+	substitutedBody, err := MarshalCanonical(manifest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(artifact.ManifestPath, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(artifact.ManifestPath, substitutedBody, 0o400); err != nil {
+		t.Fatal(err)
+	}
+	_, err = NewVerifier(validator).Verify(context.Background(), VerifyRequest{
+		ManifestPath:           artifact.ManifestPath,
+		ExpectedManifestSHA256: digestBytes(trustedBody),
+		ArchivePath:            artifact.ArchivePath,
+		Architecture:           manifest.Architecture,
+		Tools:                  manifest.Tools,
+	})
+	if !errors.Is(err, ErrIdentityMismatch) {
+		t.Fatalf("Verify() error = %v, want ErrIdentityMismatch", err)
+	}
+}
+
+func TestVerifierRejectsRootIdentityMismatch(t *testing.T) {
+	request, validator := buildFixture(t)
+	artifact, err := NewBuilder(validator).Build(context.Background(), request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	body, err := os.ReadFile(artifact.ManifestPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	manifest, err := DecodeCanonical(body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	manifest.Root.SHA256 = strings.Repeat("b", 64)
+	body, err = MarshalCanonical(manifest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(artifact.ManifestPath, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(artifact.ManifestPath, body, 0o400); err != nil {
+		t.Fatal(err)
+	}
+	_, err = NewVerifier(validator).Verify(context.Background(), VerifyRequest{
+		ManifestPath:           artifact.ManifestPath,
+		ExpectedManifestSHA256: digestBytes(body),
+		ArchivePath:            artifact.ArchivePath,
+		Architecture:           manifest.Architecture,
+		Tools:                  manifest.Tools,
+	})
+	if !errors.Is(err, ErrIdentityMismatch) {
+		t.Fatalf("Verify() error = %v, want ErrIdentityMismatch", err)
+	}
+}
+
+func TestVerifierEnforcesStreamingExtractionCeilingsAndCleansExactDestination(t *testing.T) {
+	tests := []struct {
+		name   string
+		limits verifyLimits
+	}{
+		{"extracted bytes", verifyLimits{maxExtractedBytes: 3, maxEntries: 20, maxInodes: 20}},
+		{"entry count", verifyLimits{maxExtractedBytes: 1 << 20, maxEntries: 4, maxInodes: 20}},
+		{"inode count", verifyLimits{maxExtractedBytes: 1 << 20, maxEntries: 20, maxInodes: 4}},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			request, validator := buildFixture(t)
+			artifact, err := NewBuilder(validator).Build(context.Background(), request)
+			if err != nil {
+				t.Fatal(err)
+			}
+			body, err := os.ReadFile(artifact.ManifestPath)
+			if err != nil {
+				t.Fatal(err)
+			}
+			manifest, err := DecodeCanonical(body)
+			if err != nil {
+				t.Fatal(err)
+			}
+			destination := filepath.Join(t.TempDir(), "new-destination")
+			verifier := NewVerifier(validator)
+			verifier.limits = test.limits
+			_, err = verifier.Verify(context.Background(), VerifyRequest{
+				ManifestPath:           artifact.ManifestPath,
+				ExpectedManifestSHA256: digestBytes(body),
+				ArchivePath:            artifact.ArchivePath,
+				Architecture:           manifest.Architecture,
+				Tools:                  manifest.Tools,
+				Destination:            destination,
+			})
+			if !errors.Is(err, ErrResourceLimit) {
+				t.Fatalf("Verify() error = %v, want ErrResourceLimit", err)
+			}
+			if _, statErr := os.Stat(destination); !errors.Is(statErr, os.ErrNotExist) {
+				t.Fatalf("failed verification retained destination: %v", statErr)
+			}
+		})
+	}
+}
+
+func TestVerifierNeverRemovesPreexistingDestination(t *testing.T) {
+	request, validator := buildFixture(t)
+	artifact, err := NewBuilder(validator).Build(context.Background(), request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	body, err := os.ReadFile(artifact.ManifestPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	manifest, err := DecodeCanonical(body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	destination := t.TempDir()
+	sentinel := filepath.Join(destination, "sentinel")
+	if err := os.WriteFile(sentinel, []byte("keep"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	_, err = NewVerifier(validator).Verify(context.Background(), VerifyRequest{
+		ManifestPath:           artifact.ManifestPath,
+		ExpectedManifestSHA256: digestBytes(body),
+		ArchivePath:            artifact.ArchivePath,
+		Architecture:           manifest.Architecture,
+		Tools:                  manifest.Tools,
+		Destination:            destination,
+	})
+	if err == nil {
+		t.Fatal("Verify() error = nil")
+	}
+	if _, statErr := os.Stat(sentinel); statErr != nil {
+		t.Fatalf("preexisting destination changed: %v", statErr)
+	}
+}
+
+func digestBytes(body []byte) string {
+	sum := sha256.Sum256(body)
+	return hex.EncodeToString(sum[:])
 }
 
 func writeHostileArchive(t *testing.T, path, name string, typeflag byte, linkname string) {
