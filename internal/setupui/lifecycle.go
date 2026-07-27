@@ -3,6 +3,7 @@ package setupui
 import (
 	"context"
 	"io"
+	"sync"
 
 	tea "charm.land/bubbletea/v2"
 
@@ -16,6 +17,9 @@ type LifecycleWorkflow struct {
 	Operation   string
 	ReadyLine   string
 	NextCommand string
+	// Stages is the ordered set of facts required before terminal success.
+	// Empty selects the complete canonical lifecycle sequence.
+	Stages []presentation.LifecycleStage
 }
 
 // LifecycleModel presents a non-configuring lifecycle command in the same
@@ -43,12 +47,12 @@ type LifecycleModel struct {
 // provisioning because lifecycle commands have already been selected by the
 // CLI; no configuration form or background operation is owned by this model.
 func NewLifecycleModel(pal Palette, sprites map[string]Sprite, workflow LifecycleWorkflow) LifecycleModel {
-	stages := presentation.VisualLifecycleStages()
+	stages, valid := orderedLifecycleStages(workflow.Stages)
 	states := make(map[presentation.LifecycleStage]WaypointState, len(stages))
 	for _, stage := range stages {
 		states[stage] = WaypointPending
 	}
-	return LifecycleModel{
+	m := LifecycleModel{
 		phase:     PhaseProvision,
 		workflow:  workflow,
 		stages:    stages,
@@ -58,6 +62,33 @@ func NewLifecycleModel(pal Palette, sprites map[string]Sprite, workflow Lifecycl
 		guard:     NewSizeGuard(MinWidth, MinHeight),
 		starfield: NewStarfield(0xCA37),
 	}
+	if !valid {
+		m.protocolFailure("invalid lifecycle workflow stage order")
+	}
+	return m
+}
+
+func orderedLifecycleStages(requested []presentation.LifecycleStage) ([]presentation.LifecycleStage, bool) {
+	canonical := presentation.VisualLifecycleStages()
+	if len(requested) == 0 {
+		return canonical, true
+	}
+	ordered := append([]presentation.LifecycleStage(nil), requested...)
+	previous := -1
+	for _, stage := range ordered {
+		index := -1
+		for i, candidate := range canonical {
+			if candidate == stage {
+				index = i
+				break
+			}
+		}
+		if index <= previous {
+			return ordered, false
+		}
+		previous = index
+	}
+	return ordered, true
 }
 
 // OnExit registers terminal cleanup owned by the caller. It runs at most once
@@ -79,14 +110,25 @@ func (m LifecycleModel) withExit() LifecycleModel {
 
 // RunLifecycle runs the lifecycle-only rich path. The caller owns the worker
 // and feeds it typed events; this function owns only Bubble Tea restoration.
-func RunLifecycle(ctx context.Context, in io.Reader, out io.Writer, pal Palette, sprites map[string]Sprite, workflow LifecycleWorkflow, events <-chan presentation.RichLifecycleEvent, onExit func()) (Result, error) {
-	model := NewLifecycleModel(pal, sprites, workflow).OnExit(onExit)
+func RunLifecycle(ctx context.Context, in io.Reader, out io.Writer, pal Palette, sprites map[string]Sprite, workflow LifecycleWorkflow, events <-chan presentation.RichLifecycleEvent, workerDone <-chan struct{}, onExit func()) (Result, error) {
+	var exitOnce sync.Once
+	requestExit := func() {
+		if onExit != nil {
+			exitOnce.Do(onExit)
+		}
+	}
+	model := NewLifecycleModel(pal, sprites, workflow).OnExit(requestExit)
 	model.events = events
 	opts := []tea.ProgramOption{tea.WithContext(ctx), tea.WithOutput(out)}
 	if in != nil {
 		opts = append(opts, tea.WithInput(in))
 	}
 	final, err := tea.NewProgram(model, opts...).Run()
+	// Program initialization errors and parent-context cancellation can bypass
+	// the model's key-driven exit path. Request worker cancellation on every
+	// terminal path, then join the worker before returning control to the CLI.
+	requestExit()
+	waitForLifecycleWorker(workerDone)
 	if err != nil {
 		return Result{}, err
 	}
@@ -96,6 +138,12 @@ func RunLifecycle(ctx context.Context, in io.Reader, out io.Writer, pal Palette,
 	}
 	failed, message, recovery := fm.Failed()
 	return Result{Canceled: fm.Canceled(), Failed: failed, FailMsg: message, Recovery: recovery}, nil
+}
+
+func waitForLifecycleWorker(done <-chan struct{}) {
+	if done != nil {
+		<-done
+	}
 }
 
 func (m LifecycleModel) Init() tea.Cmd {
@@ -145,23 +193,34 @@ func (m LifecycleModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 func (m LifecycleModel) apply(event presentation.RichLifecycleEvent) (tea.Model, tea.Cmd) {
 	switch event.Kind {
 	case presentation.RichLifecycleActivity:
-		if m.activate(event.Stage) {
-			m.activity = SafeText(event.Message, "lifecycle detail unavailable")
+		if !m.activate(event.Stage) {
+			m.protocolFailure("lifecycle activity arrived out of order")
+			return m, nil
 		}
+		m.activity = SafeText(event.Message, "lifecycle detail unavailable")
 		return m, m.listen()
 	case presentation.RichLifecycleCompleted:
 		m.activity = ""
-		m.complete(event.Stage)
+		if !m.complete(event.Stage) {
+			m.protocolFailure("lifecycle completion arrived out of order")
+			return m, nil
+		}
 		return m, m.listen()
 	case presentation.RichLifecycleSucceeded:
 		m.activity = ""
+		if !m.completeSequence() {
+			m.protocolFailure("lifecycle success arrived before required stages completed")
+			return m, nil
+		}
 		m.phase = PhaseReady
 		return m, nil
 	case presentation.RichLifecycleFailed:
 		m.activity = ""
-		if m.activate(event.Stage) {
-			m.states[event.Stage] = WaypointFailed
+		if !m.isExpected(event.Stage) {
+			m.protocolFailure("lifecycle failure arrived out of order")
+			return m, nil
 		}
+		m.states[event.Stage] = WaypointFailed
 		m.failure = SafeText(event.Message, "lifecycle failed")
 		m.recovery = SafeText(event.RecoveryCommand, "")
 		m.phase = PhaseFailed
@@ -172,7 +231,7 @@ func (m LifecycleModel) apply(event presentation.RichLifecycleEvent) (tea.Model,
 }
 
 func (m *LifecycleModel) activate(stage presentation.LifecycleStage) bool {
-	if _, ok := m.states[stage]; !ok {
+	if !m.isExpected(stage) {
 		return false
 	}
 	for _, candidate := range m.stages {
@@ -186,17 +245,40 @@ func (m *LifecycleModel) activate(stage presentation.LifecycleStage) bool {
 	return true
 }
 
-func (m *LifecycleModel) complete(stage presentation.LifecycleStage) {
-	if _, ok := m.states[stage]; !ok {
-		return
+func (m *LifecycleModel) complete(stage presentation.LifecycleStage) bool {
+	if !m.isExpected(stage) {
+		return false
 	}
 	m.states[stage] = WaypointCompleted
-	for i, candidate := range m.stages {
-		if candidate == stage && i+1 < len(m.stages) && m.states[m.stages[i+1]] == WaypointPending {
-			m.states[m.stages[i+1]] = WaypointActive
-			return
+	return true
+}
+
+func (m LifecycleModel) isExpected(stage presentation.LifecycleStage) bool {
+	for _, candidate := range m.stages {
+		if m.states[candidate] != WaypointCompleted {
+			return candidate == stage
 		}
 	}
+	return false
+}
+
+func (m LifecycleModel) completeSequence() bool {
+	if len(m.stages) == 0 {
+		return false
+	}
+	for _, stage := range m.stages {
+		if m.states[stage] != WaypointCompleted {
+			return false
+		}
+	}
+	return true
+}
+
+func (m *LifecycleModel) protocolFailure(message string) {
+	m.activity = ""
+	m.failure = message
+	m.recovery = ""
+	m.phase = PhaseFailed
 }
 
 // StageState exposes the current scene state for focused contract tests and
