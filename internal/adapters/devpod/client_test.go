@@ -670,6 +670,48 @@ func TestUpUsesBootstrapRootInsteadOfCapsuleRoot(t *testing.T) {
 	}
 }
 
+func TestUpPreservesLocalCapsuleSourceModesAndFallbackImage(t *testing.T) {
+	t.Parallel()
+	for _, test := range []struct {
+		name       string
+		provider   string
+		sourceMode SourceMode
+	}{
+		{name: "default Docker mode", provider: "docker"},
+		{name: "explicit capsule Podman mode", provider: "podman", sourceMode: SourceModeCapsule},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			runner := &recordingRunner{}
+			_, err := NewClient("devpod", runner).Up(context.Background(), UpOptions{
+				WorkspacePath:    "/tmp/capsule",
+				BootstrapPath:    "/tmp/disposable-bootstrap",
+				SourceMode:       test.sourceMode,
+				WorkspaceID:      "camp",
+				Provider:         test.provider,
+				FallbackImage:    "ghcr.io/example/room@sha256:abc",
+				DevcontainerPath: ".camp/runtime/devcontainer.json",
+			})
+			if err != nil {
+				t.Fatalf("Up() error = %v", err)
+			}
+			argv := runner.commands[0].Argv
+			if argv[len(argv)-1] != "/tmp/capsule" {
+				t.Fatalf("local %s source = %q, want capsule root; argv=%#v", test.provider, argv[len(argv)-1], argv)
+			}
+			foundFallback := false
+			for index := 0; index+1 < len(argv); index++ {
+				if argv[index] == "--fallback-image" && argv[index+1] == "ghcr.io/example/room@sha256:abc" {
+					foundFallback = true
+					break
+				}
+			}
+			if !foundFallback {
+				t.Fatalf("local %s argv lost generated Room fallback: %#v", test.provider, argv)
+			}
+		})
+	}
+}
+
 func TestTerminalAndT3UpRejectDevPodOpenIDETrue(t *testing.T) {
 	t.Parallel()
 	openIDE := true

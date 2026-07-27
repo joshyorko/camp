@@ -9,6 +9,26 @@ Do not use Hauler v2.0.2's live `_catalog` response as proof that all direct reg
 ## Implemented adapter behavior
 
 - DevPod command construction preserves context, workspace identity, repeated public flags, environment variables, and argument boundaries through `ports.Command`.
+- The pinned v0.26.1 installed-tool contract supports one bounded local-folder
+  upload: construct `.camp-bootstrap/devcontainer.json` and the immutable
+  `camp-hauler-kit.tar.zst` completely before `devpod up`, pass only that
+  disposable bootstrap root, and perform no post-`up` host writes. The real
+  Docker-provider gate uploaded a valid kit larger than 1 MiB, ran a
+  `postCreateCommand` that hashed it after upload, returned the matching receipt
+  through structured `devpod ssh`, independently matched the remote archive's
+  SHA-256, and recorded the bootstrap root rather than the capsule root as the
+  DevPod source. This proves upload and hook ordering only; selected capsule
+  devcontainer activation remains a later hydration concern.
+- Do not attempt to activate a devcontainer configuration created only in the
+  remote workspace with a second local-folder `devpod up --recreate`. Pinned
+  v0.26.1 exposes no supported community command for that remote reconfiguration
+  seam, and the real second-up characterization resolved the selected config
+  beneath the recorded local source instead. The first Docker-provider `up`
+  changed that disposable source to `uid=0`, `gid=0`, mode `0700`; the recreate
+  failed `stat .../.devcontainer/devcontainer.json: permission denied` even
+  though structured remote hydration had succeeded. Treat the source as
+  disposable and clean it by exact ownership scope; do not chmod or chown it to
+  manufacture a recreate contract.
 - A terminal `camp open` constructs this ordered argv: `devpod up --ide none --open-ide=false --context <context> --id <workspace-id> --provider <provider> --devcontainer-path <capsule-relative-devcontainer-path> --workspace-env CAMP_REGISTRY=<registry-endpoint> --workspace-env CAMP_FILESERVER=<fileserver-endpoint> --workspace-env CAMP_CAPSULE=<capsule> --workspace-env CAMP_CHECKPOINT=<opened-generation-or-empty> <resolved-root>`. `internal/app/open_test.go:377` proves that the application supplies the capsule-relative devcontainer path; `TestTask3ScopedWorkspaceEnvironmentAndArgvExecution` preserves the adapter's ordered environment argv, and `TestExactDevPodArgv` preserves terminal IDE selection.
 - Raw DevPod and Hauler passthrough is fail-closed. The adapters allow only exact, effect-free `version`, `help`, and `--help` invocations; known lifecycle, session, provider, store, and service commands are denied; reserved configuration, environment, identity, and store flags are conflicts; malformed and unknown argv is rejected before the runner. Passthrough accepts no environment map, so it cannot replace Camp-owned environment.
 - Remote return resolves the DevPod workspace folder, attempts an rsync mirror into a fresh local staging root, and permits tar-over-SSH fallback only for classified fallback-eligible failures. Failed staging attempts are discarded.

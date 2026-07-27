@@ -7,20 +7,22 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"reflect"
 	"strings"
-	"syscall"
 	"testing"
 	"time"
 
+	archiveadapter "github.com/joshyorko/camp/internal/adapters/archive"
 	"github.com/joshyorko/camp/internal/adapters/devpod"
+	"github.com/joshyorko/camp/internal/ports"
 )
 
-func TestInstalledDevPodBootstrapSourceSurvivesRecreate(t *testing.T) {
+func TestInstalledDevPodUploadsSingleImmutableKit(t *testing.T) {
 	if os.Getenv("CAMP_TEST_DEVPOD_BOOTSTRAP") != "1" {
-		t.Skip("set CAMP_TEST_DEVPOD_BOOTSTRAP=1 to run the real two-phase DevPod bootstrap contract")
+		t.Skip("set CAMP_TEST_DEVPOD_BOOTSTRAP=1 to run the real single-upload DevPod bootstrap contract")
 	}
 	if _, err := os.Stat("/usr/bin/docker"); err != nil {
-		t.Skipf("docker is unavailable: %v", err)
+		t.Fatalf("explicit DevPod bootstrap gate requires /usr/bin/docker: %v", err)
 	}
 
 	root := t.TempDir()
@@ -35,10 +37,25 @@ func TestInstalledDevPodBootstrapSourceSurvivesRecreate(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(capsuleRoot, ".devcontainer", "devcontainer.json"), []byte(`{"image":"busybox:1.36"}`), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(filepath.Join(bootstrapRoot, ".camp-bootstrap", "devcontainer.json"), []byte(`{"image":"alpine:3.20"}`), 0o600); err != nil {
+	if err := os.WriteFile(filepath.Join(capsuleRoot, "kit-payload.bin"), deterministicKitPayload(2<<20), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	assertBootstrapFootprint(t, bootstrapRoot)
+	kitPath := filepath.Join(bootstrapRoot, "camp-hauler-kit.tar.zst")
+	kit, err := archiveadapter.NewTarZstd().Create(context.Background(), capsuleRoot, kitPath)
+	if err != nil {
+		t.Fatalf("construct immutable kit archive: %v", err)
+	}
+	if kit.Size <= 1<<20 {
+		t.Fatalf("kit archive size = %d, want a meaningful payload larger than metadata limit", kit.Size)
+	}
+	if err := os.Chmod(kitPath, 0o400); err != nil {
+		t.Fatalf("make kit archive read-only before DevPod upload: %v", err)
+	}
+	bootstrapConfig := []byte(`{"image":"alpine:3.20","postCreateCommand":"sha256sum camp-hauler-kit.tar.zst > .camp-bootstrap/kit.sha256"}`)
+	if err := os.WriteFile(filepath.Join(bootstrapRoot, ".camp-bootstrap", "devcontainer.json"), bootstrapConfig, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	assertBootstrapFootprint(t, bootstrapRoot, kitPath)
 	t.Cleanup(func() {
 		if err := removeRootOwnedBootstrap(root, bootstrapRoot); err != nil {
 			t.Errorf("remove exact disposable bootstrap source: %v", err)
@@ -48,6 +65,13 @@ func TestInstalledDevPodBootstrapSourceSurvivesRecreate(t *testing.T) {
 	isolation := newDevPodTestIsolation(root)
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Minute)
 	defer cancel()
+	version, err := runLifecycleCommand(ctx, isolation.Environment(), "devpod", "version")
+	if err != nil {
+		t.Fatalf("read installed DevPod version: %v\n%s", err, version)
+	}
+	if got := strings.TrimSpace(string(version)); got != "v0.26.1" {
+		t.Fatalf("installed DevPod version = %q, want pinned v0.26.1", got)
+	}
 	if output, err := bootstrapDevPodDockerProvider(ctx, isolation); err != nil {
 		t.Fatalf("bootstrap private Docker provider: %v\n%s", err, output)
 	}
@@ -62,107 +86,88 @@ func TestInstalledDevPodBootstrapSourceSurvivesRecreate(t *testing.T) {
 		}
 	})
 
-	client := devpod.NewClient("devpod", execRunner{environment: environmentMap(isolation.Environment())})
-	if _, err := client.Up(ctx, devpod.UpOptions{
+	runner := &countingDevPodRunner{delegate: execRunner{environment: environmentMap(isolation.Environment())}}
+	client := devpod.NewClient("devpod", runner)
+	result, err := client.Up(ctx, devpod.UpOptions{
 		WorkspacePath: capsuleRoot, BootstrapPath: bootstrapRoot, SourceMode: devpod.SourceModeBootstrap,
 		WorkspaceID: workspaceID, Context: isolation.context, Provider: "docker", DevcontainerPath: ".camp-bootstrap/devcontainer.json",
-	}); err != nil {
-		t.Fatalf("first bootstrap up: %v", err)
+	})
+	if err != nil {
+		t.Fatalf("single bootstrap up: %v\nstdout:\n%s\nstderr:\n%s", err, result.Stdout, result.Stderr)
 	}
 	created = true
+	assertSingleBootstrapUp(t, runner.upCommands, bootstrapRoot, capsuleRoot)
 
 	remoteRoot, err := client.ResolveWorkspaceFolderInContext(ctx, isolation.context, workspaceID)
 	if err != nil {
 		t.Fatalf("resolve bootstrapped remote workspace: %v", err)
 	}
-	hydrateRemoteWorkspace(t, ctx, client, isolation.context, workspaceID, remoteRoot, "nested")
-	logLocalBootstrapOwnership(t, bootstrapRoot)
-	result, err := client.Up(ctx, devpod.UpOptions{
-		WorkspacePath: capsuleRoot, BootstrapPath: bootstrapRoot, SourceMode: devpod.SourceModeBootstrap,
-		WorkspaceID: workspaceID, Context: isolation.context, Provider: "docker", Recreate: true, DevcontainerPath: ".devcontainer/devcontainer.json",
+	remoteKit := filepath.ToSlash(filepath.Join(remoteRoot, filepath.Base(kitPath)))
+	receiptPath := filepath.ToSlash(filepath.Join(remoteRoot, ".camp-bootstrap", "kit.sha256"))
+	receiptResult, err := client.Execute(ctx, devpod.WorkspaceCommand{
+		Context: isolation.context, WorkspaceID: workspaceID,
+		Argv: []string{"cat", receiptPath},
 	})
 	if err != nil {
-		t.Fatalf("recreate hydrated nested devcontainer: %v\nstdout:\n%s\nstderr:\n%s", err, result.Stdout, result.Stderr)
+		t.Fatalf("read post-create kit receipt through structured DevPod SSH: %v\n%s", err, receiptResult.Stderr)
 	}
-	assertRemoteHydration(t, ctx, client, isolation.context, workspaceID, remoteRoot, "nested")
-	hydrateRemoteWorkspace(t, ctx, client, isolation.context, workspaceID, remoteRoot, "root")
-	result, err = client.Up(ctx, devpod.UpOptions{
-		WorkspacePath: capsuleRoot, BootstrapPath: bootstrapRoot, SourceMode: devpod.SourceModeBootstrap,
-		WorkspaceID: workspaceID, Context: isolation.context, Provider: "docker", Recreate: true, DevcontainerPath: ".devcontainer.json",
+	receiptFields := strings.Fields(string(receiptResult.Stdout))
+	if len(receiptFields) != 2 || receiptFields[0] != kit.SHA256 || receiptFields[1] != filepath.Base(kitPath) {
+		t.Fatalf("post-create kit receipt = %q, want %s  %s", receiptResult.Stdout, kit.SHA256, filepath.Base(kitPath))
+	}
+	digestResult, err := client.Execute(ctx, devpod.WorkspaceCommand{
+		Context: isolation.context, WorkspaceID: workspaceID,
+		Argv: []string{"sha256sum", remoteKit},
 	})
 	if err != nil {
-		t.Fatalf("recreate hydrated root devcontainer: %v\nstdout:\n%s\nstderr:\n%s", err, result.Stdout, result.Stderr)
+		t.Fatalf("hash remotely uploaded kit through structured DevPod SSH: %v\n%s", err, digestResult.Stderr)
 	}
-	assertRemoteHydration(t, ctx, client, isolation.context, workspaceID, remoteRoot, "root")
+	fields := strings.Fields(string(digestResult.Stdout))
+	if len(fields) != 2 || fields[0] != kit.SHA256 || fields[1] != remoteKit {
+		t.Fatalf("remote kit digest output = %q, want %s  %s", digestResult.Stdout, kit.SHA256, remoteKit)
+	}
 	assertRecordedWorkspaceSource(t, ctx, isolation, workspaceID, bootstrapRoot, capsuleRoot)
 }
 
-func hydrateRemoteWorkspace(t *testing.T, ctx context.Context, client *devpod.Client, devpodContext, workspaceID, remoteRoot, selectedConfig string) {
-	t.Helper()
-	script := `set -eu
-root=$1
-case "$2" in
-nested)
-	mkdir -p "$root/.devcontainer"
-	printf '%s\n' 'FROM alpine:3.20' > "$root/.devcontainer/Dockerfile"
-	printf '%s\n' '{"build":{"dockerfile":"Dockerfile","context":".."}}' > "$root/.devcontainer/devcontainer.json"
-	;;
-root)
-	printf '%s\n' 'FROM alpine:3.20' > "$root/Dockerfile"
-	printf '%s\n' '{"build":{"dockerfile":"Dockerfile","context":"."}}' > "$root/.devcontainer.json"
-	;;
-*)
-	exit 64
-	;;
-esac
-printf '%s\n' 'must survive recreate' > "$root/hydrated.txt"`
-	if _, err := client.Execute(ctx, devpod.WorkspaceCommand{
-		Context: devpodContext, WorkspaceID: workspaceID,
-		Argv: []string{"sh", "-c", script, "camp-hydrate", remoteRoot, selectedConfig},
-	}); err != nil {
-		t.Fatalf("hydrate %s config through remote workspace: %v", selectedConfig, err)
-	}
+type countingDevPodRunner struct {
+	delegate   ports.Runner
+	upCommands []ports.Command
 }
 
-func assertRemoteHydration(t *testing.T, ctx context.Context, client *devpod.Client, devpodContext, workspaceID, remoteRoot, selectedConfig string) {
-	t.Helper()
-	script := `set -eu
-root=$1
-test "$(cat "$root/hydrated.txt")" = "must survive recreate"
-case "$2" in
-nested)
-	test -f "$root/.devcontainer/devcontainer.json"
-	test -f "$root/.devcontainer/Dockerfile"
-	;;
-root)
-	test -f "$root/.devcontainer.json"
-	test -f "$root/Dockerfile"
-	;;
-*)
-	exit 64
-	;;
-esac`
-	if _, err := client.Execute(ctx, devpod.WorkspaceCommand{
-		Context: devpodContext, WorkspaceID: workspaceID,
-		Argv: []string{"sh", "-c", script, "camp-verify", remoteRoot, selectedConfig},
-	}); err != nil {
-		t.Fatalf("%s remote hydration did not survive recreate: %v", selectedConfig, err)
+func (r *countingDevPodRunner) Run(ctx context.Context, command ports.Command) (ports.Result, error) {
+	if len(command.Argv) > 0 && command.Argv[0] == "up" {
+		r.upCommands = append(r.upCommands, command)
 	}
+	return r.delegate.Run(ctx, command)
 }
 
-func logLocalBootstrapOwnership(t *testing.T, bootstrapRoot string) {
+func deterministicKitPayload(size int) []byte {
+	body := make([]byte, size)
+	state := uint32(0x9e3779b9)
+	for index := range body {
+		state ^= state << 13
+		state ^= state >> 17
+		state ^= state << 5
+		body[index] = byte(state)
+	}
+	return body
+}
+
+func assertSingleBootstrapUp(t *testing.T, commands []ports.Command, bootstrapRoot, capsuleRoot string) {
 	t.Helper()
-	info, err := os.Stat(bootstrapRoot)
-	if err != nil {
-		t.Logf("local bootstrap source stat after remote hydration: %v", err)
-		return
+	if len(commands) != 1 {
+		t.Fatalf("DevPod up calls = %d, want exactly one: %#v", len(commands), commands)
 	}
-	stat, ok := info.Sys().(*syscall.Stat_t)
-	if !ok {
-		t.Logf("local bootstrap source after remote hydration: mode=%s owner=unknown", info.Mode())
-		return
+	wantTail := []string{"--devcontainer-path", ".camp-bootstrap/devcontainer.json", bootstrapRoot}
+	argv := commands[0].Argv
+	if len(argv) < len(wantTail) || !reflect.DeepEqual(argv[len(argv)-len(wantTail):], wantTail) {
+		t.Fatalf("single DevPod up argv = %#v, want tail %#v", argv, wantTail)
 	}
-	t.Logf("local bootstrap source after remote hydration: mode=%#o uid=%d gid=%d", info.Mode().Perm(), stat.Uid, stat.Gid)
+	for _, argument := range argv {
+		if argument == capsuleRoot {
+			t.Fatalf("single DevPod up exposed capsule root: %#v", argv)
+		}
+	}
 }
 
 func removeRootOwnedBootstrap(testRoot, bootstrapRoot string) error {
@@ -194,24 +199,27 @@ func environmentMap(entries []string) map[string]string {
 	return result
 }
 
-func assertBootstrapFootprint(t *testing.T, root string) {
+func assertBootstrapFootprint(t *testing.T, root, kitPath string) {
 	t.Helper()
-	var count, size int64
+	var regularFiles, nonKitBytes int64
 	err := filepath.Walk(root, func(path string, info os.FileInfo, err error) error {
 		if err != nil {
 			return err
 		}
-		if !info.IsDir() {
-			count++
-			size += info.Size()
+		if !info.Mode().IsRegular() {
+			return nil
+		}
+		regularFiles++
+		if path != kitPath {
+			nonKitBytes += info.Size()
 		}
 		return nil
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if count > 16 || size > 1<<20 {
-		t.Fatalf("bootstrap footprint files=%d bytes=%d, want at most 16 files and 1 MiB", count, size)
+	if regularFiles > 16 || nonKitBytes > 1<<20 {
+		t.Fatalf("bootstrap footprint regular-files=%d non-kit-bytes=%d, want at most 16 files and 1 MiB metadata", regularFiles, nonKitBytes)
 	}
 }
 
