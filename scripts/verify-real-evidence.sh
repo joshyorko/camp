@@ -54,6 +54,7 @@ run_file() {
 }
 
 run_minio() {
+  run_named TestMinIOImmutableLifecycle 10m
   run_named TestS3TwoWriterConflict 20m
   CAMP_TEST_REAL_MINIO_REOPEN=1 run_named TestMinIOLifecycleVertical 60m
 }

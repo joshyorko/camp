@@ -5,11 +5,13 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -21,6 +23,26 @@ import (
 )
 
 const portabilityBucket = "camp-portability"
+
+func TestMinIOCredentialScanRejectsFixtureCredentials(t *testing.T) {
+	access := "minio-access-fixture"
+	secret := "minio-secret-fixture"
+	if err := scanMinIOCredentials("controller completed without credential output", access, secret); err != nil {
+		t.Fatalf("clean controller output: %v", err)
+	}
+	if err := scanMinIOCredentials("authorization leaked "+secret, access, secret); err == nil {
+		t.Fatal("credential scan accepted a secret")
+	}
+}
+
+func scanMinIOCredentials(output, access, secret string) error {
+	for _, credential := range []string{access, secret} {
+		if credential != "" && strings.Contains(output, credential) {
+			return fmt.Errorf("controller output contains a MinIO fixture credential")
+		}
+	}
+	return nil
+}
 
 func TestS3TwoWriterConflict(t *testing.T) {
 	fixture := startMinIO(t)
@@ -38,6 +60,7 @@ type controllerResult struct {
 	History          []domain.GenerationRef `json:"history,omitempty"`
 	DownloadedSHA256 string                 `json:"downloadedSha256,omitempty"`
 	DownloadedSize   int64                  `json:"downloadedSize,omitempty"`
+	LeaseReleased    bool                   `json:"leaseReleased,omitempty"`
 }
 
 type controllerProcess struct {
@@ -91,8 +114,12 @@ func runMinIOTwoWriterScenario(t *testing.T, fixture *minioFixture) {
 	}
 	results := make([]controllerResult, 0, 2)
 	for _, process := range processes {
-		if err := process.cmd.Wait(); err != nil {
-			t.Fatalf("controller process: %v: %s", err, process.output.Bytes())
+		waitErr := process.cmd.Wait()
+		if err := scanMinIOCredentials(process.output.String(), fixture.signer.accessKey, fixture.signer.secretKey); err != nil {
+			t.Fatal(err)
+		}
+		if waitErr != nil {
+			t.Fatalf("controller process: %v: %s", waitErr, process.output.Bytes())
 		}
 		results = append(results, readControllerResult(t, process.result))
 	}
@@ -141,7 +168,7 @@ func runMinIOTwoWriterScenario(t *testing.T, fixture *minioFixture) {
 		t.Fatal(err)
 	}
 	branchResult := runFreshController(t, fixture, branchRoot, filepath.Join(branchRoot, "result.json"), branch.Branch)
-	if branchResult.Pointer != loser.Generation || branchResult.DownloadedSHA256 != loser.Generation.ArchiveSHA256 || branchResult.DownloadedSize != int64(len(loserBytes)) || len(branchResult.History) != 1 || branchResult.History[0] != loser.Generation {
+	if branchResult.Pointer != loser.Generation || branchResult.DownloadedSHA256 != loser.Generation.ArchiveSHA256 || branchResult.DownloadedSize != int64(len(loserBytes)) || len(branchResult.History) != 1 || branchResult.History[0] != loser.Generation || !branchResult.LeaseReleased {
 		t.Fatalf("fresh branch evidence = %#v, loser = %#v", branchResult, loser)
 	}
 	if uploads := fixture.listUploads(t, portabilityBucket, "brain/"); len(uploads) != 0 {
@@ -156,8 +183,12 @@ func runFreshController(t *testing.T, fixture *minioFixture, root, result, branc
 		"CAMP_CONTROLLER_RESULT=" + result, "CAMP_CONTROLLER_BRANCH=" + branch,
 		"XDG_CONFIG_HOME=" + filepath.Join(root, "config"), "XDG_DATA_HOME=" + filepath.Join(root, "data"),
 		"XDG_STATE_HOME=" + filepath.Join(root, "state"), "XDG_CACHE_HOME=" + filepath.Join(root, "cache")}, result, "")
-	if err := process.cmd.Wait(); err != nil {
-		t.Fatalf("fresh controller: %v: %s", err, process.output.Bytes())
+	waitErr := process.cmd.Wait()
+	if err := scanMinIOCredentials(process.output.String(), fixture.signer.accessKey, fixture.signer.secretKey); err != nil {
+		t.Fatal(err)
+	}
+	if waitErr != nil {
+		t.Fatalf("fresh controller: %v: %s", waitErr, process.output.Bytes())
 	}
 	return readControllerResult(t, result)
 }
@@ -221,6 +252,24 @@ func TestMinIOControllerHelperProcess(t *testing.T) {
 		pointer, err := pointers.Read(context.Background(), "brain", lineage)
 		if err != nil {
 			t.Fatal(err)
+		}
+		if !lineage.IsMain() {
+			leases := coordination.NewLeaseRepository(store)
+			now := time.Now().UTC()
+			token, err := leases.Acquire(context.Background(), "brain", lineage, coordination.LeaseOwner{SessionID: "fresh-" + branch, Machine: "minio-fixture"}, &pointer, now, time.Minute)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := leases.Revalidate(context.Background(), token, now.Add(time.Second)); err != nil {
+				t.Fatal(err)
+			}
+			if err := leases.Release(context.Background(), token); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := leases.Read(context.Background(), "brain", lineage); !errors.Is(err, ports.ErrNotFound) {
+				t.Fatalf("released fresh branch lease remains readable: %v", err)
+			}
+			result.LeaseReleased = true
 		}
 		history, err := generations.List(context.Background(), "brain", lineage)
 		if err != nil {
