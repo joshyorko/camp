@@ -19,6 +19,7 @@ var (
 	ErrInvalidBlueprint        = errors.New("invalid camp blueprint")
 	ErrInvalidBlueprintRef     = errors.New("invalid blueprint reference")
 	ErrInvalidExecutionBinding = errors.New("invalid execution binding")
+	ErrExecutionRetarget       = errors.New("execution binding retarget is not allowed")
 )
 
 // CampBlueprint is a closed portable, non-secret execution shape. Runtime

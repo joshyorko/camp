@@ -25,6 +25,11 @@ const (
 	snapshotFilename  = "snapshot.json"
 )
 
+var (
+	ErrExecutionRetarget       = domain.ErrExecutionRetarget
+	ErrExecutionAlreadyStarted = errors.New("execution effects already started")
+)
+
 type StoreOption func(*Store)
 
 type CreateStep string
@@ -152,7 +157,68 @@ func (s *Store) RecordIntent(ctx context.Context, intent ports.IntentRecord) err
 	if err := validateIntent(intent); err != nil {
 		return err
 	}
+	guard, err := os.OpenFile(filepath.Join(s.sessionDirectory(intent.SessionID), journalFilename), os.O_RDWR, 0o600)
+	if err != nil {
+		return fmt.Errorf("open journal intent lock: %w", err)
+	}
+	defer guard.Close()
+	if err := syscall.Flock(int(guard.Fd()), syscall.LOCK_EX); err != nil {
+		return fmt.Errorf("lock journal intent: %w", err)
+	}
+	defer syscall.Flock(int(guard.Fd()), syscall.LOCK_UN)
 	return s.append(intent.SessionID, envelope{Kind: "intent", Intent: &intent})
+}
+
+func (s *Store) BindExecution(ctx context.Context, sessionID string, binding domain.ExecutionBinding) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	if err := validateSessionID(sessionID); err != nil {
+		return err
+	}
+	if err := binding.Validate(); err != nil {
+		return err
+	}
+	guard, err := os.OpenFile(filepath.Join(s.sessionDirectory(sessionID), journalFilename), os.O_RDWR, 0o600)
+	if err != nil {
+		return fmt.Errorf("open journal execution binding lock: %w", err)
+	}
+	defer guard.Close()
+	if err := syscall.Flock(int(guard.Fd()), syscall.LOCK_EX); err != nil {
+		return fmt.Errorf("lock journal execution binding: %w", err)
+	}
+	defer syscall.Flock(int(guard.Fd()), syscall.LOCK_UN)
+	snapshot, _, err := s.Load(ctx, sessionID)
+	if err != nil {
+		return err
+	}
+	if snapshot.ExecutionBinding != nil {
+		if *snapshot.ExecutionBinding != binding {
+			return ErrExecutionRetarget
+		}
+		return nil
+	}
+	info, err := guard.Stat()
+	if err != nil {
+		return fmt.Errorf("inspect journal before execution binding: %w", err)
+	}
+	if info.Size() != 0 {
+		return ErrExecutionAlreadyStarted
+	}
+	bindingCopy := binding
+	snapshot.ExecutionBinding = &bindingCopy
+	return s.writeSnapshot(s.sessionDirectory(sessionID), snapshot, true)
+}
+
+func (s *Store) Binding(ctx context.Context, sessionID string) (domain.ExecutionBinding, bool, error) {
+	snapshot, _, err := s.Load(ctx, sessionID)
+	if err != nil {
+		return domain.ExecutionBinding{}, false, err
+	}
+	if snapshot.ExecutionBinding == nil {
+		return domain.ExecutionBinding{}, false, nil
+	}
+	return *snapshot.ExecutionBinding, true, nil
 }
 
 func (s *Store) RecordFact(ctx context.Context, fact ports.FactRecord, snapshot domain.JournalSnapshot) error {
@@ -175,6 +241,10 @@ func (s *Store) RecordFact(ctx context.Context, fact ports.FactRecord, snapshot 
 	if err != nil {
 		return err
 	}
+	if snapshot.ExecutionBinding != nil &&
+		(current.ExecutionBinding == nil || *snapshot.ExecutionBinding != *current.ExecutionBinding) {
+		return ErrExecutionRetarget
+	}
 	composed := composeFactSnapshot(current, snapshot, fact.Transition)
 	reduced, err := reduceFact(composed, fact)
 	if err != nil {
@@ -187,6 +257,11 @@ func (s *Store) RecordFact(ctx context.Context, fact ports.FactRecord, snapshot 
 }
 
 func composeFactSnapshot(current, candidate domain.JournalSnapshot, transition string) domain.JournalSnapshot {
+	candidate.ExecutionBinding = nil
+	if current.ExecutionBinding != nil {
+		binding := *current.ExecutionBinding
+		candidate.ExecutionBinding = &binding
+	}
 	switch transition {
 	case "LeaseRenewed":
 		current.Lease = candidate.Lease
