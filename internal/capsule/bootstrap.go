@@ -12,7 +12,6 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
-	"strconv"
 	"strings"
 
 	"github.com/joshyorko/camp/internal/jsonstrict"
@@ -471,20 +470,35 @@ func composeLifecycle(original json.RawMessage, requestName string) (json.RawMes
 		if _, exists := named[helperKey]; exists {
 			return nil, errors.New("reserved lifecycle command name")
 		}
-		gate := strings.TrimSuffix(requestName, ".json") + ".gate"
-		gateCommand := ".camp-bootstrap/camp-bootstrap __remote-worker-gate .camp-bootstrap/" + requestName + " " + gate + " " + strconv.Itoa(len(named))
-		awaitCommand := ".camp-bootstrap/camp-bootstrap __remote-worker-await .camp-bootstrap " + gate
-		composed := make(map[string]json.RawMessage, len(named)+1)
-		composed[helperKey] = json.RawMessage(mustJSON(gateCommand))
+		var lifecycle strings.Builder
+		lifecycle.WriteString(helper)
+		lifecycle.WriteString(" || exit $?\n")
+		pids := make([]string, 0, len(named))
 		for _, key := range sortedKeys(named) {
 			if err := validateLifecycleLeaf(named[key]); err != nil {
 				return nil, err
 			}
-			command, err := composeLifecycleLeaf(named[key], awaitCommand)
+			command, err := namedLifecycleShellCommand(named[key])
 			if err != nil {
 				return nil, err
 			}
-			composed[key] = command
+			pid := "_camp_pid_" + fmt.Sprint(len(pids))
+			lifecycle.WriteString("(\n")
+			lifecycle.WriteString(command)
+			lifecycle.WriteString("\n) &\n")
+			lifecycle.WriteString(pid)
+			lifecycle.WriteString("=$!\n")
+			pids = append(pids, pid)
+		}
+		lifecycle.WriteString("_camp_status=0\n")
+		for _, pid := range pids {
+			lifecycle.WriteString("wait \"$")
+			lifecycle.WriteString(pid)
+			lifecycle.WriteString("\" || { _camp_code=$?; [ \"$_camp_status\" -ne 0 ] || _camp_status=$_camp_code; }\n")
+		}
+		lifecycle.WriteString("exit \"$_camp_status\"\n")
+		composed := map[string]json.RawMessage{
+			helperKey: json.RawMessage(mustJSON(lifecycle.String())),
 		}
 		body, err := json.Marshal(composed)
 		return body, err
@@ -500,6 +514,29 @@ func composeLifecycle(original json.RawMessage, requestName string) (json.RawMes
 		return json.RawMessage(mustJSON(helper + " || exit $?\n" + command)), nil
 	}
 	return composeLifecycleLeaf(trimmed, helper)
+}
+
+func namedLifecycleShellCommand(raw json.RawMessage) (string, error) {
+	var value any
+	if err := json.Unmarshal(raw, &value); err != nil {
+		return "", errors.New("malformed lifecycle command")
+	}
+	switch command := value.(type) {
+	case string:
+		return "/bin/sh -c " + shellQuote(command), nil
+	case []any:
+		arguments := make([]string, len(command))
+		for index, argument := range command {
+			value, ok := argument.(string)
+			if !ok {
+				return "", errors.New("mixed lifecycle argv")
+			}
+			arguments[index] = shellQuote(value)
+		}
+		return strings.Join(arguments, " "), nil
+	default:
+		return "", errors.New("unsupported lifecycle command form")
+	}
 }
 
 func composeLifecycleLeaf(raw json.RawMessage, helper string) (json.RawMessage, error) {

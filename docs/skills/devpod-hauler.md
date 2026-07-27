@@ -39,26 +39,32 @@ Do not use Hauler v2.0.2's live `_catalog` response as proof that all direct reg
   `activateImage`, `hydrate`, and `startServices` respectively before the
   corresponding user hook. String, argv-array, and named-object lifecycle values
   retain their top-level JSON form, and each original command or argv appears
-  exactly once behind a fail-closed helper gate. Because Dev Container
-  named-object entries execute concurrently, one reserved entry performs the
-  worker mutation exactly once per lifecycle invocation. It publishes a fresh
-  random generation, waits for that invocation's expected named entries to
-  register, and atomically publishes a generation-scoped durable success or
-  failure receipt. Every original entry remains concurrent and uses only a
-  bounded Camp-owned await command before its original command. Completed
-  generations are never accepted by a later invocation, so repeated
-  `postStartCommand` execution performs a new mutation. A helper failure, crash,
-  missing receipt, stale receipt, or unknown result prevents every user command
-  without an indefinite wait. String hooks use a same-shell
-  `helper || exit $?` prelude followed by the original text; argv hooks retain
-  their argument boundaries.
+  exactly once behind a fail-closed helper boundary. String hooks use a
+  same-shell `helper || exit $?` prelude followed by the original text; argv
+  hooks retain their argument boundaries. A named-object hook becomes one
+  reserved named entry. That entry runs the worker once, then launches every
+  original named string or argv as a separate concurrent child, waits for all
+  children, and returns failure if any child fails. The owner process therefore
+  supplies the lifecycle invocation identity: no mutable current-generation
+  file, waiter process, stale receipt, timing window, or inferred PID group can
+  authorize commands from another invocation. A worker failure or crash starts
+  no user child. Overlapping invocations own disjoint child sets and share only
+  their normal command output destinations.
+  Pinned DevPod v0.26.1 commit
+  `86b6f9f5d6713fecdeff5dd240e775a8c7e8d44e` decodes lifecycle objects in
+  `pkg/types/types.go` and executes decoded commands in
+  `pkg/devcontainer/setup/lifecyclehooks.go`; neither boundary exposes a stable
+  per-invocation token through command arguments or environment. Do not
+  reintroduce a cross-process named-hook gate without a newer authoritative
+  execution contract that supplies such an identity.
   Sorting object keys does not establish lifecycle ordering. Null, mixed,
   recursively duplicate-key, malformed, and build-only
   configurations fail before publication, and the original devcontainer file
   remains unchanged.
   `internal/capsule/bootstrap_test.go` executes the generated commands using
-  concurrent object semantics and verifies their trace rather than inspecting
-  renderer source.
+  concurrent object semantics and verifies crash isolation, stale-file
+  irrelevance, overlapping invocation ownership, concurrent completion,
+  aggregate failure, and command traces rather than inspecting renderer source.
 - `camp __remote-worker` is a hidden, stdin/stdout-only protocol entrypoint. It
   accepts one schema-v1 JSON request with strict unknown-field, recursively
   duplicate-key, operation,

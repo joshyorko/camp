@@ -79,6 +79,118 @@ func TestRenderBootstrapHelperFailurePreventsEveryUserHook(t *testing.T) {
 	}
 }
 
+func TestNamedLifecycleCrashAndStaleGateFilesCannotAuthorizeLaterInvocation(t *testing.T) {
+	lifecycle := json.RawMessage(`{"a":"printf 'user-a-%s\\n' \"$INVOCATION\" >> \"$TRACE\"","b":["/bin/sh","-c","printf 'user-b-%s\\n' \"$INVOCATION\" >> \"$TRACE\""]}`)
+	fixture := bootstrapFixture(t, lifecycle)
+	result, err := renderBootstrap(fixture.request, fixture.openHelper)
+	if err != nil {
+		t.Fatal(err)
+	}
+	document := readBootstrapDocument(t, result.DevcontainerPath)
+	trace := filepath.Join(t.TempDir(), "trace")
+
+	if err := executeLifecycleWithEnv(result.Root, document["postStartCommand"], map[string]string{
+		"TRACE": trace, "INVOCATION": "crashed", "HELPER_FAIL": "1",
+	}); err == nil {
+		t.Fatal("crashed owner invocation succeeded")
+	}
+	gateDirectory := filepath.Join(result.Root, ".camp-bootstrap")
+	for name, body := range map[string]string{
+		"services-request.gate.current":                                    strings.Repeat("1", 32) + "\n",
+		"services-request.gate." + strings.Repeat("1", 32) + ".intent":     "pending\n",
+		"services-request.gate." + strings.Repeat("1", 32) + ".wait.stale": "waiting\n",
+	} {
+		if err := os.WriteFile(filepath.Join(gateDirectory, name), []byte(body), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	if err := executeLifecycleWithEnv(result.Root, document["postStartCommand"], map[string]string{
+		"TRACE": trace, "INVOCATION": "live",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	body, err := os.ReadFile(trace)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := string(body)
+	if strings.Contains(got, "user-a-crashed") || strings.Contains(got, "user-b-crashed") {
+		t.Fatalf("crashed invocation ran user commands: %q", got)
+	}
+	for _, want := range []string{"helper-startServices-live", "user-a-live", "user-b-live"} {
+		if strings.Count(got, want+"\n") != 1 {
+			t.Fatalf("%s count differs in %q", want, got)
+		}
+	}
+}
+
+func TestNamedLifecycleOverlappingInvocationsKeepUserCommandsWithTheirOwner(t *testing.T) {
+	lifecycle := json.RawMessage(`{"a":"printf 'user-a-%s\\n' \"$INVOCATION\" >> \"$TRACE\"","b":["/bin/sh","-c","printf 'user-b-%s\\n' \"$INVOCATION\" >> \"$TRACE\""]}`)
+	fixture := bootstrapFixture(t, lifecycle)
+	result, err := renderBootstrap(fixture.request, fixture.openHelper)
+	if err != nil {
+		t.Fatal(err)
+	}
+	document := readBootstrapDocument(t, result.DevcontainerPath)
+	trace := filepath.Join(t.TempDir(), "trace")
+	start := make(chan struct{})
+	results := make(chan error, 2)
+	for _, invocation := range []string{"first", "second"} {
+		go func() {
+			<-start
+			results <- executeLifecycleWithEnv(result.Root, document["postStartCommand"], map[string]string{
+				"TRACE": trace, "INVOCATION": invocation,
+			})
+		}()
+	}
+	close(start)
+	for range 2 {
+		if err := <-results; err != nil {
+			t.Fatal(err)
+		}
+	}
+	body, err := os.ReadFile(trace)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := string(body)
+	for _, invocation := range []string{"first", "second"} {
+		for _, event := range []string{"helper-startServices-", "user-a-", "user-b-"} {
+			if strings.Count(got, event+invocation+"\n") != 1 {
+				t.Fatalf("%s%s count differs in %q", event, invocation, got)
+			}
+		}
+	}
+}
+
+func TestNamedLifecycleRunsCommandsConcurrentlyAndAggregatesFailure(t *testing.T) {
+	lifecycle := json.RawMessage(`{` +
+		`"a":"touch \"$SYNC/a\"; while [ ! -e \"$SYNC/b\" ]; do sleep 0.01; done; printf 'a\\n' >> \"$TRACE\"; exit 7",` +
+		`"b":["/bin/sh","-c","touch \"$SYNC/b\"; while [ ! -e \"$SYNC/a\" ]; do sleep 0.01; done; printf 'b\\n' >> \"$TRACE\""]}`)
+	fixture := bootstrapFixture(t, lifecycle)
+	result, err := renderBootstrap(fixture.request, fixture.openHelper)
+	if err != nil {
+		t.Fatal(err)
+	}
+	document := readBootstrapDocument(t, result.DevcontainerPath)
+	root := t.TempDir()
+	trace := filepath.Join(root, "trace")
+	if err := executeLifecycleWithEnv(result.Root, document["postStartCommand"], map[string]string{
+		"TRACE": trace, "SYNC": root,
+	}); err == nil {
+		t.Fatal("named lifecycle ignored a user command failure")
+	}
+	body, err := os.ReadFile(trace)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := string(body)
+	if strings.Count(got, "a\n") != 1 || strings.Count(got, "b\n") != 1 {
+		t.Fatalf("named lifecycle did not finish every concurrent command: %q", got)
+	}
+}
+
 func TestRenderBootstrapFailsClosedWithoutChangingOriginal(t *testing.T) {
 	for name, config := range map[string]string{
 		"build only": `{"build":{"dockerfile":"Dockerfile"}}`,
@@ -292,38 +404,15 @@ func bootstrapFixtureWithConfig(t *testing.T, config string) bootstrapTestFixtur
 	helperBody := []byte(`#!/bin/sh
 set -eu
 case "$1" in
-__remote-worker-gate)
-	request=$2
-	gate=$3
-	directory=${request%/*}
-	op=$(sed -n 's/.*"operation":"\([^"]*\)".*/\1/p' "$request")
-	status=success
-	[ "${HELPER_FAIL:-}" != 1 ] || status=failure
-	sleep 0.1
-	printf 'helper-%s\n' "$op" >> "$TRACE"
-	printf '%s\n' "$status" > "$directory/$gate.partial"
-	mv "$directory/$gate.partial" "$directory/$gate.result"
-	[ "$status" = success ]
-	;;
-__remote-worker-await)
-	directory=$2
-	gate=$3
-	count=0
-	while [ "$count" -lt 200 ]; do
-		if [ -f "$directory/$gate.result" ]; then
-			[ "$(cat "$directory/$gate.result")" = success ]
-			exit
-		fi
-		count=$((count + 1))
-		sleep 0.01
-	done
-	exit 124
-	;;
 __remote-worker)
 	op=$(sed -n 's/.*"operation":"\([^"]*\)".*/\1/p')
 	[ "${HELPER_FAIL:-}" != 1 ] || exit 42
 	sleep 0.1
-	printf 'helper-%s\n' "$op" >> "$TRACE"
+	if [ -n "${INVOCATION:-}" ]; then
+		printf 'helper-%s-%s\n' "$op" "$INVOCATION" >> "$TRACE"
+	else
+		printf 'helper-%s\n' "$op" >> "$TRACE"
+	fi
 	;;
 *)
 	exit 2
@@ -403,6 +492,10 @@ func runLifecycle(t *testing.T, root string, raw json.RawMessage) {
 }
 
 func executeLifecycle(root string, raw json.RawMessage) error {
+	return executeLifecycleWithEnv(root, raw, nil)
+}
+
+func executeLifecycleWithEnv(root string, raw json.RawMessage, environment map[string]string) error {
 	var command any
 	if err := json.Unmarshal(raw, &command); err != nil {
 		return err
@@ -415,6 +508,7 @@ func executeLifecycle(root string, raw json.RawMessage) error {
 			if err != nil {
 				return err
 			}
+			process.Env = appendEnvironment(process.Env, environment)
 			processes = append(processes, process)
 		}
 		for _, process := range processes {
@@ -432,11 +526,19 @@ func executeLifecycle(root string, raw json.RawMessage) error {
 		if err != nil {
 			return err
 		}
+		process.Env = appendEnvironment(process.Env, environment)
 		if output, err := process.CombinedOutput(); err != nil {
 			return fmt.Errorf("execute lifecycle: %w: %s", err, output)
 		}
 	}
 	return nil
+}
+
+func appendEnvironment(base []string, additions map[string]string) []string {
+	for key, value := range additions {
+		base = append(base, key+"="+value)
+	}
+	return base
 }
 
 func lifecycleProcess(root string, command any) (*exec.Cmd, error) {
@@ -478,8 +580,12 @@ func assertLifecycleForm(t *testing.T, form string, raw json.RawMessage) {
 			t.Fatalf("argv lifecycle became %T", value)
 		}
 	case "named":
-		if _, ok := value.(map[string]any); !ok {
+		named, ok := value.(map[string]any)
+		if !ok {
 			t.Fatalf("named lifecycle became %T", value)
+		}
+		if len(named) != 1 || named["00-camp-bootstrap"] == nil {
+			t.Fatalf("named lifecycle entries = %#v", named)
 		}
 	}
 }
