@@ -21,6 +21,29 @@ Do not use Hauler v2.0.2's live `_catalog` response as proof that all direct reg
   SHA-256, and recorded the bootstrap root rather than the capsule root as the
   DevPod source. This proves upload and hook ordering only; selected capsule
   devcontainer activation remains a later hydration concern.
+- Camp's remote bootstrap renderer publishes one new private source root with
+  `.camp-bootstrap/{devcontainer.json,camp-bootstrap,initialize-request.json,hydrate-request.json,services-request.json}`
+  and `camp-hauler-kit.tar.zst`; it refuses to replace an existing root. The
+  helper is copied through an already-open regular-file descriptor and the
+  generated config pins the supplied immutable outer image. Generated
+  `initializeCommand`, `onCreateCommand`, and `postStartCommand` run
+  `activateImage`, `hydrate`, and `startServices` respectively before the
+  corresponding user hook. String, argv-array, and named-object user hooks
+  remain their original command form and execute exactly once in deterministic
+  helper-first order. Null, mixed, duplicate-key, malformed, and build-only
+  configurations fail before publication, and the original devcontainer file
+  remains unchanged. `internal/capsule/bootstrap_test.go` executes the generated
+  commands against real files and verifies their trace rather than inspecting
+  renderer source.
+- `camp __remote-worker` is a hidden, stdin/stdout-only protocol entrypoint. It
+  accepts one schema-v1 JSON request with strict unknown-field, operation,
+  absolute-path, immutable-image, architecture, and helper/kit/manifest
+  identity validation. Mutation operations currently return a typed
+  `unsupported` receipt. `probe` verifies the running helper plus adjacent kit
+  and manifest bytes before reporting typed architecture, filesystem,
+  namespace, TUN, privilege, and loopback-port capabilities; an unsupported
+  capability returns a failing receipt. Protocol output is one JSON result
+  capped at 64 KiB and never contains archive bytes.
 - Do not attempt to activate a devcontainer configuration created only in the
   remote workspace with a second local-folder `devpod up --recreate`. Pinned
   v0.26.1 exposes no supported community command for that remote reconfiguration

@@ -2,12 +2,17 @@ package main
 
 import (
 	"bytes"
+	"crypto/sha256"
+	"encoding/hex"
+	"encoding/json"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 
 	"github.com/joshyorko/camp/internal/cli"
+	"github.com/joshyorko/camp/internal/remoteworker"
 )
 
 func TestRootCommandIsSingleCampCobraBinary(t *testing.T) {
@@ -40,6 +45,92 @@ func TestRunDelegatesProcessBoundaryToCLI(t *testing.T) {
 	if strings.Contains(stderr.String(), "unknown command") {
 		t.Fatalf("stderr = %q, command was not registered", stderr.String())
 	}
+}
+
+func TestRunRegistersHiddenRemoteWorkerCommand(t *testing.T) {
+	var stdout, stderr bytes.Buffer
+	exitCode := run([]string{"__remote-worker"}, cli.Streams{
+		In:     strings.NewReader("{}"),
+		Out:    &stdout,
+		ErrOut: &stderr,
+	})
+	if exitCode == int(cli.ExitSuccess) {
+		t.Fatal("__remote-worker unexpectedly accepted an invalid request")
+	}
+	if stdout.Len() != 0 || strings.Contains(stderr.String(), "unknown command") {
+		t.Fatalf("stdout=%q stderr=%q", stdout.String(), stderr.String())
+	}
+	help := renderRootHelp(t)
+	if strings.Contains(help, "__remote-worker") {
+		t.Fatalf("hidden command appeared in help: %q", help)
+	}
+}
+
+func TestRunRemoteWorkerKeepsProtocolDiagnosticsOffStderr(t *testing.T) {
+	root := t.TempDir()
+	manifest := filepath.Join(root, "manifest.json")
+	kit := filepath.Join(root, "camp-hauler-kit.tar.zst")
+	if err := os.WriteFile(manifest, []byte("{}"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(kit, []byte("kit"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	executable, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	request := remoteworker.Request{
+		SchemaVersion: remoteworker.ProtocolSchemaVersion,
+		Operation:     remoteworker.OperationHydrate,
+		SessionID:     "session-1",
+		WorkspaceRoot: root,
+		RuntimeRoot:   root,
+		ManifestPath:  manifest,
+		Expected: remoteworker.ExpectedIdentity{
+			Architecture: "linux/" + runtime.GOARCH,
+			Helper:       commandIdentity(t, "camp", executable),
+			Kit:          commandIdentity(t, filepath.Base(kit), kit),
+			Manifest:     commandIdentity(t, filepath.Base(manifest), manifest),
+			Image:        "example/final@sha256:" + strings.Repeat("a", 64),
+		},
+	}
+	body, err := json.Marshal(request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var stdout, stderr bytes.Buffer
+	exitCode := run([]string{"__remote-worker"}, cli.Streams{
+		In: bytes.NewReader(body), Out: &stdout, ErrOut: &stderr,
+	})
+	if exitCode != int(cli.ExitFailure) || stdout.Len() == 0 || stderr.Len() != 0 {
+		t.Fatalf("exit=%d stdout=%q stderr=%q", exitCode, stdout.String(), stderr.String())
+	}
+}
+
+func commandIdentity(t *testing.T, name, path string) remoteworker.FileIdentity {
+	t.Helper()
+	body, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	digest := sha256.Sum256(body)
+	return remoteworker.FileIdentity{
+		Name: name, SHA256: hex.EncodeToString(digest[:]), Size: int64(len(body)),
+	}
+}
+
+func renderRootHelp(t *testing.T) string {
+	t.Helper()
+	command := cli.NewRoot()
+	var output bytes.Buffer
+	command.SetOut(&output)
+	command.SetErr(&output)
+	command.SetArgs([]string{"--help"})
+	if err := command.Execute(); err != nil {
+		t.Fatal(err)
+	}
+	return output.String()
 }
 
 func TestRunProductionInitUsesXDGAndDockerManifestBoundary(t *testing.T) {
