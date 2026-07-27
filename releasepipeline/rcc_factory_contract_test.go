@@ -86,7 +86,7 @@ func TestRCCFactoryDeclaresPinnedTrustRootAndCanonicalTasks(t *testing.T) {
 		`installed = install_candidate(CANDIDATE, install_dir)`,
 		`resolve_package_identity(ROOT, os.environ)`,
 		`package COMMIT must match checked-out HEAD`,
-		`"result": "pending"`,
+		`"result": "gated"`,
 	)
 	localTask := taskSource(t, tasks, "local")
 	if strings.Contains(localTask, "install_candidate(") {
@@ -146,7 +146,7 @@ func TestDeveloperGuideUsesPATHRCCWhileCIKeepsVerifiedBootstrap(t *testing.T) {
 		"rcc run -r developer/toolkit.yaml -t package",
 		"`local` stops after repository-only candidate smoke verification",
 		"`install` verifies that exact candidate before atomically linking it",
-		"RCC source-gate ledger records command identity, duration, result, and sanitized failure reason",
+		"every gate ledger has that non-empty candidate SHA-256",
 	)
 	if strings.Contains(guide, "Always enter the factory through `./developer/rccw`") {
 		t.Fatal("developer guidance must not require the CI bootstrap wrapper")

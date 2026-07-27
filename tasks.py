@@ -194,19 +194,22 @@ def managed_tool_environment():
 
 
 def run_gates(suite, gates, *, env=None):
+    metadata = verify_candidate()
+    candidate_digest = metadata.get("candidateSha256")
+    if not isinstance(candidate_digest, str) or not candidate_digest:
+        raise RuntimeError("candidate manifest lacks a non-empty candidate digest")
     EVIDENCE.mkdir(parents=True, exist_ok=True)
     report = {
         "schemaVersion": 1,
         "suite": suite,
-        "candidateSha256": sha256(CANDIDATE) if CANDIDATE.is_file() else None,
+        "candidateSha256": candidate_digest,
         "gates": [],
     }
     report_path = EVIDENCE / f"{suite}-gates.json"
     failures = []
-    report_path.write_text(
-        json.dumps(report, indent=2, sort_keys=True) + "\n", encoding="utf-8"
-    )
     declared = {name for name, _command in gates}
+    if len(declared) != len(gates):
+        raise RuntimeError(f"{suite} gates contain duplicate names")
     for name in MANDATORY_TEST_GATES if suite == "test" else ():
         if name not in declared:
             report["gates"].append(
@@ -218,14 +221,21 @@ def run_gates(suite, gates, *, env=None):
                     "durationMs": 0,
                 }
             )
+    gate_results = {}
     for name, command in gates:
         result = {
             "name": name,
             "command": shlex.join(command),
-            "result": "pending",
+            "result": "gated",
             "durationMs": 0,
         }
         report["gates"].append(result)
+        gate_results[name] = result
+    report_path.write_text(
+        json.dumps(report, indent=2, sort_keys=True) + "\n", encoding="utf-8"
+    )
+    for name, command in gates:
+        result = gate_results[name]
         started = time.monotonic()
         try:
             run(command, env=env)
@@ -239,6 +249,13 @@ def run_gates(suite, gates, *, env=None):
             report_path.write_text(
                 json.dumps(report, indent=2, sort_keys=True) + "\n", encoding="utf-8"
             )
+    nonterminal = [
+        gate["name"]
+        for gate in report["gates"]
+        if gate["result"] not in {"passed", "failed", "missing", "skipped", "gated"}
+    ]
+    if nonterminal:
+        raise RuntimeError(f"{suite} gates left nonterminal: {', '.join(nonterminal)}")
     missing = [gate["name"] for gate in report["gates"] if gate["result"] == "missing"]
     if failures or missing:
         names = ", ".join(name for name, _error in failures)
@@ -280,20 +297,21 @@ def validate_freeze():
     go_module = ROOT / "go.mod"
     rcc_lock = ROOT / "developer" / "rcc.lock.yaml"
     tools_lock = ROOT / "tools.lock.yaml"
-    require_pattern(go_module, r"^go \\d+\\.\\d+\\.\\d+$", "go.mod lacks an exact Go version")
-    require_pattern(rcc_lock, r"^version: v\\d+\\.\\d+\\.\\d+$", "RCC lock lacks an exact version")
+    require_pattern(go_module, r"^go \d+\.\d+\.\d+$", "go.mod lacks an exact Go version")
+    require_pattern(rcc_lock, r"^version: v\d+\.\d+\.\d+$", "RCC lock lacks an exact version")
     require_pattern(rcc_lock, r"^host: linux/amd64$", "RCC factory host is not linux/amd64")
-    setup_robot = re.search(r"^  - robotframework=([^\\s]+)$", setup.read_text(encoding="utf-8"), re.MULTILINE)
-    pip_robot = re.fullmatch(r"robotframework==([^\\s]+)\\s*", requirements.read_text(encoding="utf-8"))
+    setup_robot = re.search(r"^  - robotframework=([^\s]+)$", setup.read_text(encoding="utf-8"), re.MULTILINE)
+    pip_robot = re.fullmatch(r"robotframework==([^\s]+)\s*", requirements.read_text(encoding="utf-8"))
     if not setup_robot or not pip_robot or setup_robot.group(1) != pip_robot.group(1):
         raise RuntimeError("RCC freeze validation failed: Robot declarations disagree")
     for tool in ("devpod", "hauler"):
-        require_pattern(tools_lock, rf"^  {tool}:\\n(?:.*\\n)*?    version: v\\d+\\.\\d+\\.\\d+$", f"{tool} lacks an exact locked version")
-    require_pattern(tools_lock, r"^  room:\\n(?:.*\\n)*?    version: v\\d+\\.\\d+\\.\\d+$", "Room lacks an exact locked version")
+        require_pattern(tools_lock, rf"^  {tool}:\n(?:.*\n)*?    version: v\d+\.\d+\.\d+$", f"{tool} lacks an exact locked version")
+    require_pattern(tools_lock, r"^  room:\n(?:.*\n)*?    version: v\d+\.\d+\.\d+$", "Room lacks an exact locked version")
 
 
 def generated_documentation():
     run(["go", "run", "./cmd/camp-docs"])
+    run(["git", "diff", "--exit-code", "--", "docs/generated"])
     run(["go", "test", "./internal/docsgen", "./docs", "-count=1"])
 
 
@@ -332,6 +350,8 @@ def install_task(_context):
 @task(name="test")
 def test_task(_context):
     """Run source, race, hygiene, vulnerability, and packaging gates."""
+    build_and_smoke_candidate()
+    verify_candidate()
     compiler = shutil.which("gcc") or shutil.which("x86_64-conda-linux-gnu-cc")
     if not compiler:
         raise RuntimeError("race gate requires a C compiler in the RCC environment")
