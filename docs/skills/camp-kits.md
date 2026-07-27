@@ -44,13 +44,29 @@ root bytes, so the manifest always carries a positive byte size even when
 `store info --digests` omits `Size`; builder and verifier bind the canonical
 reference, digest, and independently observed size.
 
-Verification extracts into a private sibling stage, revalidates tool bytes and
-the extracted store, and publishes the ready directory no-replace only after
-all checks pass. Failure removes the stage and durably syncs its parent.
+Verification requires a caller-trusted SHA-256 of the exact canonical manifest
+before any manifest-declared identity is accepted. The verifier bounds the
+manifest to 4 MiB before reading or decoding it, then requires the trusted root
+identity to match the observed prepared-store inventory. It opens the
+compressed archive once with no symlink following, bounds and hashes that open
+descriptor, seeks it back to the start, and extracts from the same descriptor;
+pathname replacement after hashing cannot substitute archive content.
+
+Extraction uses a private sibling stage, revalidates tool bytes and the
+extracted store, and publishes the ready directory no-replace only after all
+checks pass. Cleanup retains no-follow descriptors for the stage and its
+parent, recursively removes entries with descriptor-relative operations, and
+rechecks each directory name before unlinking it. A replaced stage or child
+name is refused rather than traversed or removed, and successful cleanup
+durably syncs the parent.
+
 Verification rejects architecture, version, digest, root, or post-manifest
 store drift. It bounds outer entry count, per-file and total expanded bytes,
 and zstd memory/window use from the compressed manifest identity under fixed
-hard ceilings.
+hard ceilings. It also rejects compressed archives over 64 GiB, manifests with
+more than 64 chunks, chunks over 1 GiB, and extractions requiring more than
+1,000,000 created inodes.
+
 Fault tests address each durable boundary by name and occurrence. Injection is
 one-shot: recovery cleanup runs with the fault disarmed, removes visible
 outputs, and reaches a parent-directory fsync before the test accepts the

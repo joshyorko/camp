@@ -74,6 +74,13 @@ func TestBuilderProducesDeterministicVerifiedReadyStoreArchive(t *testing.T) {
 	if first.SHA256 != second.SHA256 || first.Size != second.Size {
 		t.Fatalf("archives differ: %#v != %#v", first, second)
 	}
+	manifestBody, err := os.ReadFile(first.ManifestPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if first.ManifestSHA256 != sha256Bytes(manifestBody) {
+		t.Fatalf("manifest SHA-256 = %q, want digest of canonical bytes", first.ManifestSHA256)
+	}
 	for _, path := range []string{first.ArchivePath, first.ManifestPath} {
 		info, err := os.Stat(path)
 		if err != nil {
