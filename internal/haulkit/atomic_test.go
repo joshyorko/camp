@@ -109,3 +109,45 @@ func TestAtomicPublicationNeverReplacesExistingOutput(t *testing.T) {
 		t.Fatalf("existing output = %q", body)
 	}
 }
+
+func TestCleanupFailureDoesNotMutateUntilDisarmedOwnerRetry(t *testing.T) {
+	request, validator := buildFixture(t)
+	builder := NewBuilder(validator)
+	builder.chunkSize = 64
+	builder.runtimeObserver = fakeRuntimeObserver{runningCamp: request.CampExecutable}
+	previous := atomicBoundaryHook
+	t.Cleanup(func() { atomicBoundaryHook = previous })
+	verifiedReady := filepath.Join(request.OutputDirectory, ".haulkit-verified-ready")
+	firstSawOwnedPath := false
+	retrySawOwnedPath := false
+	recoveryFsync := false
+	fired := false
+	atomicBoundaryHook = func(event atomicBoundaryEvent) error {
+		if event.Name == "cleanup-remove" && !fired {
+			fired = true
+			_, err := os.Stat(verifiedReady)
+			firstSawOwnedPath = err == nil
+			return errors.New("injected cleanup remove failure")
+		}
+		if event.Name == "cleanup-remove" && fired && !retrySawOwnedPath {
+			_, err := os.Stat(verifiedReady)
+			retrySawOwnedPath = err == nil
+		}
+		if fired && event.Name == "directory-fsync" {
+			recoveryFsync = true
+		}
+		return nil
+	}
+	if _, err := builder.Build(context.Background(), request); err == nil {
+		t.Fatal("Build() error = nil")
+	}
+	if !firstSawOwnedPath || !retrySawOwnedPath {
+		t.Fatalf("cleanup path visibility: first=%v retry=%v", firstSawOwnedPath, retrySawOwnedPath)
+	}
+	if _, err := os.Stat(verifiedReady); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("owner retry retained verified stage: %v", err)
+	}
+	if !recoveryFsync {
+		t.Fatal("owner retry did not reach parent-directory fsync")
+	}
+}

@@ -270,13 +270,86 @@ func TestBuilderUsesObservedRunningCampExecutableInsteadOfCallerPath(t *testing.
 	}
 }
 
+func TestBuilderKeepsOpenedRunningCampIdentityAcrossPathReplacement(t *testing.T) {
+	request, validator := buildFixture(t)
+	originalDigest, _, err := hashPath(request.CampExecutable)
+	if err != nil {
+		t.Fatal(err)
+	}
+	replacement := filepath.Join(t.TempDir(), "replacement")
+	if err := os.WriteFile(replacement, []byte("replacement-running-bytes"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	builder := NewBuilder(validator)
+	builder.chunkSize = 64
+	builder.runtimeObserver = &swappingRuntimeObserver{
+		path:        request.CampExecutable,
+		replacement: replacement,
+	}
+	artifact, err := builder.Build(context.Background(), request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	body, err := os.ReadFile(artifact.ManifestPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	manifest, err := DecodeCanonical(body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if manifest.Tools.Camp.SHA256 != originalDigest {
+		t.Fatalf("Camp digest = %s, want opened running bytes %s", manifest.Tools.Camp.SHA256, originalDigest)
+	}
+}
+
+type swappingRuntimeObserver struct {
+	path        string
+	replacement string
+	swapped     bool
+}
+
+func (observer *swappingRuntimeObserver) RunningExecutable() (string, error) {
+	if err := observer.swap(); err != nil {
+		return "", err
+	}
+	return observer.path, nil
+}
+
+func (observer *swappingRuntimeObserver) OpenRunningExecutable() (*os.File, error) {
+	file, err := openRegular(observer.path)
+	if err != nil {
+		return nil, err
+	}
+	if err := observer.swap(); err != nil {
+		_ = file.Close()
+		return nil, err
+	}
+	return file, nil
+}
+
+func (observer *swappingRuntimeObserver) Probe(ctx context.Context, path, kind string) (string, error) {
+	return fixtureRuntimeProbe(ctx, path, kind)
+}
+
+func (observer *swappingRuntimeObserver) swap() error {
+	if observer.swapped {
+		return nil
+	}
+	observer.swapped = true
+	if err := os.Remove(observer.path); err != nil {
+		return err
+	}
+	return os.Rename(observer.replacement, observer.path)
+}
+
 type fakeRuntimeObserver struct {
 	runningCamp string
 	probe       func(context.Context, string, string) (string, error)
 }
 
-func (observer fakeRuntimeObserver) RunningExecutable() (string, error) {
-	return observer.runningCamp, nil
+func (observer fakeRuntimeObserver) OpenRunningExecutable() (*os.File, error) {
+	return openRegular(observer.runningCamp)
 }
 
 func (observer fakeRuntimeObserver) Probe(ctx context.Context, path, kind string) (string, error) {

@@ -19,6 +19,7 @@ import (
 
 	"github.com/joshyorko/camp/internal/domain"
 	"github.com/klauspost/compress/zstd"
+	"golang.org/x/sys/unix"
 )
 
 type Builder interface {
@@ -38,7 +39,7 @@ type RootObserver interface {
 }
 
 type RuntimeObserver interface {
-	RunningExecutable() (string, error)
+	OpenRunningExecutable() (*os.File, error)
 	Probe(context.Context, string, string) (string, error)
 }
 
@@ -138,12 +139,15 @@ func (builder *KitBuilder) Build(ctx context.Context, request BuildRequest) (Art
 	if observer == nil {
 		observer = productionRuntimeObserver{}
 	}
-	runningCamp, err := observer.RunningExecutable()
-	if err != nil || !filepath.IsAbs(runningCamp) {
+	runningCamp, err := observer.OpenRunningExecutable()
+	if err != nil {
 		return Artifact{}, fmt.Errorf("observe running Camp executable: %w", err)
 	}
+	defer runningCamp.Close()
+	if err := snapshotOpenedRegular(runningCamp, preparedRequest.CampExecutable); err != nil {
+		return Artifact{}, err
+	}
 	for source, destination := range map[string]string{
-		runningCamp:              preparedRequest.CampExecutable,
 		request.HaulerExecutable: preparedRequest.HaulerExecutable,
 		request.PastaExecutable:  preparedRequest.PastaExecutable,
 	} {
@@ -253,18 +257,27 @@ func (builder *KitBuilder) Build(ctx context.Context, request BuildRequest) (Art
 		return Artifact{}, err
 	}
 	artifact := Artifact{ManifestPath: manifestPath, ArchivePath: archivePath, SHA256: archiveDigest, Size: archiveSize, Chunks: chunks}
+	verifiedReady := filepath.Join(request.OutputDirectory, ".haulkit-verified-ready")
+	verifiedCleanup := false
+	defer func() {
+		if verifiedCleanup {
+			_ = removeDurably(verifiedReady, request.OutputDirectory)
+		}
+	}()
 	if _, err := NewVerifier(builder.validator).Verify(ctx, VerifyRequest{
 		ManifestPath: manifestPath,
 		ArchivePath:  archivePath,
 		Architecture: architecture,
 		Tools:        tools,
-		Destination:  filepath.Join(request.OutputDirectory, ".haulkit-verified-ready"),
+		Destination:  verifiedReady,
 	}); err != nil {
 		return Artifact{}, fmt.Errorf("verify completed Camp Hauler kit: %w", err)
 	}
-	if err := removeDurably(filepath.Join(request.OutputDirectory, ".haulkit-verified-ready"), request.OutputDirectory); err != nil {
+	verifiedCleanup = true
+	if err := removeDurably(verifiedReady, request.OutputDirectory); err != nil {
 		return Artifact{}, err
 	}
+	verifiedCleanup = false
 	if err := removeDurably(snapshotRoot, request.OutputDirectory); err != nil {
 		return Artifact{}, err
 	}
@@ -290,12 +303,47 @@ func containsExactIdentity(output, expected string) bool {
 
 type productionRuntimeObserver struct{}
 
-func (productionRuntimeObserver) RunningExecutable() (string, error) {
+func (productionRuntimeObserver) OpenRunningExecutable() (*os.File, error) {
+	if runtime.GOOS == "linux" {
+		fd, err := unix.Open("/proc/self/exe", unix.O_RDONLY|unix.O_CLOEXEC, 0)
+		if err != nil {
+			return nil, err
+		}
+		file := os.NewFile(uintptr(fd), "/proc/self/exe")
+		info, err := file.Stat()
+		if err != nil || !info.Mode().IsRegular() {
+			_ = file.Close()
+			return nil, errors.New("running Camp executable is not a regular file")
+		}
+		return file, nil
+	}
 	executable, err := os.Executable()
 	if err != nil {
-		return "", err
+		return nil, err
 	}
-	return filepath.EvalSymlinks(executable)
+	executable, err = filepath.EvalSymlinks(executable)
+	if err != nil {
+		return nil, err
+	}
+	before, err := os.Stat(executable)
+	if err != nil {
+		return nil, err
+	}
+	file, err := os.Open(executable)
+	if err != nil {
+		return nil, err
+	}
+	opened, err := file.Stat()
+	if err != nil {
+		_ = file.Close()
+		return nil, err
+	}
+	after, err := os.Stat(executable)
+	if err != nil || !os.SameFile(before, opened) || !os.SameFile(opened, after) {
+		_ = file.Close()
+		return nil, errors.New("running Camp executable identity changed while opening")
+	}
+	return file, nil
 }
 
 func (productionRuntimeObserver) Probe(ctx context.Context, path, kind string) (string, error) {
@@ -317,6 +365,17 @@ func snapshotRegular(source, destination string) error {
 		return err
 	}
 	defer input.Close()
+	return snapshotOpenedRegular(input, destination)
+}
+
+func snapshotOpenedRegular(input *os.File, destination string) error {
+	info, err := input.Stat()
+	if err != nil || !info.Mode().IsRegular() {
+		return errors.New("runtime source is not a regular file")
+	}
+	if _, err := input.Seek(0, io.SeekStart); err != nil {
+		return err
+	}
 	output, err := os.OpenFile(destination, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o500)
 	if err != nil {
 		return err
@@ -552,10 +611,13 @@ func writePrivateAtomic(output string, body []byte) error {
 }
 
 func removeDurably(path, parent string) error {
-	injected := runAtomicBoundaryHook("cleanup-remove")
-	removeErr := os.RemoveAll(path)
-	syncErr := syncDirectory(parent)
-	return errors.Join(injected, removeErr, syncErr)
+	if err := runAtomicBoundaryHook("cleanup-remove"); err != nil {
+		return err
+	}
+	if err := os.RemoveAll(path); err != nil {
+		return err
+	}
+	return syncDirectory(parent)
 }
 
 func hashPath(path string) (string, int64, error) {

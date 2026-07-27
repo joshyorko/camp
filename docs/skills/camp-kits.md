@@ -30,11 +30,13 @@ inventory returned by `hauler store info --output json --digests`, after the
 adapter executes the exact Hauler binary and observes the locked version.
 Before archiving, the adapter uses official `store save` then `store load` into
 a private fresh store; arbitrary unindexed files in the caller's store are not
-copied into the kit. Camp derives its own source from the symlink-resolved
-`os.Executable()` result, snapshots each runtime executable with no-follow
-regular-file opens, then probes and hashes that same private snapshot. The
-exact Camp probe is `camp --version`; Hauler uses `hauler version`, and pasta
-uses `pasta --version`.
+copied into the kit. On Linux, Camp opens `/proc/self/exe` once and copies from
+that stable file descriptor, so pathname replacement cannot change the running
+Camp bytes selected for the kit. The portable fallback proves pre-open,
+opened-file, and post-open `os.SameFile` continuity or fails closed. Camp then
+probes and hashes the same private snapshot. The exact Camp probe is
+`camp --version`; Hauler uses `hauler version`, and pasta uses
+`pasta --version`.
 
 Root references canonicalize to the exact Hauler file identity
 `hauler/<name>.tar.zst:latest`. The adapter extracts and hashes those observed
@@ -52,7 +54,8 @@ hard ceilings.
 Fault tests address each durable boundary by name and occurrence. Injection is
 one-shot: recovery cleanup runs with the fault disarmed, removes visible
 outputs, and reaches a parent-directory fsync before the test accepts the
-failure path.
+failure path. A failure injected before removal performs no mutation; the
+owning defer retries removal only after the one-shot fault is disarmed.
 Permanent generations remain native `hauler store save --filename
 <generation>.tar.zst` artifacts; the ready-store kit does not replace that
 generation format.
