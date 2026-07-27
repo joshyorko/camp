@@ -22,6 +22,17 @@ const (
 type BootstrapVerificationRequest struct {
 	Root     string
 	Expected remoteworker.ExpectedIdentity
+	Scope    BootstrapScope
+	Config   remoteworker.FileIdentity
+}
+
+type BootstrapScope struct {
+	SchemaVersion uint32
+	SessionID     string
+	WorkspaceRoot string
+	RuntimeRoot   string
+	ManifestPath  string
+	Architecture  string
 }
 
 type BootstrapVerification struct {
@@ -29,6 +40,7 @@ type BootstrapVerification struct {
 	MetadataBytes int64
 	Helper        remoteworker.FileIdentity
 	Kit           remoteworker.FileIdentity
+	Config        remoteworker.FileIdentity
 	Initialize    remoteworker.Request
 	Hydrate       remoteworker.Request
 	Services      remoteworker.Request
@@ -37,6 +49,12 @@ type BootstrapVerification struct {
 func VerifyBootstrap(request BootstrapVerificationRequest) (BootstrapVerification, error) {
 	if !filepath.IsAbs(request.Root) || filepath.Clean(request.Root) != request.Root {
 		return BootstrapVerification{}, fmt.Errorf("%w: bootstrap root is unsafe", ErrInvalidBootstrap)
+	}
+	if request.Scope.SchemaVersion != remoteworker.ProtocolSchemaVersion || request.Scope.SessionID == "" ||
+		!filepath.IsAbs(request.Scope.WorkspaceRoot) || !filepath.IsAbs(request.Scope.RuntimeRoot) ||
+		!filepath.IsAbs(request.Scope.ManifestPath) || request.Scope.Architecture != request.Expected.Architecture ||
+		request.Config.Name != "devcontainer.json" || request.Config.Size <= 0 {
+		return BootstrapVerification{}, fmt.Errorf("%w: persisted bootstrap scope is incomplete", ErrInvalidBootstrap)
 	}
 	root, err := openDirectoryBootstrap(request.Root)
 	if err != nil {
@@ -72,6 +90,11 @@ func VerifyBootstrap(request BootstrapVerificationRequest) (BootstrapVerificatio
 		return BootstrapVerification{}, fmt.Errorf("%w: helper identity", ErrInvalidBootstrap)
 	}
 	result.Kit, result.Helper = kit, helper
+	config, err := observeRelativeFile(private, "devcontainer.json", request.Config.Name)
+	if err != nil || config != request.Config {
+		return BootstrapVerification{}, fmt.Errorf("%w: devcontainer config identity", ErrInvalidBootstrap)
+	}
+	result.Config = config
 	metadata := make(map[string][]byte, 4)
 	for _, name := range []string{"devcontainer.json", "initialize-request.json", "hydrate-request.json", "services-request.json"} {
 		body, err := readRelativeFile(private, name, BootstrapMetadataLimit-result.MetadataBytes)
@@ -95,7 +118,8 @@ func VerifyBootstrap(request BootstrapVerificationRequest) (BootstrapVerificatio
 	}
 	for _, item := range requestFiles {
 		decoded, err := remoteworker.DecodeRequest(bytes.NewReader(metadata[item.name]))
-		if err != nil || decoded.Operation != item.operation || decoded.Expected != request.Expected {
+		if err != nil || decoded.Operation != item.operation || decoded.Expected != request.Expected ||
+			!requestMatchesScope(decoded, request.Scope) {
 			return BootstrapVerification{}, fmt.Errorf("%w: %s identity", ErrInvalidBootstrap, item.name)
 		}
 		*item.target = decoded
@@ -125,6 +149,12 @@ func VerifyBootstrap(request BootstrapVerificationRequest) (BootstrapVerificatio
 		}
 	}
 	return result, nil
+}
+
+func requestMatchesScope(request remoteworker.Request, scope BootstrapScope) bool {
+	return request.SchemaVersion == scope.SchemaVersion && request.SessionID == scope.SessionID &&
+		request.WorkspaceRoot == scope.WorkspaceRoot && request.RuntimeRoot == scope.RuntimeRoot &&
+		request.ManifestPath == scope.ManifestPath && request.Expected.Architecture == scope.Architecture
 }
 
 func verifyDirectoryEntries(directory *os.File, expected map[string]bool) error {

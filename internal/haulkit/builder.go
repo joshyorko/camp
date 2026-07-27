@@ -169,8 +169,14 @@ func (builder *KitBuilder) Build(ctx context.Context, request BuildRequest) (Art
 	for kind, path := range map[string]string{"camp": preparedRequest.CampExecutable, "hauler": preparedRequest.HaulerExecutable, "pasta": preparedRequest.PastaExecutable} {
 		output, err := observer.Probe(ctx, path, kind)
 		observed := strings.TrimSpace(output)
-		if err != nil || observed == "" || expectedVersions[kind] != "" && !containsExactIdentity(output, expectedVersions[kind]) {
+		if err != nil {
 			return Artifact{}, fmt.Errorf("probe %s runtime identity: %w", kind, err)
+		}
+		if observed == "" {
+			return Artifact{}, fmt.Errorf("%w: observed %s runtime identity is empty", ErrIdentityMismatch, kind)
+		}
+		if expectedVersions[kind] != "" && !containsExactIdentity(output, expectedVersions[kind]) {
+			return Artifact{}, fmt.Errorf("%w: observed %s runtime identity does not match the locked version", ErrIdentityMismatch, kind)
 		}
 		if expectedVersions[kind] == "" {
 			expectedVersions[kind] = observed

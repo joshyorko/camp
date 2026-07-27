@@ -203,13 +203,26 @@ func (p *RemoteDataPlanePreparer) Prepare(ctx context.Context, request RemoteDat
 	if bootstrap.Root != bootstrapRoot {
 		return RemoteDataPlaneResult{}, errors.New("bootstrap renderer returned an unexpected root")
 	}
-	if _, err := capsule.VerifyBootstrap(capsule.BootstrapVerificationRequest{Root: bootstrap.Root, Expected: expected}); err != nil {
+	configIdentity, err := identityForFile("devcontainer.json", bootstrap.DevcontainerPath)
+	if err != nil {
+		return RemoteDataPlaneResult{}, err
+	}
+	scope := capsule.BootstrapScope{
+		SchemaVersion: remoteworker.ProtocolSchemaVersion, SessionID: request.SessionID, WorkspaceRoot: workspaceRoot,
+		RuntimeRoot: runtimeRoot, ManifestPath: remoteManifest, Architecture: manifest.Architecture,
+	}
+	if _, err := capsule.VerifyBootstrap(capsule.BootstrapVerificationRequest{
+		Root: bootstrap.Root, Expected: expected, Scope: scope, Config: configIdentity,
+	}); err != nil {
 		return RemoteDataPlaneResult{}, fmt.Errorf("verify rendered remote bootstrap: %w", err)
 	}
 	record := domain.RemoteDataPlaneRecord{
 		Mode: domain.DataPlaneHaulerKitV1, AttemptID: request.AttemptID, BootstrapRoot: bootstrap.Root,
 		KitSHA256: artifact.SHA256, KitSize: artifact.Size,
 		ManifestSHA256: manifestIdentity.SHA256, ManifestSize: manifestIdentity.Size, OuterImage: outerImage,
+		RequestSchema: scope.SchemaVersion, RequestSession: scope.SessionID, WorkspaceRoot: scope.WorkspaceRoot,
+		RuntimeRoot: scope.RuntimeRoot, ManifestPath: scope.ManifestPath, Architecture: scope.Architecture,
+		ConfigSHA256: configIdentity.SHA256, ConfigSize: configIdentity.Size,
 	}
 	if err := publishAttemptCompletion(attemptRoot, record); err != nil {
 		return RemoteDataPlaneResult{}, fmt.Errorf("publish remote data-plane completion: %w", err)
@@ -245,40 +258,37 @@ func (p *RemoteDataPlanePreparer) reusePrepared(ctx context.Context, request Rem
 	if verified.Manifest.Archive != manifest.Archive || verified.Manifest.Root != manifest.Root {
 		return RemoteDataPlaneResult{}, errors.New("prior verified kit identity differs")
 	}
-	requestFile, err := os.Open(filepath.Join(bootstrapRoot, ".camp-bootstrap", "initialize-request.json"))
+	manifestIdentity := identityForBytes("camp-hauler-kit.json", manifestBody)
+	completion, err := readAttemptCompletion(attemptRoot)
 	if err != nil {
 		return RemoteDataPlaneResult{}, err
 	}
-	initialize, decodeErr := remoteworker.DecodeRequest(requestFile)
-	closeErr := requestFile.Close()
-	if decodeErr != nil || closeErr != nil {
-		return RemoteDataPlaneResult{}, errors.Join(decodeErr, closeErr)
-	}
-	manifestIdentity := identityForBytes("camp-hauler-kit.json", manifestBody)
-	if initialize.Operation != remoteworker.OperationActivateImage ||
-		initialize.Expected.Kit.SHA256 != manifest.Archive.SHA256 || initialize.Expected.Kit.Size != manifest.Archive.Size ||
-		initialize.Expected.Manifest != manifestIdentity || initialize.Expected.Helper.SHA256 != manifest.Tools.Camp.SHA256 ||
-		initialize.Expected.Helper.Size != manifest.Tools.Camp.Size || !immutableImage(initialize.Expected.Image) {
-		return RemoteDataPlaneResult{}, errors.New("prior bootstrap identity differs from verified kit")
-	}
 	expected := remoteworker.ExpectedIdentity{
-		Architecture: manifest.Architecture,
+		Architecture: completion.Architecture,
 		Helper:       remoteworker.FileIdentity{Name: "camp", SHA256: manifest.Tools.Camp.SHA256, Size: manifest.Tools.Camp.Size},
-		Kit:          initialize.Expected.Kit, Manifest: manifestIdentity, Image: initialize.Expected.Image,
+		Kit: remoteworker.FileIdentity{
+			Name: "camp-hauler-kit.tar.zst", SHA256: completion.KitSHA256, Size: completion.KitSize,
+		},
+		Manifest: manifestIdentity, Image: completion.OuterImage,
 	}
-	if _, err := capsule.VerifyBootstrap(capsule.BootstrapVerificationRequest{Root: bootstrapRoot, Expected: expected}); err != nil {
+	scope := capsule.BootstrapScope{
+		SchemaVersion: completion.RequestSchema, SessionID: completion.RequestSession, WorkspaceRoot: completion.WorkspaceRoot,
+		RuntimeRoot: completion.RuntimeRoot, ManifestPath: completion.ManifestPath, Architecture: completion.Architecture,
+	}
+	config := remoteworker.FileIdentity{Name: "devcontainer.json", SHA256: completion.ConfigSHA256, Size: completion.ConfigSize}
+	if completion.Mode != domain.DataPlaneHaulerKitV1 || completion.AttemptID != request.AttemptID ||
+		completion.BootstrapRoot != bootstrapRoot || completion.RequestSession != request.SessionID ||
+		completion.Architecture != manifest.Architecture || completion.KitSHA256 != manifest.Archive.SHA256 ||
+		completion.KitSize != manifest.Archive.Size || completion.ManifestSHA256 != manifestIdentity.SHA256 ||
+		completion.ManifestSize != manifestIdentity.Size || !immutableImage(completion.OuterImage) {
+		return RemoteDataPlaneResult{}, errors.New("prior completion marker is not bound to the requested attempt")
+	}
+	if _, err := capsule.VerifyBootstrap(capsule.BootstrapVerificationRequest{
+		Root: bootstrapRoot, Expected: expected, Scope: scope, Config: config,
+	}); err != nil {
 		return RemoteDataPlaneResult{}, fmt.Errorf("verify prior remote bootstrap: %w", err)
 	}
-	record := domain.RemoteDataPlaneRecord{
-		Mode: domain.DataPlaneHaulerKitV1, AttemptID: request.AttemptID, BootstrapRoot: bootstrapRoot,
-		KitSHA256: manifest.Archive.SHA256, KitSize: manifest.Archive.Size,
-		ManifestSHA256: manifestIdentity.SHA256, ManifestSize: manifestIdentity.Size, OuterImage: initialize.Expected.Image,
-	}
-	completion, err := readAttemptCompletion(attemptRoot)
-	if err != nil || completion != record {
-		return RemoteDataPlaneResult{}, errors.New("prior remote data-plane completion marker differs")
-	}
-	return RemoteDataPlaneResult{BootstrapRoot: bootstrapRoot, Record: record}, nil
+	return RemoteDataPlaneResult{BootstrapRoot: bootstrapRoot, Record: completion}, nil
 }
 
 func sameGenerationRef(left, right *domain.GenerationRef) bool {
@@ -333,6 +343,14 @@ func immutableImage(image string) bool {
 func identityForBytes(name string, body []byte) remoteworker.FileIdentity {
 	digest := sha256.Sum256(body)
 	return remoteworker.FileIdentity{Name: name, SHA256: hex.EncodeToString(digest[:]), Size: int64(len(body))}
+}
+
+func identityForFile(name, path string) (remoteworker.FileIdentity, error) {
+	body, err := os.ReadFile(path)
+	if err != nil {
+		return remoteworker.FileIdentity{}, err
+	}
+	return identityForBytes(name, body), nil
 }
 
 func createOwnedAttempt(parent, attemptID string) error {

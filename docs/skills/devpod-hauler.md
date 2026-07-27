@@ -76,6 +76,13 @@ Do not use Hauler v2.0.2's live `_catalog` response as proof that all direct reg
   separately accounted runtime payload, excluded from that metadata budget and
   independently identity-bound. The reviewed production helper was 20.1 MiB,
   so guidance must not claim the kit is the source's only large regular file.
+  The durable data-plane record and completion marker also bind the remote
+  worker protocol schema, session, workspace root, runtime root, manifest path,
+  architecture, and the full generated `devcontainer.json` SHA-256 and size.
+  Reentry supplies those persisted expectations to bootstrap verification.
+  Three mutually coherent request files with a different scope, or any
+  lifecycle/config byte change, therefore fail even when their internal
+  identities and helper substrings remain plausible.
 - Production remote opens now persist the `haulerKitV1` data-plane selection
   and stable attempt ID before preparation. The preparer snapshots the hydrated
   root into a fresh Hauler store, adds the resolved immutable devcontainer

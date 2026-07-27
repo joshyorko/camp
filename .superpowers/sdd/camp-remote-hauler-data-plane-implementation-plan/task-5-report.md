@@ -69,3 +69,26 @@
   `internal/haulkit`. `rtk go test ./... -count=1` passed 1,687 tests across 45
   packages; `rtk go vet ./...`, `rtk go build ./cmd/camp`, and
   `rtk git diff --check` passed.
+
+## Review fix round 2
+
+- `RemoteDataPlaneRecord` and the completion marker now persist the exact
+  remote-worker schema, session, workspace root, runtime root, manifest path,
+  architecture, and generated `devcontainer.json` SHA-256 and size.
+- Initial preparation derives those values from the rendered source and records
+  them only after complete verification. Reentry reconstructs its verification
+  request from the persisted record rather than trusting mutually coherent
+  files in the bootstrap directory.
+- Bootstrap verification now hashes the full config bytes and requires every
+  decoded request to match the persisted scope. Regressions replace all three
+  requests with a coherent alternate scope and alter lifecycle command
+  semantics while retaining the recognizable helper boundary; both fail.
+- Kit builder runtime-probe failures and identity mismatches now use separate
+  diagnostics. A mismatch no longer formats a nil error with `%w`.
+- RED evidence: the new verifier request did not compile until persisted scope
+  and config expectations existed, and the builder mismatch regression exposed
+  `probe hauler runtime identity: %!w(<nil>)`.
+- GREEN evidence: the affected-package gate passed 674 tests across five
+  packages. `rtk go test ./... -count=1` passed 1,689 tests across 45 packages;
+  `rtk go vet ./...`, `rtk go build ./cmd/camp`, and `rtk git diff --check`
+  passed.

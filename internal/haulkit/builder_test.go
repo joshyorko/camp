@@ -173,6 +173,8 @@ func TestBuilderDerivesRuntimeIdentityAndRejectsWrongCallerClaims(t *testing.T) 
 	request.HaulerVersion = "v0.0.0"
 	if _, err := builder.Build(context.Background(), request); err == nil {
 		t.Fatal("Build() accepted caller Hauler version")
+	} else if strings.Contains(err.Error(), "%!w") || !strings.Contains(err.Error(), "identity") {
+		t.Fatalf("Build() identity diagnostic = %q", err)
 	}
 }
 

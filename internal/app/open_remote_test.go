@@ -11,6 +11,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -25,6 +26,7 @@ import (
 	imageops "github.com/joshyorko/camp/internal/images"
 	"github.com/joshyorko/camp/internal/journal"
 	"github.com/joshyorko/camp/internal/ports"
+	"github.com/joshyorko/camp/internal/remoteworker"
 	"github.com/joshyorko/camp/internal/target"
 )
 
@@ -1187,7 +1189,11 @@ func (r *recordingRemoteDataPlane) Prepare(_ context.Context, request RemoteData
 		Record: domain.RemoteDataPlaneRecord{
 			Mode: domain.DataPlaneHaulerKitV1, AttemptID: request.AttemptID, BootstrapRoot: r.bootstrapRoot,
 			KitSHA256: strings.Repeat("a", 64), KitSize: 1, ManifestSHA256: strings.Repeat("b", 64), ManifestSize: 1,
-			OuterImage: "example.test/room@sha256:" + strings.Repeat("c", 64),
+			OuterImage:    "example.test/room@sha256:" + strings.Repeat("c", 64),
+			RequestSchema: remoteworker.ProtocolSchemaVersion, RequestSession: request.SessionID,
+			WorkspaceRoot: "/workspaces/brain", RuntimeRoot: "/var/lib/camp/" + request.SessionID,
+			ManifestPath: "/var/lib/camp/" + request.SessionID + "/camp-hauler-kit.json", Architecture: "linux/" + runtime.GOARCH,
+			ConfigSHA256: strings.Repeat("d", 64), ConfigSize: 1,
 		},
 	}, nil
 }

@@ -1082,7 +1082,11 @@ func validRemoteDataPlaneResult(result RemoteDataPlaneResult, selected domain.Re
 		record.Mode == selected.Mode && record.AttemptID == selected.AttemptID &&
 		len(record.KitSHA256) == 64 && record.KitSize > 0 &&
 		len(record.ManifestSHA256) == 64 && record.ManifestSize > 0 &&
-		strings.Contains(record.OuterImage, "@sha256:") && len(record.OuterImage[strings.LastIndex(record.OuterImage, "@sha256:")+8:]) == 64
+		strings.Contains(record.OuterImage, "@sha256:") && len(record.OuterImage[strings.LastIndex(record.OuterImage, "@sha256:")+8:]) == 64 &&
+		record.RequestSchema != 0 && strings.HasSuffix(record.AttemptID, "-hauler-kit-v1") &&
+		record.RequestSession == strings.TrimSuffix(record.AttemptID, "-hauler-kit-v1") &&
+		validRoot(record.WorkspaceRoot) && validRoot(record.RuntimeRoot) && validRoot(record.ManifestPath) &&
+		strings.HasPrefix(record.Architecture, "linux/") && len(record.ConfigSHA256) == 64 && record.ConfigSize > 0
 }
 
 func validateSnapshotBackend(snapshot domain.JournalSnapshot, backend config.Backend) error {

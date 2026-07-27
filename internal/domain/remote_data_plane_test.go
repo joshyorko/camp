@@ -10,7 +10,10 @@ func TestRemoteDataPlaneRecordRoundTripsWithoutChangingJournalSchema(t *testing.
 	record := RemoteDataPlaneRecord{
 		Mode: DataPlaneHaulerKitV1, AttemptID: "session-hauler-kit-v1", BootstrapRoot: "/data/session/bootstrap",
 		KitSHA256: strings.Repeat("a", 64), KitSize: 42, ManifestSHA256: strings.Repeat("b", 64), ManifestSize: 21,
-		OuterImage: "example.test/room@sha256:" + strings.Repeat("c", 64),
+		OuterImage:    "example.test/room@sha256:" + strings.Repeat("c", 64),
+		RequestSchema: 1, RequestSession: "session", WorkspaceRoot: "/workspaces/brain",
+		RuntimeRoot: "/var/lib/camp/session", ManifestPath: "/var/lib/camp/session/camp-hauler-kit.json",
+		Architecture: "linux/amd64", ConfigSHA256: strings.Repeat("d", 64), ConfigSize: 512,
 	}
 	snapshot := JournalSnapshot{SchemaVersion: SchemaVersion, Recovery: RecoveryRecord{RemoteDataPlane: &record}}
 	body, err := json.Marshal(snapshot)

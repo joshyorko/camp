@@ -383,9 +383,7 @@ func TestVerifyBootstrapAcceptsCompleteRenderedSourceAndAccountsPayloadClasses(t
 	if err != nil {
 		t.Fatal(err)
 	}
-	verified, err := VerifyBootstrap(BootstrapVerificationRequest{
-		Root: bootstrap.Root, Expected: fixture.request.InitializeRequest.Expected,
-	})
+	verified, err := VerifyBootstrap(bootstrapVerificationRequest(t, fixture, bootstrap))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -418,8 +416,43 @@ func TestVerifyBootstrapRejectsTamperedOrUnboundedRenderedSource(t *testing.T) {
 				t.Fatal(err)
 			}
 		},
+		"coherent request scope": func(t *testing.T, fixture bootstrapTestFixture, bootstrap Bootstrap) {
+			for name, request := range map[string]remoteworker.Request{
+				"initialize-request.json": fixture.request.InitializeRequest,
+				"hydrate-request.json":    fixture.request.HydrateRequest,
+				"services-request.json":   fixture.request.ServicesRequest,
+			} {
+				request.WorkspaceRoot = "/workspaces/tampered"
+				request.RuntimeRoot = "/var/lib/camp/tampered"
+				request.ManifestPath = "/var/lib/camp/tampered/camp-hauler-kit.json"
+				body, _ := json.Marshal(request)
+				if err := os.WriteFile(filepath.Join(bootstrap.Root, ".camp-bootstrap", name), body, 0o600); err != nil {
+					t.Fatal(err)
+				}
+			}
+		},
 		"devcontainer": func(t *testing.T, _ bootstrapTestFixture, bootstrap Bootstrap) {
 			if err := os.WriteFile(filepath.Join(bootstrap.Root, ".camp-bootstrap", "devcontainer.json"), []byte(`{"image":"mutable:latest"}`), 0o600); err != nil {
+				t.Fatal(err)
+			}
+		},
+		"lifecycle semantics": func(t *testing.T, _ bootstrapTestFixture, bootstrap Bootstrap) {
+			path := filepath.Join(bootstrap.Root, ".camp-bootstrap", "devcontainer.json")
+			body, err := os.ReadFile(path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			var document map[string]json.RawMessage
+			if err := json.Unmarshal(body, &document); err != nil {
+				t.Fatal(err)
+			}
+			var command string
+			if err := json.Unmarshal(document["initializeCommand"], &command); err != nil {
+				t.Fatal(err)
+			}
+			document["initializeCommand"], _ = json.Marshal(command + " && true")
+			body, _ = json.Marshal(document)
+			if err := os.WriteFile(path, body, 0o600); err != nil {
 				t.Fatal(err)
 			}
 		},
@@ -447,13 +480,25 @@ func TestVerifyBootstrapRejectsTamperedOrUnboundedRenderedSource(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
+			verification := bootstrapVerificationRequest(t, fixture, bootstrap)
 			mutate(t, fixture, bootstrap)
-			if _, err := VerifyBootstrap(BootstrapVerificationRequest{
-				Root: bootstrap.Root, Expected: fixture.request.InitializeRequest.Expected,
-			}); err == nil {
+			if _, err := VerifyBootstrap(verification); err == nil {
 				t.Fatal("VerifyBootstrap() error = nil")
 			}
 		})
+	}
+}
+
+func bootstrapVerificationRequest(t *testing.T, fixture bootstrapTestFixture, bootstrap Bootstrap) BootstrapVerificationRequest {
+	t.Helper()
+	request := fixture.request.InitializeRequest
+	return BootstrapVerificationRequest{
+		Root: bootstrap.Root, Expected: request.Expected,
+		Scope: BootstrapScope{
+			SchemaVersion: request.SchemaVersion, SessionID: request.SessionID, WorkspaceRoot: request.WorkspaceRoot,
+			RuntimeRoot: request.RuntimeRoot, ManifestPath: request.ManifestPath, Architecture: request.Expected.Architecture,
+		},
+		Config: fileIdentity(t, "devcontainer.json", filepath.Join(bootstrap.Root, ".camp-bootstrap", "devcontainer.json")),
 	}
 }
 
