@@ -29,6 +29,9 @@ func (i *BlueprintInspector) Inspect(ctx context.Context) (BlueprintInspection, 
 	if err != nil {
 		return BlueprintInspection{}, err
 	}
+	if err := blueprint.Validate(); err != nil {
+		return BlueprintInspection{}, err
+	}
 	ref, err := blueprint.Ref()
 	if err != nil {
 		return BlueprintInspection{}, err

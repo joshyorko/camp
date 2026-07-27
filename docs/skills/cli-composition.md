@@ -39,14 +39,22 @@ Unknown commands and arbitrary arguments return the stable usage exit code 2. Hu
 
 ## Deferred controller and profile command composition
 
-The schema/application layer provides controller inspection, canonical blueprint
-inspection, journal-projected timelines, and immutable non-secret profile
-operations. It intentionally does not register Cobra commands until production
-composition owns both profile persistence and journal execution-binding writes.
-The proposed stable command surface is `camp inspect`, `camp timeline`, and
-`camp profile import|list|show|current|activate|deactivate`; each must use the
-existing JSON envelope and must not expose profile values that fail the
-non-secret validation.
+The implemented domain/application slice validates controller identities,
+blueprints, blueprint references, execution bindings, provenance, and the
+closed profile schema. Blueprint identity accepts only the typed DevPod/Hauler
+tool-version fields, exact supported schema versions, portable identifiers, and
+canonical lowercase SHA-256 references. Profiles currently allow only
+`workspaceEngine: devpod`; there is no arbitrary setting map. Store-facing
+profile reads are revalidated, and timeline marks absent, zero, malformed, or
+unsupported bindings `unknown-blueprint`.
+
+This slice has no durable profile store, production binding reader/writer, or
+Cobra composition. Therefore no controller, timeline, or profile command is
+implemented or advertised. A future surface may add `camp inspect`, `camp
+timeline`, and `camp profile import|list|show|current|activate|deactivate` only
+after production composition owns both profile persistence and journal
+execution-binding writes; each command must use the existing JSON envelope and
+must not expose a profile that fails validation.
 
 Before registering `profile activate`, composition must prove that open writes
 the selected profile digest into the session's execution binding before effects,

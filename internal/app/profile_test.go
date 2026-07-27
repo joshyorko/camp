@@ -4,20 +4,26 @@ import (
 	"context"
 	"errors"
 	"testing"
+
+	"github.com/joshyorko/camp/internal/domain"
 )
 
-func TestProfilesImportStoresCanonicalImmutableProfileAndActivationUsesDigest(t *testing.T) {
+func TestProfilesImportStoresClosedCanonicalProfileAndActivationUsesDigest(t *testing.T) {
 	t.Parallel()
 	store := &profileStoreStub{}
-	profiles := NewProfiles(store)
-	profile, err := profiles.Import(context.Background(), ProfileInput{Name: "local", Values: map[string]string{"workspaceEngine": "devpod"}})
+	profile, err := NewProfiles(store).Import(context.Background(), ProfileInput{
+		Name: "local",
+		Values: ProfileValues{
+			WorkspaceEngine: domain.WorkspaceEngineDevPod,
+		},
+	})
 	if err != nil {
 		t.Fatal(err)
 	}
 	if profile.Digest == "" || len(store.imported) != 1 {
 		t.Fatalf("profile=%#v store=%#v", profile, store)
 	}
-	if err := profiles.Activate(context.Background(), profile.Digest); err != nil {
+	if err := NewProfiles(store).Activate(context.Background(), profile.Digest); err != nil {
 		t.Fatal(err)
 	}
 	if store.active != profile.Digest {
@@ -25,31 +31,66 @@ func TestProfilesImportStoresCanonicalImmutableProfileAndActivationUsesDigest(t 
 	}
 }
 
-func TestProfilesRejectSecretAndPathBearingImportsBeforeStoreEffects(t *testing.T) {
+func TestProfilesRejectMalformedInputsBeforeStoreEffects(t *testing.T) {
 	t.Parallel()
-	store := &profileStoreStub{}
-	profiles := NewProfiles(store)
-	for _, input := range []ProfileInput{{Name: "secret", Values: map[string]string{"token": "value"}}, {Name: "path", Values: map[string]string{"workspace": "/home/josh/brain"}}} {
-		if _, err := profiles.Import(context.Background(), input); !errors.Is(err, ErrUnsafeProfile) {
-			t.Fatalf("Import(%#v) = %v", input, err)
-		}
+	tests := []ProfileInput{
+		{},
+		{Name: "access-token", Values: ProfileValues{WorkspaceEngine: domain.WorkspaceEngineDevPod}},
+		{Name: "local", Values: ProfileValues{}},
+		{Name: "local", Values: ProfileValues{WorkspaceEngine: "docker"}},
 	}
-	if len(store.imported) != 0 {
-		t.Fatalf("unsafe imports reached store: %#v", store.imported)
+	for _, input := range tests {
+		store := &profileStoreStub{}
+		if _, err := NewProfiles(store).Import(context.Background(), input); !errors.Is(err, ErrInvalidProfile) {
+			t.Fatalf("Import(%#v) = %v, want ErrInvalidProfile", input, err)
+		}
+		if len(store.imported) != 0 {
+			t.Fatalf("invalid import reached store: %#v", store.imported)
+		}
 	}
 }
 
-func TestProfilesImportCopiesValuesBeforePersistingImmutableProfile(t *testing.T) {
+func TestProfilesValidateAndCopyStoreResults(t *testing.T) {
 	t.Parallel()
-	store := &profileStoreStub{}
-	values := map[string]string{"workspaceEngine": "devpod"}
-	profile, err := NewProfiles(store).Import(context.Background(), ProfileInput{Name: "local", Values: values})
+	valid, err := NewProfile(ProfileInput{Name: "local", Values: ProfileValues{WorkspaceEngine: domain.WorkspaceEngineDevPod}})
 	if err != nil {
 		t.Fatal(err)
 	}
-	values["workspaceEngine"] = "mutated"
-	if profile.Values["workspaceEngine"] != "devpod" || store.imported[0].Values["workspaceEngine"] != "devpod" {
-		t.Fatalf("profile values were mutable: %#v", store.imported[0])
+	store := &profileStoreStub{imported: []Profile{valid}}
+	profiles := NewProfiles(store)
+
+	listed, err := profiles.List(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	listed[0].Name = "mutated"
+	shown, err := profiles.Show(context.Background(), valid.Digest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if shown.Name != "local" || store.imported[0].Name != "local" {
+		t.Fatalf("store result was aliased: shown=%#v store=%#v", shown, store.imported[0])
+	}
+
+	store.imported = append(store.imported, Profile{})
+	if _, err := profiles.List(context.Background()); !errors.Is(err, ErrInvalidProfile) {
+		t.Fatalf("List() error = %v, want ErrInvalidProfile", err)
+	}
+	store.imported = []Profile{{Digest: valid.Digest}}
+	if _, err := profiles.Show(context.Background(), valid.Digest); !errors.Is(err, ErrInvalidProfile) {
+		t.Fatalf("Show() error = %v, want ErrInvalidProfile", err)
+	}
+}
+
+func TestProfileDecoderRejectsUnknownFieldsAndDigestMismatch(t *testing.T) {
+	t.Parallel()
+	for _, body := range []string{
+		`{"schemaVersion":1,"name":"local","values":{"workspaceEngine":"devpod"},"digest":"` + string(make([]byte, 64)) + `"}`,
+		`{"schemaVersion":1,"name":"local","values":{"workspaceEngine":"devpod","token":"secret"},"digest":"` + string(make([]byte, 64)) + `"}`,
+	} {
+		if _, err := DecodeProfile([]byte(body)); err == nil {
+			t.Fatal("DecodeProfile succeeded, want error")
+		}
 	}
 }
 
@@ -62,7 +103,11 @@ func (s *profileStoreStub) Import(_ context.Context, profile Profile) error {
 	s.imported = append(s.imported, profile)
 	return nil
 }
-func (s *profileStoreStub) List(context.Context) ([]Profile, error) { return s.imported, nil }
+func (s *profileStoreStub) List(context.Context) ([]Profile, error) {
+	out := make([]Profile, len(s.imported))
+	copy(out, s.imported)
+	return out, nil
+}
 func (s *profileStoreStub) Get(_ context.Context, digest string) (Profile, error) {
 	for _, profile := range s.imported {
 		if profile.Digest == digest {

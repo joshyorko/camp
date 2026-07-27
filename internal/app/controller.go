@@ -21,5 +21,12 @@ func (i *ControllerInspector) Inspect(ctx context.Context) (domain.ControllerIde
 	if i == nil || i.reader == nil {
 		return domain.ControllerIdentity{}, errors.New("controller identity reader is nil")
 	}
-	return i.reader.ControllerIdentity(ctx)
+	identity, err := i.reader.ControllerIdentity(ctx)
+	if err != nil {
+		return domain.ControllerIdentity{}, err
+	}
+	if err := identity.Validate(); err != nil {
+		return domain.ControllerIdentity{}, err
+	}
+	return identity, nil
 }

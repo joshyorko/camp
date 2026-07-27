@@ -48,9 +48,10 @@ func (t *Timeline) List(ctx context.Context) ([]TimelineEntry, error) {
 			if err != nil {
 				return nil, err
 			}
-			if found {
+			if found && binding.Validate() == nil {
 				entry.Blueprint = BlueprintKnown
-				entry.Binding = &binding
+				bindingCopy := binding
+				entry.Binding = &bindingCopy
 			}
 		}
 		entries = append(entries, entry)
