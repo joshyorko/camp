@@ -133,7 +133,7 @@ the candidate to install the exact DevPod and Hauler assets from
 Framework suites against the same executable. Go tests are not hidden inside
 Robot keywords. Gate manifests distinguish passed and failed gates; an absent
 named test, opt-in skip, Robot skip, missing executable, or candidate mutation
-is a failure. RCC source-gate ledger records command identity, duration, result, and sanitized failure reason for every named mandatory gate. A missing mandatory gate is recorded as `missing` and fails the task rather than being hidden by a broad test command. The RCC and pip Robot Framework declarations are both 7.4.2; that current factory pin supersedes the older 6.1.1 planning reference.
+is a failure. RCC `test` builds and verifies its candidate before source gates; every gate ledger has that non-empty candidate SHA-256 and only terminal `passed`, `failed`, `missing`, `skipped`, or `gated` results. A missing mandatory gate is recorded as `missing` and fails the task rather than being hidden by a broad test command. Generated documentation is a gate only when regeneration leaves `docs/generated/` unchanged; a post-generation diff fails it. The RCC and pip Robot Framework declarations are both 7.4.2; that current factory pin supersedes the older 6.1.1 planning reference.
 
 A clean-start rehearsal removes only Camp-owned state. Inventory `camp list
 --json` and DevPod workspaces first, run `camp strike --purge --yes` while the
