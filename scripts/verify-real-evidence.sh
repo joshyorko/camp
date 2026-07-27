@@ -16,22 +16,28 @@ run_named() {
   local name="$1" timeout="$2"
   shift 2
   local output
-  output="$(mktemp)"
+  output="$(mktemp "${TMPDIR:-/tmp}/camp-real-evidence.XXXXXX")"
+  cleanup_receipt() {
+    trap - RETURN INT TERM
+    local receipt="${output:-}"
+    if [[ -f "${receipt}" && "$(basename -- "${receipt}")" == camp-real-evidence.* ]]; then
+      rm -f -- "${receipt}"
+    fi
+  }
+  trap cleanup_receipt RETURN
+  trap 'cleanup_receipt; exit 130' INT
+  trap 'cleanup_receipt; exit 143' TERM
   if ! go test -v "${package}" -run "^${name}$" -count=1 -timeout="${timeout}" "$@" | tee "${output}"; then
-    rm -f "${output}"
     return 1
   fi
   if grep -qE "(^|[[:space:]])SKIP|no tests to run" "${output}"; then
     printf 'evidence gate %s skipped or ran no tests\n' "${name}" >&2
-    rm -f "${output}"
     return 1
   fi
   if ! grep -q -- "--- PASS: ${name}" "${output}"; then
     printf 'evidence gate %s produced no passing test receipt\n' "${name}" >&2
-    rm -f "${output}"
     return 1
   fi
-  rm -f "${output}"
 }
 
 discover() {

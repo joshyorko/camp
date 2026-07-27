@@ -273,7 +273,9 @@ Discovery lists `TestMountedFileBackendParity`, `TestS3TwoWriterConflict`,
 discovers those names without requiring a candidate. Every execution mode
 requires all five names, an executable orchestrator-provided `build/camp`, and
 a passing test receipt for every selected gate; an opt-in skip or no-tests
-result is a failure. The real lifecycle tests require `CAMP_TEST_BINARY`; they no longer
+result is a failure. Each selected gate writes its receipt through a uniquely named
+`camp-real-evidence.*` temporary file and removes only that file on return, SIGINT,
+or SIGTERM. The real lifecycle tests require `CAMP_TEST_BINARY`; they no longer
 build independent executables or inspect the host-global DevPod context. Each scenario uses private XDG
 config, data, state, cache, and mode-0700 runtime roots plus a unique private
 DevPod home, config, SSH config, and non-default context. Before scenario
