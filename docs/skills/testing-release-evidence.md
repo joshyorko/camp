@@ -157,15 +157,29 @@ workflow commit and run URL, including every direct and RCC job result. The
 mandatory RCC Robot job downloads the `rcc-local` artifact instead of
 rebuilding it, verifies the manifest commit and candidate SHA-256, and runs
 `robot` against that exact binary. Its always-running artifact upload retains
-the Robot gate ledger, Robot XML/log/report directory, candidate manifest, and
-`ci-cleanup-receipt.json`; a failed or interrupted Robot run is evidence of
-failure, not permission to omit the cleanup receipt. Its
+the Robot gate ledger, Robot XML, log, report, candidate manifest, teardown
+observations, and `ci-cleanup-receipt.json`; each path is mandatory and a
+missing path fails the evidence job. The downloaded artifact contents are
+rooted under `build/`: CI stages `ci-artifact/build/`, uploads the staging
+directory's contents, and downloads them into the repository root. Uploading
+the files directly would strip `build/` at the artifact boundary. The cleanup receipt is derived from
+ownership-checked controller removal followed by an observed absent path; it
+is never inferred from a Robot step or job conclusion. A failed or interrupted
+Robot run is evidence of failure, not permission to invent a cleanup result.
+Its
 `qualifiedHistoricalRuns` starts empty: repository tests cannot populate it or
 claim hosted parity. Do not remove the direct jobs until two consecutive,
 actual complete PR/master runs have passed every recorded mandatory gate; add
 those two GitHub Actions run IDs and URLs only after both runs finish.
 Do not cache `ROBOCORP_HOME`; the environment is private writable runtime state,
 not a verified immutable cache seed.
+
+Parity records translate Actions conclusions into the gate vocabulary
+`passed`, `failed`, `missing`, `skipped`, or `gated`; raw values such as
+`success` and `cancelled` are not ledger results. Before publication, resolve
+the requested release tag to a commit and require it to equal
+`candidate_commit`; `gh release create --verify-tag` alone proves that a tag
+exists, not that it targets the candidate proven by CI.
 
 Developer workstations use the `rcc` already on PATH and its configured
 `ROBOCORP_HOME`; this is the ordinary interactive interface. CI and release

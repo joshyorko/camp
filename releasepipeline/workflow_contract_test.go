@@ -58,22 +58,57 @@ func TestCIAddsRCCParityWithoutCachingPrivateRuntimeHomes(t *testing.T) {
 		"if: always()",
 		"name: Direct Go and RCC parity record",
 		"needs: [test, integration, minio, locked-tools, packaging, rcc-local, rcc-test, rcc-robot]",
-		"candidateCommit",
-		"requiredConsecutiveCompleteRuns",
-		"qualifiedHistoricalRuns",
 		"build/evidence/parity.json",
-		`"robot": os.environ["RCC_ROBOT"]`,
+		"developer/ci_release_evidence.py write-parity",
 	)
 	for _, directJob := range []string{"  test:", "  integration:", "  minio:", "  locked-tools:", "  packaging:"} {
 		if !strings.Contains(workflow, directJob) {
 			t.Errorf("direct parity lane %q was removed before two immutable complete run references exist", directJob)
 		}
 	}
-	if !strings.Contains(workflow, `"qualifiedHistoricalRuns": []`) {
-		t.Fatal("hosted parity history must remain empty until two real immutable complete run references exist")
-	}
 	if strings.Contains(workflow, "build/rcc-homes") && strings.Contains(workflow, "actions/cache") {
 		t.Fatal("CI must not cache private RCC homes")
+	}
+	document := parseWorkflow(t, workflow)
+	stage := findStepByName(t, document, "rcc-local", "Stage candidate with preserved build root")
+	stageRun := stage["run"].(string)
+	for _, staged := range []string{
+		"ci-artifact/build/camp",
+		"ci-artifact/build/evidence/candidate.json",
+	} {
+		if !strings.Contains(stageRun, staged) {
+			t.Errorf("candidate staging omits preserved path %s", staged)
+		}
+	}
+	candidateUpload := findStepByUses(t, document, "rcc-local", "actions/upload-artifact@")
+	candidateUploadWith := candidateUpload["with"].(map[string]any)
+	if candidateUploadWith["path"] != "ci-artifact/" {
+		t.Fatalf("candidate upload root = %#v, want ci-artifact/", candidateUploadWith["path"])
+	}
+	download := findStepByUses(t, document, "rcc-robot", "actions/download-artifact@")
+	with := download["with"].(map[string]any)
+	if with["path"] != "." {
+		t.Fatalf("RCC Robot candidate download path = %#v, want repository root", with["path"])
+	}
+	requireEvidence := findStepByName(t, document, "rcc-robot", "Require mandatory RCC Robot evidence")
+	run := requireEvidence["run"].(string)
+	for _, required := range []string{
+		"build/evidence/candidate.json",
+		"build/evidence/robot-gates.json",
+		"build/evidence/robot/output.xml",
+		"build/evidence/robot/log.html",
+		"build/evidence/robot/report.html",
+		"build/evidence/robot-cleanup.jsonl",
+		"build/evidence/ci-cleanup-receipt.json",
+	} {
+		if !strings.Contains(run, "test -f "+required) {
+			t.Errorf("mandatory Robot evidence validation omits %s", required)
+		}
+	}
+	upload := findStepByName(t, document, "rcc-robot", "Upload RCC Robot evidence and cleanup receipt")
+	uploadWith := upload["with"].(map[string]any)
+	if uploadWith["if-no-files-found"] != "error" {
+		t.Fatalf("mandatory Robot evidence missing-file policy = %#v, want error", uploadWith["if-no-files-found"])
 	}
 }
 
@@ -87,8 +122,7 @@ func TestReleaseWorkflowVerifiesDownloadsBeforeProtectedPublication(t *testing.T
 		"actions: read",
 		"gh run download",
 		"rcc-candidate-${CANDIDATE_COMMIT}",
-		"candidate.json",
-		"candidateSha256",
+		"ci_release_evidence.py verify-candidate",
 		"Run RCC release packaging for verified candidate",
 		"environment: release",
 		"contents: write",
@@ -106,6 +140,7 @@ func TestReleaseWorkflowVerifiesDownloadsBeforeProtectedPublication(t *testing.T
 		"verified_artifacts.py recheck dist",
 		"dist/verified-artifacts.json",
 		"inputs.publish == true",
+		"ci_release_evidence.py verify-tag-target",
 		"retention-days:",
 	)
 	for _, forbiddenTrigger := range []string{"pull_request:", `push:
@@ -130,6 +165,49 @@ func TestReleaseWorkflowVerifiesDownloadsBeforeProtectedPublication(t *testing.T
 		}
 	}
 	assertActionsPinned(t, workflow)
+}
+
+func parseWorkflow(t *testing.T, workflow string) map[string]any {
+	t.Helper()
+	var document map[string]any
+	if err := yaml.Unmarshal([]byte(workflow), &document); err != nil {
+		t.Fatal(err)
+	}
+	return document
+}
+
+func findStepByUses(t *testing.T, document map[string]any, jobName, prefix string) map[string]any {
+	t.Helper()
+	for _, step := range workflowSteps(t, document, jobName) {
+		if uses, _ := step["uses"].(string); strings.HasPrefix(uses, prefix) {
+			return step
+		}
+	}
+	t.Fatalf("job %s has no step using %s", jobName, prefix)
+	return nil
+}
+
+func findStepByName(t *testing.T, document map[string]any, jobName, name string) map[string]any {
+	t.Helper()
+	for _, step := range workflowSteps(t, document, jobName) {
+		if step["name"] == name {
+			return step
+		}
+	}
+	t.Fatalf("job %s has no step named %s", jobName, name)
+	return nil
+}
+
+func workflowSteps(t *testing.T, document map[string]any, jobName string) []map[string]any {
+	t.Helper()
+	jobs := document["jobs"].(map[string]any)
+	job := jobs[jobName].(map[string]any)
+	rawSteps := job["steps"].([]any)
+	steps := make([]map[string]any, 0, len(rawSteps))
+	for _, raw := range rawSteps {
+		steps = append(steps, raw.(map[string]any))
+	}
+	return steps
 }
 
 func TestProviderEvidenceUsesExplicitProtectedProfilesNotSecretConditionals(t *testing.T) {

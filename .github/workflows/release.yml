@@ -95,22 +95,10 @@ jobs:
             --repo "$GITHUB_REPOSITORY" \
             --name "rcc-candidate-${CANDIDATE_COMMIT}" \
             --dir .
-          python3 - <<'PY'
-          import hashlib
-          import json
-          import os
-          import pathlib
-
-          candidate = pathlib.Path("build/camp")
-          manifest = json.loads(pathlib.Path("build/evidence/candidate.json").read_text())
-          digest = hashlib.sha256(candidate.read_bytes()).hexdigest()
-          if manifest.get("commit") != os.environ["CANDIDATE_COMMIT"]:
-              raise SystemExit("candidate manifest commit does not match requested commit")
-          if manifest.get("candidateSha256") != os.environ["CANDIDATE_SHA256"]:
-              raise SystemExit("candidate manifest digest does not match requested digest")
-          if digest != os.environ["CANDIDATE_SHA256"]:
-              raise SystemExit("downloaded candidate digest does not match requested digest")
-          PY
+          python3 developer/ci_release_evidence.py verify-candidate \
+            --build-root build \
+            --commit "$CANDIDATE_COMMIT" \
+            --sha256 "$CANDIDATE_SHA256"
       - name: Run RCC release packaging for verified candidate
         env:
           VERSION: ${{ inputs.version }}
@@ -308,11 +296,15 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           REQUESTED_VERSION: ${{ inputs.version }}
+          CANDIDATE_COMMIT: ${{ inputs.candidate_commit }}
         run: |
           release_tag="${GITHUB_REF_NAME}"
           if [[ "${GITHUB_EVENT_NAME}" == "workflow_dispatch" ]]; then
             release_tag="v${REQUESTED_VERSION#v}"
           fi
+          python3 developer/ci_release_evidence.py verify-tag-target \
+            --tag "$release_tag" \
+            --candidate-commit "$CANDIDATE_COMMIT"
           gh release create "$release_tag" \
             dist/camp_*.tar.gz \
             dist/checksums.txt \

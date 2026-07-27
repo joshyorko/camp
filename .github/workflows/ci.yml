@@ -114,12 +114,15 @@ jobs:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
       - name: Build exact RCC candidate
         run: ./developer/rccw run -r developer/toolkit.yaml --dev -t local
+      - name: Stage candidate with preserved build root
+        run: |
+          mkdir -p ci-artifact/build/evidence
+          install -m 0755 build/camp ci-artifact/build/camp
+          cp build/evidence/candidate.json ci-artifact/build/evidence/candidate.json
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: rcc-candidate-${{ github.sha }}
-          path: |
-            build/camp
-            build/evidence/candidate.json
+          path: ci-artifact/
           if-no-files-found: error
           retention-days: 14
 
@@ -161,58 +164,24 @@ jobs:
           CANDIDATE_COMMIT: ${{ github.sha }}
         run: |
           chmod +x build/camp
-          python3 - <<'PY'
-          import hashlib
-          import json
-          import os
-          import pathlib
-
-          candidate = pathlib.Path("build/camp")
-          manifest = json.loads(pathlib.Path("build/evidence/candidate.json").read_text())
-          digest = hashlib.sha256(candidate.read_bytes()).hexdigest()
-          if manifest.get("commit") != os.environ["CANDIDATE_COMMIT"]:
-              raise SystemExit("candidate manifest commit does not match workflow commit")
-          if manifest.get("dirty") is not False:
-              raise SystemExit("CI candidate must be built from a clean checkout")
-          if manifest.get("candidateSha256") != digest:
-              raise SystemExit("downloaded candidate digest does not match manifest")
-          PY
+          python3 developer/ci_release_evidence.py verify-candidate \
+            --build-root build \
+            --commit "$CANDIDATE_COMMIT"
       - name: Run mandatory exact-candidate Robot lifecycle
         id: robot
-        run: ./developer/rccw run -r developer/toolkit.yaml -t robot
-      - name: Record RCC Robot cleanup receipt
-        if: always()
         env:
           CANDIDATE_COMMIT: ${{ github.sha }}
-          ROBOT_OUTCOME: ${{ steps.robot.outcome }}
-          RUN_ID: ${{ github.run_id }}
-          RUN_ATTEMPT: ${{ github.run_attempt }}
+        run: ./developer/rccw run -r developer/toolkit.yaml -t robot
+      - name: Require mandatory RCC Robot evidence
+        if: always()
         run: |
-          mkdir -p build/evidence
-          python3 - <<'PY'
-          import hashlib
-          import json
-          import os
-          import pathlib
-
-          candidate = pathlib.Path("build/camp")
-          receipt = {
-              "schemaVersion": 1,
-              "candidateCommit": os.environ["CANDIDATE_COMMIT"],
-              "candidateSha256": hashlib.sha256(candidate.read_bytes()).hexdigest() if candidate.is_file() else "",
-              "run": {
-                  "id": os.environ["RUN_ID"],
-                  "attempt": os.environ["RUN_ATTEMPT"],
-              },
-              "robotOutcome": os.environ["ROBOT_OUTCOME"],
-              "cleanupEvidence": "mandatory lifecycle gates and Robot teardown",
-              "result": "passed" if os.environ["ROBOT_OUTCOME"] == "success" else "failed",
-          }
-          pathlib.Path("build/evidence/ci-cleanup-receipt.json").write_text(
-              json.dumps(receipt, indent=2, sort_keys=True) + "\n",
-              encoding="utf-8",
-          )
-          PY
+          test -f build/evidence/candidate.json
+          test -f build/evidence/robot-gates.json
+          test -f build/evidence/robot/output.xml
+          test -f build/evidence/robot/log.html
+          test -f build/evidence/robot/report.html
+          test -f build/evidence/robot-cleanup.jsonl
+          test -f build/evidence/ci-cleanup-receipt.json
       - name: Upload RCC Robot evidence and cleanup receipt
         if: always()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
@@ -222,8 +191,9 @@ jobs:
             build/evidence/candidate.json
             build/evidence/robot-gates.json
             build/evidence/robot/
+            build/evidence/robot-cleanup.jsonl
             build/evidence/ci-cleanup-receipt.json
-          if-no-files-found: warn
+          if-no-files-found: error
           retention-days: 90
 
   parity-evidence:
@@ -248,43 +218,14 @@ jobs:
           RCC_TEST: ${{ needs.rcc-test.result }}
           RCC_ROBOT: ${{ needs.rcc-robot.result }}
         run: |
-          mkdir -p build/evidence
-          python3 - <<'PY'
-          import json
-          import os
-          import pathlib
-
-          direct = {
-              "test": os.environ["DIRECT_TEST"],
-              "integration": os.environ["DIRECT_INTEGRATION"],
-              "minio": os.environ["DIRECT_MINIO"],
-              "locked-tools": os.environ["DIRECT_LOCKED_TOOLS"],
-              "packaging": os.environ["DIRECT_PACKAGING"],
-          }
-          rcc = {
-              "local": os.environ["RCC_LOCAL"],
-              "test": os.environ["RCC_TEST"],
-              "robot": os.environ["RCC_ROBOT"],
-          }
-          complete = all(result == "success" for result in [*direct.values(), *rcc.values()])
-          record = {
-              "schemaVersion": 1,
-              "candidateCommit": os.environ["CANDIDATE_COMMIT"],
-              "run": {
-                  "id": os.environ["RUN_ID"],
-                  "attempt": os.environ["RUN_ATTEMPT"],
-                  "url": os.environ["RUN_URL"],
-              },
-              "mandatoryGates": {"direct": direct, "rcc": rcc},
-              "complete": complete,
-              "requiredConsecutiveCompleteRuns": 2,
-              "qualifiedHistoricalRuns": [],
-          }
-          pathlib.Path("build/evidence/parity.json").write_text(
-              json.dumps(record, indent=2, sort_keys=True) + "\n",
-              encoding="utf-8",
-          )
-          PY
+          python3 developer/ci_release_evidence.py write-parity \
+            --output build/evidence/parity.json \
+            --candidate-commit "$CANDIDATE_COMMIT" \
+            --run-id "$RUN_ID" \
+            --run-attempt "$RUN_ATTEMPT" \
+            --run-url "$RUN_URL" \
+            --direct "{\"test\":\"$DIRECT_TEST\",\"integration\":\"$DIRECT_INTEGRATION\",\"minio\":\"$DIRECT_MINIO\",\"locked-tools\":\"$DIRECT_LOCKED_TOOLS\",\"packaging\":\"$DIRECT_PACKAGING\"}" \
+            --rcc "{\"local\":\"$RCC_LOCAL\",\"test\":\"$RCC_TEST\",\"robot\":\"$RCC_ROBOT\"}"
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: rcc-parity-evidence-${{ github.sha }}
