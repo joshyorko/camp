@@ -6,6 +6,7 @@ import (
 	"errors"
 	"strings"
 	"testing"
+	"unicode/utf8"
 )
 
 func validRequest() Request {
@@ -53,12 +54,45 @@ func TestDecodeRequestAcceptsOneStrictVersionedDocument(t *testing.T) {
 		"unknown operation": func(body []byte) []byte {
 			return bytes.Replace(body, []byte(`"probe"`), []byte(`"invented"`), 1)
 		},
+		"recursive duplicate": func(body []byte) []byte {
+			return bytes.Replace(body, []byte(`"architecture"`), []byte(`"architecture":"linux/amd64","architecture"`), 1)
+		},
 	} {
 		t.Run(name, func(t *testing.T) {
 			if _, err := DecodeRequest(bytes.NewReader(mutate(append([]byte(nil), body...)))); !errors.Is(err, ErrInvalidRequest) {
 				t.Fatalf("DecodeRequest() error = %v", err)
 			}
 		})
+	}
+}
+
+func TestRunEmitsBoundedTypedResultForMalformedRequest(t *testing.T) {
+	var stdout, stderr bytes.Buffer
+	err := Run(t.Context(), strings.NewReader("{"), &stdout, &stderr)
+	if !errors.Is(err, ErrInvalidRequest) {
+		t.Fatalf("Run() error = %v", err)
+	}
+	if stderr.Len() != 0 || stdout.Len() == 0 || stdout.Len() > DiagnosticLimit {
+		t.Fatalf("stdout bytes=%d stderr=%q", stdout.Len(), stderr.String())
+	}
+	var result Result
+	if err := json.Unmarshal(stdout.Bytes(), &result); err != nil {
+		t.Fatal(err)
+	}
+	var receipt ErrorReceipt
+	if err := json.Unmarshal(result.Receipt, &receipt); err != nil {
+		t.Fatal(err)
+	}
+	if result.Operation != OperationRejected || receipt.Status != "error" ||
+		receipt.Code != "invalid_request" || receipt.Diagnostic == "" {
+		t.Fatalf("result=%#v receipt=%#v", result, receipt)
+	}
+}
+
+func TestBoundedDiagnosticNormalizesBeforeApplyingByteCap(t *testing.T) {
+	diagnostic := boundedDiagnostic(errors.New(string(bytes.Repeat([]byte{0xff}, DiagnosticLimit))))
+	if !utf8.ValidString(diagnostic) || len(diagnostic) > maxDiagnosticBytes {
+		t.Fatalf("diagnostic bytes=%d valid=%v", len(diagnostic), utf8.ValidString(diagnostic))
 	}
 }
 

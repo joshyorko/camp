@@ -1,16 +1,18 @@
 package remoteworker
 
 import (
+	"bufio"
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"errors"
 	"fmt"
 	"io"
-	"net"
 	"os"
 	"path/filepath"
 	"runtime"
+	"strconv"
+	"strings"
 
 	"golang.org/x/sys/unix"
 )
@@ -30,6 +32,9 @@ type ProbeReceipt struct {
 func Run(ctx context.Context, input io.Reader, output, _ io.Writer) error {
 	request, err := DecodeRequest(input)
 	if err != nil {
+		if encodeErr := encodeErrorResult(output, OperationRejected, err); encodeErr != nil {
+			return errors.Join(err, encodeErr)
+		}
 		return err
 	}
 	if request.Operation == OperationProbe {
@@ -45,6 +50,9 @@ func Run(ctx context.Context, input io.Reader, output, _ io.Writer) error {
 
 func runProbe(_ context.Context, request Request, output io.Writer) error {
 	if err := verifyProbeInputs(request); err != nil {
+		if encodeErr := encodeErrorResult(output, request.Operation, err); encodeErr != nil {
+			return errors.Join(err, encodeErr)
+		}
 		return err
 	}
 	architecture := "linux/" + runtime.GOARCH
@@ -75,6 +83,21 @@ func runProbe(_ context.Context, request Request, output io.Writer) error {
 		return err
 	}
 	return probeErr
+}
+
+func encodeErrorResult(output io.Writer, operation Operation, err error) error {
+	code := "remote_worker_failed"
+	switch {
+	case errors.Is(err, ErrInvalidRequest):
+		code = "invalid_request"
+	case errors.Is(err, ErrIdentityMismatch):
+		code = "identity_mismatch"
+	case errors.Is(err, ErrUnsupportedCapability):
+		code = "unsupported_capability"
+	}
+	return encodeResult(output, operation, ErrorReceipt{
+		Status: "error", Code: code, Diagnostic: boundedDiagnostic(err),
+	})
 }
 
 func verifyProbeInputs(request Request) error {
@@ -157,7 +180,11 @@ func probeFilesystem(root string) error {
 
 func probeNamespaces() error {
 	for _, name := range []string{"mnt", "net", "user"} {
-		if _, err := os.Readlink(filepath.Join("/proc/self/ns", name)); err != nil {
+		fd, err := unix.Open(filepath.Join("/proc/self/ns", name), unix.O_RDONLY|unix.O_CLOEXEC, 0)
+		if err != nil {
+			return err
+		}
+		if err := unix.Close(fd); err != nil {
 			return err
 		}
 	}
@@ -165,27 +192,66 @@ func probeNamespaces() error {
 }
 
 func probeTUN() error {
-	info, err := os.Stat("/dev/net/tun")
+	fd, err := unix.Open("/dev/net/tun", unix.O_RDWR|unix.O_CLOEXEC|unix.O_NOFOLLOW, 0)
 	if err != nil {
 		return err
 	}
-	if info.Mode()&os.ModeDevice == 0 {
-		return errors.New("/dev/net/tun is not a device")
+	defer unix.Close(fd)
+	if _, err := unix.IoctlGetInt(fd, unix.TUNGETFEATURES); err != nil {
+		return err
 	}
 	return nil
 }
 
 func probePrivilege() error {
-	if os.Geteuid() != 0 {
-		return errors.New("effective user is not root")
-	}
-	return nil
-}
-
-func probeLoopbackPort() error {
-	listener, err := net.Listen("tcp4", "127.0.0.1:0")
+	status, err := os.Open("/proc/self/status")
 	if err != nil {
 		return err
 	}
-	return listener.Close()
+	defer status.Close()
+	return probePrivilegeFrom(status)
+}
+
+func probePrivilegeFrom(status io.Reader) error {
+	scanner := bufio.NewScanner(status)
+	for scanner.Scan() {
+		key, value, found := strings.Cut(scanner.Text(), ":")
+		if !found || key != "CapEff" {
+			continue
+		}
+		effective, err := strconv.ParseUint(strings.TrimSpace(value), 16, 64)
+		if err != nil {
+			return fmt.Errorf("parse effective capabilities: %w", err)
+		}
+		const required = uint64(1<<unix.CAP_NET_ADMIN | 1<<unix.CAP_SYS_ADMIN)
+		if effective&required != required {
+			return fmt.Errorf("effective capabilities lack CAP_NET_ADMIN or CAP_SYS_ADMIN")
+		}
+		return nil
+	}
+	if err := scanner.Err(); err != nil {
+		return err
+	}
+	return fmt.Errorf("effective capabilities are unavailable")
+}
+
+func openLoopbackProbeSocket() (int, error) {
+	fd, err := unix.Socket(unix.AF_INET, unix.SOCK_STREAM|unix.SOCK_CLOEXEC|unix.SOCK_NONBLOCK, 0)
+	if err != nil {
+		return -1, err
+	}
+	address := &unix.SockaddrInet4{Addr: [4]byte{127, 0, 0, 1}}
+	if err := unix.Bind(fd, address); err != nil {
+		_ = unix.Close(fd)
+		return -1, err
+	}
+	return fd, nil
+}
+
+func probeLoopbackPort() error {
+	fd, err := openLoopbackProbeSocket()
+	if err != nil {
+		return err
+	}
+	return unix.Close(fd)
 }

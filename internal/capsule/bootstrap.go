@@ -2,6 +2,7 @@ package capsule
 
 import (
 	"bytes"
+	"crypto/rand"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
@@ -11,7 +12,9 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strings"
 
+	"github.com/joshyorko/camp/internal/jsonstrict"
 	"github.com/joshyorko/camp/internal/remoteworker"
 	"golang.org/x/sys/unix"
 )
@@ -59,6 +62,11 @@ func renderBootstrap(request BootstrapRequest, openHelper func() (*os.File, erro
 	if err := requireRealDirectory(parent); err != nil {
 		return Bootstrap{}, err
 	}
+	parentDirectory, err := openDirectoryBootstrap(parent)
+	if err != nil {
+		return Bootstrap{}, err
+	}
+	defer parentDirectory.Close()
 	original, err := readRegular(request.DevcontainerPath)
 	if err != nil {
 		return Bootstrap{}, err
@@ -99,11 +107,26 @@ func renderBootstrap(request BootstrapRequest, openHelper func() (*os.File, erro
 		if item.request.Expected != expected {
 			return Bootstrap{}, fmt.Errorf("%w: request identities differ", ErrInvalidBootstrap)
 		}
+		if item.request.SchemaVersion != request.InitializeRequest.SchemaVersion ||
+			item.request.SessionID != request.InitializeRequest.SessionID ||
+			item.request.WorkspaceRoot != request.InitializeRequest.WorkspaceRoot ||
+			item.request.RuntimeRoot != request.InitializeRequest.RuntimeRoot ||
+			item.request.ManifestPath != request.InitializeRequest.ManifestPath {
+			return Bootstrap{}, fmt.Errorf("%w: request scopes differ", ErrInvalidBootstrap)
+		}
 	}
-	if observed, err := observeRegular(request.KitArchivePath, expected.Kit.Name); err != nil {
+	kit, err := openRegularBootstrap(request.KitArchivePath)
+	if err != nil {
+		return Bootstrap{}, err
+	}
+	defer kit.Close()
+	if observed, err := observeOpenFile(kit, expected.Kit.Name); err != nil {
 		return Bootstrap{}, err
 	} else if observed != expected.Kit {
 		return Bootstrap{}, fmt.Errorf("%w: kit identity", ErrInvalidBootstrap)
+	}
+	if _, err := kit.Seek(0, io.SeekStart); err != nil {
+		return Bootstrap{}, err
 	}
 	if observed, err := observeRegular(request.ManifestPath, expected.Manifest.Name); err != nil {
 		return Bootstrap{}, err
@@ -149,21 +172,26 @@ func renderBootstrap(request BootstrapRequest, openHelper func() (*os.File, erro
 	}
 	generated = append(generated, '\n')
 
-	stage, err := os.MkdirTemp(parent, ".camp-bootstrap-stage-*")
+	stageName, stage, stageDirectory, err := createBootstrapStage(parentDirectory)
 	if err != nil {
 		return Bootstrap{}, err
 	}
+	defer stageDirectory.Close()
 	published := false
 	defer func() {
 		if !published {
 			_ = os.RemoveAll(stage)
 		}
 	}()
-	private := filepath.Join(stage, ".camp-bootstrap")
-	if err := os.Mkdir(private, 0o700); err != nil {
+	if err := unix.Mkdirat(int(stageDirectory.Fd()), ".camp-bootstrap", 0o700); err != nil {
 		return Bootstrap{}, err
 	}
-	if err := writePrivateFile(filepath.Join(private, "devcontainer.json"), generated, 0o600); err != nil {
+	privateDirectory, err := openRelativeDirectory(stageDirectory, ".camp-bootstrap")
+	if err != nil {
+		return Bootstrap{}, err
+	}
+	defer privateDirectory.Close()
+	if err := writePrivateFileAt(privateDirectory, "devcontainer.json", generated, 0o600); err != nil {
 		return Bootstrap{}, err
 	}
 	for _, item := range requests {
@@ -172,26 +200,46 @@ func renderBootstrap(request BootstrapRequest, openHelper func() (*os.File, erro
 			return Bootstrap{}, err
 		}
 		body = append(body, '\n')
-		if err := writePrivateFile(filepath.Join(private, item.name), body, 0o600); err != nil {
+		if err := writePrivateFileAt(privateDirectory, item.name, body, 0o600); err != nil {
 			return Bootstrap{}, err
 		}
 	}
-	if err := copyOpenFile(helper, filepath.Join(private, "camp-bootstrap"), 0o700); err != nil {
+	if err := copyOpenFileAt(helper, privateDirectory, "camp-bootstrap", 0o700); err != nil {
 		return Bootstrap{}, err
 	}
-	if err := copyRegular(request.KitArchivePath, filepath.Join(stage, "camp-hauler-kit.tar.zst"), 0o600); err != nil {
+	if err := verifyRelativeIdentity(privateDirectory, "camp-bootstrap", expected.Helper); err != nil {
 		return Bootstrap{}, err
 	}
-	if err := syncBootstrapDirectory(private); err != nil {
+	if err := copyOpenFileAt(kit, stageDirectory, "camp-hauler-kit.tar.zst", 0o600); err != nil {
 		return Bootstrap{}, err
 	}
-	if err := syncBootstrapDirectory(stage); err != nil {
+	if err := verifyRelativeIdentity(stageDirectory, "camp-hauler-kit.tar.zst", expected.Kit); err != nil {
 		return Bootstrap{}, err
 	}
-	if err := unix.Renameat2(unix.AT_FDCWD, stage, unix.AT_FDCWD, request.Root, unix.RENAME_NOREPLACE); err != nil {
+	if err := privateDirectory.Sync(); err != nil {
 		return Bootstrap{}, err
 	}
-	if err := syncBootstrapDirectory(parent); err != nil {
+	if err := stageDirectory.Sync(); err != nil {
+		return Bootstrap{}, err
+	}
+	if err := requireSameDirectory(parentDirectory, parent); err != nil {
+		return Bootstrap{}, err
+	}
+	targetName := filepath.Base(request.Root)
+	if err := unix.Renameat2(int(parentDirectory.Fd()), stageName, int(parentDirectory.Fd()), targetName, unix.RENAME_NOREPLACE); err != nil {
+		return Bootstrap{}, err
+	}
+	if err := requireSameDirectory(parentDirectory, parent); err != nil {
+		_ = unix.Renameat2(int(parentDirectory.Fd()), targetName, int(parentDirectory.Fd()), stageName, unix.RENAME_NOREPLACE)
+		_ = parentDirectory.Sync()
+		return Bootstrap{}, err
+	}
+	if err := bootstrapDirectorySync(parentDirectory); err != nil {
+		rollbackErr := unix.Renameat2(int(parentDirectory.Fd()), targetName, int(parentDirectory.Fd()), stageName, unix.RENAME_NOREPLACE)
+		syncErr := parentDirectory.Sync()
+		if rollbackErr != nil || syncErr != nil {
+			return Bootstrap{}, fmt.Errorf("%w: parent sync failed and rollback was incomplete: rename=%v sync=%v", ErrInvalidBootstrap, rollbackErr, syncErr)
+		}
 		return Bootstrap{}, err
 	}
 	published = true
@@ -201,7 +249,103 @@ func renderBootstrap(request BootstrapRequest, openHelper func() (*os.File, erro
 	}, nil
 }
 
+var bootstrapDirectorySync = func(directory *os.File) error {
+	return directory.Sync()
+}
+
+func createBootstrapStage(parent *os.File) (string, string, *os.File, error) {
+	for range 100 {
+		var random [8]byte
+		if _, err := rand.Read(random[:]); err != nil {
+			return "", "", nil, err
+		}
+		name := ".camp-bootstrap-stage-" + hex.EncodeToString(random[:])
+		if err := unix.Mkdirat(int(parent.Fd()), name, 0o700); err == nil {
+			directory, openErr := openRelativeDirectory(parent, name)
+			if openErr != nil {
+				_ = unix.Unlinkat(int(parent.Fd()), name, unix.AT_REMOVEDIR)
+				return "", "", nil, openErr
+			}
+			return name, filepath.Join("/proc/self/fd", fmt.Sprint(parent.Fd()), name), directory, nil
+		} else if !errors.Is(err, unix.EEXIST) {
+			return "", "", nil, err
+		}
+	}
+	return "", "", nil, errors.New("could not allocate bootstrap stage")
+}
+
+func openRelativeDirectory(parent *os.File, name string) (*os.File, error) {
+	fd, err := unix.Openat(int(parent.Fd()), name, unix.O_RDONLY|unix.O_CLOEXEC|unix.O_DIRECTORY|unix.O_NOFOLLOW, 0)
+	if err != nil {
+		return nil, err
+	}
+	return os.NewFile(uintptr(fd), name), nil
+}
+
+func verifyRelativeIdentity(parent *os.File, name string, expected remoteworker.FileIdentity) error {
+	fd, err := unix.Openat(int(parent.Fd()), name, unix.O_RDONLY|unix.O_CLOEXEC|unix.O_NOFOLLOW, 0)
+	if err != nil {
+		return err
+	}
+	file := os.NewFile(uintptr(fd), name)
+	defer file.Close()
+	observed, err := observeOpenFile(file, expected.Name)
+	if err != nil {
+		return err
+	}
+	if observed != expected {
+		return fmt.Errorf("%w: staged %s identity", ErrInvalidBootstrap, expected.Name)
+	}
+	return nil
+}
+
+func openDirectoryBootstrap(path string) (*os.File, error) {
+	return openPathBootstrap(path, unix.O_RDONLY|unix.O_CLOEXEC|unix.O_DIRECTORY|unix.O_NOFOLLOW)
+}
+
+func openPathBootstrap(path string, finalFlags int) (*os.File, error) {
+	if !filepath.IsAbs(path) || filepath.Clean(path) != path {
+		return nil, fmt.Errorf("%w: unsafe path %q", ErrInvalidBootstrap, path)
+	}
+	current, err := unix.Open("/", unix.O_RDONLY|unix.O_CLOEXEC|unix.O_DIRECTORY, 0)
+	if err != nil {
+		return nil, err
+	}
+	if path == "/" {
+		return os.NewFile(uintptr(current), path), nil
+	}
+	segments := strings.Split(strings.TrimPrefix(path, "/"), "/")
+	for index, segment := range segments {
+		flags := unix.O_RDONLY | unix.O_CLOEXEC | unix.O_DIRECTORY | unix.O_NOFOLLOW
+		if index == len(segments)-1 {
+			flags = finalFlags
+		}
+		next, openErr := unix.Openat(current, segment, flags, 0)
+		_ = unix.Close(current)
+		if openErr != nil {
+			return nil, openErr
+		}
+		current = next
+	}
+	return os.NewFile(uintptr(current), path), nil
+}
+
+func requireSameDirectory(directory *os.File, path string) error {
+	pinned, err := directory.Stat()
+	if err != nil {
+		return err
+	}
+	current, err := os.Lstat(path)
+	if err != nil || current.Mode()&os.ModeSymlink != 0 || !current.IsDir() || !os.SameFile(pinned, current) {
+		return fmt.Errorf("%w: bootstrap parent changed", ErrInvalidBootstrap)
+	}
+	return nil
+}
+
 func decodeDevcontainer(body []byte) (map[string]json.RawMessage, error) {
+	if err := jsonstrict.RejectDuplicateKeys(body); err != nil {
+		return nil, fmt.Errorf("%w: decode devcontainer: %v", ErrInvalidBootstrap, err)
+	}
 	document, err := decodeRawObject(body)
 	if err != nil {
 		return nil, fmt.Errorf("%w: decode devcontainer: %v", ErrInvalidBootstrap, err)
@@ -210,6 +354,9 @@ func decodeDevcontainer(body []byte) (map[string]json.RawMessage, error) {
 }
 
 func decodeRawObject(body []byte) (map[string]json.RawMessage, error) {
+	if err := jsonstrict.RejectDuplicateKeys(body); err != nil {
+		return nil, err
+	}
 	decoder := json.NewDecoder(bytes.NewReader(body))
 	open, err := decoder.Token()
 	if err != nil || open != json.Delim('{') {
@@ -245,9 +392,9 @@ func decodeRawObject(body []byte) (map[string]json.RawMessage, error) {
 }
 
 func composeLifecycle(original json.RawMessage, requestName string) (json.RawMessage, error) {
-	helper := mustJSON(".camp-bootstrap/camp-bootstrap __remote-worker < .camp-bootstrap/" + requestName)
+	helper := ".camp-bootstrap/camp-bootstrap __remote-worker < .camp-bootstrap/" + requestName
 	if len(original) == 0 {
-		return json.RawMessage(`{"00-camp-bootstrap":` + helper + `}`), nil
+		return json.RawMessage(mustJSON(helper)), nil
 	}
 	trimmed := bytes.TrimSpace(original)
 	if bytes.Equal(trimmed, []byte("null")) {
@@ -258,28 +405,59 @@ func composeLifecycle(original json.RawMessage, requestName string) (json.RawMes
 		if err != nil || len(named) == 0 {
 			return nil, errors.New("malformed named lifecycle command")
 		}
-		if _, conflict := named["00-camp-bootstrap"]; conflict {
-			return nil, errors.New("reserved lifecycle command name")
-		}
 		var buffer bytes.Buffer
-		buffer.WriteString(`{"00-camp-bootstrap":`)
 		buffer.WriteString(helper)
+		buffer.WriteString("\npids=")
 		for _, key := range sortedKeys(named) {
 			if err := validateLifecycleLeaf(named[key]); err != nil {
 				return nil, err
 			}
-			buffer.WriteByte(',')
-			buffer.WriteString(mustJSON(key))
-			buffer.WriteByte(':')
-			buffer.Write(bytes.TrimSpace(named[key]))
+			command, err := lifecycleCommandScript(named[key])
+			if err != nil {
+				return nil, err
+			}
+			buffer.WriteString("\n( ")
+			buffer.WriteString(command)
+			buffer.WriteString(" ) &\npids=\"$pids $!\"")
 		}
-		buffer.WriteByte('}')
-		return buffer.Bytes(), nil
+		buffer.WriteString("\nstatus=0\nfor pid in $pids; do wait \"$pid\" || status=$?; done\nexit \"$status\"")
+		return json.RawMessage(mustJSON(buffer.String())), nil
 	}
 	if err := validateLifecycleLeaf(trimmed); err != nil {
 		return nil, err
 	}
-	return json.RawMessage(`{"00-camp-bootstrap":` + helper + `,"10-user":` + string(trimmed) + `}`), nil
+	command, err := lifecycleCommandScript(trimmed)
+	if err != nil {
+		return nil, err
+	}
+	return json.RawMessage(mustJSON(helper + "\nexec " + command)), nil
+}
+
+func lifecycleCommandScript(raw json.RawMessage) (string, error) {
+	var value any
+	if err := json.Unmarshal(raw, &value); err != nil {
+		return "", errors.New("malformed lifecycle command")
+	}
+	switch command := value.(type) {
+	case string:
+		return "/bin/sh -c " + shellQuote(command), nil
+	case []any:
+		arguments := make([]string, len(command))
+		for index, argument := range command {
+			value, ok := argument.(string)
+			if !ok {
+				return "", errors.New("mixed lifecycle argv")
+			}
+			arguments[index] = shellQuote(value)
+		}
+		return strings.Join(arguments, " "), nil
+	default:
+		return "", errors.New("unsupported lifecycle command form")
+	}
+}
+
+func shellQuote(value string) string {
+	return "'" + strings.ReplaceAll(value, "'", "'\"'\"'") + "'"
 }
 
 func validateLifecycleLeaf(raw json.RawMessage) error {
@@ -368,11 +546,10 @@ func observeOpenFile(file *os.File, name string) (remoteworker.FileIdentity, err
 }
 
 func openRegularBootstrap(path string) (*os.File, error) {
-	fd, err := unix.Open(path, unix.O_RDONLY|unix.O_CLOEXEC|unix.O_NOFOLLOW, 0)
+	file, err := openPathBootstrap(path, unix.O_RDONLY|unix.O_CLOEXEC|unix.O_NOFOLLOW)
 	if err != nil {
 		return nil, err
 	}
-	file := os.NewFile(uintptr(fd), path)
 	info, err := file.Stat()
 	if err != nil || !info.Mode().IsRegular() {
 		file.Close()
@@ -381,11 +558,12 @@ func openRegularBootstrap(path string) (*os.File, error) {
 	return file, nil
 }
 
-func writePrivateFile(path string, body []byte, mode os.FileMode) error {
-	file, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_EXCL, mode)
+func writePrivateFileAt(parent *os.File, name string, body []byte, mode os.FileMode) error {
+	fd, err := unix.Openat(int(parent.Fd()), name, unix.O_WRONLY|unix.O_CREAT|unix.O_EXCL|unix.O_CLOEXEC|unix.O_NOFOLLOW, uint32(mode.Perm()))
 	if err != nil {
 		return err
 	}
+	file := os.NewFile(uintptr(fd), name)
 	if _, err = file.Write(body); err == nil {
 		err = file.Sync()
 	}
@@ -396,23 +574,15 @@ func writePrivateFile(path string, body []byte, mode os.FileMode) error {
 	return closeErr
 }
 
-func copyRegular(source, destination string, mode os.FileMode) error {
-	file, err := openRegularBootstrap(source)
-	if err != nil {
-		return err
-	}
-	defer file.Close()
-	return copyOpenFile(file, destination, mode)
-}
-
-func copyOpenFile(source *os.File, destination string, mode os.FileMode) error {
+func copyOpenFileAt(source, parent *os.File, name string, mode os.FileMode) error {
 	if _, err := source.Seek(0, io.SeekStart); err != nil {
 		return err
 	}
-	output, err := os.OpenFile(destination, os.O_WRONLY|os.O_CREATE|os.O_EXCL, mode)
+	fd, err := unix.Openat(int(parent.Fd()), name, unix.O_WRONLY|unix.O_CREAT|unix.O_EXCL|unix.O_CLOEXEC|unix.O_NOFOLLOW, uint32(mode.Perm()))
 	if err != nil {
 		return err
 	}
+	output := os.NewFile(uintptr(fd), name)
 	_, copyErr := io.Copy(output, source)
 	syncErr := output.Sync()
 	closeErr := output.Close()
@@ -423,13 +593,4 @@ func copyOpenFile(source *os.File, destination string, mode os.FileMode) error {
 		return syncErr
 	}
 	return closeErr
-}
-
-func syncBootstrapDirectory(path string) error {
-	directory, err := os.Open(path)
-	if err != nil {
-		return err
-	}
-	defer directory.Close()
-	return directory.Sync()
 }

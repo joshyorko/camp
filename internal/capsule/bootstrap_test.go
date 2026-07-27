@@ -5,6 +5,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -44,14 +45,7 @@ func TestRenderBootstrapExecutesHelperBeforeEveryLifecycleForm(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			want := "helper-activateImage\nuser\nhelper-hydrate\nuser\nhelper-startServices\nuser\n"
-			if name == "named" {
-				want = "helper-activateImage\nuser-a\nuser-b\nhelper-hydrate\nuser-a\nuser-b\nhelper-startServices\nuser-a\nuser-b\n"
-			}
-			got := string(body)
-			if got != want {
-				t.Fatalf("lifecycle trace = %q, want %q", got, want)
-			}
+			assertLifecycleTrace(t, name, string(body))
 		})
 	}
 }
@@ -65,6 +59,8 @@ func TestRenderBootstrapFailsClosedWithoutChangingOriginal(t *testing.T) {
 			`","onCreateCommand":{"same":"echo one","same":"echo two"}}`,
 		"duplicate lifecycle field": `{"image":"example/original@sha256:` + strings.Repeat("a", 64) +
 			`","onCreateCommand":"echo one","onCreateCommand":"echo two"}`,
+		"recursive duplicate field": `{"image":"example/original@sha256:` + strings.Repeat("a", 64) +
+			`","customizations":{"vscode":{"setting":1,"setting":2}}}`,
 	} {
 		t.Run(name, func(t *testing.T) {
 			fixture := bootstrapFixtureWithConfig(t, config)
@@ -86,6 +82,117 @@ func TestRenderBootstrapFailsClosedWithoutChangingOriginal(t *testing.T) {
 				t.Fatalf("bootstrap root exists after failure: %v", err)
 			}
 		})
+	}
+}
+
+func TestRenderBootstrapPublishesKitFromVerifiedDescriptor(t *testing.T) {
+	for name, mutate := range map[string]func(string) error{
+		"replace path": func(path string) error {
+			replacement := filepath.Join(filepath.Dir(path), "replacement.tar.zst")
+			if err := os.WriteFile(replacement, []byte("replacement"), 0o600); err != nil {
+				return err
+			}
+			return os.Rename(replacement, path)
+		},
+		"mutate opened inode": func(path string) error {
+			return os.WriteFile(path, []byte("replacement"), 0o600)
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			fixture := bootstrapFixture(t, json.RawMessage(`"true"`))
+			original, err := os.ReadFile(fixture.request.KitArchivePath)
+			if err != nil {
+				t.Fatal(err)
+			}
+			openHelper := fixture.openHelper
+			fixture.openHelper = func() (*os.File, error) {
+				if err := mutate(fixture.request.KitArchivePath); err != nil {
+					return nil, err
+				}
+				return openHelper()
+			}
+			result, renderErr := renderBootstrap(fixture.request, fixture.openHelper)
+			if renderErr != nil {
+				if _, err := os.Stat(fixture.request.Root); !os.IsNotExist(err) {
+					t.Fatalf("failed render published root: %v", err)
+				}
+				return
+			}
+			published, err := os.ReadFile(filepath.Join(result.Root, "camp-hauler-kit.tar.zst"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !bytes.Equal(published, original) {
+				t.Fatalf("published unverified kit bytes %q", published)
+			}
+		})
+	}
+}
+
+func TestRenderBootstrapRequiresOneRequestScope(t *testing.T) {
+	for name, mutate := range map[string]func(*remoteworker.Request){
+		"schema":         func(request *remoteworker.Request) { request.SchemaVersion++ },
+		"session":        func(request *remoteworker.Request) { request.SessionID = "other" },
+		"workspace root": func(request *remoteworker.Request) { request.WorkspaceRoot = "/workspaces/other" },
+		"runtime root":   func(request *remoteworker.Request) { request.RuntimeRoot = "/var/lib/camp/other" },
+		"manifest path":  func(request *remoteworker.Request) { request.ManifestPath = "/var/lib/camp/other/manifest.json" },
+	} {
+		t.Run(name, func(t *testing.T) {
+			fixture := bootstrapFixture(t, json.RawMessage(`"true"`))
+			mutate(&fixture.request.HydrateRequest)
+			if _, err := renderBootstrap(fixture.request, fixture.openHelper); err == nil {
+				t.Fatal("renderBootstrap() error = nil")
+			}
+			if _, err := os.Stat(fixture.request.Root); !os.IsNotExist(err) {
+				t.Fatalf("bootstrap root exists after failure: %v", err)
+			}
+		})
+	}
+}
+
+func TestRenderBootstrapRollsBackPublishedInodeWhenParentSyncFails(t *testing.T) {
+	fixture := bootstrapFixture(t, json.RawMessage(`"true"`))
+	parent := filepath.Dir(fixture.request.Root)
+	previous := bootstrapDirectorySync
+	t.Cleanup(func() { bootstrapDirectorySync = previous })
+	injected := false
+	bootstrapDirectorySync = func(directory *os.File) error {
+		if directory.Name() == parent && !injected {
+			if _, err := os.Lstat(fixture.request.Root); err == nil {
+				injected = true
+				return errors.New("injected parent sync failure")
+			}
+		}
+		return directory.Sync()
+	}
+	if _, err := renderBootstrap(fixture.request, fixture.openHelper); err == nil {
+		t.Fatal("renderBootstrap() error = nil")
+	}
+	if !injected {
+		t.Fatal("parent sync failure was not injected after publication")
+	}
+	if _, err := os.Lstat(fixture.request.Root); !os.IsNotExist(err) {
+		t.Fatalf("published bootstrap survived failed parent sync: %v", err)
+	}
+	matches, err := filepath.Glob(filepath.Join(parent, ".camp-bootstrap-stage-*"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(matches) != 0 {
+		t.Fatalf("rollback retained stages: %v", matches)
+	}
+}
+
+func TestRenderBootstrapRejectsSymlinkedSourceAncestor(t *testing.T) {
+	fixture := bootstrapFixture(t, json.RawMessage(`"true"`))
+	linkParent := t.TempDir()
+	link := filepath.Join(linkParent, "source")
+	if err := os.Symlink(filepath.Dir(fixture.request.KitArchivePath), link); err != nil {
+		t.Fatal(err)
+	}
+	fixture.request.KitArchivePath = filepath.Join(link, filepath.Base(fixture.request.KitArchivePath))
+	if _, err := renderBootstrap(fixture.request, fixture.openHelper); err == nil {
+		t.Fatal("renderBootstrap() error = nil")
 	}
 }
 
@@ -113,7 +220,7 @@ func bootstrapFixtureWithConfig(t *testing.T, config string) bootstrapTestFixtur
 	if err := os.WriteFile(devcontainer, []byte(config), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	helperBody := []byte("#!/bin/sh\nset -eu\nop=$(sed -n 's/.*\"operation\":\"\\([^\"]*\\)\".*/\\1/p')\nprintf 'helper-%s\\n' \"$op\" >> \"$TRACE\"\n")
+	helperBody := []byte("#!/bin/sh\nset -eu\nop=$(sed -n 's/.*\"operation\":\"\\([^\"]*\\)\".*/\\1/p')\nsleep 0.1\nprintf 'helper-%s\\n' \"$op\" >> \"$TRACE\"\n")
 	if err := os.WriteFile(helper, helperBody, 0o700); err != nil {
 		t.Fatal(err)
 	}
@@ -181,33 +288,78 @@ func readBootstrapDocument(t *testing.T, path string) map[string]json.RawMessage
 
 func runLifecycle(t *testing.T, root string, raw json.RawMessage) {
 	t.Helper()
-	var commands map[string]json.RawMessage
-	if err := json.Unmarshal(raw, &commands); err != nil {
+	var command any
+	if err := json.Unmarshal(raw, &command); err != nil {
 		t.Fatal(err)
 	}
-	for _, key := range sortedKeys(commands) {
-		var command any
-		if err := json.Unmarshal(commands[key], &command); err != nil {
-			t.Fatal(err)
+	switch value := command.(type) {
+	case map[string]any:
+		processes := make([]*exec.Cmd, 0, len(value))
+		for _, nested := range value {
+			processes = append(processes, lifecycleProcess(t, root, nested))
 		}
-		var process *exec.Cmd
-		switch value := command.(type) {
-		case string:
-			process = exec.Command("/bin/sh", "-c", value)
-		case []any:
-			argv := make([]string, len(value))
-			for index := range value {
-				argv[index] = value[index].(string)
+		for _, process := range processes {
+			if err := process.Start(); err != nil {
+				t.Fatal(err)
 			}
-			process = exec.Command(argv[0], argv[1:]...)
-		default:
-			t.Fatalf("unsupported generated command %#v", command)
 		}
-		process.Dir = root
-		process.Env = os.Environ()
+		for _, process := range processes {
+			if err := process.Wait(); err != nil {
+				t.Fatalf("execute lifecycle object: %v", err)
+			}
+		}
+	default:
+		process := lifecycleProcess(t, root, command)
 		if output, err := process.CombinedOutput(); err != nil {
-			t.Fatalf("execute %s: %v: %s", key, err, output)
+			t.Fatalf("execute lifecycle: %v: %s", err, output)
 		}
+	}
+}
+
+func lifecycleProcess(t *testing.T, root string, command any) *exec.Cmd {
+	t.Helper()
+	var process *exec.Cmd
+	switch value := command.(type) {
+	case string:
+		process = exec.Command("/bin/sh", "-c", value)
+	case []any:
+		argv := make([]string, len(value))
+		for index := range value {
+			argv[index] = value[index].(string)
+		}
+		process = exec.Command(argv[0], argv[1:]...)
+	default:
+		t.Fatalf("unsupported generated command %#v", command)
+	}
+	process.Dir = root
+	process.Env = os.Environ()
+	return process
+}
+
+func assertLifecycleTrace(t *testing.T, form, trace string) {
+	t.Helper()
+	lines := strings.Split(strings.TrimSuffix(trace, "\n"), "\n")
+	operations := []string{"activateImage", "hydrate", "startServices"}
+	index := 0
+	for _, operation := range operations {
+		if index >= len(lines) || lines[index] != "helper-"+operation {
+			t.Fatalf("%s lifecycle did not run helper first for %s: %q", form, operation, trace)
+		}
+		index++
+		wantUsers := map[string]int{"user": 1}
+		if form == "named" {
+			wantUsers = map[string]int{"user-a": 1, "user-b": 1}
+		}
+		for range wantUsers {
+			if index >= len(lines) || wantUsers[lines[index]] == 0 {
+				t.Fatalf("%s lifecycle did not preserve user commands after %s: %q", form, operation, trace)
+			}
+			wantUsers[lines[index]]--
+			index++
+		}
+	}
+	if index != len(lines) {
+		t.Fatalf("%s lifecycle executed extra commands: %q", form, trace)
 	}
 }
 

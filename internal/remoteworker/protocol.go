@@ -10,13 +10,16 @@ import (
 	"path/filepath"
 	"strings"
 	"unicode"
+	"unicode/utf8"
+
+	"github.com/joshyorko/camp/internal/jsonstrict"
 )
 
 const (
 	ProtocolSchemaVersion uint32 = 1
 	DiagnosticLimit              = 64 << 10
 	maxRequestBytes              = 1 << 20
-	maxDiagnosticBytes           = 60 << 10
+	maxDiagnosticBytes           = 10 << 10
 )
 
 var (
@@ -37,6 +40,7 @@ const (
 	OperationCheckpoint    Operation = "checkpoint"
 	OperationStopServices  Operation = "stopServices"
 	OperationCleanup       Operation = "cleanup"
+	OperationRejected      Operation = "rejected"
 )
 
 type FileIdentity struct {
@@ -74,9 +78,25 @@ type UnsupportedReceipt struct {
 	Diagnostic string `json:"diagnostic"`
 }
 
+type ErrorReceipt struct {
+	Status     string `json:"status"`
+	Code       string `json:"code"`
+	Diagnostic string `json:"diagnostic"`
+}
+
 func DecodeRequest(reader io.Reader) (Request, error) {
 	var request Request
-	decoder := json.NewDecoder(io.LimitReader(reader, maxRequestBytes+1))
+	body, err := io.ReadAll(io.LimitReader(reader, maxRequestBytes+1))
+	if err != nil {
+		return request, invalidRequest("read: %v", err)
+	}
+	if len(body) > maxRequestBytes {
+		return request, invalidRequest("request size")
+	}
+	if err := jsonstrict.RejectDuplicateKeys(body); err != nil {
+		return request, invalidRequest("decode: %v", err)
+	}
+	decoder := json.NewDecoder(bytes.NewReader(body))
 	decoder.DisallowUnknownFields()
 	if err := decoder.Decode(&request); err != nil {
 		return request, invalidRequest("decode: %v", err)
@@ -157,11 +177,15 @@ func invalidRequest(format string, arguments ...any) error {
 }
 
 func boundedDiagnostic(err error) string {
-	value := err.Error()
-	if len(value) > maxDiagnosticBytes {
-		value = value[:maxDiagnosticBytes]
+	value := strings.ToValidUTF8(err.Error(), "\uFFFD")
+	if len(value) <= maxDiagnosticBytes {
+		return value
 	}
-	return strings.ToValidUTF8(value, "\uFFFD")
+	value = value[:maxDiagnosticBytes]
+	for !utf8.ValidString(value) {
+		value = value[:len(value)-1]
+	}
+	return value
 }
 
 func encodeResult(writer io.Writer, operation Operation, receipt any) error {

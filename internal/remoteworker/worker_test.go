@@ -9,7 +9,10 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"strings"
 	"testing"
+
+	"golang.org/x/sys/unix"
 )
 
 func TestProbeReportsTypedCapabilitiesAfterVerifyingInputs(t *testing.T) {
@@ -65,6 +68,47 @@ func TestProbeReportsTypedCapabilitiesAfterVerifyingInputs(t *testing.T) {
 	}
 }
 
+func TestLoopbackProbeBindsWithoutListening(t *testing.T) {
+	fd, err := openLoopbackProbeSocket()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer unix.Close(fd)
+	accepting, err := unix.GetsockoptInt(fd, unix.SOL_SOCKET, unix.SO_ACCEPTCONN)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if accepting != 0 {
+		t.Fatal("loopback probe socket is listening")
+	}
+	address, err := unix.Getsockname(fd)
+	if err != nil {
+		t.Fatal(err)
+	}
+	inet, ok := address.(*unix.SockaddrInet4)
+	if !ok || inet.Port == 0 || inet.Addr != [4]byte{127, 0, 0, 1} {
+		t.Fatalf("loopback probe address = %#v", address)
+	}
+}
+
+func TestPrivilegeProbeUsesEffectiveCapabilitiesNotUserID(t *testing.T) {
+	const status = "Name:\tcamp\nUid:\t1000\t1000\t1000\t1000\nCapEff:\t0000000000201000\n"
+	if err := probePrivilegeFrom(strings.NewReader(status)); err != nil {
+		t.Fatalf("probePrivilegeFrom() error = %v", err)
+	}
+	for name, status := range map[string]string{
+		"missing net admin": "CapEff:\t0000000000200000\n",
+		"missing sys admin": "CapEff:\t0000000000001000\n",
+		"malformed":         "CapEff:\tnot-hex\n",
+	} {
+		t.Run(name, func(t *testing.T) {
+			if err := probePrivilegeFrom(strings.NewReader(status)); err == nil {
+				t.Fatal("probePrivilegeFrom() error = nil")
+			}
+		})
+	}
+}
+
 func TestProbeRejectsChangedKitBeforeCapabilityChecks(t *testing.T) {
 	root := t.TempDir()
 	manifest := filepath.Join(root, "manifest.json")
@@ -96,8 +140,16 @@ func TestProbeRejectsChangedKitBeforeCapabilityChecks(t *testing.T) {
 	if err := Run(t.Context(), bytes.NewReader(body), &output, &bytes.Buffer{}); !errors.Is(err, ErrIdentityMismatch) {
 		t.Fatalf("Run() error = %v", err)
 	}
-	if output.Len() != 0 {
-		t.Fatalf("output = %q", output.String())
+	var result Result
+	if err := json.Unmarshal(output.Bytes(), &result); err != nil {
+		t.Fatal(err)
+	}
+	var receipt ErrorReceipt
+	if err := json.Unmarshal(result.Receipt, &receipt); err != nil {
+		t.Fatal(err)
+	}
+	if result.Operation != OperationProbe || receipt.Status != "error" || receipt.Code != "identity_mismatch" {
+		t.Fatalf("result=%#v receipt=%#v", result, receipt)
 	}
 }
 

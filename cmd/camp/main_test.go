@@ -57,7 +57,9 @@ func TestRunRegistersHiddenRemoteWorkerCommand(t *testing.T) {
 	if exitCode == int(cli.ExitSuccess) {
 		t.Fatal("__remote-worker unexpectedly accepted an invalid request")
 	}
-	if stdout.Len() != 0 || strings.Contains(stderr.String(), "unknown command") {
+	if !strings.Contains(stdout.String(), `"operation":"rejected"`) ||
+		!strings.Contains(stdout.String(), `"code":"invalid_request"`) ||
+		strings.Contains(stderr.String(), "unknown command") {
 		t.Fatalf("stdout=%q stderr=%q", stdout.String(), stderr.String())
 	}
 	help := renderRootHelp(t)
