@@ -61,6 +61,8 @@ type ProviderRequest struct {
 
 type UpOptions struct {
 	WorkspacePath        string
+	BootstrapPath        string
+	SourceMode           SourceMode
 	WorkspaceID          string
 	Context              string
 	Provider             string
@@ -88,6 +90,13 @@ type UpOptions struct {
 	SSHConfigPath        string
 	ForwardedArgv        []string
 }
+
+type SourceMode string
+
+const (
+	SourceModeCapsule   SourceMode = "capsule"
+	SourceModeBootstrap SourceMode = "bootstrap"
+)
 
 type CampEnvironment struct {
 	Registry   string
@@ -232,7 +241,11 @@ func (c *Client) Up(ctx context.Context, options UpOptions) (ports.Result, error
 		argv = append(argv, "--ssh-config", options.SSHConfigPath)
 	}
 	argv = append(argv, options.ForwardedArgv...)
-	argv = append(argv, options.WorkspacePath)
+	sourcePath := options.WorkspacePath
+	if options.SourceMode == SourceModeBootstrap {
+		sourcePath = options.BootstrapPath
+	}
+	argv = append(argv, sourcePath)
 	return c.run(ctx, argv)
 }
 

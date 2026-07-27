@@ -642,6 +642,34 @@ func TestT3CodeUpUsesSafeTerminalDevPodSetup(t *testing.T) {
 	}
 }
 
+func TestUpUsesBootstrapRootInsteadOfCapsuleRoot(t *testing.T) {
+	t.Parallel()
+	runner := &recordingRunner{}
+	_, err := NewClient("devpod", runner).Up(context.Background(), UpOptions{
+		WorkspacePath:    "/tmp/capsule",
+		BootstrapPath:    "/tmp/session/devpod-bootstrap",
+		SourceMode:       SourceModeBootstrap,
+		WorkspaceID:      "camp",
+		Provider:         "docker",
+		DevcontainerPath: ".camp-bootstrap/devcontainer.json",
+	})
+	if err != nil {
+		t.Fatalf("Up() error = %v", err)
+	}
+	want := []string{
+		"up", "--ide", "none", "--open-ide=false", "--id", "camp", "--provider", "docker",
+		"--devcontainer-path", ".camp-bootstrap/devcontainer.json", "/tmp/session/devpod-bootstrap",
+	}
+	if len(runner.commands) != 1 || !reflect.DeepEqual(runner.commands[0].Argv, want) {
+		t.Fatalf("argv = %#v, want %#v", runner.commands, want)
+	}
+	for _, argument := range runner.commands[0].Argv {
+		if argument == "/tmp/capsule" {
+			t.Fatalf("argv exposed capsule root: %#v", runner.commands[0].Argv)
+		}
+	}
+}
+
 func TestTerminalAndT3UpRejectDevPodOpenIDETrue(t *testing.T) {
 	t.Parallel()
 	openIDE := true
