@@ -123,6 +123,11 @@ A separate fresh-XDG branch reader must then read the branch pointer, list and
 validate its sidecar, download the archive, and verify the same size and digest.
 Pointer creation by itself is not branch-reopen evidence.
 
+That fresh branch reader must also acquire, revalidate, and conditionally release
+its branch-scoped lease. Controller helper output is scanned for both ephemeral
+fixture credentials before any failure output is reported, so the real proof
+does not turn a fixture secret into a test receipt.
+
 A third process with a new XDG root must reconstruct the winning main pointer
 and history from MinIO and verify the downloaded winner digest. Integration
 harnesses must not synthesize recovery commands. An exact recovery-command
@@ -148,3 +153,8 @@ Run the process contract with Docker available:
 ```sh
 go test ./integration -run '^TestS3TwoWriterConflict$' -count=1 -v -timeout=3m
 ```
+
+`scripts/verify-real-evidence.sh minio` also runs
+`TestMinIOImmutableLifecycle` before the race and CLI lifecycle gates. This
+keeps the deliberately lost multipart-completion response and its verified
+readback reconciliation in the named MinIO receipt.

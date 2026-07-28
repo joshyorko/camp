@@ -4,7 +4,9 @@ import (
 	"context"
 	"errors"
 	"os"
+	"os/exec"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -41,6 +43,98 @@ func (a fakeAssembler) Assemble(_ context.Context, _, _, output string) (hauler.
 		return hauler.GenerationArtifact{}, err
 	}
 	return hauler.GenerationArtifact{Path: output, SHA256: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", Size: 4, Validated: true}, nil
+}
+
+type replacingArchiver struct {
+	root string
+}
+
+func (a *replacingArchiver) Create(_ context.Context, root, destination string) (archiveadapter.ArchiveInfo, error) {
+	a.root = root
+	if err := os.WriteFile(destination, []byte("inner"), 0o600); err != nil {
+		return archiveadapter.ArchiveInfo{}, err
+	}
+	campDirectory := filepath.Join(root, ".camp")
+	if err := os.Rename(campDirectory, campDirectory+".replaced"); err != nil {
+		return archiveadapter.ArchiveInfo{}, err
+	}
+	if err := os.MkdirAll(filepath.Join(campDirectory, "build"), 0o700); err != nil {
+		return archiveadapter.ArchiveInfo{}, err
+	}
+	return archiveadapter.ArchiveInfo{Path: destination, SHA256: "inner-sha", Size: 5}, nil
+}
+
+type rejectingAssembler struct {
+	called bool
+}
+
+func (a *rejectingAssembler) Assemble(context.Context, string, string, string) (hauler.GenerationArtifact, error) {
+	a.called = true
+	return hauler.GenerationArtifact{}, errors.New("assembler must not run")
+}
+
+func TestBuilderRejectsCheckpointDirectoryIdentityChangeBeforeAssembly(t *testing.T) {
+	t.Parallel()
+	root := t.TempDir()
+	archiver := &replacingArchiver{}
+	assembler := &rejectingAssembler{}
+	builder := NewBuilder(archiver, assembler)
+
+	_, err := builder.Build(context.Background(), BuildRequest{
+		Capsule: "second-brain", Root: root,
+		Inventory: domain.ImageInventory{GeneratedAt: time.Unix(100, 0), Images: []domain.Image{}},
+		Lineage:   domain.Lineage{Branch: "main"}, Generation: 1,
+		SessionID: "session-a", CreatedAt: time.Unix(101, 0),
+	})
+	if err == nil || !strings.Contains(err.Error(), "changed identity") {
+		t.Fatalf("Build() error = %v; want changed identity", err)
+	}
+	if assembler.called {
+		t.Fatal("Build() called the assembler after checkpoint directory replacement")
+	}
+}
+
+type execAssembler struct {
+	root  string
+	paths []string
+}
+
+func (a *execAssembler) Assemble(ctx context.Context, manifest, workingDirectory, output string) (hauler.GenerationArtifact, error) {
+	a.paths = []string{manifest, workingDirectory, output}
+	for _, path := range a.paths {
+		if strings.HasPrefix(path, "/proc/self/fd/") || !strings.HasPrefix(path, a.root+string(os.PathSeparator)) {
+			return hauler.GenerationArtifact{}, errors.New("assembler received a non-canonical checkpoint path")
+		}
+	}
+	command := exec.CommandContext(ctx, "sh", "-c", `test -r "$1" && test -d "$2" && printf haul >"$3"`, "checkpoint-builder", manifest, workingDirectory, output)
+	if combined, err := command.CombinedOutput(); err != nil {
+		return hauler.GenerationArtifact{}, errors.New(string(combined))
+	}
+	return hauler.GenerationArtifact{
+		Path: output, SHA256: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+		Size: 4, Validated: true,
+	}, nil
+}
+
+func TestBuilderPassesCanonicalCheckpointPathsAcrossExec(t *testing.T) {
+	t.Parallel()
+	root := t.TempDir()
+	archiver := &fakeArchiver{}
+	assembler := &execAssembler{root: root}
+	builder := NewBuilder(archiver, assembler)
+
+	result, err := builder.Build(context.Background(), BuildRequest{
+		Capsule: "second-brain", Root: root,
+		Inventory: domain.ImageInventory{GeneratedAt: time.Unix(100, 0), Images: []domain.Image{}},
+		Lineage:   domain.Lineage{Branch: "main"}, Generation: 1,
+		SessionID: "session-a", CreatedAt: time.Unix(101, 0),
+	})
+	if err != nil {
+		t.Fatalf("Build() error = %v", err)
+	}
+	if !result.Artifact.Validated || len(assembler.paths) != 3 {
+		t.Fatalf("result = %#v paths = %#v", result, assembler.paths)
+	}
 }
 
 func TestBuilderIsOnlyOrderedPathToValidatedGenerationMetadata(t *testing.T) {
