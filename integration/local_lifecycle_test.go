@@ -320,7 +320,7 @@ func writeLifecycleFixture(t *testing.T, source string) {
 		}
 	}
 	lifecycleDevcontainer, err := json.Marshal(map[string]any{
-		"image": lockedLifecycleImage(t), "privileged": true, "remoteUser": "root", "overrideCommand": false,
+		"image": lockedLifecycleImage(t), "privileged": true, "remoteUser": "root",
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -378,7 +378,7 @@ func TestWriteLifecycleFixturePinsLightweightContainerEngineDevcontainer(t *test
 	}
 	image := lockedLifecycleImage(t)
 	if config.Image != image || !config.Privileged || config.RemoteUser != "root" ||
-		config.OverrideCommand == nil || *config.OverrideCommand {
+		config.OverrideCommand != nil {
 		t.Fatalf("lifecycle devcontainer fixture = %#v, want pinned privileged container-engine image", config)
 	}
 }

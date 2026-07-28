@@ -331,7 +331,8 @@ Hosted exact-candidate CI pre-pulls that locked reference before RCC invokes
 DevPod because fresh image acquisition can outlive DevPod's agent-injection
 deadline. The pre-pull moves acquisition outside that deadline; it does not
 replace the real DevPod create, agent injection, workspace engine, or cleanup
-evidence.
+evidence. Keep DevPod's default command override for this fixture; forcing the
+Podman image's own command lets the container exit before agent injection.
 Before each file or MinIO lifecycle scenario opens Camp's workspace,
 the harness creates one unrelated workspace in that same private context. Its
 scenario ledger recovers exact Camp workspace IDs, process identities,
