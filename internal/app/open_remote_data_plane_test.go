@@ -107,6 +107,30 @@ func TestRemoteDataPlanePreparerStopsBeforeRenderAfterBuildOrVerifyFailure(t *te
 	}
 }
 
+func TestRemoteDataPlanePreparerRequiresBuiltManifestAuthorityForVerification(t *testing.T) {
+	var order []string
+	builder := &fakeRemoteKitBuilder{order: &order, manifestSHA256: strings.Repeat("0", 64)}
+	preparer := NewRemoteDataPlanePreparer(RemoteDataPlaneDependencies{
+		Root: t.TempDir(), Archiver: fakeRemoteArchiver{order: &order}, Hauler: &fakeRemoteHauler{order: &order},
+		Builder: builder, Verifier: &fakeRemoteKitVerifier{order: &order}, Images: fakeRemoteImageResolver{},
+		Confinement: fakeRemoteConfinement{}, HaulerExecutable: "/managed/hauler", HaulerVersion: "v2.0.2",
+	})
+	root := t.TempDir()
+	config := filepath.Join(root, "devcontainer.json")
+	if err := os.WriteFile(config, []byte(`{"image":"example.test/workspace:v1"}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := preparer.Prepare(context.Background(), RemoteDataPlaneRequest{
+		SessionID: "session-1", AttemptID: "session-1-hauler-kit-v1", Capsule: "brain", Lineage: domain.Lineage{Branch: "main"},
+		Materialization: root, DevcontainerPath: config,
+	}); err == nil || !strings.Contains(err.Error(), "manifest authority") {
+		t.Fatalf("Prepare() error = %v", err)
+	}
+	if got := strings.Join(order, ","); got != "archive,add-file,add-image,build,verify" {
+		t.Fatalf("preparation order = %q", got)
+	}
+}
+
 func TestRemoteDataPlanePreparerReusesVerifiedCompletedAttempt(t *testing.T) {
 	var order []string
 	preparer := NewRemoteDataPlanePreparer(RemoteDataPlaneDependencies{
@@ -138,6 +162,34 @@ func TestRemoteDataPlanePreparerReusesVerifiedCompletedAttempt(t *testing.T) {
 	}
 	if first.Record != second.Record || strings.Join(order, ",") != "verify" {
 		t.Fatalf("reused attempt = first:%#v second:%#v order:%v", first.Record, second.Record, order)
+	}
+}
+
+func TestRemoteDataPlanePreparerReentryRequiresPersistedManifestAuthority(t *testing.T) {
+	var order []string
+	preparer, request := fakeCompletedPreparer(t, &order)
+	if _, err := preparer.Prepare(context.Background(), request); err != nil {
+		t.Fatal(err)
+	}
+	attemptRoot := filepath.Join(preparer.deps.Root, request.AttemptID)
+	record, err := readAttemptCompletion(attemptRoot)
+	if err != nil {
+		t.Fatal(err)
+	}
+	record.ManifestSHA256 = strings.Repeat("0", 64)
+	body, err := json.Marshal(record)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(attemptRoot, remoteAttemptComplete), append(body, '\n'), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	order = nil
+	if _, err := preparer.Prepare(context.Background(), request); err == nil || !strings.Contains(err.Error(), "manifest authority") {
+		t.Fatalf("Prepare() error = %v", err)
+	}
+	if got := strings.Join(order, ","); got != "verify" {
+		t.Fatalf("reentry order = %q", got)
 	}
 }
 
@@ -334,9 +386,10 @@ func (f *fakeRemoteHauler) ValidateStore(context.Context, string) (haulkit.Store
 }
 
 type fakeRemoteKitBuilder struct {
-	order   *[]string
-	request haulkit.BuildRequest
-	err     error
+	order          *[]string
+	request        haulkit.BuildRequest
+	err            error
+	manifestSHA256 string
 }
 
 func (f *fakeRemoteKitBuilder) Build(_ context.Context, request haulkit.BuildRequest) (haulkit.Artifact, error) {
@@ -365,7 +418,11 @@ func (f *fakeRemoteKitBuilder) Build(_ context.Context, request haulkit.BuildReq
 	body, _ := haulkit.MarshalCanonical(document)
 	_ = os.WriteFile(manifest, body, 0o600)
 	_ = os.WriteFile(archive, []byte("kit"), 0o600)
-	return haulkit.Artifact{ManifestPath: manifest, ArchivePath: archive, SHA256: digestString([]byte("kit")), Size: 3}, nil
+	manifestSHA256 := digestString(body)
+	if f.manifestSHA256 != "" {
+		manifestSHA256 = f.manifestSHA256
+	}
+	return haulkit.Artifact{ManifestPath: manifest, ManifestSHA256: manifestSHA256, ArchivePath: archive, SHA256: digestString([]byte("kit")), Size: 3}, nil
 }
 
 type fakeRemoteKitVerifier struct {
@@ -377,6 +434,13 @@ func (f *fakeRemoteKitVerifier) Verify(_ context.Context, request haulkit.Verify
 	*f.order = append(*f.order, "verify")
 	if f.err != nil {
 		return haulkit.VerifiedKit{}, f.err
+	}
+	body, err := os.ReadFile(request.ManifestPath)
+	if err != nil {
+		return haulkit.VerifiedKit{}, err
+	}
+	if request.ExpectedManifestSHA256 == "" || request.ExpectedManifestSHA256 != digestString(body) {
+		return haulkit.VerifiedKit{}, errors.New("missing or wrong trusted manifest authority")
 	}
 	return haulkit.VerifiedKit{Manifest: haulkit.Manifest{
 		Architecture: request.Architecture,

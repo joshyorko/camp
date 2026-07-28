@@ -2,6 +2,8 @@ package haulkit
 
 import (
 	"bytes"
+	"errors"
+	"fmt"
 	"strings"
 	"testing"
 
@@ -85,6 +87,45 @@ func TestNormalizeRootReferenceUsesExactHaulerFileIdentity(t *testing.T) {
 		if _, err := NormalizeRootReference(input); err == nil {
 			t.Fatalf("NormalizeRootReference(%q) error = nil", input)
 		}
+	}
+}
+
+func TestValidateRejectsHardArchiveAndChunkCeilings(t *testing.T) {
+	tests := []struct {
+		name   string
+		mutate func(*Manifest)
+	}{
+		{"archive bytes", func(manifest *Manifest) {
+			manifest.Archive.Size = maxArchiveBytes + 1
+			manifest.Chunks = []ChunkIdentity{{
+				Index: 0, Name: "kit.part", SHA256: testDigest, Size: maxArchiveBytes + 1,
+			}}
+		}},
+		{"chunk bytes", func(manifest *Manifest) {
+			manifest.Archive.Size = maxChunkBytes + 1
+			manifest.Chunks = []ChunkIdentity{{
+				Index: 0, Name: "kit.part", SHA256: testDigest, Size: maxChunkBytes + 1,
+			}}
+		}},
+		{"chunk count", func(manifest *Manifest) {
+			manifest.Archive.Size = int64(maxChunkCount + 1)
+			manifest.Chunks = make([]ChunkIdentity, maxChunkCount+1)
+			for index := range manifest.Chunks {
+				manifest.Chunks[index] = ChunkIdentity{
+					Index: uint32(index), Name: fmt.Sprintf("part-%03d", index),
+					SHA256: testDigest, Size: 1,
+				}
+			}
+		}},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			manifest := validTestManifest()
+			test.mutate(&manifest)
+			if err := Validate(manifest); !errors.Is(err, ErrArchiveLimit) {
+				t.Fatalf("Validate() error = %v, want ErrArchiveLimit", err)
+			}
+		})
 	}
 }
 

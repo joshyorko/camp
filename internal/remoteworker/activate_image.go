@@ -118,7 +118,7 @@ func (runtimeState *productionActivationRuntime) Verify(ctx context.Context, req
 		return verifiedRuntimeKit{}, statErr
 	}
 	verified, err := haulkit.NewVerifier(validator).Verify(ctx, haulkit.VerifyRequest{
-		ManifestPath: sourceManifest, ArchivePath: sourceKit, Architecture: request.Expected.Architecture,
+		ManifestPath: sourceManifest, ExpectedManifestSHA256: request.Expected.Manifest.SHA256, ArchivePath: sourceKit, Architecture: request.Expected.Architecture,
 		Tools: manifest.Tools, Destination: ready,
 	})
 	if err != nil {

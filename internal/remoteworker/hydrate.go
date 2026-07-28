@@ -1,7 +1,9 @@
 package remoteworker
 
 import (
+	"bytes"
 	"context"
+	"crypto/sha256"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -15,19 +17,25 @@ import (
 	hauleradapter "github.com/joshyorko/camp/internal/adapters/hauler"
 	"github.com/joshyorko/camp/internal/adapters/subprocess"
 	"github.com/joshyorko/camp/internal/haulkit"
+	"github.com/joshyorko/camp/internal/jsonstrict"
 	"golang.org/x/sys/unix"
 )
 
 var ErrUnsafeHydration = errors.New("unsafe remote workspace hydration")
 
 type HydrationReceipt struct {
-	Status        string `json:"status"`
-	WorkspaceRoot string `json:"workspaceRoot"`
-	RootSHA256    string `json:"rootSHA256"`
+	Status        string           `json:"status"`
+	SessionID     string           `json:"sessionId"`
+	WorkspaceRoot string           `json:"workspaceRoot"`
+	RuntimeRoot   string           `json:"runtimeRoot"`
+	ManifestPath  string           `json:"manifestPath"`
+	Expected      ExpectedIdentity `json:"expected"`
+	RootSHA256    string           `json:"rootSHA256"`
 }
 
 type hydrationRuntime interface {
 	Verify(context.Context, Request) (verifiedRuntimeKit, error)
+	AdmitWorkspace(string) error
 	ExtractRoot(context.Context, Request, verifiedRuntimeKit) (string, error)
 	InstallTools(Request, verifiedRuntimeKit) error
 	Promote(string, string) error
@@ -35,16 +43,19 @@ type hydrationRuntime interface {
 }
 
 func hydrateWorkspace(ctx context.Context, request Request, runtime hydrationRuntime) (HydrationReceipt, error) {
+	if observer, ok := runtime.(interface {
+		ObserveCompleted(Request) (HydrationReceipt, bool, error)
+	}); ok {
+		if receipt, complete, err := observer.ObserveCompleted(request); err != nil || complete {
+			return receipt, err
+		}
+	}
+	if err := runtime.AdmitWorkspace(request.WorkspaceRoot); err != nil {
+		return HydrationReceipt{}, err
+	}
 	kit, err := runtime.Verify(ctx, request)
 	if err != nil {
 		return HydrationReceipt{}, err
-	}
-	if observer, ok := runtime.(interface {
-		Observe(Request, verifiedRuntimeKit) (HydrationReceipt, bool, error)
-	}); ok {
-		if receipt, complete, err := observer.Observe(request, kit); err != nil || complete {
-			return receipt, err
-		}
 	}
 	stage, err := runtime.ExtractRoot(ctx, request, kit)
 	if err != nil {
@@ -56,7 +67,7 @@ func hydrateWorkspace(ctx context.Context, request Request, runtime hydrationRun
 	if err := runtime.Promote(stage, request.WorkspaceRoot); err != nil {
 		return HydrationReceipt{}, err
 	}
-	receipt := HydrationReceipt{Status: "completed", WorkspaceRoot: request.WorkspaceRoot, RootSHA256: kit.RootSHA256}
+	receipt := newHydrationReceipt(request, kit.RootSHA256)
 	if err := runtime.Publish(request, receipt); err != nil {
 		return HydrationReceipt{}, err
 	}
@@ -85,27 +96,127 @@ func (runtimeState *productionHydrationRuntime) Verify(ctx context.Context, requ
 	return kit, err
 }
 
-func (*productionHydrationRuntime) Observe(request Request, kit verifiedRuntimeKit) (HydrationReceipt, bool, error) {
-	path := filepath.Join(request.WorkspaceRoot, ".camp", "runtime", "hydrate.receipt.json")
-	file, err := os.OpenFile(path, os.O_RDONLY|syscall.O_NOFOLLOW, 0)
-	if isNotExist(err) {
+func (*productionHydrationRuntime) ObserveCompleted(request Request) (HydrationReceipt, bool, error) {
+	body, err := readHydrationReceipt(request.WorkspaceRoot)
+	if err != nil {
 		return HydrationReceipt{}, false, nil
 	}
-	if err != nil {
-		return HydrationReceipt{}, false, err
-	}
-	defer file.Close()
-	body, err := io.ReadAll(io.LimitReader(file, maxDiagnosticBytes+1))
-	if err != nil || len(body) > maxDiagnosticBytes {
-		return HydrationReceipt{}, false, errors.Join(err, ErrUnsafeHydration)
+	if err := jsonstrict.RejectDuplicateKeys(body); err != nil {
+		return HydrationReceipt{}, false, nil
 	}
 	var receipt HydrationReceipt
-	if err := json.Unmarshal(body, &receipt); err != nil ||
-		receipt.Status != "completed" || receipt.WorkspaceRoot != request.WorkspaceRoot ||
-		receipt.RootSHA256 != kit.RootSHA256 {
-		return HydrationReceipt{}, false, fmt.Errorf("%w: hydration receipt differs", ErrUnsafeHydration)
+	decoder := json.NewDecoder(bytes.NewReader(body))
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(&receipt); err != nil {
+		return HydrationReceipt{}, false, nil
+	}
+	var trailing any
+	if err := decoder.Decode(&trailing); !errors.Is(err, io.EOF) {
+		return HydrationReceipt{}, false, nil
+	}
+	trustedRootSHA256, err := readTrustedManifestRoot(request)
+	if err != nil || !hydrationReceiptMatches(request, receipt, trustedRootSHA256) {
+		return HydrationReceipt{}, false, nil
 	}
 	return receipt, true, nil
+}
+
+func newHydrationReceipt(request Request, rootSHA256 string) HydrationReceipt {
+	return HydrationReceipt{
+		Status: "completed", SessionID: request.SessionID, WorkspaceRoot: request.WorkspaceRoot,
+		RuntimeRoot: request.RuntimeRoot, ManifestPath: request.ManifestPath, Expected: request.Expected,
+		RootSHA256: rootSHA256,
+	}
+}
+
+func hydrationReceiptMatches(request Request, receipt HydrationReceipt, trustedRootSHA256 string) bool {
+	return receipt.Status == "completed" && receipt.SessionID == request.SessionID &&
+		receipt.WorkspaceRoot == request.WorkspaceRoot && receipt.RuntimeRoot == request.RuntimeRoot &&
+		receipt.ManifestPath == request.ManifestPath && receipt.Expected == request.Expected &&
+		validDigest(trustedRootSHA256) && receipt.RootSHA256 == trustedRootSHA256
+}
+
+func readTrustedManifestRoot(request Request) (string, error) {
+	const maxHydrationManifestBytes = 4 << 20
+	expected := request.Expected.Manifest
+	if expected.Size <= 0 || expected.Size > maxHydrationManifestBytes ||
+		expected.Name != filepath.Base(request.ManifestPath) {
+		return "", ErrIdentityMismatch
+	}
+	parentFD, _, err := openOperationDirectory(filepath.Dir(request.ManifestPath))
+	if err != nil {
+		return "", err
+	}
+	defer unix.Close(parentFD)
+	fd, err := unix.Openat(parentFD, expected.Name, unix.O_RDONLY|unix.O_CLOEXEC|unix.O_NOFOLLOW, 0)
+	if err != nil {
+		return "", err
+	}
+	file := os.NewFile(uintptr(fd), expected.Name)
+	defer file.Close()
+	before, err := file.Stat()
+	if err != nil || !before.Mode().IsRegular() || before.Size() != expected.Size {
+		return "", ErrIdentityMismatch
+	}
+	body, err := io.ReadAll(io.LimitReader(file, expected.Size+1))
+	if err != nil || int64(len(body)) != expected.Size {
+		return "", errors.Join(err, ErrIdentityMismatch)
+	}
+	after, err := file.Stat()
+	if err != nil || !os.SameFile(before, after) || before.Size() != after.Size() {
+		return "", ErrIdentityMismatch
+	}
+	digest := sha256.Sum256(body)
+	if fmt.Sprintf("%x", digest) != expected.SHA256 {
+		return "", ErrIdentityMismatch
+	}
+	manifest, err := haulkit.DecodeCanonical(body)
+	if err != nil {
+		return "", err
+	}
+	return manifest.Root.SHA256, nil
+}
+
+func readHydrationReceipt(workspace string) ([]byte, error) {
+	workspaceFD, _, err := openOperationDirectory(workspace)
+	if err != nil {
+		return nil, err
+	}
+	defer unix.Close(workspaceFD)
+	campFD, err := unix.Openat(workspaceFD, ".camp", unix.O_RDONLY|unix.O_DIRECTORY|unix.O_CLOEXEC|unix.O_NOFOLLOW, 0)
+	if err != nil {
+		return nil, err
+	}
+	defer unix.Close(campFD)
+	runtimeFD, err := unix.Openat(campFD, "runtime", unix.O_RDONLY|unix.O_DIRECTORY|unix.O_CLOEXEC|unix.O_NOFOLLOW, 0)
+	if err != nil {
+		return nil, err
+	}
+	defer unix.Close(runtimeFD)
+	fd, err := unix.Openat(runtimeFD, "hydrate.receipt.json", unix.O_RDONLY|unix.O_CLOEXEC|unix.O_NOFOLLOW, 0)
+	if err != nil {
+		return nil, err
+	}
+	file := os.NewFile(uintptr(fd), "hydrate.receipt.json")
+	defer file.Close()
+	info, err := file.Stat()
+	if err != nil || !info.Mode().IsRegular() || info.Size() > maxDiagnosticBytes {
+		return nil, ErrUnsafeHydration
+	}
+	body, err := io.ReadAll(io.LimitReader(file, maxDiagnosticBytes+1))
+	if err != nil || len(body) > maxDiagnosticBytes {
+		return nil, errors.Join(err, ErrUnsafeHydration)
+	}
+	return body, nil
+}
+
+func (*productionHydrationRuntime) AdmitWorkspace(workspace string) error {
+	workspaceFD, _, err := openOperationDirectory(workspace)
+	if err != nil {
+		return fmt.Errorf("%w: open workspace: %v", ErrUnsafeHydration, err)
+	}
+	defer unix.Close(workspaceFD)
+	return validateInitialWorkspace(workspaceFD)
 }
 
 func (runtimeState *productionHydrationRuntime) ExtractRoot(ctx context.Context, request Request, kit verifiedRuntimeKit) (string, error) {

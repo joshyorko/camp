@@ -69,3 +69,170 @@ Status: DONE_WITH_CONCERNS
   claim that every mutation operation is unsupported.
 - Remaining uncertainty: real pinned-provider activation and hydration remain
   Task 12 release evidence.
+
+## Fix round 1
+
+Status: DONE
+
+### Result
+
+- Preparation now passes the builder-returned manifest SHA-256 as the trusted
+  verifier authority and rejects a mismatch between that authority and the
+  verified manifest bytes.
+- Completed-attempt reentry reads the durable completion record before
+  verification and passes its persisted manifest SHA-256 as the authority.
+- Provider activation passes the descriptor-verified bootstrap manifest digest
+  to the Kit verifier, which is also reused by container hydration.
+- Hydration admits the workspace through a pinned descriptor before root
+  extraction or `.camp/runtime` installation. An unexpected initial entry now
+  stops before either mutation.
+
+### TDD evidence
+
+- RED: the Task 6 verifier call sites omitted `ExpectedManifestSHA256` despite
+  `haulkit.KitVerifier` requiring it; GREEN: the app fake verifier now rejects
+  missing or wrong authority, preparation rejects a mismatched builder digest,
+  and reentry rejects a mismatched persisted digest.
+- RED: hydration installed runtime tools before promotion performed workspace
+  admission; GREEN: admission is explicit before extraction/install, and an
+  orchestration-level test proves the unsafe workspace performs only
+  `verify,admit`, with neither a root stage nor `.camp/runtime` created.
+
+### Verification
+
+- `rtk go test ./internal/app ./internal/remoteworker -count=1` — 245 passed.
+- `rtk go vet ./internal/app ./internal/remoteworker` — passed.
+- `rtk git diff --check` — passed.
+
+### Documentation improvement
+
+Documentation improvement:
+- Canonical file changed or proposed: `docs/skills/devpod-hauler.md`
+- Durable learning captured: manifest SHA-256 must come from built or persisted authority at every Kit verifier boundary; workspace admission precedes root extraction and runtime installation.
+- Evidence: `TestRemoteDataPlanePreparerRequiresBuiltManifestAuthorityForVerification`, `TestRemoteDataPlanePreparerReentryRequiresPersistedManifestAuthority`, and `TestHydrateRejectsIneligibleWorkspaceBeforeExtractionOrRuntimeInstall`.
+- Stale or ambiguous guidance removed: the hydration sequence no longer implies runtime installation may occur before workspace eligibility is established.
+- Remaining uncertainty: a fresh pinned-provider activation/hydration run remains the Task 12 release gate.
+
+## Fix round 3
+
+Status: DONE
+
+### Result
+
+- Hydration reentry now first attempts a read-only completed-receipt observation
+  through pinned workspace, `.camp`, runtime, and receipt descriptors with
+  `O_NOFOLLOW` at every boundary.
+- A receipt bypasses admission and verifier mutation only when its completed
+  status, session, workspace/runtime roots, manifest path, full expected
+  identity, and root digest exactly match the request. Invalid evidence falls
+  through to admission before any verifier, runtime, or root mutation.
+- New receipts persist that complete identity binding. Earlier/incomplete
+  receipts fail closed into admission rather than adopting a partial workspace.
+
+### TDD evidence
+
+- RED: admission before receipt observation made a correctly completed
+  workspace non-idempotent; GREEN:
+  `TestHydrateCompletedReceiptBypassesAdmissionAndVerification` proves the
+  production descriptor observer returns the exact receipt without calling
+  admission, verification, or mutation.
+- RED: a receipt-first path could trust arbitrary workspace content; GREEN:
+  `TestInvalidCompletedReceiptDoesNotBypassAdmission` covers forged,
+  mismatched, stale, and symlinked receipts, proves each reaches admission,
+  and proves its mutation-faithful verifier is not called.
+
+### Verification
+
+- `rtk go test ./internal/remoteworker -count=1` — 30 passed.
+- `rtk go vet ./internal/remoteworker` — passed.
+- `rtk git diff --check` — passed.
+
+### Documentation improvement
+
+Documentation improvement:
+- Canonical file changed or proposed: `docs/skills/devpod-hauler.md`
+- Durable learning captured: completed hydration reentry may bypass admission only after a read-only descriptor-pinned receipt check binds all request identities; invalid receipt evidence must return to the pre-mutation admission boundary.
+- Evidence: `TestHydrateCompletedReceiptBypassesAdmissionAndVerification` and `TestInvalidCompletedReceiptDoesNotBypassAdmission`.
+- Stale or ambiguous guidance removed: the prior admission-first rule did not distinguish validated completed reentry from uncompleted workspace admission.
+- Remaining uncertainty: a fresh pinned-provider activation/hydration run remains the Task 12 release gate.
+
+## Fix round 2
+
+Status: DONE
+
+### Result
+
+- Hydration now admits the workspace before invoking `Verify`. This prevents
+  the production activation verifier from creating `RuntimeRoot` or publishing
+  its ready kit before an unexpected workspace entry has been rejected.
+- The regression seam faithfully models production verifier staging by creating
+  `RuntimeRoot/kit` when called. For an ineligible workspace, it proves
+  `Verify` is never called, `.camp/runtime` is absent, the root stage is absent,
+  and the original workspace directory and file bytes are unchanged.
+
+### TDD evidence
+
+- RED: `Verify` preceded admission and could create runtime state; GREEN:
+  `TestHydrateRejectsIneligibleWorkspaceBeforeVerifierRuntimeMutation` now
+  proves admission is first and no verifier/extraction/install mutation occurs.
+
+### Verification
+
+- `rtk go test ./internal/remoteworker -count=1` — 24 passed.
+- `rtk go vet ./internal/remoteworker` — passed.
+- `rtk git diff --check` — passed.
+
+### Documentation improvement
+
+Documentation improvement:
+- Canonical file changed or proposed: `docs/skills/devpod-hauler.md`
+- Durable learning captured: workspace admission must precede every verifier-created runtime-root mutation, not only root extraction and runtime installation.
+- Evidence: `TestHydrateRejectsIneligibleWorkspaceBeforeVerifierRuntimeMutation` uses a verifier seam that creates the same runtime-root/kit shape as production verification.
+- Stale or ambiguous guidance removed: the prior rule named extraction and installation but did not make verifier staging subject to admission.
+- Remaining uncertainty: a fresh pinned-provider activation/hydration run remains the Task 12 release gate.
+
+## Fix round 4
+
+Status: DONE
+
+### Result
+
+- Completed hydration reentry now derives its trusted root digest from the
+  canonical manifest opened through a pinned parent directory and no-follow
+  file descriptor.
+- The manifest bytes must match the exact SHA-256 and size in
+  `Expected.Manifest` before their validated `Root.SHA256` can authorize a
+  receipt. A syntactically valid but unequal receipt root is never adopted.
+- Missing, replaced, malformed, or symlinked manifest evidence cannot authorize
+  completion and falls through to workspace admission without invoking the
+  verifier or performing mutation.
+- Exact receipt and descriptor-pinned manifest/root evidence still returns
+  idempotent success before admission, verification, or mutation.
+
+### TDD evidence
+
+- RED: `TestInvalidCompletedReceiptDoesNotBypassAdmission/valid_but_wrong_root_digest`
+  returned success because receipt matching accepted any valid 64-hex digest.
+- RED: `TestReplacedManifestCannotAuthorizeCompletedReceipt` returned success
+  because completed reentry did not consult the trusted manifest identity.
+- GREEN: the focused reentry suite passed after receipt matching required exact
+  equality with the root parsed from descriptor-pinned canonical manifest bytes
+  matching `Expected.Manifest`.
+- The symlinked-manifest regression additionally proves the authority read uses
+  a no-follow file boundary; the existing receipt mismatch and symlink cases
+  remain in the same focused suite.
+
+### Verification
+
+- `rtk go test ./internal/remoteworker -count=1` — 33 passed.
+- `rtk go vet ./internal/remoteworker` — passed.
+- `rtk git diff --check` — passed.
+
+### Documentation improvement
+
+Documentation improvement:
+- Canonical file changed or proposed: `docs/skills/devpod-hauler.md`
+- Durable learning captured: a read-only completed hydration shortcut requires exact receipt-root equality with the root parsed from descriptor-pinned canonical manifest bytes matching `Expected.Manifest`; digest syntax alone is not authority.
+- Evidence: `TestHydrateCompletedReceiptBypassesAdmissionAndVerification`, `TestInvalidCompletedReceiptDoesNotBypassAdmission`, `TestReplacedManifestCannotAuthorizeCompletedReceipt`, and `TestSymlinkedManifestCannotAuthorizeCompletedReceipt`.
+- Stale or ambiguous guidance removed: the prior phrase “exactly binds ... root digest” did not identify the trusted authority or exclude accepting digest syntax alone.
+- Remaining uncertainty: a fresh pinned-provider activation/hydration run remains the Task 12 release gate.

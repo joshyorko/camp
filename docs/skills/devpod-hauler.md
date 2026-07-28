@@ -9,7 +9,18 @@ Do not use Hauler v2.0.2's live `_catalog` response as proof that all direct reg
 ## Implemented adapter behavior
 
 - DevPod command construction preserves context, workspace identity, repeated public flags, environment variables, and argument boundaries through `ports.Command`.
-- The pinned v0.26.1 installed-tool contract supports one bounded local-folder
+- Bootstrap source mode is currently an adapter-only contract; production
+  `app.Open` still uses capsule mode and does not construct, select, journal, or
+  clean a bootstrap root. The adapter resolves both source identities before
+  execution, rejects missing, non-directory, aliased, or nested
+  bootstrap/capsule roots, and passes the canonical absolute bootstrap path to
+  DevPod. `os.SameFile` proves exact observable filesystem identity and
+  resolved paths prove lexical nesting; this does not prove isolation from
+  privileged bind-mounted descendants or mount/path replacement after
+  validation. Production `app.Open` must close that ownership and time-of-use
+  boundary before selecting bootstrap mode. Default and explicit capsule modes
+  retain the existing capsule source.
+- The pinned v0.26.1 installed-tool contract proves one bounded local-folder
   upload: construct `.camp-bootstrap/devcontainer.json` and the immutable
   `camp-hauler-kit.tar.zst` completely before `devpod up`, pass only that
   disposable bootstrap root, and perform no post-`up` mutation or ownership
@@ -134,16 +145,30 @@ Do not use Hauler v2.0.2's live `_catalog` response as proof that all direct reg
   receipt is published. A non-Docker provider engine fails as an unsupported
   capability; there is no provider-plugin or network-pull fallback.
 - Container-side `hydrate` repeats helper, kit, manifest, tool, architecture,
-  store, and root verification. It extracts the root artifact through the
-  existing Hauler and archive adapters into a private stage, installs the exact
-  Camp, Hauler, and pasta bytes beneath `.camp/runtime`, and promotes entries
-  with descriptor-relative no-replace renames. The only preexisting workspace
-  paths it accepts are `.camp-bootstrap` and `.camp/runtime`; hydrated `.camp`
+  store, and root verification. The persisted/bootstrap manifest digest is a
+  required verifier authority at preparation, reentry, provider activation,
+  and container hydration; callers must not infer it from the untrusted
+  manifest being verified. Before the verifier can create runtime-root state,
+  root extraction, or `.camp/runtime` installation, hydration admits the
+  workspace descriptor and accepts only `.camp-bootstrap` and `.camp/runtime`;
+  an ineligible workspace receives no runtime-root, root-stage, or workspace
+  mutation. It then extracts the root artifact through
+  the existing Hauler and archive adapters into a private stage, installs the
+  exact Camp, Hauler, and pasta bytes beneath `.camp/runtime`, and promotes
+  entries with descriptor-relative no-replace renames. Hydrated `.camp`
   content is merged without replacing runtime. Each rename fsyncs both
   directories, and the durable hydration receipt is published only after the
-  root is complete. The generated lifecycle boundary releases the preserved
-  user `onCreateCommand` only after that success. It never calls `devpod up`
-  again or falls back to the capsule source.
+  root is complete. Reentry first performs only a descriptor-pinned, no-follow
+  receipt and trusted-manifest read; it succeeds without admission or verifier
+  mutation only when the completed receipt exactly binds the request session,
+  workspace/runtime roots, manifest path, every expected identity, and a root
+  digest equal to the root in canonical manifest bytes whose descriptor-pinned
+  SHA-256 and size match `Expected.Manifest`. Digest syntax alone is never
+  authority. Missing, malformed, stale, mismatched, replaced, or linked
+  evidence is not adopted and falls through to admission before any mutation.
+  The generated lifecycle boundary
+  releases the preserved user `onCreateCommand` only after that success. It
+  never calls `devpod up` again or falls back to the capsule source.
 - Do not attempt to activate a devcontainer configuration created only in the
   remote workspace with a second local-folder `devpod up --recreate`. Pinned
   v0.26.1 exposes no supported community command for that remote reconfiguration

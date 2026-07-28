@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"os"
 	"path/filepath"
 	"sort"
 	"strconv"
@@ -141,15 +142,18 @@ func NewClient(executable string, runner ports.Runner) *Client {
 }
 
 func (c *Client) Up(ctx context.Context, options UpOptions) (ports.Result, error) {
+	bootstrapSourcePath := options.BootstrapPath
 	switch options.SourceMode {
 	case "", SourceModeCapsule:
 	case SourceModeBootstrap:
 		if strings.TrimSpace(options.BootstrapPath) == "" {
 			return ports.Result{}, errors.New("DevPod bootstrap source path is required")
 		}
-		if filepath.Clean(options.BootstrapPath) == filepath.Clean(options.WorkspacePath) {
-			return ports.Result{}, errors.New("DevPod bootstrap source must differ from workspace path")
+		canonicalBootstrapPath, err := validateBootstrapSourceIsolation(options.WorkspacePath, options.BootstrapPath)
+		if err != nil {
+			return ports.Result{}, err
 		}
+		bootstrapSourcePath = canonicalBootstrapPath
 	default:
 		return ports.Result{}, fmt.Errorf("unsupported DevPod source mode %q", options.SourceMode)
 	}
@@ -255,10 +259,64 @@ func (c *Client) Up(ctx context.Context, options UpOptions) (ports.Result, error
 	argv = append(argv, options.ForwardedArgv...)
 	sourcePath := options.WorkspacePath
 	if options.SourceMode == SourceModeBootstrap {
-		sourcePath = options.BootstrapPath
+		sourcePath = bootstrapSourcePath
 	}
 	argv = append(argv, sourcePath)
 	return c.run(ctx, argv)
+}
+
+type sourceIdentity struct {
+	path string
+	info os.FileInfo
+}
+
+func validateBootstrapSourceIsolation(workspacePath, bootstrapPath string) (string, error) {
+	workspace, err := resolveSourceIdentity(workspacePath)
+	if err != nil {
+		return "", fmt.Errorf("establish DevPod capsule source identity: %w", err)
+	}
+	bootstrap, err := resolveSourceIdentity(bootstrapPath)
+	if err != nil {
+		return "", fmt.Errorf("establish DevPod bootstrap source identity: %w", err)
+	}
+	if sameSourceIdentity(workspace.info, bootstrap.info) ||
+		sourceContains(workspace.path, bootstrap.path) ||
+		sourceContains(bootstrap.path, workspace.path) {
+		return "", errors.New("DevPod bootstrap and capsule sources must be canonically disjoint")
+	}
+	return bootstrap.path, nil
+}
+
+func resolveSourceIdentity(path string) (sourceIdentity, error) {
+	if strings.TrimSpace(path) == "" {
+		return sourceIdentity{}, errors.New("source path is empty")
+	}
+	absolute, err := filepath.Abs(path)
+	if err != nil {
+		return sourceIdentity{}, err
+	}
+	resolved, err := filepath.EvalSymlinks(absolute)
+	if err != nil {
+		return sourceIdentity{}, err
+	}
+	info, err := os.Stat(resolved)
+	if err != nil {
+		return sourceIdentity{}, err
+	}
+	if !info.IsDir() {
+		return sourceIdentity{}, errors.New("source path is not a directory")
+	}
+	return sourceIdentity{path: filepath.Clean(resolved), info: info}, nil
+}
+
+func sameSourceIdentity(left, right os.FileInfo) bool {
+	return os.SameFile(left, right)
+}
+
+func sourceContains(parent, candidate string) bool {
+	relative, err := filepath.Rel(parent, candidate)
+	return err == nil && relative != "." && relative != ".." &&
+		!strings.HasPrefix(relative, ".."+string(filepath.Separator))
 }
 
 func (c *Client) EnsureProvider(ctx context.Context, devpodContext, provider string) error {
