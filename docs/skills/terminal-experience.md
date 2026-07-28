@@ -48,6 +48,16 @@ Rich-mode cancellation is terminal-normal: the shell is restored without failure
 
 When rich-mode provisioning fails, `camp setup` maps to the same lifecycle failure shape as the line-mode flow and reports exactly one recovery command.
 
+## Lifecycle scene event contract
+
+The reusable lifecycle scene model consumes `presentation.RichLifecycleEvent`, not subprocess output. Its event kind makes activity, completion, terminal success, and failure distinct: activity may activate the next required stage and display its exact safe detail, but only a typed completion changes that waypoint to complete. Completion does not auto-activate the following stage. A failure marks the next required typed stage failed, preserves at most one safe recovery command, omits the `next:` affordance when no recovery exists, and never renders a ready band. Unknown or out-of-order stage identifiers fail closed as presentation protocol errors.
+
+The canonical lifecycle stage IDs and labels are `hydrate`, `services`, `devpod`, `attach`, `mirror`, `image-capture`, `archive`, `upload`, `pointer`, `cleanup`, and `recovery`. Each `LifecycleWorkflow` declares the ordered subset required by that command; an empty declaration requires the complete canonical sequence. Duplicate, unknown, or canonically reversed declarations fail closed. A terminal success event renders completion only after every required stage has a prior typed completion. The campsite still has four landmark slots, so the model shows the active four-stage window while retaining state for the workflow sequence. Lifecycle adapters must emit these typed facts directly from application boundaries and must not derive them by matching command output.
+
+The model invokes its cancellation callback at most once. `RunLifecycle` also accepts the worker's completion channel and does not return until that channel closes, so a CLI adapter can cancel the worker and still join it before terminal handoff.
+
+`internal/setupui/scenedump` can render deterministic lifecycle sample states (`lifecycle-progress`, `lifecycle-ready`, and `lifecycle-failure`) for review. `TestLifecycleSceneGoldens` protects exactly five ANSI scenes: progress at 80×24, 120×40, and 160×48; ready at 160×48; and failure at 120×40. No PNG or complete size/state matrix is claimed by the model lane. CLI capability selection, the remaining scene matrix, tracked PTY captures, and exact-candidate Robot evidence remain Task 7 integration gates.
+
 The Bubble Tea UI context and provisioning-worker context are separate. User exit cancels provisioning without killing Bubble Tea's restoration path, and the CLI does not return until a started worker has actually exited. Cancellation before submission is terminal: it closes the never-started completion and message streams, prevents a late start from launching effects, and repeated starts share the original message stream rather than creating an unclosed one.
 
 ## Lifecycle transcripts (non-setup)
