@@ -412,6 +412,35 @@ exit 1
 	}
 }
 
+func TestRunLifecycleOpenRetainsFirstAmbiguousOutputWhenRetryFails(t *testing.T) {
+	root := t.TempDir()
+	countPath := filepath.Join(root, "count")
+	executable := filepath.Join(root, "camp")
+	writeTestExecutable(t, executable, `#!/bin/sh
+count=0
+if test -f "$CAMP_TEST_COUNT"; then count=$(cat "$CAMP_TEST_COUNT"); fi
+count=$((count + 1))
+printf '%s\n' "$count" > "$CAMP_TEST_COUNT"
+if test "$count" -eq 1; then
+  printf '%s\n' 'first DevPod diagnostic: object mutation outcome is ambiguous'
+else
+  printf '%s\n' 'second recovery failure'
+fi
+exit 1
+`)
+	output, err := runLifecycleOpenWithAmbiguousRetryAt(
+		context.Background(),
+		[]string{"CAMP_TEST_COUNT=" + countPath},
+		"",
+		executable,
+		"--json",
+		"open",
+	)
+	if err == nil || !bytes.Contains(output, []byte("first DevPod diagnostic")) || !bytes.Contains(output, []byte("second recovery failure")) {
+		t.Fatalf("retry output = %q, error = %v; want both attempt diagnostics", output, err)
+	}
+}
+
 func mustRunLifecycle(t *testing.T, ctx context.Context, environment []string, executable string, argv ...string) []byte {
 	t.Helper()
 	output, err := runLifecycleCommandAt(ctx, environment, "", executable, argv...)
@@ -435,7 +464,13 @@ func runLifecycleOpenWithAmbiguousRetryAt(ctx context.Context, environment []str
 	if err == nil || !bytes.Contains(output, []byte(ports.ErrAmbiguous.Error())) {
 		return output, err
 	}
-	return runLifecycleCommandAt(ctx, environment, directory, executable, argv...)
+	retryOutput, retryErr := runLifecycleCommandAt(ctx, environment, directory, executable, argv...)
+	if retryErr == nil {
+		return retryOutput, nil
+	}
+	combined := append(append([]byte(nil), output...), []byte("\nretry output:\n")...)
+	combined = append(combined, retryOutput...)
+	return combined, retryErr
 }
 
 func runLifecycleCommand(ctx context.Context, environment []string, executable string, argv ...string) ([]byte, error) {

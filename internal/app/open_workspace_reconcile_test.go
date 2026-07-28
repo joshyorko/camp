@@ -57,6 +57,28 @@ func TestOpenReconcileWorkspaceUpUnknownOutcomeUsesStatusWithoutSecondUp(t *test
 	}
 }
 
+func TestOpenFailedWorkspaceUpAmbiguityIncludesBoundedDevPodStderr(t *testing.T) {
+	t.Parallel()
+	environment := newOpenTestEnvironment(t)
+	devpod := &unknownOutcomeWorkspaceDevPod{
+		upResults: []ports.Result{{ExitCode: 17, Stderr: []byte("fatal: workspace agent failed before readiness")}},
+		upErrors:  []error{errors.New("exit status 17")},
+	}
+	environment.open.deps.DevPod = devpod
+	root := filepath.Join(t.TempDir(), "SecondBrain")
+	if err := os.MkdirAll(root, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	_, err := environment.open.Run(context.Background(), OpenRequest{
+		SessionID: "workspace-up-diagnostic", Capsule: "brain", Branch: "main", Mode: domain.SessionReadWrite,
+		ExplicitRoot: root, EntryMode: domain.EntryTerminal, Context: "default", Provider: "docker",
+		Runtime: environment.runtime, Backend: environment.backend,
+	})
+	if !errors.Is(err, ports.ErrAmbiguous) || !strings.Contains(err.Error(), "workspace agent failed before readiness") {
+		t.Fatalf("Open() error = %v, want ambiguous outcome with bounded DevPod diagnostic", err)
+	}
+}
+
 func TestOpenReconcileWorkspaceUpWaitsForBusyWorkspaceWithoutSecondUp(t *testing.T) {
 	t.Parallel()
 	environment := newOpenTestEnvironment(t)

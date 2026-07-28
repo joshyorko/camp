@@ -40,6 +40,7 @@ var (
 const (
 	workspaceReadyTimeout = 30 * time.Second
 	workspaceReadyPoll    = 100 * time.Millisecond
+	workspaceUpDiagnostic = 8 << 10
 )
 
 type OpenPointerReader interface {
@@ -1277,7 +1278,7 @@ func (o *Open) settleKnownWorkspaceUpFailure(ctx context.Context, intent ports.I
 		if candidate.Context != input.Context || candidate.Provider.Name != input.Provider || candidate.Source.LocalFolder != input.SourceRoot {
 			return errors.New("failed WorkspaceUp created a workspace with mismatched identity")
 		}
-		return ports.ErrAmbiguous
+		return ambiguousWorkspaceUpError(result)
 	}
 	snapshot, pending, err := o.deps.Journal.Load(ctx, intent.SessionID)
 	if err != nil {
@@ -1294,6 +1295,21 @@ func (o *Open) settleKnownWorkspaceUpFailure(ctx context.Context, intent ports.I
 		return fmt.Errorf("record failed WorkspaceUp attempt: %w", err)
 	}
 	return nil
+}
+
+func ambiguousWorkspaceUpError(result ports.Result) error {
+	diagnostic := strings.TrimSpace(strings.ToValidUTF8(string(result.Stderr), "\uFFFD"))
+	if diagnostic == "" {
+		diagnostic = strings.TrimSpace(strings.ToValidUTF8(string(result.Stdout), "\uFFFD"))
+	}
+	if len(diagnostic) > workspaceUpDiagnostic {
+		diagnostic = "[earlier DevPod output omitted]\n" +
+			strings.ToValidUTF8(diagnostic[len(diagnostic)-workspaceUpDiagnostic:], "\uFFFD")
+	}
+	if diagnostic == "" {
+		return ports.ErrAmbiguous
+	}
+	return fmt.Errorf("%w; DevPod diagnostic: %s", ports.ErrAmbiguous, diagnostic)
 }
 
 func (o *Open) reenter(ctx context.Context, snapshot domain.JournalSnapshot, request OpenRequest) (OpenResult, error) {
