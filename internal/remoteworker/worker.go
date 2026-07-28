@@ -31,6 +31,7 @@ type ProbeReceipt struct {
 type workerOperations interface {
 	ActivateImage(context.Context, Request) (any, error)
 	Hydrate(context.Context, Request) (any, error)
+	StartServices(context.Context, Request) (any, error)
 }
 
 func Run(ctx context.Context, input io.Reader, output, _ io.Writer) error {
@@ -54,6 +55,8 @@ func runWithOperations(ctx context.Context, input io.Reader, output io.Writer, o
 		receipt, err = operations.ActivateImage(ctx, request)
 	case OperationHydrate:
 		receipt, err = operations.Hydrate(ctx, request)
+	case OperationStartServices:
+		receipt, err = operations.StartServices(ctx, request)
 	default:
 		err = ErrUnsupportedOperation
 	}

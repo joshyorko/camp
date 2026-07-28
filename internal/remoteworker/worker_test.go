@@ -19,6 +19,7 @@ import (
 type recordingWorkerOperations struct {
 	activated bool
 	hydrated  bool
+	started   bool
 }
 
 type activationFixture struct {
@@ -83,7 +84,12 @@ func (operations *recordingWorkerOperations) Hydrate(context.Context, Request) (
 	return map[string]string{"status": "completed"}, nil
 }
 
-func TestRunDispatchesTaskSixOperationsAndKeepsTaskSevenUnsupported(t *testing.T) {
+func (operations *recordingWorkerOperations) StartServices(context.Context, Request) (any, error) {
+	operations.started = true
+	return map[string]string{"status": "ready"}, nil
+}
+
+func TestRunDispatchesRemoteLifecycleOperations(t *testing.T) {
 	for _, operation := range []Operation{OperationActivateImage, OperationHydrate, OperationStartServices} {
 		t.Run(string(operation), func(t *testing.T) {
 			request := validRequest()
@@ -95,21 +101,13 @@ func TestRunDispatchesTaskSixOperationsAndKeepsTaskSevenUnsupported(t *testing.T
 			operations := &recordingWorkerOperations{}
 			var output bytes.Buffer
 			runErr := runWithOperations(t.Context(), bytes.NewReader(body), &output, operations)
-			if operation == OperationStartServices {
-				if !errors.Is(runErr, ErrUnsupportedOperation) {
-					t.Fatalf("runWithOperations() error = %v", runErr)
-				}
-				if operations.activated || operations.hydrated {
-					t.Fatal("unsupported operation reached Task 6 implementation")
-				}
-				return
-			}
 			if runErr != nil {
 				t.Fatal(runErr)
 			}
 			if operations.activated != (operation == OperationActivateImage) ||
-				operations.hydrated != (operation == OperationHydrate) {
-				t.Fatalf("dispatch activate=%v hydrate=%v", operations.activated, operations.hydrated)
+				operations.hydrated != (operation == OperationHydrate) ||
+				operations.started != (operation == OperationStartServices) {
+				t.Fatalf("dispatch activate=%v hydrate=%v start=%v", operations.activated, operations.hydrated, operations.started)
 			}
 			var result Result
 			if err := json.Unmarshal(output.Bytes(), &result); err != nil {
