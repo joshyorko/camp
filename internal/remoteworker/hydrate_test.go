@@ -2,13 +2,17 @@ package remoteworker
 
 import (
 	"context"
+	"crypto/sha256"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 
+	"github.com/joshyorko/camp/internal/domain"
+	"github.com/joshyorko/camp/internal/haulkit"
 	"golang.org/x/sys/unix"
 )
 
@@ -131,10 +135,7 @@ func TestHydrateRejectsIneligibleWorkspaceBeforeVerifierRuntimeMutation(t *testi
 
 func TestHydrateCompletedReceiptBypassesAdmissionAndVerification(t *testing.T) {
 	workspace := filepath.Join(t.TempDir(), "workspace")
-	request := validRequest()
-	request.Operation = OperationHydrate
-	request.WorkspaceRoot = workspace
-	request.RuntimeRoot = filepath.Join(workspace, ".camp", "runtime")
+	request := hydrationRequestWithTrustedManifest(t, workspace, strings.Repeat("a", 64))
 	if err := os.MkdirAll(request.RuntimeRoot, 0o700); err != nil {
 		t.Fatal(err)
 	}
@@ -167,15 +168,13 @@ func TestInvalidCompletedReceiptDoesNotBypassAdmission(t *testing.T) {
 	}{
 		{name: "forged", mutate: func(receipt *HydrationReceipt) { receipt.Status = "forged" }},
 		{name: "mismatched", mutate: func(receipt *HydrationReceipt) { receipt.Expected.Kit.SHA256 = strings.Repeat("c", 64) }},
+		{name: "valid but wrong root digest", mutate: func(receipt *HydrationReceipt) { receipt.RootSHA256 = strings.Repeat("b", 64) }},
 		{name: "stale", mutate: func(receipt *HydrationReceipt) { receipt.SessionID = "old-session" }},
 		{name: "symlinked", symlink: true},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			workspace := filepath.Join(t.TempDir(), "workspace")
-			request := validRequest()
-			request.Operation = OperationHydrate
-			request.WorkspaceRoot = workspace
-			request.RuntimeRoot = filepath.Join(workspace, ".camp", "runtime")
+			request := hydrationRequestWithTrustedManifest(t, workspace, strings.Repeat("a", 64))
 			if err := os.MkdirAll(filepath.Join(workspace, ".camp", "runtime"), 0o700); err != nil {
 				t.Fatal(err)
 			}
@@ -212,6 +211,127 @@ func TestInvalidCompletedReceiptDoesNotBypassAdmission(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestReplacedManifestCannotAuthorizeCompletedReceipt(t *testing.T) {
+	workspace := filepath.Join(t.TempDir(), "workspace")
+	request := hydrationRequestWithTrustedManifest(t, workspace, strings.Repeat("a", 64))
+	if err := os.MkdirAll(request.RuntimeRoot, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(workspace, "user.txt"), []byte("keep"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	replacement := canonicalHydrationManifest(t, strings.Repeat("b", 64))
+	if err := os.WriteFile(request.ManifestPath, replacement, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	receipt := newHydrationReceipt(request, strings.Repeat("b", 64))
+	body, err := json.Marshal(receipt)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(request.RuntimeRoot, "hydrate.receipt.json"), body, 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	fixture := &receiptObservingHydrationFixture{hydrationFixture: hydrationFixture{mutateRuntime: true}}
+	if _, err := hydrateWorkspace(t.Context(), request, fixture); !errors.Is(err, ErrUnsafeHydration) {
+		t.Fatalf("hydrateWorkspace() error = %v", err)
+	}
+	if got := strings.Join(fixture.order, ","); got != "observe,admit" {
+		t.Fatalf("hydration order = %q", got)
+	}
+	if _, err := os.Lstat(filepath.Join(request.RuntimeRoot, "kit")); !os.IsNotExist(err) {
+		t.Fatalf("verifier mutated runtime after replaced manifest: %v", err)
+	}
+}
+
+func TestSymlinkedManifestCannotAuthorizeCompletedReceipt(t *testing.T) {
+	workspace := filepath.Join(t.TempDir(), "workspace")
+	request := hydrationRequestWithTrustedManifest(t, workspace, strings.Repeat("a", 64))
+	trustedCopy := filepath.Join(filepath.Dir(request.ManifestPath), "trusted-copy.json")
+	if err := os.Rename(request.ManifestPath, trustedCopy); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(filepath.Base(trustedCopy), request.ManifestPath); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(request.RuntimeRoot, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(workspace, "user.txt"), []byte("keep"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	receipt := newHydrationReceipt(request, strings.Repeat("a", 64))
+	body, err := json.Marshal(receipt)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(request.RuntimeRoot, "hydrate.receipt.json"), body, 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	fixture := &receiptObservingHydrationFixture{hydrationFixture: hydrationFixture{mutateRuntime: true}}
+	if _, err := hydrateWorkspace(t.Context(), request, fixture); !errors.Is(err, ErrUnsafeHydration) {
+		t.Fatalf("hydrateWorkspace() error = %v", err)
+	}
+	if got := strings.Join(fixture.order, ","); got != "observe,admit" {
+		t.Fatalf("hydration order = %q", got)
+	}
+}
+
+func hydrationRequestWithTrustedManifest(t *testing.T, workspace, rootSHA256 string) Request {
+	t.Helper()
+	request := validRequest()
+	request.Operation = OperationHydrate
+	request.WorkspaceRoot = workspace
+	request.RuntimeRoot = filepath.Join(workspace, ".camp", "runtime")
+	request.ManifestPath = filepath.Join(filepath.Dir(workspace), ".camp-bootstrap", "manifest.json")
+	if err := os.MkdirAll(filepath.Dir(request.ManifestPath), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	body := canonicalHydrationManifest(t, rootSHA256)
+	if err := os.WriteFile(request.ManifestPath, body, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	digest := sha256.Sum256(body)
+	request.Expected.Manifest = FileIdentity{
+		Name:   "manifest.json",
+		SHA256: fmt.Sprintf("%x", digest),
+		Size:   int64(len(body)),
+	}
+	return request
+}
+
+func canonicalHydrationManifest(t *testing.T, rootSHA256 string) []byte {
+	t.Helper()
+	const digest = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+	body, err := haulkit.MarshalCanonical(haulkit.Manifest{
+		SchemaVersion: haulkit.ManifestSchemaVersion,
+		Kind:          "camp-hauler-kit",
+		SessionID:     "session-1",
+		Capsule:       "capsule",
+		Lineage:       domain.Lineage{Branch: "main"},
+		Architecture:  "linux/amd64",
+		Store: haulkit.StoreIdentity{
+			HaulerVersion: "v2.0.2",
+			IndexSHA256:   digest,
+			Entries:       []haulkit.StoreEntry{{Reference: "root", Type: "file", Digest: digest, Size: 4}},
+		},
+		Root: haulkit.RootIdentity{Reference: "hauler/root.tar.zst:latest", SHA256: rootSHA256, Size: 4},
+		Tools: haulkit.ToolIdentities{
+			Camp:   haulkit.FileIdentity{Name: "camp", Version: "dev", SHA256: digest, Size: 4},
+			Hauler: haulkit.FileIdentity{Name: "hauler", Version: "v2.0.2", SHA256: digest, Size: 4},
+			Pasta:  haulkit.FileIdentity{Name: "pasta", Version: "pasta 1", SHA256: digest, Size: 4},
+		},
+		Archive: haulkit.ArchiveIdentity{SHA256: digest, Size: 8},
+		Chunks:  []haulkit.ChunkIdentity{{Index: 0, Name: "kit.tar.zst.part-000000", SHA256: digest, Size: 8}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return body
 }
 
 func TestPromoteHydratedRootPreservesOnlyBootstrapAndRuntime(t *testing.T) {

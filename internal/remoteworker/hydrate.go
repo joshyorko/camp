@@ -3,6 +3,7 @@ package remoteworker
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -110,7 +111,11 @@ func (*productionHydrationRuntime) ObserveCompleted(request Request) (HydrationR
 		return HydrationReceipt{}, false, nil
 	}
 	var trailing any
-	if err := decoder.Decode(&trailing); !errors.Is(err, io.EOF) || !hydrationReceiptMatches(request, receipt) {
+	if err := decoder.Decode(&trailing); !errors.Is(err, io.EOF) {
+		return HydrationReceipt{}, false, nil
+	}
+	trustedRootSHA256, err := readTrustedManifestRoot(request)
+	if err != nil || !hydrationReceiptMatches(request, receipt, trustedRootSHA256) {
 		return HydrationReceipt{}, false, nil
 	}
 	return receipt, true, nil
@@ -124,11 +129,52 @@ func newHydrationReceipt(request Request, rootSHA256 string) HydrationReceipt {
 	}
 }
 
-func hydrationReceiptMatches(request Request, receipt HydrationReceipt) bool {
+func hydrationReceiptMatches(request Request, receipt HydrationReceipt, trustedRootSHA256 string) bool {
 	return receipt.Status == "completed" && receipt.SessionID == request.SessionID &&
 		receipt.WorkspaceRoot == request.WorkspaceRoot && receipt.RuntimeRoot == request.RuntimeRoot &&
 		receipt.ManifestPath == request.ManifestPath && receipt.Expected == request.Expected &&
-		validDigest(receipt.RootSHA256)
+		validDigest(trustedRootSHA256) && receipt.RootSHA256 == trustedRootSHA256
+}
+
+func readTrustedManifestRoot(request Request) (string, error) {
+	const maxHydrationManifestBytes = 4 << 20
+	expected := request.Expected.Manifest
+	if expected.Size <= 0 || expected.Size > maxHydrationManifestBytes ||
+		expected.Name != filepath.Base(request.ManifestPath) {
+		return "", ErrIdentityMismatch
+	}
+	parentFD, _, err := openOperationDirectory(filepath.Dir(request.ManifestPath))
+	if err != nil {
+		return "", err
+	}
+	defer unix.Close(parentFD)
+	fd, err := unix.Openat(parentFD, expected.Name, unix.O_RDONLY|unix.O_CLOEXEC|unix.O_NOFOLLOW, 0)
+	if err != nil {
+		return "", err
+	}
+	file := os.NewFile(uintptr(fd), expected.Name)
+	defer file.Close()
+	before, err := file.Stat()
+	if err != nil || !before.Mode().IsRegular() || before.Size() != expected.Size {
+		return "", ErrIdentityMismatch
+	}
+	body, err := io.ReadAll(io.LimitReader(file, expected.Size+1))
+	if err != nil || int64(len(body)) != expected.Size {
+		return "", errors.Join(err, ErrIdentityMismatch)
+	}
+	after, err := file.Stat()
+	if err != nil || !os.SameFile(before, after) || before.Size() != after.Size() {
+		return "", ErrIdentityMismatch
+	}
+	digest := sha256.Sum256(body)
+	if fmt.Sprintf("%x", digest) != expected.SHA256 {
+		return "", ErrIdentityMismatch
+	}
+	manifest, err := haulkit.DecodeCanonical(body)
+	if err != nil {
+		return "", err
+	}
+	return manifest.Root.SHA256, nil
 }
 
 func readHydrationReceipt(workspace string) ([]byte, error) {
