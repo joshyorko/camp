@@ -185,3 +185,59 @@ Documentation improvement:
 - Evidence: `TestRemoteChildContextPrefixUsesOnlyExactVerifiedRunconWhenSELinuxEnforces`, `TestRemoteChildContextPrefixIsEmptyWhenSELinuxIsNotEnforcing`, `TestEnsureRemoteServiceRejectsCompleteHelperArgvOrDigestDriftBeforeRestart`, `TestServiceActorEvidenceRoundTripsAndRejectsEitherIdentityMismatch`, `TestServiceActorEvidenceRejectsConflatedOrWrongRoleCommands`, and `TestRunRegistersHiddenRemoteServiceSupervisorCommand`.
 - Stale or ambiguous guidance removed: the prior guide implied the current worker record was supervisor evidence and did not state that the SELinux prefix or complete helper argv/digest was part of reentry authority.
 - Remaining uncertainty: fresh pinned-provider Task 12 acceptance still must exercise enforcing SELinux, real service restart after worker exit, push/fetch, pod-IP refusal, disconnect survival, and crash-cut adoption.
+
+## Fix round 2
+
+Status: DONE_WITH_CONCERNS
+
+### Result
+
+- Actor evidence no longer uses `os.ReadFile` or the shared receipt helper.
+  Its dedicated boundary resolves every absolute parent component through
+  descriptor-relative `openat(O_DIRECTORY|O_NOFOLLOW)` calls.
+- Existing evidence is accepted only when `openat(O_NOFOLLOW)` yields a
+  mode-0600 regular file within the diagnostic bound. The observer performs a
+  bounded read, repeats `fstat`, then compares device, inode, and size against a
+  no-follow `fstatat` of the still-named entry.
+- Publication writes a random private partial with `openat(O_EXCL|O_NOFOLLOW)`,
+  enforces mode 0600, fsyncs the file and parent, and commits with
+  descriptor-relative `renameat2(RENAME_NOREPLACE)`. A concurrent existing path
+  is compared only through the same safe observer.
+- Successful publication performs readback through that observer. Exact
+  existing bytes remain idempotent; symlinked files or parents, non-regular or
+  oversized evidence, replacement races, and unequal content fail closed.
+- Service journaling, pending-start adoption, tool identity, endpoints, and
+  process supervision were not changed.
+
+### TDD evidence
+
+- RED: a symlink to matching JSON was accepted by both publication and
+  observation because they followed `os.ReadFile`; a symlinked parent was also
+  traversed.
+- RED: the observer had no open-file identity seam, so a named entry replacement
+  during the read could not be detected.
+- GREEN: hostile tests now reject symlinked actor files, a symlinked parent,
+  directories, oversized evidence, and a descriptor-stable open file whose
+  named path is replaced before acceptance.
+- GREEN: exact publication followed by both a second publication and readback
+  remains idempotent.
+
+### Verification
+
+- `rtk go test ./internal/remoteworker -count=1`
+  — 56 passed.
+- `rtk go test -race ./internal/remoteworker -count=1`
+  — 56 passed.
+- `rtk go vet ./internal/remoteworker`
+  — passed.
+- `rtk git diff --check`
+  — passed.
+
+### Documentation improvement
+
+Documentation improvement:
+- Canonical file changed or proposed: `docs/skills/devpod-hauler.md`
+- Durable learning captured: immutable actor evidence requires descriptor-relative no-follow parent traversal, private bounded regular-file observation, stable open-and-named device/inode/size, fsynced private staging, and no-replace publication; byte equality alone is not authority.
+- Evidence: `TestServiceActorEvidenceRejectsSymlinkedFileAndParent`, `TestServiceActorEvidenceRejectsNonRegularAndExcessiveExistingFiles`, `TestServiceActorObserverRejectsNamedFileReplacementDuringRead`, and the idempotent replay in `TestServiceActorEvidenceRoundTripsAndRejectsEitherIdentityMismatch`.
+- Stale or ambiguous guidance removed: the earlier word “immutable” did not disclose that existing evidence was followed by pathname and could authorize a replaceable symlink target.
+- Remaining uncertainty: fresh pinned-provider Task 12 acceptance remains unchanged.

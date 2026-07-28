@@ -1,19 +1,13 @@
 package remoteworker
 
 import (
-	"bytes"
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
-	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
-	"os"
-	"reflect"
 
 	"github.com/joshyorko/camp/internal/domain"
-	"github.com/joshyorko/camp/internal/jsonstrict"
 )
 
 var ErrServiceEvidence = errors.New("remote Hauler service evidence is incomplete")
@@ -90,42 +84,6 @@ func processRecordArgvMatches(record domain.ProcessRecord, operation string) boo
 	}
 	digest := sha256.Sum256([]byte(record.Argv[0] + "\x00" + record.Argv[1]))
 	return record.ArgvSHA256 == hex.EncodeToString(digest[:])
-}
-
-func publishServiceActorEvidence(path string, evidence ServiceActorEvidence) error {
-	if evidence.SchemaVersion != ProtocolSchemaVersion || evidence.SessionID == "" ||
-		validateServiceActors(evidence.Worker, evidence.Supervisor) != nil {
-		return ErrServiceEvidence
-	}
-	body, err := json.Marshal(evidence)
-	if err != nil {
-		return err
-	}
-	return publishReceipt(path, append(body, '\n'))
-}
-
-func observeServiceActorEvidence(path string, expected ServiceActorEvidence) error {
-	body, err := os.ReadFile(path)
-	if err != nil {
-		return err
-	}
-	if len(body) > maxDiagnosticBytes || jsonstrict.RejectDuplicateKeys(body) != nil {
-		return ErrServiceEvidence
-	}
-	var observed ServiceActorEvidence
-	decoder := json.NewDecoder(bytes.NewReader(body))
-	decoder.DisallowUnknownFields()
-	if err := decoder.Decode(&observed); err != nil {
-		return ErrServiceEvidence
-	}
-	var trailing any
-	if err := decoder.Decode(&trailing); !errors.Is(err, io.EOF) {
-		return ErrServiceEvidence
-	}
-	if !reflect.DeepEqual(observed, expected) || validateServiceActors(observed.Worker, observed.Supervisor) != nil {
-		return ErrServiceEvidence
-	}
-	return nil
 }
 
 func validateServiceEvidence(records []domain.ServiceUnitRecord) error {

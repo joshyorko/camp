@@ -3,6 +3,7 @@ package remoteworker
 import (
 	"context"
 	"errors"
+	"os"
 	"path/filepath"
 	"testing"
 
@@ -108,6 +109,9 @@ func TestServiceActorEvidenceRoundTripsAndRejectsEitherIdentityMismatch(t *testi
 	if err := publishServiceActorEvidence(path, actors); err != nil {
 		t.Fatal(err)
 	}
+	if err := publishServiceActorEvidence(path, actors); err != nil {
+		t.Fatalf("idempotent publish: %v", err)
+	}
 	if err := observeServiceActorEvidence(path, actors); err != nil {
 		t.Fatal(err)
 	}
@@ -120,6 +124,99 @@ func TestServiceActorEvidenceRoundTripsAndRejectsEitherIdentityMismatch(t *testi
 		if err := observeServiceActorEvidence(path, expected); !errors.Is(err, ErrServiceEvidence) {
 			t.Fatalf("observeServiceActorEvidence() error = %v", err)
 		}
+	}
+}
+
+func TestServiceActorEvidenceRejectsSymlinkedFileAndParent(t *testing.T) {
+	root := t.TempDir()
+	actors := ServiceActorEvidence{
+		SchemaVersion: ProtocolSchemaVersion, SessionID: "session-1",
+		Worker: validWorkerRecord(), Supervisor: validSupervisorRecord(),
+	}
+	target := filepath.Join(root, "target.json")
+	if err := publishServiceActorEvidence(target, actors); err != nil {
+		t.Fatal(err)
+	}
+	link := filepath.Join(root, "actors.json")
+	if err := os.Symlink(target, link); err != nil {
+		t.Fatal(err)
+	}
+	if err := observeServiceActorEvidence(link, actors); !errors.Is(err, ErrServiceEvidence) {
+		t.Fatalf("symlinked actor observation error = %v", err)
+	}
+	if err := publishServiceActorEvidence(link, actors); !errors.Is(err, ErrServiceEvidence) {
+		t.Fatalf("symlinked actor publication error = %v", err)
+	}
+
+	realParent := filepath.Join(root, "real-parent")
+	if err := os.Mkdir(realParent, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	parentTarget := filepath.Join(realParent, "actors.json")
+	if err := publishServiceActorEvidence(parentTarget, actors); err != nil {
+		t.Fatal(err)
+	}
+	parentLink := filepath.Join(root, "parent-link")
+	if err := os.Symlink(realParent, parentLink); err != nil {
+		t.Fatal(err)
+	}
+	if err := publishServiceActorEvidence(filepath.Join(parentLink, "new.json"), actors); !errors.Is(err, ErrServiceEvidence) {
+		t.Fatalf("symlinked parent publication error = %v", err)
+	}
+	if err := observeServiceActorEvidence(filepath.Join(parentLink, filepath.Base(parentTarget)), actors); !errors.Is(err, ErrServiceEvidence) {
+		t.Fatalf("symlinked parent observation error = %v", err)
+	}
+}
+
+func TestServiceActorEvidenceRejectsNonRegularAndExcessiveExistingFiles(t *testing.T) {
+	actors := ServiceActorEvidence{
+		SchemaVersion: ProtocolSchemaVersion, SessionID: "session-1",
+		Worker: validWorkerRecord(), Supervisor: validSupervisorRecord(),
+	}
+	for _, test := range []struct {
+		name  string
+		setup func(string) error
+	}{
+		{"directory", func(path string) error { return os.Mkdir(path, 0o700) }},
+		{"excessive", func(path string) error {
+			return os.WriteFile(path, make([]byte, maxDiagnosticBytes+1), 0o600)
+		}},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "actors.json")
+			if err := test.setup(path); err != nil {
+				t.Fatal(err)
+			}
+			if err := observeServiceActorEvidence(path, actors); !errors.Is(err, ErrServiceEvidence) {
+				t.Fatalf("observeServiceActorEvidence() error = %v", err)
+			}
+			if err := publishServiceActorEvidence(path, actors); !errors.Is(err, ErrServiceEvidence) {
+				t.Fatalf("publishServiceActorEvidence() error = %v", err)
+			}
+		})
+	}
+}
+
+func TestServiceActorObserverRejectsNamedFileReplacementDuringRead(t *testing.T) {
+	root := t.TempDir()
+	path := filepath.Join(root, "actors.json")
+	actors := ServiceActorEvidence{
+		SchemaVersion: ProtocolSchemaVersion, SessionID: "session-1",
+		Worker: validWorkerRecord(), Supervisor: validSupervisorRecord(),
+	}
+	if err := publishServiceActorEvidence(path, actors); err != nil {
+		t.Fatal(err)
+	}
+	replacement := filepath.Join(root, "replacement.json")
+	if err := os.WriteFile(replacement, []byte("{}\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := observeServiceActorFile(path, func() {
+		if renameErr := os.Rename(replacement, path); renameErr != nil {
+			t.Errorf("replace actor evidence: %v", renameErr)
+		}
+	}); !errors.Is(err, ErrServiceEvidence) {
+		t.Fatalf("observeServiceActorFile() error = %v", err)
 	}
 }
 

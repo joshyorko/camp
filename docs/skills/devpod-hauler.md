@@ -261,15 +261,21 @@ Do not use Hauler v2.0.2's live `_catalog` response as proof that all direct reg
   worker launches one exact, one-shot Camp service-supervisor subprocess; their
   distinct full process records are validated as a parent/child pair and
   published as immutable per-invocation actor evidence, separately from the
-  pasta-helper and Hauler-child service records. Invocation locking, durable
-  start intents, and recorded PID/boot/start, executable, complete argv digest,
-  PGID, SID, and network-namespace evidence let retries adopt an unknown-outcome
-  start, observe an already-live unit without duplication, or identity-safely
-  restore a stopped recorded unit. Reentry rebuilds the complete expected pasta
-  argv, including the verified SELinux prefix and exact Hauler command, and
-  compares its digest before observation or restart. Recorded command,
-  confinement, endpoint, log, pidfile, worker, supervisor, argv, or digest drift
-  fails closed.
+  pasta-helper and Hauler-child service records. Actor publication opens every
+  parent component descriptor-relatively with `O_NOFOLLOW`, stages mode-0600
+  bytes privately, fsyncs file and parent, and commits with a no-replace rename.
+  Existing evidence is idempotent only after the same bounded no-follow
+  observer proves a private regular file whose open and named
+  device/inode/size remain stable; symlinks, directories, oversized bytes,
+  replacement races, and unequal content fail closed. Invocation locking,
+  durable start intents, and recorded PID/boot/start, executable, complete argv
+  digest, PGID, SID, and network-namespace evidence let retries adopt an
+  unknown-outcome start, observe an already-live unit without duplication, or
+  identity-safely restore a stopped recorded unit. Reentry rebuilds the complete
+  expected pasta argv, including the verified SELinux prefix and exact Hauler
+  command, and compares its digest before observation or restart. Recorded
+  command, confinement, endpoint, log, pidfile, worker, supervisor, argv, or
+  digest drift fails closed.
 - A live `devpod ssh` process is not sufficient forwarder readiness evidence: a
   fresh-controller file lifecycle run observed the process remain alive while
   its fileserver reverse tunnel never became reachable and its forwarder log
