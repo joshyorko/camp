@@ -333,6 +333,9 @@ deadline. The pre-pull moves acquisition outside that deadline; it does not
 replace the real DevPod create, agent injection, workspace engine, or cleanup
 evidence. Keep DevPod's default command override for this fixture; forcing the
 Podman image's own command lets the container exit before agent injection.
+Run the workspace as the image's `podman` user; its default root user can make
+the bind-mounted source root-owned, blocking Camp source access and exact
+cleanup.
 Before each file or MinIO lifecycle scenario opens Camp's workspace,
 the harness creates one unrelated workspace in that same private context. Its
 scenario ledger recovers exact Camp workspace IDs, process identities,
