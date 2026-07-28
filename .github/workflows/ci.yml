@@ -167,6 +167,14 @@ jobs:
           python3 developer/ci_release_evidence.py verify-candidate \
             --build-root build \
             --commit "$CANDIDATE_COMMIT"
+      - name: Authorize RCC pasta user namespace
+        shell: bash
+        run: |
+          restriction=/proc/sys/kernel/apparmor_restrict_unprivileged_userns
+          if [[ -r "$restriction" ]] && [[ "$(cat "$restriction")" == "1" ]]; then
+            sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+          fi
+          unshare --user --map-root-user true
       - name: Run mandatory exact-candidate Robot lifecycle
         id: robot
         env:

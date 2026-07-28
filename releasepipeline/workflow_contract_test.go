@@ -112,6 +112,21 @@ func TestCIAddsRCCParityWithoutCachingPrivateRuntimeHomes(t *testing.T) {
 	}
 }
 
+func TestRCCRobotAuthorizesPastaUserNamespacesOnRestrictedUbuntu(t *testing.T) {
+	workflow := parseWorkflow(t, readWorkflow(t, "ci.yml"))
+	step := findStepByName(t, workflow, "rcc-robot", "Authorize RCC pasta user namespace")
+	run := step["run"].(string)
+	for _, required := range []string{
+		"/proc/sys/kernel/apparmor_restrict_unprivileged_userns",
+		"sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0",
+		"unshare --user --map-root-user true",
+	} {
+		if !strings.Contains(run, required) {
+			t.Errorf("Pasta user-namespace setup omits %q", required)
+		}
+	}
+}
+
 func TestReleaseWorkflowVerifiesDownloadsBeforeProtectedPublication(t *testing.T) {
 	workflow := readWorkflow(t, "release.yml")
 	requireContains(t, workflow,
