@@ -28,12 +28,14 @@ type SceneData struct {
 	// (the config form, or a ready/failure band). May be empty.
 	Foreground string
 	// Ready and Failure gate the closing band.
-	Ready       bool
-	ReadyLine   string
-	NextCommand string
-	Failure     string
-	Recovery    string
-	HelpLine    string
+	Ready        bool
+	ReadyTitle   string
+	ReadyLine    string
+	NextCommand  string
+	Failure      string
+	FailureTitle string
+	Recovery     string
+	HelpLine     string
 }
 
 // Layout describes the responsive geometry for a given terminal size.
@@ -386,7 +388,11 @@ func reapplyBackground(content string, bg color.Color) string {
 }
 
 func readyBlock(data SceneData, w int, pal Palette) string {
-	title := lipgloss.NewStyle().Foreground(pal.Amber).Bold(true).Render("CAMP IS READY")
+	titleText := data.ReadyTitle
+	if titleText == "" {
+		titleText = "CAMP IS READY"
+	}
+	title := lipgloss.NewStyle().Foreground(pal.Amber).Bold(true).Render(titleText)
 	rule := ruleAround(title, w*2/3, pal)
 	sub := ""
 	if data.ReadyLine != "" {
@@ -402,10 +408,18 @@ func readyBlock(data SceneData, w int, pal Palette) string {
 }
 
 func failureBlock(data SceneData, w int, pal Palette) string {
-	head := lipgloss.NewStyle().Foreground(pal.Fail).Bold(true).Render("SETUP STOPPED")
+	headText := data.FailureTitle
+	if headText == "" {
+		headText = "SETUP STOPPED"
+	}
+	head := lipgloss.NewStyle().Foreground(pal.Fail).Bold(true).Render(headText)
 	msg := lipgloss.NewStyle().Foreground(pal.Fail).Render(data.Failure)
-	rec := lipgloss.NewStyle().Foreground(pal.LabelMeta).Render("next: " + data.Recovery)
-	return lipgloss.JoinVertical(lipgloss.Center, head, "", msg, "", rec)
+	parts := []string{head, "", msg}
+	if data.Recovery != "" {
+		rec := lipgloss.NewStyle().Foreground(pal.LabelMeta).Render("next: " + data.Recovery)
+		parts = append(parts, "", rec)
+	}
+	return lipgloss.JoinVertical(lipgloss.Center, parts...)
 }
 
 func ruleAround(label string, width int, pal Palette) string {

@@ -116,8 +116,9 @@ Do not use Hauler v2.0.2's live `_catalog` response as proof that all direct reg
   accepts one schema-v1 JSON request with strict unknown-field, recursively
   duplicate-key, operation,
   absolute-path, immutable-image, architecture, and helper/kit/manifest
-  identity validation. `activateImage` and `hydrate` are implemented; Task 7
-  service operations remain typed `unsupported`. The bootstrap carries the
+  identity validation. `activateImage`, `hydrate`, `startServices`, and
+  `checkpoint` are implemented; other unimplemented mutation operations remain
+  typed `unsupported`. The bootstrap carries the
   canonical manifest as a seventh descriptor-verified file so provider-side
   activation and container-side hydration can independently verify the uploaded
   archive. `probe` verifies the running helper plus adjacent kit
@@ -199,6 +200,39 @@ Do not use Hauler v2.0.2's live `_catalog` response as proof that all direct reg
 - `sshtransfer.Executor` runs rsync without a shell and connects the SSH tar producer to the local tar consumer with an OS pipe. The tar consumer requires GNU tar options `--same-permissions` and `--delay-directory-restore`; BusyBox tar is not a valid fallback dependency.
 - The real transfer gate covers exact bytes, permission modes, relative symlinks, hard-link inode identity, Unicode and spaces, `.camp/build` and `.camp/runtime` exclusions, rsync deletion, and a 2 MiB file. Forced fallback uses a missing rsync executable so fallback classification and the tar pipe are exercised rather than mocked.
 - Checkpoint mirror intent IDs are the durable attempt anchor. Rsync and tar destinations derive distinct attempt IDs from that anchor, and successful facts persist the returned root, resolved remote root, method, and exclusions. A partial transfer is outcome-unknown: retain its exact staging destination, record an ambiguous mirror fact, and block publication and blind retry until recovery observes it. A controller death after intent but before fact leaves the serialized attempt pending and likewise starts no second transfer.
+- A persisted `haulerKitV1` session never enters the legacy rsync or
+  tar-over-SSH checkpoint mirror. Its generation-derived remote attempt ID is
+  immutable across retry. Remote preparation verifies authority, observes that
+  exact attempt, quiesces the recorded registry and fileserver, cuts the
+  registry, inventories tagged images, archives the root, validates a fresh
+  Hauler store, and builds one verified return Camp Kit. `sync` resumes the
+  exact recorded services after the durable preparation receipt; `close`
+  leaves them quiesced until inbound publication completes. The return
+  fileserver authority is only the canonical manifest and its named 1 GiB
+  chunks; the complete archive and enclosing directories are never valid
+  allow-list entries. The supervised fileserver uses an otherwise empty store
+  and serves only `.camp/transfer/export`; that root contains exactly one
+  mode-0700 attempt directory whose descriptor-verified mode-0400 regular
+  files have single-link, stable inode, size, and digest identity. Extra
+  entries, symlinks, hardlinks, replacements, and directory drift fail closed.
+  A prepared receipt is durable before export publication, so an
+  outcome-unknown retry completes or adopts that same attempt and never builds
+  or exposes a second logical Kit. Host download, permanent `hauler store save`, upload,
+  pointer CAS, and acknowledgement are separate inbound-publication work and
+  must not be inferred from `remotePrepared`.
+- Before remote mutation the host re-reads the authoritative latest pointer
+  after writer-lease revalidation. When a pointer is recorded, its revision,
+  generation/current base, capsule, lineage, and complete document must exactly
+  match the backend. An absent pointer requires an empty expected revision.
+  Main may have no current base in that state; a new non-main lineage may
+  retain its non-nil inherited source generation as `CurrentBase` without
+  inventing a branch pointer. An unexpected live pointer, missing recorded
+  pointer, or revision drift fails before DevPod execution. On the remote side
+  the exclusive service lock is retained after
+  exact service quiescence and through registry-cut creation plus tagged-image
+  inventory. The lock is released only at that explicit immutable handoff and
+  is released with cancellation removed on every failure path, so a concurrent
+  service start or restore cannot interleave with the write barrier or cut.
 - Logical mirror attempts increase durably across every sync and final close; attempt-scoped journal IDs must not repeat within a session. The remote transport requires the persisted request workspace ID and DevPod context to exactly match its composition identity, then uses the persisted values for root resolution and transfer commands. Mismatch fails before resolution or staging.
 - Transfer command environment overrides replace inherited keys and remain deterministically ordered. Outcome-unknown errors are safe to format and unwrap even through a typed-nil pointer. Missing tar fallback is transport unavailability, not evidence that the persisted workspace is non-remote.
 - Tar fallback streams producer stdout exclusively into the consumer pipe; archive bytes are never diagnostic output. Captured stdout/stderr diagnostics are capped at 64 KiB per process. Start the producer before the staging-mutating consumer so a producer start failure is a not-started attempt with no consumer mutation; retain staging only after evidence that the consumer may have started mutating it.
@@ -249,7 +283,8 @@ Do not use Hauler v2.0.2's live `_catalog` response as proof that all direct reg
   worker, which revalidates the completed hydration receipt, manifest, ready
   store, and installed Hauler/pasta bytes before service mutation. It serves
   the ready store plus a persistent writable registry overlay at
-  `127.0.0.1:5000` and the ready store plus `.camp/transfer` at
+  `127.0.0.1:5000` and the ready store plus the private
+  `.camp/transfer/export` allow-list root at
   `127.0.0.1:8080`. Each exact installed Hauler child runs behind its own exact
   installed pasta process in a distinct network namespace; pasta maps only
   IPv4 loopback to private guest ports `15000` and `18080`, disables UDP and

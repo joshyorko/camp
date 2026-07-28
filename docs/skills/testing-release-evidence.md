@@ -127,18 +127,13 @@ rcc run -r developer/toolkit.yaml -t robot
 rcc run -r developer/toolkit.yaml -t robotKubernetes
 ```
 
-`local` creates one truthfully stamped `build/camp` and
-`build/evidence/candidate.json`, then atomically links that candidate at
-`~/.local/bin/camp` so subsequent commands are simply `camp setup`, `camp init`,
-and `camp open`. `install` remains a compatibility alias for `local`. Neither
-task edits shell startup files; Bluefin already includes `~/.local/bin` in
-PATH. `robot` verifies that candidate digest, asks
+`local` creates one truthfully stamped repository-only `build/camp` and `build/evidence/candidate.json`. `local` stops after repository-only candidate smoke verification. `install` verifies that exact candidate before atomically linking it at `~/.local/bin/camp` so subsequent commands are simply `camp setup`, `camp init`, and `camp open`. Neither task edits shell startup files; Bluefin already includes `~/.local/bin` in PATH. `robot` verifies that candidate digest, asks
 the candidate to install the exact DevPod and Hauler assets from
 `tools.lock.yaml`, runs named Go evidence directly, then runs black-box Robot
 Framework suites against the same executable. Go tests are not hidden inside
 Robot keywords. Gate manifests distinguish passed and failed gates; an absent
 named test, opt-in skip, Robot skip, missing executable, or candidate mutation
-is a failure.
+is a failure. RCC `test` builds and verifies its candidate before source gates; every gate ledger has that non-empty candidate SHA-256 and only terminal `passed`, `failed`, `missing`, `skipped`, or `gated` results. A missing mandatory gate is recorded as `missing` and fails the task rather than being hidden by a broad test command. Generated documentation is a gate only when regeneration leaves `docs/generated/` unchanged; a post-generation diff fails it. The RCC and pip Robot Framework declarations are both 7.4.2; that current factory pin supersedes the older 6.1.1 planning reference.
 
 A clean-start rehearsal removes only Camp-owned state. Inventory `camp list
 --json` and DevPod workspaces first, run `camp strike --purge --yes` while the
@@ -158,13 +153,38 @@ compiler alone therefore does not prove that `go test -race` can use it.
 
 RCC-backed jobs run alongside the direct Go jobs during parity. The
 `parity-evidence` job always writes `build/evidence/parity.json` for the exact
-workflow commit and run URL, including every direct and RCC job result. Its
+workflow commit and run URL, including every direct and RCC job result. The
+mandatory RCC Robot job downloads the `rcc-local` artifact instead of
+rebuilding it, verifies the manifest commit and candidate SHA-256, and runs
+`robot` against that exact binary. Its always-running artifact upload retains
+the Robot gate ledger, Robot XML, log, report, candidate manifest, teardown
+observations, and `ci-cleanup-receipt.json`; each path is mandatory and a
+missing path fails the evidence job. The downloaded artifact contents are
+rooted under `build/`: CI stages `ci-artifact/build/`, uploads the staging
+directory's contents, and downloads them into the repository root. Uploading
+the files directly would strip `build/` at the artifact boundary. The cleanup receipt is derived from
+ownership-checked controller removal followed by an observed absent path; it
+is never inferred from a Robot step or job conclusion. A failed or interrupted
+Robot run is evidence of failure, not permission to invent a cleanup result.
+Its
 `qualifiedHistoricalRuns` starts empty: repository tests cannot populate it or
 claim hosted parity. Do not remove the direct jobs until two consecutive,
 actual complete PR/master runs have passed every recorded mandatory gate; add
 those two GitHub Actions run IDs and URLs only after both runs finish.
 Do not cache `ROBOCORP_HOME`; the environment is private writable runtime state,
 not a verified immutable cache seed.
+
+Parity records translate Actions conclusions into the gate vocabulary
+`passed`, `failed`, `missing`, `skipped`, or `gated`; raw values such as
+`success` and `cancelled` are not ledger results. Before publication, validate
+the requested tag name, fetch only
+`+refs/tags/<tag>:refs/camp-release-tags/<tag>` from `origin` with automatic tag
+following disabled, peel that fetched private ref to its commit, and require it
+to equal `candidate_commit`. This handles annotated and lightweight tags,
+refreshes a moved tag instead of trusting a stale local ref, and fails closed
+when the exact remote tag is missing or malformed. Only then may publication
+run; `gh release create --verify-tag` alone proves that a tag exists, not that
+it targets the candidate proven by CI.
 
 Developer workstations use the `rcc` already on PATH and its configured
 `ROBOCORP_HOME`; this is the ordinary interactive interface. CI and release
@@ -265,6 +285,15 @@ when docs execution does not supply stdin.
 
 When a stacked PR's base merges, restack the child directly onto the resulting `master` commit and compare `master...HEAD` before pushing. The post-rebase diff must contain only the child scope; record the old and new head SHAs, then force-push with a lease pinned to the observed old remote head so concurrent updates fail instead of being overwritten.
 
+When several overlapping PRs are intentionally replaced by one integration
+PR, start the integration branch at the current remote `master` and merge each
+observed PR head with an explicit merge commit in dependency order. Do not use
+an octopus merge for overlapping heads: it obscures which parent introduced a
+conflict and cannot record an ordered resolution. Before publication, require
+`git merge-base --is-ancestor <observed-head> HEAD` for every superseded PR and
+review `git diff --stat origin/master...HEAD`; a green combined test run alone
+does not prove that every source head was included.
+
 Named acceptance gates require discovery evidence before execution evidence. `go test -run` exits zero even when no matching test exists, so first require the exact test name from `go test -list`, then run with `-v` and retain the matching `=== RUN` and `--- PASS` lines. A package-level `PASS` accompanied by `[no tests to run]` is not acceptance evidence.
 
 ```bash
@@ -274,10 +303,13 @@ go test -v ./integration -run '^TestNamedAcceptanceGate$' -count=1
 
 Discovery lists `TestMountedFileBackendParity`, `TestS3TwoWriterConflict`,
 `TestMinIOLifecycleVertical`, `TestLocalLifecycleVertical`, and
-`TestLocalLifecycleCrashMatrix`. `scripts/verify-real-evidence.sh` requires all
-five names, an executable orchestrator-provided `build/camp`, and a passing
-test receipt for every selected mode; an opt-in skip or no-tests result is a
-failure. The real lifecycle tests require `CAMP_TEST_BINARY`; they no longer
+`TestLocalLifecycleCrashMatrix`. `scripts/verify-real-evidence.sh list`
+discovers those names without requiring a candidate. Every execution mode
+requires all five names, an executable orchestrator-provided `build/camp`, and
+a passing test receipt for every selected gate; an opt-in skip or no-tests
+result is a failure. Each selected gate writes its receipt through a uniquely named
+`camp-real-evidence.*` temporary file and removes only that file on return, SIGINT,
+or SIGTERM. The real lifecycle tests require `CAMP_TEST_BINARY`; they no longer
 build independent executables or inspect the host-global DevPod context. Each scenario uses private XDG
 config, data, state, cache, and mode-0700 runtime roots plus a unique private
 DevPod home, config, SSH config, and non-default context. Before scenario
@@ -351,10 +383,10 @@ These named tests remain executable product gates even while their requirements
 are `roadmap-gated`. The RCC `robot` task therefore fails when a current
 candidate cannot satisfy them; black-box Robot success alone must not overwrite
 that failure. Promote a requirement from `roadmap-gated` only after the same
-candidate produces the named real-tool evidence. During the initial parity
-phase, hosted CI runs RCC `local` and `test` but does not make this knowingly
-failing Robot task a required PR job. Add that job only after A2/A3 evidence is
-green.
+candidate produces the named real-tool evidence. Hosted CI now makes this
+failure-visible Robot task mandatory and retains its exact-candidate evidence;
+until the named gates pass, the workflow is expected to stay red and cannot be
+used as a release or parity claim.
 
 For filesystem-dependent safety tests, prove determinism with repeated focused execution when practical. The ownership-marker temporary-name substitution test requires injection of the named fallback because a Linux filesystem may support `O_TMPFILE`; the focused test passed 50 repetitions after that injection, and `go test ./internal/capsule -count=1` passed 52 tests.
 
@@ -493,7 +525,12 @@ resulting `verified-artifacts.json` binds the exact candidate version and
 commit plus each archive's architecture, relative path, byte size, SHA-256,
 verification-record path and SHA-256, and passed result. Creation fails for a
 missing native result, identity/digest mismatch, or an extra release archive.
-The sealed `verified-release-set-<commit>` is the only archive source for
+The release workflow is manual-only and requires the successful CI run ID,
+full candidate commit, and exact `build/camp` SHA-256. Before packaging it
+checks out that commit, verifies the CI run and its mandatory Robot/parity jobs,
+downloads `rcc-candidate-<commit>`, and matches both the manifest identity and
+binary digest. Tag pushes cannot supply that evidence identity and therefore do
+not start releases. The sealed `verified-release-set-<commit>` is the only archive source for
 attestation and publication. Both downstream jobs independently run
 `verified_artifacts.py recheck`; neither job invokes RCC, Go, or packaging build
 scripts, so a missing, changed, substituted, or newly added archive fails before
@@ -507,8 +544,8 @@ attestation.
 A manual release workflow with `publish=false` is the safe hosted validation
 lane: it builds, uploads, downloads, checksum-verifies, and natively exercises
 both architectures, but skips attestation and publication. Attestation is a
-public provenance side effect, so it runs only for a tag or an explicitly
-approved manual publication. A dry-run artifact proves candidate mechanics; it
+public provenance side effect, so it runs only for an explicitly approved
+manual publication. A dry-run artifact proves candidate mechanics; it
 does not prove attestation or a published release.
 
 Before closing issue #13, link the successful mandatory CI run, both native

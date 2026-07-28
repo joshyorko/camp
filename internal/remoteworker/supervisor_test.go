@@ -97,8 +97,8 @@ func TestRemoteServiceSpecsUseExactInstalledToolsAndPrivateLoopbackMappings(t *t
 		t.Fatalf("registry argv = %#v", registry.Argv)
 	}
 	if !reflect.DeepEqual(fileserver.Argv, []string{
-		"store", "--store", request.RuntimeRoot + "/kit/store", "serve", "fileserver",
-		"--directory", request.WorkspaceRoot + "/.camp/transfer", "--port", "18080", "--timeout", "86400",
+		"store", "--store", request.WorkspaceRoot + "/.camp/transfer/fileserver-store", "serve", "fileserver",
+		"--directory", request.WorkspaceRoot + "/.camp/transfer/export", "--port", "18080", "--timeout", "86400",
 	}) {
 		t.Fatalf("fileserver argv = %#v", fileserver.Argv)
 	}

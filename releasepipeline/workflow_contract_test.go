@@ -43,24 +43,72 @@ func TestCIAddsRCCParityWithoutCachingPrivateRuntimeHomes(t *testing.T) {
 	requireContains(t, workflow,
 		"name: RCC local candidate",
 		"name: RCC source gates",
+		"name: RCC exact-candidate lifecycle evidence",
 		"./developer/rccw run -r developer/toolkit.yaml --dev -t local",
 		"./developer/rccw run -r developer/toolkit.yaml --dev -t test",
+		"./developer/rccw run -r developer/toolkit.yaml -t robot",
+		"actions/download-artifact@",
 		"developer/verify_pr_receipt.py",
 		"build/evidence/candidate.json",
 		"build/evidence/test-gates.json",
-		"name: Direct Go and RCC parity record",
-		"needs: [test, integration, minio, locked-tools, packaging, rcc-local, rcc-test]",
-		"candidateCommit",
-		"requiredConsecutiveCompleteRuns",
-		"qualifiedHistoricalRuns",
-		"build/evidence/parity.json",
+		"build/evidence/robot-gates.json",
+		"build/evidence/robot/",
+		"build/evidence/ci-cleanup-receipt.json",
+		"name: rcc-robot-evidence-${{ github.sha }}",
 		"if: always()",
+		"name: Direct Go and RCC parity record",
+		"needs: [test, integration, minio, locked-tools, packaging, rcc-local, rcc-test, rcc-robot]",
+		"build/evidence/parity.json",
+		"developer/ci_release_evidence.py write-parity",
 	)
-	if strings.Contains(workflow, "./developer/rccw run -r developer/toolkit.yaml -t robot") {
-		t.Fatal("RCC Robot must not become mandatory CI before its roadmap-gated product evidence passes")
+	for _, directJob := range []string{"  test:", "  integration:", "  minio:", "  locked-tools:", "  packaging:"} {
+		if !strings.Contains(workflow, directJob) {
+			t.Errorf("direct parity lane %q was removed before two immutable complete run references exist", directJob)
+		}
 	}
 	if strings.Contains(workflow, "build/rcc-homes") && strings.Contains(workflow, "actions/cache") {
 		t.Fatal("CI must not cache private RCC homes")
+	}
+	document := parseWorkflow(t, workflow)
+	stage := findStepByName(t, document, "rcc-local", "Stage candidate with preserved build root")
+	stageRun := stage["run"].(string)
+	for _, staged := range []string{
+		"ci-artifact/build/camp",
+		"ci-artifact/build/evidence/candidate.json",
+	} {
+		if !strings.Contains(stageRun, staged) {
+			t.Errorf("candidate staging omits preserved path %s", staged)
+		}
+	}
+	candidateUpload := findStepByUses(t, document, "rcc-local", "actions/upload-artifact@")
+	candidateUploadWith := candidateUpload["with"].(map[string]any)
+	if candidateUploadWith["path"] != "ci-artifact/" {
+		t.Fatalf("candidate upload root = %#v, want ci-artifact/", candidateUploadWith["path"])
+	}
+	download := findStepByUses(t, document, "rcc-robot", "actions/download-artifact@")
+	with := download["with"].(map[string]any)
+	if with["path"] != "." {
+		t.Fatalf("RCC Robot candidate download path = %#v, want repository root", with["path"])
+	}
+	requireEvidence := findStepByName(t, document, "rcc-robot", "Require mandatory RCC Robot evidence")
+	run := requireEvidence["run"].(string)
+	for _, required := range []string{
+		"build/evidence/candidate.json",
+		"build/evidence/robot-gates.json",
+		"build/evidence/robot/output.xml",
+		"build/evidence/robot/log.html",
+		"build/evidence/robot/report.html",
+		"build/evidence/robot-cleanup.jsonl",
+		"build/evidence/ci-cleanup-receipt.json",
+	} {
+		if !strings.Contains(run, "test -f "+required) {
+			t.Errorf("mandatory Robot evidence validation omits %s", required)
+		}
+	}
+	upload := findStepByName(t, document, "rcc-robot", "Upload RCC Robot evidence and cleanup receipt")
+	uploadWith := upload["with"].(map[string]any)
+	if uploadWith["if-no-files-found"] != "error" {
+		t.Fatalf("mandatory Robot evidence missing-file policy = %#v, want error", uploadWith["if-no-files-found"])
 	}
 }
 
@@ -68,7 +116,14 @@ func TestReleaseWorkflowVerifiesDownloadsBeforeProtectedPublication(t *testing.T
 	workflow := readWorkflow(t, "release.yml")
 	requireContains(t, workflow,
 		"workflow_dispatch:",
-		"tags:",
+		"candidate_ci_run_id:",
+		"candidate_commit:",
+		"candidate_sha256:",
+		"actions: read",
+		"gh run download",
+		"rcc-candidate-${CANDIDATE_COMMIT}",
+		"ci_release_evidence.py verify-candidate",
+		"Run RCC release packaging for verified candidate",
 		"environment: release",
 		"contents: write",
 		"id-token: write",
@@ -80,17 +135,21 @@ func TestReleaseWorkflowVerifiesDownloadsBeforeProtectedPublication(t *testing.T
 		"./developer/rccw run -r developer/toolkit.yaml -t package",
 		"name: RCC release package",
 		"name: Seal verified artifact set",
-		"verified-release-set-${{ github.sha }}",
+		"verified-release-set-${{ inputs.candidate_commit }}",
 		"verified_artifacts.py create dist",
 		"verified_artifacts.py recheck dist",
 		"dist/verified-artifacts.json",
-		"github.event_name == 'push' || inputs.publish == true",
+		"inputs.publish == true",
+		"ci_release_evidence.py fetch-verify-tag",
 		"retention-days:",
 	)
-	if strings.Contains(workflow, "pull_request:") {
-		t.Fatal("release.yml must not run on pull requests")
+	for _, forbiddenTrigger := range []string{"pull_request:", `push:
+    tags:`} {
+		if strings.Contains(workflow, forbiddenTrigger) {
+			t.Fatalf("release.yml contains release trigger that cannot supply exact CI evidence: %q", forbiddenTrigger)
+		}
 	}
-	if strings.Count(workflow, "github.event_name == 'push' || inputs.publish == true") != 2 {
+	if strings.Count(workflow, "inputs.publish == true") != 2 {
 		t.Fatal("manual dry runs must gate both attestation and publication")
 	}
 	if strings.Count(workflow, "verified_artifacts.py recheck dist") != 2 {
@@ -105,7 +164,58 @@ func TestReleaseWorkflowVerifiesDownloadsBeforeProtectedPublication(t *testing.T
 			t.Errorf("%s job can rebuild release archives", name)
 		}
 	}
+	document := parseWorkflow(t, workflow)
+	publishStep := findStepByName(t, document, "publish", "Publish verified assets")
+	publishRun := publishStep["run"].(string)
+	verifyIndex := strings.Index(publishRun, "ci_release_evidence.py fetch-verify-tag")
+	publishIndex := strings.Index(publishRun, "gh release create")
+	if verifyIndex < 0 || publishIndex < 0 || verifyIndex >= publishIndex {
+		t.Fatal("release tag fetch and exact target verification must finish before publication")
+	}
 	assertActionsPinned(t, workflow)
+}
+
+func parseWorkflow(t *testing.T, workflow string) map[string]any {
+	t.Helper()
+	var document map[string]any
+	if err := yaml.Unmarshal([]byte(workflow), &document); err != nil {
+		t.Fatal(err)
+	}
+	return document
+}
+
+func findStepByUses(t *testing.T, document map[string]any, jobName, prefix string) map[string]any {
+	t.Helper()
+	for _, step := range workflowSteps(t, document, jobName) {
+		if uses, _ := step["uses"].(string); strings.HasPrefix(uses, prefix) {
+			return step
+		}
+	}
+	t.Fatalf("job %s has no step using %s", jobName, prefix)
+	return nil
+}
+
+func findStepByName(t *testing.T, document map[string]any, jobName, name string) map[string]any {
+	t.Helper()
+	for _, step := range workflowSteps(t, document, jobName) {
+		if step["name"] == name {
+			return step
+		}
+	}
+	t.Fatalf("job %s has no step named %s", jobName, name)
+	return nil
+}
+
+func workflowSteps(t *testing.T, document map[string]any, jobName string) []map[string]any {
+	t.Helper()
+	jobs := document["jobs"].(map[string]any)
+	job := jobs[jobName].(map[string]any)
+	rawSteps := job["steps"].([]any)
+	steps := make([]map[string]any, 0, len(rawSteps))
+	for _, raw := range rawSteps {
+		steps = append(steps, raw.(map[string]any))
+	}
+	return steps
 }
 
 func TestProviderEvidenceUsesExplicitProtectedProfilesNotSecretConditionals(t *testing.T) {

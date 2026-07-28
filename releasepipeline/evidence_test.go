@@ -10,6 +10,8 @@ import (
 	"runtime"
 	"strings"
 	"testing"
+
+	"gopkg.in/yaml.v3"
 )
 
 const (
@@ -167,6 +169,29 @@ func TestVerifiedArtifactManifestBindsBothNativeResultsAndRejectsMutation(t *tes
 		t.Fatal(err)
 	}
 	runVerifiedArtifacts(t, "recheck", dist, false)
+}
+
+func TestReleaseInputsRequirePreviouslyVerifiedCandidateIdentity(t *testing.T) {
+	contents, err := os.ReadFile(filepath.Join("..", ".github", "workflows", "release.yml"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var workflow map[string]any
+	if err := yaml.Unmarshal(contents, &workflow); err != nil {
+		t.Fatal(err)
+	}
+	triggers := workflow["on"].(map[string]any)
+	dispatch := triggers["workflow_dispatch"].(map[string]any)
+	inputs := dispatch["inputs"].(map[string]any)
+	for _, name := range []string{"candidate_ci_run_id", "candidate_commit", "candidate_sha256"} {
+		input, ok := inputs[name].(map[string]any)
+		if !ok || input["required"] != true || input["type"] != "string" {
+			t.Errorf("release input %s must be a required string, got %#v", name, inputs[name])
+		}
+	}
+	if _, automaticTagRelease := triggers["push"]; automaticTagRelease {
+		t.Fatal("tag pushes cannot identify the mandatory CI evidence run and must not release automatically")
+	}
 }
 
 func runEvidence(t *testing.T, mode, dist string) {

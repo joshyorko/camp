@@ -170,7 +170,7 @@ func TestReleaseWorkflowCannotClaimKubernetesWithoutMatchingProtectedEvidence(t 
 		"name: Bind optional Kubernetes support claim",
 		"if: inputs.claim_kubernetes_support == true",
 		"environment: release-providers",
-		`--name "kubernetes-evidence-${GITHUB_SHA}"`,
+		`--name "kubernetes-evidence-${CANDIDATE_COMMIT}"`,
 		"kubernetes_evidence.py validate",
 		"kubernetes_evidence.py validate-provenance",
 		"--relevant-change",

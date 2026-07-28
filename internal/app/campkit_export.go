@@ -2,10 +2,14 @@ package app
 
 import (
 	"context"
+	"errors"
+	"fmt"
 	"io"
 
 	"github.com/joshyorko/camp/internal/campkit"
 )
+
+var ErrCampKitExportRequest = errors.New("CampKit export request is incomplete")
 
 // CampKitExportResolver owns authoritative manifest and exact-generation
 // source resolution. It must not move pointers or acquire leases.
@@ -20,6 +24,12 @@ type CampKitSourceRevalidator interface {
 // ExportCampKit resolves one exact generation, validates its sources before
 // transfer, streams to an atomic file, and validates again before publication.
 func ExportCampKit(ctx context.Context, output, generation string, resolver CampKitExportResolver) error {
+	if output == "" {
+		return fmt.Errorf("output is required: %w", ErrCampKitExportRequest)
+	}
+	if generation == "" {
+		return fmt.Errorf("generation is required: %w", ErrCampKitExportRequest)
+	}
 	if resolver == nil {
 		return io.ErrClosedPipe
 	}

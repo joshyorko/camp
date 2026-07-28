@@ -187,7 +187,10 @@ resolution alone is not a transfer lock.
 `app.ExportCampKit` is the application seam: it requires an authoritative
 resolver and revalidator, performs the first check before streaming, and uses
 the final check immediately before `ExportFile`'s no-replace publication. It
-does not move pointers or acquire leases.
+does not move pointers or acquire leases. It rejects a missing output path or
+generation reference before it invokes the resolver, so callers that bypass
+the Cobra required-flag boundary still cannot trigger source reads with an
+incomplete request.
 
 ## Verification and boundaries
 

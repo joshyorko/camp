@@ -2,6 +2,17 @@
 
 ## Unreleased
 
+### Lifecycle and Remote Workspaces
+
+- add typed, event-driven lifecycle presentation and wire rich checkpoint,
+  sync, close, recovery, status, and failure outcomes through the production
+  CLI without deriving state from subprocess text
+- add immutable remote Hauler checkpoints with authoritative pointer
+  revalidation, service write barriers, resumable attempt adoption, bounded
+  worker envelopes, and private immutable return exports
+- add portable controller, blueprint, profile, provenance, timeline, and
+  execution-binding contracts with strict persisted identity validation
+
 ### Developer Experience
 
 - add the RCC-contained developer factory with one repository-local, truthfully
@@ -13,9 +24,14 @@
   black-box CLI suites with requirement traceability
 - run RCC factory jobs alongside the existing direct Go CI during the parity
   period and delegate release packaging to the existing packaging authority
+- require exact-candidate RCC lifecycle evidence, ownership-checked cleanup
+  receipts, normalized parity results, and candidate-bound release/tag
+  verification before publication
 
 ### Portability and Safety
 
+- harden CampKit export, IDE launch, MinIO portability, and real-evidence
+  discovery so invalid or incomplete inputs fail before production effects
 - capture only OCI images explicitly pushed through `CAMP_REGISTRY`; derive the
   transported inventory from the immutable registry cut instead of enumerating
   the workspace engine

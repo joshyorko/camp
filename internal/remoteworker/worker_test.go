@@ -17,9 +17,10 @@ import (
 )
 
 type recordingWorkerOperations struct {
-	activated bool
-	hydrated  bool
-	started   bool
+	activated    bool
+	hydrated     bool
+	started      bool
+	checkpointed bool
 }
 
 type activationFixture struct {
@@ -89,11 +90,19 @@ func (operations *recordingWorkerOperations) StartServices(context.Context, Requ
 	return map[string]string{"status": "ready"}, nil
 }
 
+func (operations *recordingWorkerOperations) Checkpoint(context.Context, Request) (any, error) {
+	operations.checkpointed = true
+	return map[string]string{"status": "prepared"}, nil
+}
+
 func TestRunDispatchesRemoteLifecycleOperations(t *testing.T) {
-	for _, operation := range []Operation{OperationActivateImage, OperationHydrate, OperationStartServices} {
+	for _, operation := range []Operation{OperationActivateImage, OperationHydrate, OperationStartServices, OperationCheckpoint} {
 		t.Run(string(operation), func(t *testing.T) {
 			request := validRequest()
 			request.Operation = operation
+			if operation == OperationCheckpoint {
+				request.Checkpoint = checkpointRequest(false).Checkpoint
+			}
 			body, err := json.Marshal(request)
 			if err != nil {
 				t.Fatal(err)
@@ -106,7 +115,8 @@ func TestRunDispatchesRemoteLifecycleOperations(t *testing.T) {
 			}
 			if operations.activated != (operation == OperationActivateImage) ||
 				operations.hydrated != (operation == OperationHydrate) ||
-				operations.started != (operation == OperationStartServices) {
+				operations.started != (operation == OperationStartServices) ||
+				operations.checkpointed != (operation == OperationCheckpoint) {
 				t.Fatalf("dispatch activate=%v hydrate=%v start=%v", operations.activated, operations.hydrated, operations.started)
 			}
 			var result Result

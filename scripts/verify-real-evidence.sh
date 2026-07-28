@@ -16,8 +16,17 @@ run_named() {
   local name="$1" timeout="$2"
   shift 2
   local output
-  output="$(mktemp)"
-  trap 'rm -f "${output}"' RETURN
+  output="$(mktemp "${TMPDIR:-/tmp}/camp-real-evidence.XXXXXX")"
+  cleanup_receipt() {
+    trap - RETURN INT TERM
+    local receipt="${output:-}"
+    if [[ -f "${receipt}" && "$(basename -- "${receipt}")" == camp-real-evidence.* ]]; then
+      rm -f -- "${receipt}"
+    fi
+  }
+  trap cleanup_receipt RETURN
+  trap 'cleanup_receipt; exit 130' INT
+  trap 'cleanup_receipt; exit 143' TERM
   if ! go test -v "${package}" -run "^${name}$" -count=1 -timeout="${timeout}" "$@" | tee "${output}"; then
     return 1
   fi
@@ -54,6 +63,7 @@ run_file() {
 }
 
 run_minio() {
+  run_named TestMinIOImmutableLifecycle 10m
   run_named TestS3TwoWriterConflict 20m
   CAMP_TEST_REAL_MINIO_REOPEN=1 run_named TestMinIOLifecycleVertical 60m
 }
@@ -63,22 +73,28 @@ run_lifecycle() {
   CAMP_TEST_REAL_LIFECYCLE=1 run_named TestLocalLifecycleCrashMatrix 120m
 }
 
-require_candidate
-discover >/dev/null
 case "${mode}" in
   list)
     discover
     ;;
   file)
+    require_candidate
+    discover >/dev/null
     run_file
     ;;
   minio)
+    require_candidate
+    discover >/dev/null
     run_minio
     ;;
   lifecycle)
+    require_candidate
+    discover >/dev/null
     run_lifecycle
     ;;
   all)
+    require_candidate
+    discover >/dev/null
     run_file
     run_minio
     run_lifecycle

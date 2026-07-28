@@ -127,6 +127,7 @@ type JournalSnapshot struct {
 	Lineage                 Lineage             `json:"lineage" yaml:"lineage"`
 	Mode                    SessionMode         `json:"mode" yaml:"mode"`
 	Tools                   ToolVersions        `json:"tools" yaml:"tools"`
+	ExecutionBinding        *ExecutionBinding   `json:"executionBinding,omitempty" yaml:"executionBinding,omitempty"`
 	OpenedGeneration        *GenerationRef      `json:"openedGeneration,omitempty" yaml:"openedGeneration,omitempty"`
 	CurrentBase             *GenerationRef      `json:"currentBase,omitempty" yaml:"currentBase,omitempty"`
 	CurrentPointer          *LatestPointer      `json:"currentPointer,omitempty" yaml:"currentPointer,omitempty"`

@@ -20,11 +20,64 @@ Production composition is not only command registration. The `internal/adapters/
 
 `camp attach [target]` composes the existing ownership-safe `app.Attach` use case with the production journal, ownership revalidator, canonical target resolver, and DevPod adapter. The Cobra boundary owns only typed flag parsing: the VS Code Insiders alias and DevPod SSH port, user, environment, agent, GPG, stdio, keepalive, signing-key, terminal, terminfo, and raw passthrough options. Typed/raw conflict detection remains in the DevPod adapter before process execution. Terminal attach must pass the process stdin, stdout, and stderr through `ports.Command`; capturing subprocess output without those destinations would make a registered interactive command unusable even if its argv were correct.
 
+Nested VS Code entry derives its host only from a DevPod workspace ID that is a
+single DNS-label-shaped value of at most 63 ASCII characters. The adapter then
+constructs the direct `vscode-remote://ssh-remote+<workspace>.devpod/<target>`
+URI and invokes `code` or `code-insiders` without a DevPod SSH shell.
+`integration/ide_lifecycle_test.go` binds this public command surface to the
+orchestrator-provided `CAMP_TEST_BINARY`: it checks the exact attach help,
+stable JSON usage rejection for a conflicting `--insiders`/`--ide` pair, and
+that the matching Insiders pair crosses parsing into production composition
+under isolated XDG roots and an empty `PATH`. That credential-free contract is
+not evidence that a real editor connected to a live DevPod workspace.
+
 The subprocess runner keeps a command with all three terminal streams in Camp's foreground process group and passes those descriptors directly, without capture pipes, so DevPod SSH can detect, read, and write the controlling terminal. Non-interactive commands retain captured output and an isolated process group so cancellation can terminate their full subprocess tree.
 
 `lifecycle.CloseEffects` acts only on identities recorded in the session snapshot. Workspace cleanup distinguishes delete from `--keep-workspace` stop, forwarders and the supervisor use full PID/boot/start identities, and PID reuse means the recorded process is already absent rather than authorizing a signal to the new occupant. Services delegate to `supervisor.ServiceSupervisor.Stop`, which stops each recorded child before its helper and then proves absence; lease release uses the exact recorded revision, and materialization cleanup delegates to the ownership marker/device/inode guard. The production-composition regression in `internal/adapters/lifecycle/lifecycle_test.go` wires those concrete types and asserts child → helper → absence for both services. `lifecycle.SessionObserver` reports PID reuse explicitly and accepts live service evidence only after the existing supervisor inspector validates process topology and listeners; stopped active sessions still require listener-absence validation, while closed historical sessions with absent recorded processes do not claim ports legitimately reused later. `lifecycle.ServingRefresher` requires exactly one request-matching `ServingContentRefreshed` intent when pending work exists, tolerates unrelated concurrent intents without consuming them, validates both complete production service specs before stopping either service, and requires the recorded absolute Hauler command prefix `store --store <absolute-store> serve <service-name>` for `registry` or `fileserver`. Registry refresh retains the recorded mutable overlay so post-seal pushes remain available to the next checkpoint; fileserver refresh moves to the published haul directory. Journal fact commits serialize per session: lease renewal updates only lease state, checkpoint facts retain the latest durable lease, and service-changing `ServiceStart`, `ServiceRestart`, and `ServingContentRefreshed` facts update service records atop the latest snapshot. Recovery facts that reuse a service transition without changing service records retain their state transition. `CheckpointPublisher` reloads that composed snapshot and records only its matching refresh fact, so lease renewal and every intermediate refreshed identity fact cannot replace each other while unrelated pending intents remain owned by their writers. Refresh remains post-publication and an error remains an operational refresh failure rather than a publication rollback.
 
 Unknown commands and arbitrary arguments return the stable usage exit code 2. Human failures use stderr; JSON failures use stdout and the versioned presentation envelope. Command handlers must obtain the inherited mode through `cli.OutputModeFrom` so success and failure presentation do not invent separate flag plumbing.
+
+## Deferred controller and profile command composition
+
+The implemented domain/application slice validates controller identities,
+blueprints, blueprint references, execution bindings, provenance, and the
+closed profile schema. Blueprint identity accepts only the typed DevPod/Hauler
+tool-version fields using strict v-prefixed SemVer 2.0.0, exact supported schema
+versions, portable identifiers, and canonical lowercase SHA-256 references.
+Every standalone controller, blueprint, blueprint-reference, binding, and
+provenance JSON decoder rejects unknown fields and trailing JSON values.
+Profiles currently allow only `workspaceEngine: devpod`; there is no arbitrary
+setting map. Their decoder also rejects nested unknown fields before digest
+validation. Store-facing profile reads are revalidated, and timeline marks
+absent, zero, malformed, or unsupported bindings `unknown-blueprint`.
+
+The durable profile adapter implements import, deterministic list, show,
+current, activate, and deactivate through one strictly decoded versioned JSON
+document. Updates hold an adjacent exclusive lock across validation and
+mode-0600 temporary-file publication, fsync, rename, and parent-directory
+fsync. The journal owns the optional execution binding: it accepts the first
+binding only through `BindExecution` while the journal has no effects, permits
+an exact idempotent repeat, rejects retargeting, and leaves legacy snapshots
+unbound. `BindExecution`, intent append, and fact composition take the same
+per-session journal lock. Facts preserve the exact durable binding and reject a
+non-nil caller snapshot that would establish or retarget it before journal
+append or snapshot publication.
+
+There is still no Cobra or production lifecycle composition. Therefore no
+controller, timeline, or profile command is implemented or advertised. A
+future surface may add `camp inspect`, `camp timeline`, and `camp profile
+import|list|show|current|activate|deactivate` only after production composition
+selects the profile-store path, derives the blueprint, and routes lifecycle
+entry through the execution guard; each command must use the existing JSON
+envelope and must not expose a profile that fails validation.
+
+Before registering `profile activate`, composition must prove that open calls
+`ExecutionGuard.BeforeEffects` with the selected profile and blueprint digests,
+and that attach, sync, close, and recover call `ExecutionGuard.Require` before
+their effects.
+Timeline must show legacy sessions without such a binding as
+`unknown-blueprint`, never synthesize a compatibility claim. Until those
+production dependencies exist, command help must not advertise this surface.
 
 Cobra's help flag and generated `help` command bypass normal positional validation. Keep strict help-path validation at the `cli.Execute` boundary: unavailable or unknown help topics, extra topic components, and garbage combined with `--help` must exit 2 in both human and JSON modes without emitting successful help. Valid root and completion help must remain available.
 
@@ -97,4 +150,9 @@ A command is usable only when its handler is wired to production dependencies an
 - `internal/adapters/hauler/client_test.go`
 - `internal/cli/shell_recipe.go` and `shell_recipe_test.go`
 - `internal/config/store.go`, `bootstrap.go`, and their focused tests
+- `internal/domain/controller.go`, `blueprint.go`, `validation.go`, and `controller_test.go`
+- `internal/app/profile.go` and `profile_test.go`
+- `internal/adapters/profilestore/store.go` and `store_test.go`
+- `internal/app/execution_binding.go` and `execution_binding_test.go`
+- `internal/journal/store.go` and `store_test.go`
 - pinned DevPod `cmd/provider/options.go`, `cmd/provider/set_options.go`, and `pkg/config/config.go` at `86b6f9f5`

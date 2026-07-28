@@ -10,6 +10,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -26,6 +27,7 @@ import (
 	"github.com/joshyorko/camp/internal/journal"
 	"github.com/joshyorko/camp/internal/ports"
 	registryadapter "github.com/joshyorko/camp/internal/registry"
+	"github.com/joshyorko/camp/internal/remoteworker"
 	"github.com/joshyorko/camp/internal/workspace"
 )
 
@@ -204,6 +206,224 @@ type fakeMirror struct {
 
 func localCheckpointTransports(transport ports.WorkspaceTransport) CheckpointTransports {
 	return CheckpointTransports{Local: transport}
+}
+
+type fakeRemoteCheckpointPreparer struct {
+	snapshot   domain.JournalSnapshot
+	generation uint64
+	close      bool
+	receipt    remoteworker.CheckpointReceipt
+	calls      int
+}
+
+func (f *fakeRemoteCheckpointPreparer) Prepare(_ context.Context, snapshot domain.JournalSnapshot, generation uint64, close bool) (remoteworker.CheckpointReceipt, error) {
+	f.calls++
+	f.snapshot, f.generation, f.close = snapshot, generation, close
+	return f.receipt, nil
+}
+
+func TestRemoteCheckpointRevalidatesExactLivePointerBeforeExecutor(t *testing.T) {
+	for _, test := range []struct {
+		name        string
+		recorded    *domain.LatestPointer
+		recordedRev string
+		live        *domain.LatestPointer
+		wantErr     bool
+		wantCalls   int
+	}{
+		{name: "missing baseline remains missing", wantCalls: 1},
+		{name: "unexpected live pointer", live: testRemotePointer(1), wantErr: true},
+		{name: "recorded pointer missing", recorded: testRemotePointer(1), recordedRev: "missing-r1", wantErr: true},
+		{name: "pointer revision drift", recorded: testRemotePointer(1), live: testRemotePointer(1), recordedRev: "wrong-r1", wantErr: true},
+		{name: "pointer generation drift", recorded: testRemotePointer(1), live: testRemotePointer(2), recordedRev: "wrong", wantErr: true},
+		{name: "exact pointer", recorded: testRemotePointer(1), live: testRemotePointer(1), wantCalls: 1},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			now := time.Unix(100, 0).UTC()
+			sandbox := t.TempDir()
+			snapshot := remoteCheckpointSnapshot()
+			lease := domain.WriterLease{
+				SchemaVersion: domain.SchemaVersion, SessionID: snapshot.SessionID, Capsule: snapshot.Capsule,
+				Lineage: snapshot.Lineage, Machine: "machine", CreatedAt: now, HeartbeatAt: now, ExpiresAt: now.Add(time.Minute),
+			}
+			snapshot.Mode, snapshot.State = domain.SessionReadWrite, domain.SessionOpen
+			snapshot.Lease = domain.LeaseRecord{Lease: &lease, Revision: "lease-r1"}
+			snapshot.CurrentPointer = test.recorded
+			snapshot.ExpectedPointerRevision = test.recordedRev
+			if test.recorded != nil {
+				generation := test.recorded.Generation
+				snapshot.CurrentBase = &generation
+			}
+			backend, _ := filebackend.New(filepath.Join(sandbox, "backend"))
+			pointers := coordination.NewPointerRepository(backend)
+			if test.live != nil {
+				record, err := pointers.Create(context.Background(), *test.live)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if test.recorded != nil && test.recordedRev == "" {
+					snapshot.ExpectedPointerRevision = string(record.Revision)
+				}
+				if test.recorded != nil && test.recordedRev == "" && reflect.DeepEqual(test.recorded, test.live) {
+					snapshot.ExpectedPointerRevision = string(record.Revision)
+				}
+			}
+			log, _ := journal.NewStore(filepath.Join(sandbox, "journal"))
+			if err := log.Create(context.Background(), snapshot); err != nil {
+				t.Fatal(err)
+			}
+			remote := &fakeRemoteCheckpointPreparer{receipt: remoteworker.CheckpointReceipt{
+				SchemaVersion: remoteworker.ProtocolSchemaVersion, Status: "prepared",
+				SessionID: snapshot.SessionID, AttemptID: snapshot.SessionID + "-checkpoint-" + strconv.FormatUint(nextCheckpointGeneration(snapshot), 10),
+			}}
+			publisher := NewCheckpointPublisher(
+				log, &fakeLockValidator{}, &fakeLeaseValidator{}, CheckpointTransports{RemoteKit: remote},
+				newCheckpointFakes(now).pipeline(), &fakeCheckpointBuilder{},
+				coordination.NewGenerationRepository(backend), pointers, fixedAppClock{now: now},
+			)
+			_, err := publisher.Publish(context.Background(), ports.OperationToken{
+				ID: "lock", Owner: ports.OperationOwner{SessionID: snapshot.SessionID, Operation: "sync"},
+			}, snapshot.SessionID)
+			if (err != nil) != test.wantErr || remote.calls != test.wantCalls {
+				t.Fatalf("error=%v calls=%d", err, remote.calls)
+			}
+		})
+	}
+}
+
+func TestRemoteCheckpointAbsentPointerHonorsBranchAndMainBaselineSemantics(t *testing.T) {
+	source := domain.GenerationRef{Generation: 7, ArchiveSHA256: strings.Repeat("c", 64)}
+	for _, test := range []struct {
+		name        string
+		lineage     domain.Lineage
+		currentBase *domain.GenerationRef
+		revision    string
+		live        *domain.LatestPointer
+		wantCalls   int
+	}{
+		{name: "new feature branch inherits source without pointer", lineage: domain.Lineage{Branch: "feature"}, currentBase: &source, wantCalls: 1},
+		{name: "new feature branch rejects nonempty absent revision", lineage: domain.Lineage{Branch: "feature"}, currentBase: &source, revision: "unexpected-r1"},
+		{name: "new feature branch rejects unexpected live pointer", lineage: domain.Lineage{Branch: "feature"}, currentBase: &source, live: testRemotePointerFor(domain.Lineage{Branch: "feature"}, 8, &source)},
+		{name: "new main starts without pointer or source", lineage: domain.Lineage{Branch: "main"}, wantCalls: 1},
+		{name: "main rejects absent pointer with inherited source", lineage: domain.Lineage{Branch: "main"}, currentBase: &source},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			now := time.Unix(100, 0).UTC()
+			sandbox := t.TempDir()
+			snapshot := remoteCheckpointSnapshot()
+			snapshot.Lineage = test.lineage
+			snapshot.CurrentBase = cloneGeneration(test.currentBase)
+			snapshot.ExpectedPointerRevision = test.revision
+			snapshot.OpenedGeneration = cloneGeneration(test.currentBase)
+			lease := domain.WriterLease{
+				SchemaVersion: domain.SchemaVersion, SessionID: snapshot.SessionID, Capsule: snapshot.Capsule,
+				Lineage: test.lineage, Machine: "machine", OpenedGeneration: cloneGeneration(test.currentBase),
+				CreatedAt: now, HeartbeatAt: now, ExpiresAt: now.Add(time.Minute),
+			}
+			snapshot.Mode, snapshot.State = domain.SessionReadWrite, domain.SessionOpen
+			snapshot.Lease = domain.LeaseRecord{Lease: &lease, Revision: "lease-r1"}
+			backend, _ := filebackend.New(filepath.Join(sandbox, "backend"))
+			pointers := coordination.NewPointerRepository(backend)
+			if test.live != nil {
+				if _, err := pointers.Create(context.Background(), *test.live); err != nil {
+					t.Fatal(err)
+				}
+			}
+			log, _ := journal.NewStore(filepath.Join(sandbox, "journal"))
+			if err := log.Create(context.Background(), snapshot); err != nil {
+				t.Fatal(err)
+			}
+			remote := &fakeRemoteCheckpointPreparer{receipt: remoteworker.CheckpointReceipt{
+				SchemaVersion: remoteworker.ProtocolSchemaVersion, Status: "prepared",
+				SessionID: snapshot.SessionID, AttemptID: snapshot.SessionID + "-checkpoint-" + strconv.FormatUint(nextCheckpointGeneration(snapshot), 10),
+			}}
+			publisher := NewCheckpointPublisher(
+				log, &fakeLockValidator{}, &fakeLeaseValidator{}, CheckpointTransports{RemoteKit: remote},
+				newCheckpointFakes(now).pipeline(), &fakeCheckpointBuilder{},
+				coordination.NewGenerationRepository(backend), pointers, fixedAppClock{now: now},
+			)
+			_, err := publisher.Publish(context.Background(), ports.OperationToken{
+				ID: "lock", Owner: ports.OperationOwner{SessionID: snapshot.SessionID, Operation: "sync"},
+			}, snapshot.SessionID)
+			if (err == nil) != (test.wantCalls == 1) || remote.calls != test.wantCalls {
+				t.Fatalf("error=%v calls=%d", err, remote.calls)
+			}
+		})
+	}
+}
+
+func testRemotePointer(generation uint64) *domain.LatestPointer {
+	return testRemotePointerFor(domain.Lineage{Branch: "main"}, generation, nil)
+}
+
+func testRemotePointerFor(lineage domain.Lineage, generation uint64, parent *domain.GenerationRef) *domain.LatestPointer {
+	digit := "a"
+	if generation%2 == 0 {
+		digit = "b"
+	}
+	ref := domain.GenerationRef{Generation: generation, ArchiveSHA256: strings.Repeat(digit, 64)}
+	objectKey, _ := coordination.GenerationObjectKey("brain", lineage, ref)
+	return &domain.LatestPointer{
+		SchemaVersion: domain.SchemaVersion, Capsule: "brain", Lineage: lineage,
+		Generation: ref, Parent: cloneGeneration(parent), ObjectKey: objectKey,
+		Size: 1, CreatedAt: time.Unix(50, 0).UTC(), SessionID: "prior",
+	}
+}
+
+func nextCheckpointGeneration(snapshot domain.JournalSnapshot) uint64 {
+	if snapshot.CurrentBase == nil {
+		return 1
+	}
+	return snapshot.CurrentBase.Generation + 1
+}
+
+func TestCheckpointPublisherUsesRemoteKitPreparationWithoutLegacyMirror(t *testing.T) {
+	now := time.Unix(100, 0).UTC()
+	sandbox := t.TempDir()
+	lease := domain.WriterLease{
+		SchemaVersion: domain.SchemaVersion, SessionID: "session-1", Capsule: "brain",
+		Lineage: domain.Lineage{Branch: "main"}, Machine: "machine", CreatedAt: now,
+		HeartbeatAt: now, ExpiresAt: now.Add(time.Minute),
+	}
+	snapshot := remoteCheckpointSnapshot()
+	snapshot.Mode = domain.SessionReadWrite
+	snapshot.State = domain.SessionOpen
+	snapshot.Lease = domain.LeaseRecord{Lease: &lease, Revision: "lease-r1"}
+	snapshot.Workspace.StagingRoot = sandbox
+	snapshot.Recovery.RemoteDataPlane = remoteCheckpointSnapshot().Recovery.RemoteDataPlane
+	snapshot.Workspace = remoteCheckpointSnapshot().Workspace
+	snapshot.Workspace.StagingRoot = sandbox
+	store, err := journal.NewStore(filepath.Join(sandbox, "journal"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Create(context.Background(), snapshot); err != nil {
+		t.Fatal(err)
+	}
+	backend, err := filebackend.New(filepath.Join(sandbox, "backend"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	remote := &fakeRemoteCheckpointPreparer{receipt: remoteworker.CheckpointReceipt{
+		SchemaVersion: remoteworker.ProtocolSchemaVersion, Status: "prepared",
+		SessionID: snapshot.SessionID, AttemptID: snapshot.SessionID + "-checkpoint-1",
+	}}
+	publisher := NewCheckpointPublisher(
+		store, &fakeLockValidator{}, &fakeLeaseValidator{},
+		CheckpointTransports{Remote: &fakeMirror{err: errors.New("legacy mirror must not run")}, RemoteKit: remote},
+		newCheckpointFakes(now).pipeline(), &fakeCheckpointBuilder{},
+		coordination.NewGenerationRepository(backend), coordination.NewPointerRepository(backend), fixedAppClock{now: now},
+	)
+	result, err := publisher.Publish(context.Background(), ports.OperationToken{
+		ID: "lock", Owner: ports.OperationOwner{SessionID: snapshot.SessionID, Operation: "sync"},
+	}, snapshot.SessionID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Disposition != CheckpointDispositionRemotePrepared || result.Published ||
+		remote.generation != 1 || remote.close || remote.snapshot.SessionID != snapshot.SessionID {
+		t.Fatalf("result=%#v remote=%#v", result, remote)
+	}
 }
 
 func (m *fakeMirror) ReturnToStaging(_ context.Context, request ports.MirrorRequest) (ports.MirrorResult, error) {

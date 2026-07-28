@@ -114,12 +114,15 @@ jobs:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
       - name: Build exact RCC candidate
         run: ./developer/rccw run -r developer/toolkit.yaml --dev -t local
+      - name: Stage candidate with preserved build root
+        run: |
+          mkdir -p ci-artifact/build/evidence
+          install -m 0755 build/camp ci-artifact/build/camp
+          cp build/evidence/candidate.json ci-artifact/build/evidence/candidate.json
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: rcc-candidate-${{ github.sha }}
-          path: |
-            build/camp
-            build/evidence/candidate.json
+          path: ci-artifact/
           if-no-files-found: error
           retention-days: 14
 
@@ -145,10 +148,58 @@ jobs:
           if-no-files-found: error
           retention-days: 30
 
+  rcc-robot:
+    name: RCC exact-candidate lifecycle evidence
+    needs: rcc-local
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: rcc-candidate-${{ github.sha }}
+          path: .
+      - name: Verify downloaded exact candidate
+        env:
+          CANDIDATE_COMMIT: ${{ github.sha }}
+        run: |
+          chmod +x build/camp
+          python3 developer/ci_release_evidence.py verify-candidate \
+            --build-root build \
+            --commit "$CANDIDATE_COMMIT"
+      - name: Run mandatory exact-candidate Robot lifecycle
+        id: robot
+        env:
+          CANDIDATE_COMMIT: ${{ github.sha }}
+        run: ./developer/rccw run -r developer/toolkit.yaml -t robot
+      - name: Require mandatory RCC Robot evidence
+        if: always()
+        run: |
+          test -f build/evidence/candidate.json
+          test -f build/evidence/robot-gates.json
+          test -f build/evidence/robot/output.xml
+          test -f build/evidence/robot/log.html
+          test -f build/evidence/robot/report.html
+          test -f build/evidence/robot-cleanup.jsonl
+          test -f build/evidence/ci-cleanup-receipt.json
+      - name: Upload RCC Robot evidence and cleanup receipt
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: rcc-robot-evidence-${{ github.sha }}
+          path: |
+            build/evidence/candidate.json
+            build/evidence/robot-gates.json
+            build/evidence/robot/
+            build/evidence/robot-cleanup.jsonl
+            build/evidence/ci-cleanup-receipt.json
+          if-no-files-found: error
+          retention-days: 90
+
   parity-evidence:
     name: Direct Go and RCC parity record
     if: always()
-    needs: [test, integration, minio, locked-tools, packaging, rcc-local, rcc-test]
+    needs: [test, integration, minio, locked-tools, packaging, rcc-local, rcc-test, rcc-robot]
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     steps:
@@ -165,43 +216,16 @@ jobs:
           DIRECT_PACKAGING: ${{ needs.packaging.result }}
           RCC_LOCAL: ${{ needs.rcc-local.result }}
           RCC_TEST: ${{ needs.rcc-test.result }}
+          RCC_ROBOT: ${{ needs.rcc-robot.result }}
         run: |
-          mkdir -p build/evidence
-          python3 - <<'PY'
-          import json
-          import os
-          import pathlib
-
-          direct = {
-              "test": os.environ["DIRECT_TEST"],
-              "integration": os.environ["DIRECT_INTEGRATION"],
-              "minio": os.environ["DIRECT_MINIO"],
-              "locked-tools": os.environ["DIRECT_LOCKED_TOOLS"],
-              "packaging": os.environ["DIRECT_PACKAGING"],
-          }
-          rcc = {
-              "local": os.environ["RCC_LOCAL"],
-              "test": os.environ["RCC_TEST"],
-          }
-          complete = all(result == "success" for result in [*direct.values(), *rcc.values()])
-          record = {
-              "schemaVersion": 1,
-              "candidateCommit": os.environ["CANDIDATE_COMMIT"],
-              "run": {
-                  "id": os.environ["RUN_ID"],
-                  "attempt": os.environ["RUN_ATTEMPT"],
-                  "url": os.environ["RUN_URL"],
-              },
-              "mandatoryGates": {"direct": direct, "rcc": rcc},
-              "complete": complete,
-              "requiredConsecutiveCompleteRuns": 2,
-              "qualifiedHistoricalRuns": [],
-          }
-          pathlib.Path("build/evidence/parity.json").write_text(
-              json.dumps(record, indent=2, sort_keys=True) + "\n",
-              encoding="utf-8",
-          )
-          PY
+          python3 developer/ci_release_evidence.py write-parity \
+            --output build/evidence/parity.json \
+            --candidate-commit "$CANDIDATE_COMMIT" \
+            --run-id "$RUN_ID" \
+            --run-attempt "$RUN_ATTEMPT" \
+            --run-url "$RUN_URL" \
+            --direct "{\"test\":\"$DIRECT_TEST\",\"integration\":\"$DIRECT_INTEGRATION\",\"minio\":\"$DIRECT_MINIO\",\"locked-tools\":\"$DIRECT_LOCKED_TOOLS\",\"packaging\":\"$DIRECT_PACKAGING\"}" \
+            --rcc "{\"local\":\"$RCC_LOCAL\",\"test\":\"$RCC_TEST\",\"robot\":\"$RCC_ROBOT\"}"
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: rcc-parity-evidence-${{ github.sha }}
