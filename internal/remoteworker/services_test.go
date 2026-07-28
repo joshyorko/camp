@@ -228,6 +228,201 @@ func TestServiceActorEvidenceCleanupRemovesExactPartial(t *testing.T) {
 	}
 }
 
+func TestServiceActorEvidenceCleanupRestoresSubstitutionAfterInitialCheck(t *testing.T) {
+	root := t.TempDir()
+	path := filepath.Join(root, "actors.json")
+	actors := ServiceActorEvidence{
+		SchemaVersion: ProtocolSchemaVersion, SessionID: "session-1",
+		Worker: validWorkerRecord(), Supervisor: validSupervisorRecord(),
+	}
+	replacement := []byte("replacement")
+	var partialPath string
+	ops := defaultServiceActorPublicationOps()
+	ops.beforeRename = func(_ int, partial string) error {
+		partialPath = filepath.Join(root, partial)
+		return errors.New("injected failure before publication")
+	}
+	ops.afterCleanupCheck = func(parentFD int, partial string) error {
+		if err := unix.Renameat(parentFD, partial, parentFD, partial+".owned"); err != nil {
+			return err
+		}
+		return os.WriteFile(filepath.Join(root, partial), replacement, 0o600)
+	}
+
+	err := publishServiceActorEvidenceWithOps(path, actors, ops)
+	if !errors.Is(err, ErrServiceEvidence) {
+		t.Fatalf("publication error = %v", err)
+	}
+	if !strings.Contains(err.Error(), "injected failure before publication") ||
+		!strings.Contains(err.Error(), "identity or shape changed") {
+		t.Fatalf("publication error did not preserve primary and cleanup diagnostics: %v", err)
+	}
+	got, err := os.ReadFile(partialPath)
+	if err != nil {
+		t.Fatalf("substituted partial was not restored: %v", err)
+	}
+	if !bytes.Equal(got, replacement) {
+		t.Fatalf("restored substitution = %q, want %q", got, replacement)
+	}
+	quarantines, err := filepath.Glob(filepath.Join(root, ".actor-cleanup-*"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(quarantines) != 0 {
+		t.Fatalf("restored substitution left quarantine evidence: %q", quarantines)
+	}
+}
+
+func TestServiceActorEvidenceCleanupNeverOverwritesConcurrentName(t *testing.T) {
+	root := t.TempDir()
+	path := filepath.Join(root, "actors.json")
+	actors := ServiceActorEvidence{
+		SchemaVersion: ProtocolSchemaVersion, SessionID: "session-1",
+		Worker: validWorkerRecord(), Supervisor: validSupervisorRecord(),
+	}
+	replacement := []byte("replacement")
+	concurrent := []byte("concurrent")
+	var partialPath string
+	ops := defaultServiceActorPublicationOps()
+	ops.beforeRename = func(_ int, partial string) error {
+		partialPath = filepath.Join(root, partial)
+		return errors.New("injected failure before publication")
+	}
+	ops.afterCleanupCheck = func(parentFD int, partial string) error {
+		if err := unix.Renameat(parentFD, partial, parentFD, partial+".owned"); err != nil {
+			return err
+		}
+		return os.WriteFile(filepath.Join(root, partial), replacement, 0o600)
+	}
+	ops.afterCleanupQuarantine = func(_ int, partial string) error {
+		return os.WriteFile(filepath.Join(root, partial), concurrent, 0o600)
+	}
+
+	err := publishServiceActorEvidenceWithOps(path, actors, ops)
+	if !errors.Is(err, ErrServiceEvidence) {
+		t.Fatalf("publication error = %v", err)
+	}
+	got, readErr := os.ReadFile(partialPath)
+	if readErr != nil || !bytes.Equal(got, concurrent) {
+		t.Fatalf("concurrent name = %q, %v; want %q", got, readErr, concurrent)
+	}
+	quarantines, globErr := filepath.Glob(filepath.Join(root, ".actor-cleanup-*"))
+	if globErr != nil {
+		t.Fatal(globErr)
+	}
+	if len(quarantines) != 1 {
+		t.Fatalf("quarantine evidence = %q, want one preserved entry", quarantines)
+	}
+	got, readErr = os.ReadFile(quarantines[0])
+	if readErr != nil || !bytes.Equal(got, replacement) {
+		t.Fatalf("preserved quarantine = %q, %v; want %q", got, readErr, replacement)
+	}
+}
+
+func TestServiceActorEvidenceCleanupDeletionFsyncFailureIsRetryable(t *testing.T) {
+	root := t.TempDir()
+	path := filepath.Join(root, "actors.json")
+	actors := ServiceActorEvidence{
+		SchemaVersion: ProtocolSchemaVersion, SessionID: "session-1",
+		Worker: validWorkerRecord(), Supervisor: validSupervisorRecord(),
+	}
+	var partialPath string
+	ops := defaultServiceActorPublicationOps()
+	ops.beforeRename = func(_ int, partial string) error {
+		partialPath = filepath.Join(root, partial)
+		return errors.New("injected failure before publication")
+	}
+	fsyncCalls := 0
+	ops.fsync = func(fd int) error {
+		fsyncCalls++
+		if fsyncCalls == 3 {
+			return errors.New("injected cleanup deletion fsync failure")
+		}
+		return unix.Fsync(fd)
+	}
+
+	err := publishServiceActorEvidenceWithOps(path, actors, ops)
+	if !errors.Is(err, ErrServiceEvidence) ||
+		!strings.Contains(err.Error(), "injected cleanup deletion fsync failure") {
+		t.Fatalf("publication error = %v", err)
+	}
+	if _, statErr := os.Lstat(partialPath); !errors.Is(statErr, os.ErrNotExist) {
+		t.Fatalf("owned partial survived confirmed deletion: %v", statErr)
+	}
+	if retryErr := publishServiceActorEvidence(path, actors); retryErr != nil {
+		t.Fatalf("retry publication: %v", retryErr)
+	}
+}
+
+func TestServiceActorEvidenceCleanupRestoreFsyncFailureIsRetryable(t *testing.T) {
+	root := t.TempDir()
+	path := filepath.Join(root, "actors.json")
+	actors := ServiceActorEvidence{
+		SchemaVersion: ProtocolSchemaVersion, SessionID: "session-1",
+		Worker: validWorkerRecord(), Supervisor: validSupervisorRecord(),
+	}
+	replacement := []byte("replacement")
+	var partialPath string
+	ops := defaultServiceActorPublicationOps()
+	ops.beforeRename = func(_ int, partial string) error {
+		partialPath = filepath.Join(root, partial)
+		return errors.New("injected failure before publication")
+	}
+	ops.afterCleanupCheck = func(parentFD int, partial string) error {
+		if err := unix.Renameat(parentFD, partial, parentFD, partial+".owned"); err != nil {
+			return err
+		}
+		return os.WriteFile(filepath.Join(root, partial), replacement, 0o600)
+	}
+	fsyncCalls := 0
+	ops.fsync = func(fd int) error {
+		fsyncCalls++
+		if fsyncCalls == 3 {
+			return errors.New("injected cleanup restore fsync failure")
+		}
+		return unix.Fsync(fd)
+	}
+
+	err := publishServiceActorEvidenceWithOps(path, actors, ops)
+	if !errors.Is(err, ErrServiceEvidence) ||
+		!strings.Contains(err.Error(), "injected cleanup restore fsync failure") {
+		t.Fatalf("publication error = %v", err)
+	}
+	got, readErr := os.ReadFile(partialPath)
+	if readErr != nil || !bytes.Equal(got, replacement) {
+		t.Fatalf("restored substitution = %q, %v; want %q", got, readErr, replacement)
+	}
+	if retryErr := publishServiceActorEvidence(path, actors); retryErr != nil {
+		t.Fatalf("retry publication: %v", retryErr)
+	}
+}
+
+func TestServiceActorEvidenceCleanupFailsClosedWithoutAtomicQuarantine(t *testing.T) {
+	root := t.TempDir()
+	path := filepath.Join(root, "actors.json")
+	actors := ServiceActorEvidence{
+		SchemaVersion: ProtocolSchemaVersion, SessionID: "session-1",
+		Worker: validWorkerRecord(), Supervisor: validSupervisorRecord(),
+	}
+	var partialPath string
+	ops := defaultServiceActorPublicationOps()
+	ops.beforeRename = func(_ int, partial string) error {
+		partialPath = filepath.Join(root, partial)
+		return errors.New("injected failure before publication")
+	}
+	ops.rename = func(int, string, int, string, uint) error {
+		return unix.ENOSYS
+	}
+
+	err := publishServiceActorEvidenceWithOps(path, actors, ops)
+	if !errors.Is(err, ErrServiceEvidence) || !strings.Contains(err.Error(), unix.ENOSYS.Error()) {
+		t.Fatalf("publication error = %v", err)
+	}
+	if _, statErr := os.Lstat(partialPath); statErr != nil {
+		t.Fatalf("owned partial was changed without atomic quarantine: %v", statErr)
+	}
+}
+
 func TestServiceActorEvidenceCleanupRemovesExactPartialAfterEarlyFileFailures(t *testing.T) {
 	actors := ServiceActorEvidence{
 		SchemaVersion: ProtocolSchemaVersion, SessionID: "session-1",

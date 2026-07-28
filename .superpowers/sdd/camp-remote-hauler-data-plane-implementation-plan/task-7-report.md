@@ -341,3 +341,64 @@ Documentation improvement:
 - Evidence: `TestServiceActorEvidenceRetryConfirmsParentDurability`, `TestServiceActorEvidenceCleanupLeavesSubstitutedPartialUntouched`, `TestServiceActorEvidenceCleanupRemovesExactPartial`, and the focused, race, vet, and diff-check commands above.
 - Stale or ambiguous guidance removed: the prior guide described stable existing-file observation but did not state the retry durability barrier or identity-bound partial cleanup rule.
 - Remaining uncertainty: fresh pinned-provider Task 12 acceptance remains unchanged.
+
+## Fix round 5
+
+Status: DONE
+
+### Result
+
+- Deferred actor-partial cleanup no longer performs check-then-unlink on the
+  contested name. After the initial no-follow shape check, it atomically moves
+  that name to a random private quarantine with
+  `renameat2(RENAME_NOREPLACE)` and fsyncs the parent directory.
+- Cleanup validates the quarantined device, inode, private regular-file mode,
+  and bounded size against the identity captured immediately after exclusive
+  creation. Only that exact quarantined inode is unlinked, followed by a parent
+  fsync whose failure remains an unknown-durability publication error.
+- A substituted inode is restored to the original name only with
+  `RENAME_NOREPLACE`, then parent-fsynced. A concurrent occupant is never
+  overwritten; failed restoration leaves the unrelated inode in quarantine as
+  evidence. Unsupported atomic rename fails closed without changing the
+  contested name.
+- Primary publication failures remain joined with cleanup diagnostics.
+  No-follow parent traversal, immediate identity capture, bounded shape,
+  stable observation, no-replace publication, and idempotent retry behavior
+  remain intact.
+
+### TDD evidence
+
+- RED: the new race-boundary tests failed to compile because cleanup exposed no
+  seam after its initial check or after atomic quarantine; production still
+  called `unlinkat` directly on the checked contested name.
+- GREEN:
+  `TestServiceActorEvidenceCleanupRestoresSubstitutionAfterInitialCheck`
+  substitutes the name after the initial check and proves the unrelated inode
+  is restored while both primary and cleanup errors survive.
+- GREEN: `TestServiceActorEvidenceCleanupNeverOverwritesConcurrentName` proves
+  a new occupant created after quarantine is not overwritten and the displaced
+  unrelated inode remains preserved in private quarantine.
+- GREEN:
+  `TestServiceActorEvidenceCleanupDeletionFsyncFailureIsRetryable` and
+  `TestServiceActorEvidenceCleanupRestoreFsyncFailureIsRetryable` prove both
+  directory durability failures propagate and a later publication retry can
+  complete.
+- GREEN:
+  `TestServiceActorEvidenceCleanupFailsClosedWithoutAtomicQuarantine` proves an
+  unavailable atomic primitive leaves the owned partial untouched.
+
+### Verification
+
+- `rtk go test ./internal/remoteworker -count=1` — 69 passed.
+- `rtk go test -race ./internal/remoteworker -count=1` — 69 passed.
+- `rtk go vet ./internal/remoteworker` — passed.
+- `rtk git diff --check` — passed.
+
+### Documentation improvement
+
+Documentation improvement:
+- Canonical file changed or proposed: `docs/skills/devpod-hauler.md`
+- Durable learning captured: actor-evidence partial cleanup must atomically quarantine the contested name, fsync every quarantine/delete/restore directory mutation, validate the quarantined inode before deletion, and restore mismatches only with no-replace semantics while preserving evidence when a concurrent name blocks restoration.
+- Evidence: `internal/remoteworker/actor_evidence.go`, `TestServiceActorEvidenceCleanupRestoresSubstitutionAfterInitialCheck`, `TestServiceActorEvidenceCleanupNeverOverwritesConcurrentName`, `TestServiceActorEvidenceCleanupDeletionFsyncFailureIsRetryable`, `TestServiceActorEvidenceCleanupRestoreFsyncFailureIsRetryable`, `TestServiceActorEvidenceCleanupFailsClosedWithoutAtomicQuarantine`, and the focused, race, vet, and diff-check commands above.
+- Stale or ambiguous guidance removed: the prior cleanup rule authorized a pathname check followed by unlink and said substitutions remained untouched without specifying atomic displacement, restoration, no-overwrite behavior, or directory durability barriers.
+- Remaining uncertainty: fresh pinned-provider Task 12 acceptance remains unchanged; no real DevPod/Hauler lifecycle gate ran in this fix round.

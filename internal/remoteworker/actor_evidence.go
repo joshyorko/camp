@@ -19,12 +19,14 @@ import (
 )
 
 type serviceActorPublicationOps struct {
-	fsync        func(int) error
-	rename       func(int, string, int, string, uint) error
-	beforeRename func(int, string) error
-	write        func(*os.File, []byte) (int, error)
-	chmod        func(*os.File, os.FileMode) error
-	fileSync     func(*os.File) error
+	fsync                  func(int) error
+	rename                 func(int, string, int, string, uint) error
+	beforeRename           func(int, string) error
+	afterCleanupCheck      func(int, string) error
+	afterCleanupQuarantine func(int, string) error
+	write                  func(*os.File, []byte) (int, error)
+	chmod                  func(*os.File, os.FileMode) error
+	fileSync               func(*os.File) error
 }
 
 func defaultServiceActorPublicationOps() serviceActorPublicationOps {
@@ -93,7 +95,7 @@ func publishServiceActorEvidenceWithOps(
 	cleanup := true
 	defer func() {
 		if cleanup {
-			if err := cleanupServiceActorPartial(parentFD, partial, partialStat, int64(len(body))); err != nil {
+			if err := cleanupServiceActorPartial(parentFD, partial, partialStat, int64(len(body)), ops); err != nil {
 				resultErr = actorEvidenceError(errors.Join(resultErr, err))
 			}
 		}
@@ -148,19 +150,82 @@ func publishServiceActorEvidenceWithOps(
 	return nil
 }
 
-func cleanupServiceActorPartial(parentFD int, name string, created unix.Stat_t, maxSize int64) error {
+func cleanupServiceActorPartial(
+	parentFD int,
+	name string,
+	created unix.Stat_t,
+	maxSize int64,
+	ops serviceActorPublicationOps,
+) error {
 	var named unix.Stat_t
 	if err := unix.Fstatat(parentFD, name, &named, unix.AT_SYMLINK_NOFOLLOW); err != nil {
 		return fmt.Errorf("observe actor evidence partial for cleanup: %w", err)
 	}
-	if created.Mode&unix.S_IFMT != unix.S_IFREG || created.Mode&0o077 != 0 || created.Size != 0 ||
-		created.Dev != named.Dev || created.Ino != named.Ino ||
-		named.Mode&unix.S_IFMT != unix.S_IFREG || named.Mode&0o077 != 0 ||
-		named.Size < 0 || named.Size > maxSize || maxSize > maxDiagnosticBytes {
+	if !validServiceActorPartial(created, named, maxSize) {
 		return errors.New("actor evidence partial identity or shape changed; refusing cleanup")
 	}
-	if err := unix.Unlinkat(parentFD, name, 0); err != nil {
-		return fmt.Errorf("remove actor evidence partial: %w", err)
+	if ops.afterCleanupCheck != nil {
+		if err := ops.afterCleanupCheck(parentFD, name); err != nil {
+			return fmt.Errorf("actor evidence cleanup boundary: %w", err)
+		}
+	}
+	random := make([]byte, 16)
+	if _, err := rand.Read(random); err != nil {
+		return fmt.Errorf("allocate actor evidence partial quarantine: %w", err)
+	}
+	quarantine := ".actor-cleanup-" + hex.EncodeToString(random)
+	if err := ops.rename(parentFD, name, parentFD, quarantine, unix.RENAME_NOREPLACE); err != nil {
+		return fmt.Errorf("quarantine actor evidence partial: %w", err)
+	}
+	if err := ops.fsync(parentFD); err != nil {
+		restoreErr := restoreServiceActorPartial(parentFD, quarantine, name, ops)
+		return fmt.Errorf("sync actor evidence partial quarantine: %w", errors.Join(err, restoreErr))
+	}
+	if ops.afterCleanupQuarantine != nil {
+		if err := ops.afterCleanupQuarantine(parentFD, name); err != nil {
+			restoreErr := restoreServiceActorPartial(parentFD, quarantine, name, ops)
+			return fmt.Errorf("actor evidence quarantined cleanup boundary: %w", errors.Join(err, restoreErr))
+		}
+	}
+	var quarantined unix.Stat_t
+	if err := unix.Fstatat(parentFD, quarantine, &quarantined, unix.AT_SYMLINK_NOFOLLOW); err != nil {
+		restoreErr := restoreServiceActorPartial(parentFD, quarantine, name, ops)
+		return fmt.Errorf("observe quarantined actor evidence partial: %w", errors.Join(err, restoreErr))
+	}
+	if !validServiceActorPartial(created, quarantined, maxSize) {
+		restoreErr := restoreServiceActorPartial(parentFD, quarantine, name, ops)
+		return fmt.Errorf(
+			"actor evidence partial identity or shape changed; refusing cleanup: %w",
+			errors.Join(restoreErr, ErrServiceEvidence),
+		)
+	}
+	if err := unix.Unlinkat(parentFD, quarantine, 0); err != nil {
+		return fmt.Errorf("remove quarantined actor evidence partial: %w", err)
+	}
+	if err := ops.fsync(parentFD); err != nil {
+		return fmt.Errorf("sync removed actor evidence partial: %w", err)
+	}
+	return nil
+}
+
+func validServiceActorPartial(created, current unix.Stat_t, maxSize int64) bool {
+	return created.Mode&unix.S_IFMT == unix.S_IFREG && created.Mode&0o077 == 0 && created.Size == 0 &&
+		created.Dev == current.Dev && created.Ino == current.Ino &&
+		current.Mode&unix.S_IFMT == unix.S_IFREG && current.Mode&0o077 == 0 &&
+		current.Size >= 0 && current.Size <= maxSize && maxSize <= maxDiagnosticBytes
+}
+
+func restoreServiceActorPartial(
+	parentFD int,
+	quarantine string,
+	name string,
+	ops serviceActorPublicationOps,
+) error {
+	if err := ops.rename(parentFD, quarantine, parentFD, name, unix.RENAME_NOREPLACE); err != nil {
+		return fmt.Errorf("preserve quarantined actor evidence partial without overwriting current name: %w", err)
+	}
+	if err := ops.fsync(parentFD); err != nil {
+		return fmt.Errorf("sync restored actor evidence partial: %w", err)
 	}
 	return nil
 }

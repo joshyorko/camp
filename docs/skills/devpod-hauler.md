@@ -269,10 +269,14 @@ Do not use Hauler v2.0.2's live `_catalog` response as proof that all direct reg
   device/inode/size remain stable and a parent fsync confirms directory
   durability. Immediately after exclusive creation, deferred partial cleanup
   captures the empty file's device, inode, type, and private mode, before write,
-  chmod, or file-fsync can fail. Cleanup later unlinks only when a no-follow
-  named observation still proves that exact private regular file with a size
-  between zero and the bounded evidence length; substitutions remain untouched
-  and fail closed. Symlinks, directories, oversized bytes,
+  chmod, or file-fsync can fail. Cleanup first checks the named private bounded
+  shape, then atomically quarantines that name with a no-replace rename and
+  fsyncs the parent before deciding ownership. It deletes and parent-fsyncs only
+  when the quarantined inode still matches the captured identity. A substituted
+  inode is restored with a no-replace rename plus parent fsync; a concurrent
+  occupant is never overwritten, and a failed restoration preserves the
+  quarantined evidence. Missing atomic-rename support, any directory-fsync
+  failure, symlinks, directories, oversized bytes,
   replacement races, unequal content, and cleanup identity drift fail closed.
   Invocation locking,
   durable start intents, and recorded PID/boot/start, executable, complete argv
