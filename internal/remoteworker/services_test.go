@@ -319,6 +319,37 @@ func TestServiceActorEvidenceCleanupNeverOverwritesConcurrentName(t *testing.T) 
 	}
 }
 
+func TestServiceActorEvidenceCleanupNeverDeletesReplacementAfterQuarantineValidation(t *testing.T) {
+	root := t.TempDir()
+	path := filepath.Join(root, "actors.json")
+	actors := ServiceActorEvidence{
+		SchemaVersion: ProtocolSchemaVersion, SessionID: "session-1",
+		Worker: validWorkerRecord(), Supervisor: validSupervisorRecord(),
+	}
+	replacement := []byte("replacement")
+	var partialPath string
+	ops := defaultServiceActorPublicationOps()
+	ops.beforeRename = func(_ int, partial string) error {
+		partialPath = filepath.Join(root, partial)
+		return errors.New("injected failure before publication")
+	}
+	ops.afterCleanupValidation = func(parentFD int, quarantine string) error {
+		if err := unix.Renameat(parentFD, quarantine, parentFD, quarantine+".owned"); err != nil {
+			return err
+		}
+		return os.WriteFile(filepath.Join(root, quarantine), replacement, 0o600)
+	}
+
+	err := publishServiceActorEvidenceWithOps(path, actors, ops)
+	if !errors.Is(err, ErrServiceEvidence) {
+		t.Fatalf("publication error = %v", err)
+	}
+	got, readErr := os.ReadFile(partialPath)
+	if readErr != nil || !bytes.Equal(got, replacement) {
+		t.Fatalf("post-validation replacement = %q, %v; want preserved %q", got, readErr, replacement)
+	}
+}
+
 func TestServiceActorEvidenceCleanupDeletionFsyncFailureIsRetryable(t *testing.T) {
 	root := t.TempDir()
 	path := filepath.Join(root, "actors.json")
@@ -335,7 +366,7 @@ func TestServiceActorEvidenceCleanupDeletionFsyncFailureIsRetryable(t *testing.T
 	fsyncCalls := 0
 	ops.fsync = func(fd int) error {
 		fsyncCalls++
-		if fsyncCalls == 3 {
+		if fsyncCalls == 5 {
 			return errors.New("injected cleanup deletion fsync failure")
 		}
 		return unix.Fsync(fd)
@@ -420,6 +451,40 @@ func TestServiceActorEvidenceCleanupFailsClosedWithoutAtomicQuarantine(t *testin
 	}
 	if _, statErr := os.Lstat(partialPath); statErr != nil {
 		t.Fatalf("owned partial was changed without atomic quarantine: %v", statErr)
+	}
+}
+
+func TestServiceActorEvidenceCleanupFailsClosedWithoutAtomicDisplacement(t *testing.T) {
+	root := t.TempDir()
+	path := filepath.Join(root, "actors.json")
+	actors := ServiceActorEvidence{
+		SchemaVersion: ProtocolSchemaVersion, SessionID: "session-1",
+		Worker: validWorkerRecord(), Supervisor: validSupervisorRecord(),
+	}
+	var partialPath string
+	ops := defaultServiceActorPublicationOps()
+	rename := ops.rename
+	ops.beforeRename = func(_ int, partial string) error {
+		partialPath = filepath.Join(root, partial)
+		return errors.New("injected failure before publication")
+	}
+	ops.rename = func(oldDirFD int, oldPath string, newDirFD int, newPath string, flags uint) error {
+		if flags == unix.RENAME_EXCHANGE {
+			return unix.ENOSYS
+		}
+		return rename(oldDirFD, oldPath, newDirFD, newPath, flags)
+	}
+
+	err := publishServiceActorEvidenceWithOps(path, actors, ops)
+	if !errors.Is(err, ErrServiceEvidence) || !strings.Contains(err.Error(), unix.ENOSYS.Error()) {
+		t.Fatalf("publication error = %v", err)
+	}
+	if _, statErr := os.Lstat(partialPath); statErr != nil {
+		t.Fatalf("owned partial was not restored after unsupported displacement: %v", statErr)
+	}
+	displacements, globErr := filepath.Glob(filepath.Join(root, ".actor-displace-*"))
+	if globErr != nil || len(displacements) != 1 {
+		t.Fatalf("preserved displacement evidence = %q, %v; want one entry", displacements, globErr)
 	}
 }
 

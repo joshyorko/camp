@@ -24,6 +24,7 @@ type serviceActorPublicationOps struct {
 	beforeRename           func(int, string) error
 	afterCleanupCheck      func(int, string) error
 	afterCleanupQuarantine func(int, string) error
+	afterCleanupValidation func(int, string) error
 	write                  func(*os.File, []byte) (int, error)
 	chmod                  func(*os.File, os.FileMode) error
 	fileSync               func(*os.File) error
@@ -199,13 +200,86 @@ func cleanupServiceActorPartial(
 			errors.Join(restoreErr, ErrServiceEvidence),
 		)
 	}
-	if err := unix.Unlinkat(parentFD, quarantine, 0); err != nil {
-		return fmt.Errorf("remove quarantined actor evidence partial: %w", err)
+	if ops.afterCleanupValidation != nil {
+		if err := ops.afterCleanupValidation(parentFD, quarantine); err != nil {
+			restoreErr := restoreServiceActorPartial(parentFD, quarantine, name, ops)
+			return fmt.Errorf("actor evidence quarantine validation boundary: %w", errors.Join(err, restoreErr))
+		}
+	}
+	capture, placeholder, err := createServiceActorCleanupPlaceholder(parentFD)
+	if err != nil {
+		restoreErr := restoreServiceActorPartial(parentFD, quarantine, name, ops)
+		return fmt.Errorf("create actor evidence cleanup displacement: %w", errors.Join(err, restoreErr))
 	}
 	if err := ops.fsync(parentFD); err != nil {
-		return fmt.Errorf("sync removed actor evidence partial: %w", err)
+		restoreErr := restoreServiceActorPartial(parentFD, quarantine, name, ops)
+		return fmt.Errorf("sync actor evidence cleanup displacement: %w", errors.Join(err, restoreErr))
+	}
+	if err := ops.rename(parentFD, quarantine, parentFD, capture, unix.RENAME_EXCHANGE); err != nil {
+		restoreErr := restoreServiceActorPartial(parentFD, quarantine, name, ops)
+		return fmt.Errorf("capture actor evidence partial for deletion: %w", errors.Join(err, restoreErr))
+	}
+	if err := ops.fsync(parentFD); err != nil {
+		return fmt.Errorf("sync captured actor evidence partial: %w", err)
+	}
+	var captured, displaced unix.Stat_t
+	capturedErr := unix.Fstatat(parentFD, capture, &captured, unix.AT_SYMLINK_NOFOLLOW)
+	displacedErr := unix.Fstatat(parentFD, quarantine, &displaced, unix.AT_SYMLINK_NOFOLLOW)
+	if capturedErr != nil || displacedErr != nil ||
+		!validServiceActorPartial(created, captured, maxSize) ||
+		!samePrivateEmptyServiceActorPlaceholder(placeholder, displaced) {
+		restoreErr := restoreServiceActorPartial(parentFD, capture, name, ops)
+		return fmt.Errorf(
+			"captured actor evidence partial identity or shape changed; refusing cleanup: %w",
+			errors.Join(capturedErr, displacedErr, restoreErr, ErrServiceEvidence),
+		)
+	}
+	if err := unix.Unlinkat(parentFD, capture, 0); err != nil {
+		return fmt.Errorf("remove captured actor evidence partial: %w", err)
+	}
+	if err := ops.fsync(parentFD); err != nil {
+		return fmt.Errorf("sync removed captured actor evidence partial: %w", err)
+	}
+	if err := unix.Unlinkat(parentFD, quarantine, 0); err != nil {
+		return fmt.Errorf("remove actor evidence cleanup placeholder: %w", err)
+	}
+	if err := ops.fsync(parentFD); err != nil {
+		return fmt.Errorf("sync removed actor evidence cleanup placeholder: %w", err)
 	}
 	return nil
+}
+
+func createServiceActorCleanupPlaceholder(parentFD int) (string, unix.Stat_t, error) {
+	random := make([]byte, 16)
+	if _, err := rand.Read(random); err != nil {
+		return "", unix.Stat_t{}, err
+	}
+	name := ".actor-displace-" + hex.EncodeToString(random)
+	fd, err := unix.Openat(
+		parentFD,
+		name,
+		unix.O_RDWR|unix.O_CREAT|unix.O_EXCL|unix.O_CLOEXEC|unix.O_NOFOLLOW,
+		0o600,
+	)
+	if err != nil {
+		return "", unix.Stat_t{}, err
+	}
+	defer unix.Close(fd)
+	var created unix.Stat_t
+	if err := unix.Fstat(fd, &created); err != nil {
+		return "", unix.Stat_t{}, err
+	}
+	if created.Mode&unix.S_IFMT != unix.S_IFREG || created.Mode&0o777 != 0o600 ||
+		created.Size != 0 || created.Nlink != 1 {
+		return "", unix.Stat_t{}, ErrServiceEvidence
+	}
+	return name, created, nil
+}
+
+func samePrivateEmptyServiceActorPlaceholder(created, current unix.Stat_t) bool {
+	return created.Dev == current.Dev && created.Ino == current.Ino &&
+		current.Mode&unix.S_IFMT == unix.S_IFREG && current.Mode&0o777 == 0o600 &&
+		current.Size == 0 && current.Nlink == 1
 }
 
 func validServiceActorPartial(created, current unix.Stat_t, maxSize int64) bool {

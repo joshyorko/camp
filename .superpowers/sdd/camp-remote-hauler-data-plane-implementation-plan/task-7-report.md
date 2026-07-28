@@ -402,3 +402,66 @@ Documentation improvement:
 - Evidence: `internal/remoteworker/actor_evidence.go`, `TestServiceActorEvidenceCleanupRestoresSubstitutionAfterInitialCheck`, `TestServiceActorEvidenceCleanupNeverOverwritesConcurrentName`, `TestServiceActorEvidenceCleanupDeletionFsyncFailureIsRetryable`, `TestServiceActorEvidenceCleanupRestoreFsyncFailureIsRetryable`, `TestServiceActorEvidenceCleanupFailsClosedWithoutAtomicQuarantine`, and the focused, race, vet, and diff-check commands above.
 - Stale or ambiguous guidance removed: the prior cleanup rule authorized a pathname check followed by unlink and said substitutions remained untouched without specifying atomic displacement, restoration, no-overwrite behavior, or directory durability barriers.
 - Remaining uncertainty: fresh pinned-provider Task 12 acceptance remains unchanged; no real DevPod/Hauler lifecycle gate ran in this fix round.
+
+## Authorized fix round 6
+
+Status: DONE
+
+### Result
+
+- Deferred actor-partial cleanup now exposes the exact boundary after
+  quarantine validation and before the former destructive action. A
+  substitution at that boundary is never deleted.
+- Cleanup creates an exclusive private empty placeholder, captures its
+  descriptor identity, fsyncs its creation, and atomically exchanges it with
+  the validated quarantine using `RENAME_EXCHANGE`. It then verifies that the
+  displaced inode is the originally created private bounded regular partial
+  and that the quarantine contains the exact placeholder.
+- An exact captured partial and the exact placeholder are removed with a parent
+  fsync after each directory mutation. A captured mismatch is restored to the
+  original name only with `RENAME_NOREPLACE`; a concurrent name is never
+  overwritten, and any failed restoration preserves displaced evidence.
+- Missing exchange support fails closed: the original partial is restored, the
+  private placeholder remains as evidence, and no unowned inode is deleted.
+  Primary publication and cleanup failures remain joined.
+- Descriptor-relative no-follow traversal, initial no-replace quarantine,
+  immediate creation identity, bounded private-file validation, no-replace
+  publication, retry durability, and service journaling are unchanged.
+
+### TDD evidence
+
+- RED:
+  `TestServiceActorEvidenceCleanupNeverDeletesReplacementAfterQuarantineValidation`
+  failed because the new post-validation hook was not reached by production;
+  the test could not find its replacement after the old cleanup completed.
+- GREEN: the same test substitutes the random quarantine immediately after
+  validation and proves the replacement is restored intact rather than
+  deleted.
+- GREEN: `TestServiceActorEvidenceCleanupRemovesExactPartial` proves exact-owned
+  cleanup; the existing substitution, concurrent-name, deletion-fsync, and
+  restore-fsync tests prove restoration/preservation and unknown-outcome
+  propagation through the displacement path.
+- GREEN:
+  `TestServiceActorEvidenceCleanupFailsClosedWithoutAtomicDisplacement` proves
+  an unavailable exchange primitive restores the owned partial, preserves the
+  private displacement evidence, and returns the primary plus cleanup error.
+
+### Verification
+
+- `rtk go test ./internal/remoteworker ./internal/adapters/supervisor
+  ./internal/adapters/hauler ./internal/capsule ./internal/app -count=1`
+  — 465 passed.
+- `rtk go test -race ./internal/remoteworker -count=1` — 71 passed.
+- `rtk go vet ./internal/remoteworker ./internal/adapters/supervisor
+  ./internal/adapters/hauler ./internal/capsule ./internal/app` — passed.
+- `rtk go build ./cmd/camp` — passed.
+- `rtk git diff --check` — passed.
+
+### Documentation improvement
+
+Documentation improvement:
+- Canonical file changed or proposed: `docs/skills/devpod-hauler.md`
+- Durable learning captured: post-validation actor-partial cleanup requires a fsynced exclusive placeholder, atomic exchange displacement, verification of both the displaced original identity and placeholder identity, a durability barrier after every directory mutation, no-replace mismatch restoration, and fail-closed preservation when exchange is unsupported or restoration is blocked.
+- Evidence: `internal/remoteworker/actor_evidence.go`, `TestServiceActorEvidenceCleanupNeverDeletesReplacementAfterQuarantineValidation`, `TestServiceActorEvidenceCleanupRemovesExactPartial`, `TestServiceActorEvidenceCleanupNeverOverwritesConcurrentName`, `TestServiceActorEvidenceCleanupDeletionFsyncFailureIsRetryable`, `TestServiceActorEvidenceCleanupRestoreFsyncFailureIsRetryable`, `TestServiceActorEvidenceCleanupFailsClosedWithoutAtomicDisplacement`, and the focused, race, vet, build, and diff-check commands above.
+- Stale or ambiguous guidance removed: the prior guide stopped at validating a random quarantine name before unlink and did not require atomic post-validation displacement, placeholder identity verification, exchange support, or a durability barrier for each new mutation.
+- Remaining uncertainty: fresh pinned-provider Task 12 acceptance remains unchanged; no real DevPod/Hauler lifecycle gate ran in this authorized fix round.

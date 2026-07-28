@@ -271,12 +271,14 @@ Do not use Hauler v2.0.2's live `_catalog` response as proof that all direct reg
   captures the empty file's device, inode, type, and private mode, before write,
   chmod, or file-fsync can fail. Cleanup first checks the named private bounded
   shape, then atomically quarantines that name with a no-replace rename and
-  fsyncs the parent before deciding ownership. It deletes and parent-fsyncs only
-  when the quarantined inode still matches the captured identity. A substituted
-  inode is restored with a no-replace rename plus parent fsync; a concurrent
-  occupant is never overwritten, and a failed restoration preserves the
-  quarantined evidence. Missing atomic-rename support, any directory-fsync
-  failure, symlinks, directories, oversized bytes,
+  fsyncs the parent before deciding ownership. After quarantine validation, it
+  creates and fsyncs an exclusive private placeholder, atomically exchanges
+  that placeholder with the quarantine, and verifies both the displaced inode
+  and placeholder identity before deletion. Every displacement, deletion, and
+  restoration is parent-fsynced. A substituted inode is restored with a
+  no-replace rename; a concurrent occupant is never overwritten, and a failed
+  restoration preserves the displaced evidence. Missing no-replace or exchange
+  support, any directory-fsync failure, symlinks, directories, oversized bytes,
   replacement races, unequal content, and cleanup identity drift fail closed.
   Invocation locking,
   durable start intents, and recorded PID/boot/start, executable, complete argv
