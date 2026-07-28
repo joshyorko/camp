@@ -28,6 +28,7 @@ type HydrationReceipt struct {
 
 type hydrationRuntime interface {
 	Verify(context.Context, Request) (verifiedRuntimeKit, error)
+	AdmitWorkspace(string) error
 	ExtractRoot(context.Context, Request, verifiedRuntimeKit) (string, error)
 	InstallTools(Request, verifiedRuntimeKit) error
 	Promote(string, string) error
@@ -45,6 +46,9 @@ func hydrateWorkspace(ctx context.Context, request Request, runtime hydrationRun
 		if receipt, complete, err := observer.Observe(request, kit); err != nil || complete {
 			return receipt, err
 		}
+	}
+	if err := runtime.AdmitWorkspace(request.WorkspaceRoot); err != nil {
+		return HydrationReceipt{}, err
 	}
 	stage, err := runtime.ExtractRoot(ctx, request, kit)
 	if err != nil {
@@ -106,6 +110,15 @@ func (*productionHydrationRuntime) Observe(request Request, kit verifiedRuntimeK
 		return HydrationReceipt{}, false, fmt.Errorf("%w: hydration receipt differs", ErrUnsafeHydration)
 	}
 	return receipt, true, nil
+}
+
+func (*productionHydrationRuntime) AdmitWorkspace(workspace string) error {
+	workspaceFD, _, err := openOperationDirectory(workspace)
+	if err != nil {
+		return fmt.Errorf("%w: open workspace: %v", ErrUnsafeHydration, err)
+	}
+	defer unix.Close(workspaceFD)
+	return validateInitialWorkspace(workspaceFD)
 }
 
 func (runtimeState *productionHydrationRuntime) ExtractRoot(ctx context.Context, request Request, kit verifiedRuntimeKit) (string, error) {

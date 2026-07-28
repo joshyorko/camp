@@ -2,10 +2,13 @@ package remoteworker
 
 import (
 	"context"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"golang.org/x/sys/unix"
 )
 
 type hydrationFixture struct {
@@ -17,6 +20,16 @@ type hydrationFixture struct {
 func (fixture *hydrationFixture) Verify(context.Context, Request) (verifiedRuntimeKit, error) {
 	fixture.order = append(fixture.order, "verify")
 	return verifiedRuntimeKit{Store: "/runtime/store", RootSHA256: strings.Repeat("a", 64)}, nil
+}
+
+func (fixture *hydrationFixture) AdmitWorkspace(workspace string) error {
+	fixture.order = append(fixture.order, "admit")
+	workspaceFD, _, err := openOperationDirectory(workspace)
+	if err != nil {
+		return err
+	}
+	defer unix.Close(workspaceFD)
+	return validateInitialWorkspace(workspaceFD)
 }
 
 func (fixture *hydrationFixture) ExtractRoot(context.Context, Request, verifiedRuntimeKit) (string, error) {
@@ -61,8 +74,36 @@ func TestHydrateVerifiesExtractsPromotesThenPublishesCompletion(t *testing.T) {
 		t.Fatal(err)
 	}
 	if receipt.Status != "completed" ||
-		strings.Join(fixture.order, ",") != "verify,extract,tools,promote,receipt:completed" {
+		strings.Join(fixture.order, ",") != "verify,admit,extract,tools,promote,receipt:completed" {
 		t.Fatalf("receipt=%#v order=%v", receipt, fixture.order)
+	}
+}
+
+func TestHydrateRejectsIneligibleWorkspaceBeforeExtractionOrRuntimeInstall(t *testing.T) {
+	parent := t.TempDir()
+	workspace := filepath.Join(parent, "workspace")
+	stage := filepath.Join(parent, "stage")
+	if err := os.MkdirAll(workspace, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(workspace, "user.txt"), []byte("keep"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	fixture := &hydrationFixture{workspace: workspace, stage: stage}
+	request := validRequest()
+	request.Operation = OperationHydrate
+	request.WorkspaceRoot = workspace
+	if _, err := hydrateWorkspace(t.Context(), request, fixture); !errors.Is(err, ErrUnsafeHydration) {
+		t.Fatalf("hydrateWorkspace() error = %v", err)
+	}
+	if got := strings.Join(fixture.order, ","); got != "verify,admit" {
+		t.Fatalf("hydration order = %q", got)
+	}
+	if _, err := os.Lstat(filepath.Join(workspace, ".camp", "runtime")); !os.IsNotExist(err) {
+		t.Fatalf("runtime was installed before admission failed: %v", err)
+	}
+	if _, err := os.Lstat(stage); !os.IsNotExist(err) {
+		t.Fatalf("root was extracted before admission failed: %v", err)
 	}
 }
 

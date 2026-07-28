@@ -69,3 +69,46 @@ Status: DONE_WITH_CONCERNS
   claim that every mutation operation is unsupported.
 - Remaining uncertainty: real pinned-provider activation and hydration remain
   Task 12 release evidence.
+
+## Fix round 1
+
+Status: DONE
+
+### Result
+
+- Preparation now passes the builder-returned manifest SHA-256 as the trusted
+  verifier authority and rejects a mismatch between that authority and the
+  verified manifest bytes.
+- Completed-attempt reentry reads the durable completion record before
+  verification and passes its persisted manifest SHA-256 as the authority.
+- Provider activation passes the descriptor-verified bootstrap manifest digest
+  to the Kit verifier, which is also reused by container hydration.
+- Hydration admits the workspace through a pinned descriptor before root
+  extraction or `.camp/runtime` installation. An unexpected initial entry now
+  stops before either mutation.
+
+### TDD evidence
+
+- RED: the Task 6 verifier call sites omitted `ExpectedManifestSHA256` despite
+  `haulkit.KitVerifier` requiring it; GREEN: the app fake verifier now rejects
+  missing or wrong authority, preparation rejects a mismatched builder digest,
+  and reentry rejects a mismatched persisted digest.
+- RED: hydration installed runtime tools before promotion performed workspace
+  admission; GREEN: admission is explicit before extraction/install, and an
+  orchestration-level test proves the unsafe workspace performs only
+  `verify,admit`, with neither a root stage nor `.camp/runtime` created.
+
+### Verification
+
+- `rtk go test ./internal/app ./internal/remoteworker -count=1` — 245 passed.
+- `rtk go vet ./internal/app ./internal/remoteworker` — passed.
+- `rtk git diff --check` — passed.
+
+### Documentation improvement
+
+Documentation improvement:
+- Canonical file changed or proposed: `docs/skills/devpod-hauler.md`
+- Durable learning captured: manifest SHA-256 must come from built or persisted authority at every Kit verifier boundary; workspace admission precedes root extraction and runtime installation.
+- Evidence: `TestRemoteDataPlanePreparerRequiresBuiltManifestAuthorityForVerification`, `TestRemoteDataPlanePreparerReentryRequiresPersistedManifestAuthority`, and `TestHydrateRejectsIneligibleWorkspaceBeforeExtractionOrRuntimeInstall`.
+- Stale or ambiguous guidance removed: the hydration sequence no longer implies runtime installation may occur before workspace eligibility is established.
+- Remaining uncertainty: a fresh pinned-provider activation/hydration run remains the Task 12 release gate.

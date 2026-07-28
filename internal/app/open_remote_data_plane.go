@@ -172,7 +172,7 @@ func (p *RemoteDataPlanePreparer) Prepare(ctx context.Context, request RemoteDat
 		return RemoteDataPlaneResult{}, err
 	}
 	verified, err := p.deps.Verifier.Verify(ctx, haulkit.VerifyRequest{
-		ManifestPath: artifact.ManifestPath, ArchivePath: artifact.ArchivePath,
+		ManifestPath: artifact.ManifestPath, ExpectedManifestSHA256: artifact.ManifestSHA256, ArchivePath: artifact.ArchivePath,
 		Architecture: manifest.Architecture, Tools: manifest.Tools, StoreDirectory: storeRoot,
 	})
 	if err != nil {
@@ -183,6 +183,9 @@ func (p *RemoteDataPlanePreparer) Prepare(ctx context.Context, request RemoteDat
 		return RemoteDataPlaneResult{}, errors.New("verified Camp Hauler Kit v1 identity differs from prepared inputs")
 	}
 	manifestIdentity := identityForBytes("camp-hauler-kit.json", manifestBody)
+	if manifestIdentity.SHA256 != artifact.ManifestSHA256 {
+		return RemoteDataPlaneResult{}, errors.New("built Camp Hauler Kit v1 manifest identity differs from artifact authority")
+	}
 	expected := remoteworker.ExpectedIdentity{
 		Architecture: manifest.Architecture,
 		Helper: remoteworker.FileIdentity{
@@ -262,8 +265,12 @@ func (p *RemoteDataPlanePreparer) reusePrepared(ctx context.Context, request Rem
 		!sameGenerationRef(manifest.Generation, request.Generation) {
 		return RemoteDataPlaneResult{}, errors.New("prior remote data-plane attempt identity differs")
 	}
+	completion, err := readAttemptCompletion(attemptRoot)
+	if err != nil {
+		return RemoteDataPlaneResult{}, err
+	}
 	verified, err := p.deps.Verifier.Verify(ctx, haulkit.VerifyRequest{
-		ManifestPath: manifestPath, ArchivePath: archivePath, Architecture: manifest.Architecture,
+		ManifestPath: manifestPath, ExpectedManifestSHA256: completion.ManifestSHA256, ArchivePath: archivePath, Architecture: manifest.Architecture,
 		Tools: manifest.Tools, StoreDirectory: storeRoot,
 	})
 	if err != nil {
@@ -273,10 +280,6 @@ func (p *RemoteDataPlanePreparer) reusePrepared(ctx context.Context, request Rem
 		return RemoteDataPlaneResult{}, errors.New("prior verified kit identity differs")
 	}
 	manifestIdentity := identityForBytes("camp-hauler-kit.json", manifestBody)
-	completion, err := readAttemptCompletion(attemptRoot)
-	if err != nil {
-		return RemoteDataPlaneResult{}, err
-	}
 	expected := remoteworker.ExpectedIdentity{
 		Architecture: completion.Architecture,
 		Helper:       remoteworker.FileIdentity{Name: "camp", SHA256: manifest.Tools.Camp.SHA256, Size: manifest.Tools.Camp.Size},
