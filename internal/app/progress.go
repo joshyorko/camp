@@ -16,6 +16,7 @@ const (
 	ProgressForwardersStopped        ProgressStage = "forwarders-stopped"
 	ProgressServicesStopped          ProgressStage = "services-stopped"
 	ProgressSupervisorStopped        ProgressStage = "supervisor-stopped"
+	ProgressSessionArtifactsRemoved  ProgressStage = "session-artifacts-removed"
 	ProgressLeaseReleased            ProgressStage = "lease-released"
 	ProgressMaterializationRemoved   ProgressStage = "materialization-removed"
 	ProgressMaterializationPreserved ProgressStage = "materialization-preserved"

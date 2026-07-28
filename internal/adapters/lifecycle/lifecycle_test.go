@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"os"
 	"path/filepath"
 	"reflect"
 	"testing"
@@ -52,6 +53,96 @@ func TestCloseEffectsUseRecordedOwnershipAndChildFirstControllers(t *testing.T) 
 	}
 	if leases.token.Lease != *snapshot.Lease.Lease || leases.token.Revision != ports.Revision(snapshot.Lease.Revision) {
 		t.Fatalf("lease token = %#v", leases.token)
+	}
+}
+
+func TestCloseEffectsStopForwardersRemovesIdentityVerifiedEvidence(t *testing.T) {
+	t.Parallel()
+	root := t.TempDir()
+	evidencePath := filepath.Join(root, "registry-forward.json")
+	if err := os.WriteFile(evidencePath, []byte(`{"evidencePath":"`+evidencePath+`"}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	record, err := readForwardingEvidence(evidencePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	record.Name = "registry"
+	record.Process.Identity = domain.ProcessIdentity{PID: 31, BootID: "boot", StartTicks: 31}
+	snapshot := lifecycleSnapshot(root)
+	snapshot.Recovery.Forwarding = []domain.ForwardingRecord{record}
+	effects := NewCloseEffects(&fakeWorkspace{}, &fakeProcesses{}, &fakeServices{}, &fakeLeases{}, &fakeOwnership{})
+
+	if err := effects.StopForwarders(context.Background(), snapshot); err != nil {
+		t.Fatalf("StopForwarders() error = %v", err)
+	}
+	if _, err := os.Lstat(evidencePath); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("forwarding evidence after StopForwarders() = %v, want absent", err)
+	}
+}
+
+func TestCloseEffectsRemovesOwnedSessionRuntimeArtifacts(t *testing.T) {
+	t.Parallel()
+	parent := t.TempDir()
+	runtimeRoot := filepath.Join(parent, "session-a")
+	if err := os.Mkdir(runtimeRoot, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	snapshot := lifecycleSnapshot(runtimeRoot)
+	snapshot.Recovery.Session = domain.SessionArtifactPaths{
+		Root:        filepath.Join(t.TempDir(), snapshot.SessionID),
+		RuntimeRoot: runtimeRoot,
+	}
+	snapshot.Recovery.Cleanup.RemoveSessionArtifacts = true
+	snapshot.Recovery.Forwarding = []domain.ForwardingRecord{
+		{Name: "registry", EvidencePath: filepath.Join(runtimeRoot, "registry-forward.json")},
+		{Name: "fileserver", EvidencePath: filepath.Join(runtimeRoot, "fileserver-forward.json")},
+	}
+	for name, body := range map[string]string{
+		"store-seed":             snapshot.SessionID + "\n",
+		"registry.log":           "registry\n",
+		"fileserver.log":         "fileserver\n",
+		"registry-forward.log":   "registry forward\n",
+		"fileserver-forward.log": "fileserver forward\n",
+	} {
+		if err := os.WriteFile(filepath.Join(runtimeRoot, name), []byte(body), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	effects := NewCloseEffects(&fakeWorkspace{}, &fakeProcesses{}, &fakeServices{}, &fakeLeases{}, &fakeOwnership{})
+
+	if err := effects.RemoveSessionArtifacts(context.Background(), snapshot); err != nil {
+		t.Fatalf("RemoveSessionArtifacts() error = %v", err)
+	}
+	if _, err := os.Lstat(runtimeRoot); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("session runtime root after cleanup = %v, want absent", err)
+	}
+}
+
+func TestCloseEffectsPreservesSessionRuntimeWithUnexpectedEntry(t *testing.T) {
+	t.Parallel()
+	runtimeRoot := filepath.Join(t.TempDir(), "session-a")
+	if err := os.Mkdir(runtimeRoot, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	unrelated := filepath.Join(runtimeRoot, "unrelated")
+	if err := os.WriteFile(unrelated, []byte("preserve"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	snapshot := lifecycleSnapshot(runtimeRoot)
+	snapshot.Recovery.Session = domain.SessionArtifactPaths{
+		Root:        filepath.Join(t.TempDir(), snapshot.SessionID),
+		RuntimeRoot: runtimeRoot,
+	}
+	snapshot.Recovery.Cleanup.RemoveSessionArtifacts = true
+	effects := NewCloseEffects(&fakeWorkspace{}, &fakeProcesses{}, &fakeServices{}, &fakeLeases{}, &fakeOwnership{})
+
+	if err := effects.RemoveSessionArtifacts(context.Background(), snapshot); err == nil {
+		t.Fatal("RemoveSessionArtifacts() error = nil, want unexpected-entry rejection")
+	}
+	body, err := os.ReadFile(unrelated)
+	if err != nil || string(body) != "preserve" {
+		t.Fatalf("unrelated runtime entry = %q, %v; want preserved", body, err)
 	}
 }
 

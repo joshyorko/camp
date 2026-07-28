@@ -43,6 +43,9 @@ func (e *fakeCloseEffects) StopServices(context.Context, domain.JournalSnapshot)
 func (e *fakeCloseEffects) StopSupervisor(context.Context, domain.JournalSnapshot) error {
 	return e.effect("supervisor")
 }
+func (e *fakeCloseEffects) RemoveSessionArtifacts(context.Context, domain.JournalSnapshot) error {
+	return e.effect("artifacts")
+}
 func (e *fakeCloseEffects) ReleaseLease(context.Context, domain.JournalSnapshot) error {
 	return e.effect("lease")
 }
@@ -153,6 +156,43 @@ func TestCloseReportsCompletedCleanupStagesInEffectOrder(t *testing.T) {
 	}
 	if !reflect.DeepEqual(reported, want) {
 		t.Fatalf("reported = %#v, want %#v", reported, want)
+	}
+}
+
+func TestCloseRemovesSessionArtifactsAfterProcessesStop(t *testing.T) {
+	t.Parallel()
+	snapshot := domain.JournalSnapshot{
+		SchemaVersion: domain.SchemaVersion,
+		SessionID:     "session-artifacts",
+		Capsule:       "brain",
+		Lineage:       domain.Lineage{Branch: "main"},
+		Mode:          domain.SessionReadOnly,
+		State:         domain.SessionOpen,
+		Recovery: domain.RecoveryRecord{
+			Cleanup: domain.CleanupPolicy{
+				WorkspaceAction:        domain.WorkspaceCleanupDelete,
+				RemoveSessionArtifacts: true,
+			},
+		},
+		Materialization: domain.Materialization{Mode: domain.MaterializationAdopted},
+		Cleanup:         domain.Cleanup{State: domain.CleanupPending},
+	}
+	journal := &fakePendingCloseJournal{snapshot: snapshot}
+	events := []string{}
+
+	_, err := NewClose(
+		journal,
+		&fakeOperationLocker{events: &events, token: ports.OperationToken{ID: "lock"}},
+		&fakeCheckpointPublisher{events: &events},
+		&fakeCloseEffects{events: &events},
+		fixedAppClock{now: time.Unix(200, 0)},
+	).Run(context.Background(), CloseRequest{SessionID: snapshot.SessionID})
+	if err != nil {
+		t.Fatalf("Run() error = %v", err)
+	}
+	want := []string{"lock:close", "workspace", "forwarders", "services", "supervisor", "artifacts", "materialization", "unlock:close"}
+	if !reflect.DeepEqual(events, want) {
+		t.Fatalf("events = %#v, want process shutdown before session artifacts %#v", events, want)
 	}
 }
 

@@ -20,6 +20,7 @@ import (
 	"time"
 
 	"github.com/joshyorko/camp/internal/adapters/devpod"
+	"github.com/joshyorko/camp/internal/adapters/supervisor"
 	"github.com/joshyorko/camp/internal/domain"
 	"github.com/joshyorko/camp/internal/ports"
 	"golang.org/x/sys/unix"
@@ -145,7 +146,7 @@ func (m *ForwarderManager) Stop(ctx context.Context, record domain.ForwardingRec
 	if m == nil || m.processes == nil || record.Process.Identity.PID <= 0 {
 		return errors.New("workspace forwarder identity is incomplete")
 	}
-	if err := m.processes.Stop(ctx, record.Process.Identity, 5*time.Second); err != nil {
+	if err := m.processes.Stop(ctx, record.Process.Identity, 5*time.Second); err != nil && !errors.Is(err, supervisor.ErrProcessIdentity) {
 		return err
 	}
 	if record.EvidencePath != "" {

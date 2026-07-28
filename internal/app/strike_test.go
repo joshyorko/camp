@@ -42,6 +42,9 @@ func (e *strikeEffects) StopSupervisor(context.Context, domain.JournalSnapshot) 
 	e.supervisor++
 	return nil
 }
+func (e *strikeEffects) RemoveSessionArtifacts(context.Context, domain.JournalSnapshot) error {
+	return nil
+}
 func (e *strikeEffects) ReleaseLease(context.Context, domain.JournalSnapshot) error { return nil }
 func (e *strikeEffects) RemoveMaterialization(context.Context, domain.JournalSnapshot) (bool, error) {
 	e.materialization++

@@ -435,6 +435,16 @@ process (`sleep 30 & wait`) and prove the whole process group terminates within
 the deadline; killing only the shell can leave descendants holding captured
 stdout/stderr open until their natural exit.
 
+GitHub's Ubuntu 24.04 runner enables
+`kernel.apparmor_restrict_unprivileged_userns=1`. RCC's pinned Pasta executable
+lives under a private Holotree path and therefore does not inherit the runner's
+path-specific AppArmor allowances. The exact-candidate lifecycle job must
+explicitly disable that restriction on its ephemeral runner and prove
+`unshare --user --map-root-user true` before invoking RCC; otherwise Pasta exits
+before its private PID file and loopback-confined Hauler child become ready.
+Keep this authorization scoped to the lifecycle job rather than weakening
+Camp's production confinement checks.
+
 Replacement-identity tests must account for immediate inode reuse on GitHub's
 Ubuntu filesystems. New materialization and hydration records include Linux
 `statx` birth time when the filesystem provides it, in addition to device and
