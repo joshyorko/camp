@@ -4,12 +4,15 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"os"
+	"path/filepath"
 	"time"
 
 	"github.com/joshyorko/camp/internal/adapters/supervisor"
 	"github.com/joshyorko/camp/internal/coordination"
 	"github.com/joshyorko/camp/internal/domain"
 	"github.com/joshyorko/camp/internal/ports"
+	"golang.org/x/sys/unix"
 )
 
 type workspaceCloser interface {
@@ -67,7 +70,7 @@ func (e *CloseEffects) StopForwarders(ctx context.Context, snapshot domain.Journ
 		if err := validateProcessIdentity(forwarding.Process.Identity); err != nil {
 			return fmt.Errorf("forwarder %q: %w", forwarding.Name, err)
 		}
-		if err := e.processes.Stop(ctx, forwarding.Process.Identity, 5*time.Second); err != nil && !errors.Is(err, supervisor.ErrProcessIdentity) {
+		if err := NewForwarderManager(nil, e.processes).Stop(ctx, forwarding); err != nil {
 			return fmt.Errorf("stop forwarder %q: %w", forwarding.Name, err)
 		}
 	}
@@ -119,6 +122,89 @@ func (e *CloseEffects) RemoveMaterialization(ctx context.Context, snapshot domai
 		return false, errors.New("materialization ownership dependency is incomplete")
 	}
 	return e.ownership.RemoveOwned(ctx, snapshot.Materialization)
+}
+
+func (e *CloseEffects) RemoveSessionArtifacts(ctx context.Context, snapshot domain.JournalSnapshot) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	if !snapshot.Recovery.Cleanup.RemoveSessionArtifacts {
+		return errors.New("session artifact cleanup is not authorized")
+	}
+	runtimeRoot := filepath.Clean(snapshot.Recovery.Session.RuntimeRoot)
+	sessionRoot := filepath.Clean(snapshot.Recovery.Session.Root)
+	if !filepath.IsAbs(runtimeRoot) || runtimeRoot == string(filepath.Separator) || snapshot.SessionID == "" {
+		return errors.New("recorded session runtime root is unsafe")
+	}
+	if runtimeRoot != filepath.Join(sessionRoot, "runtime") && filepath.Base(runtimeRoot) != snapshot.SessionID {
+		return errors.New("recorded session runtime root does not match the session")
+	}
+	info, err := os.Lstat(runtimeRoot)
+	if errors.Is(err, os.ErrNotExist) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	if info.Mode()&os.ModeSymlink != 0 || !info.IsDir() {
+		return errors.New("recorded session runtime root is not a real directory")
+	}
+
+	allowed := map[string]struct{}{"store-seed": {}}
+	for _, service := range snapshot.Services {
+		expected := filepath.Join(runtimeRoot, service.Name+".log")
+		if filepath.Clean(service.LogPath) != expected {
+			return fmt.Errorf("service %q log is outside the session runtime root", service.Name)
+		}
+		allowed[filepath.Base(expected)] = struct{}{}
+	}
+	for _, forwarding := range snapshot.Recovery.Forwarding {
+		expectedEvidence := filepath.Join(runtimeRoot, forwarding.Name+"-forward.json")
+		if filepath.Clean(forwarding.EvidencePath) != expectedEvidence {
+			return fmt.Errorf("forwarder %q evidence is outside the session runtime root", forwarding.Name)
+		}
+		allowed[forwarding.Name+"-forward.log"] = struct{}{}
+	}
+	entries, err := os.ReadDir(runtimeRoot)
+	if err != nil {
+		return err
+	}
+	for _, entry := range entries {
+		if _, ok := allowed[entry.Name()]; !ok {
+			return fmt.Errorf("unexpected session runtime artifact %q", entry.Name())
+		}
+		var stat unix.Stat_t
+		path := filepath.Join(runtimeRoot, entry.Name())
+		if err := unix.Lstat(path, &stat); err != nil {
+			return err
+		}
+		if stat.Mode&unix.S_IFMT != unix.S_IFREG || stat.Nlink != 1 {
+			return fmt.Errorf("session runtime artifact %q is not an owned regular file", entry.Name())
+		}
+		if entry.Name() == "store-seed" {
+			body, err := os.ReadFile(path)
+			if err != nil {
+				return err
+			}
+			if string(body) != snapshot.SessionID+"\n" {
+				return errors.New("session runtime ownership seed does not match the session")
+			}
+		}
+	}
+	for _, entry := range entries {
+		if err := os.Remove(filepath.Join(runtimeRoot, entry.Name())); err != nil {
+			return err
+		}
+	}
+	if err := os.Remove(runtimeRoot); err != nil {
+		return err
+	}
+	if filepath.Base(runtimeRoot) == snapshot.SessionID {
+		if err := os.Remove(filepath.Dir(runtimeRoot)); err != nil && !errors.Is(err, os.ErrNotExist) && !errors.Is(err, unix.ENOTEMPTY) {
+			return err
+		}
+	}
+	return nil
 }
 
 func validateProcessIdentity(identity domain.ProcessIdentity) error {

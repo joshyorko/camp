@@ -148,7 +148,7 @@ func richLifecycleStage(stage app.ProgressStage) (presentation.LifecycleStage, b
 func richLifecycleActivityStage(stage app.ProgressStage) (presentation.LifecycleStage, bool) {
 	switch stage {
 	case app.ProgressWorkspaceClosed, app.ProgressForwardersStopped, app.ProgressServicesStopped,
-		app.ProgressSupervisorStopped, app.ProgressLeaseReleased:
+		app.ProgressSupervisorStopped, app.ProgressSessionArtifactsRemoved, app.ProgressLeaseReleased:
 		return presentation.StageCleanup, true
 	default:
 		return "", false
@@ -352,6 +352,8 @@ func lifecycleProgressMessage(event app.ProgressEvent) string {
 		return "stopped Hauler services"
 	case app.ProgressSupervisorStopped:
 		return "stopped session supervisor"
+	case app.ProgressSessionArtifactsRemoved:
+		return "removed private session runtime artifacts"
 	case app.ProgressLeaseReleased:
 		return "released writer lease"
 	case app.ProgressMaterializationRemoved:

@@ -16,6 +16,7 @@ type CloseEffects interface {
 	StopForwarders(context.Context, domain.JournalSnapshot) error
 	StopServices(context.Context, domain.JournalSnapshot) error
 	StopSupervisor(context.Context, domain.JournalSnapshot) error
+	RemoveSessionArtifacts(context.Context, domain.JournalSnapshot) error
 	ReleaseLease(context.Context, domain.JournalSnapshot) error
 	RemoveMaterialization(context.Context, domain.JournalSnapshot) (bool, error)
 }
@@ -170,6 +171,7 @@ func closeProgressEvent(transition string) ProgressEvent {
 		"ForwardersStopped":         ProgressForwardersStopped,
 		"ServicesStopped":           ProgressServicesStopped,
 		"SupervisorStopped":         ProgressSupervisorStopped,
+		"SessionArtifactsRemoved":   ProgressSessionArtifactsRemoved,
 		"LeaseReleased":             ProgressLeaseReleased,
 		"MaterializationRemoved":    ProgressMaterializationRemoved,
 		"AdoptedPreserved":          ProgressMaterializationPreserved,
@@ -198,7 +200,7 @@ func selectCloseCleanupPending(snapshot domain.JournalSnapshot, pending []ports.
 
 func isCloseCleanupTransition(transition string) bool {
 	switch transition {
-	case "WorkspaceStoppedOrDeleted", "ForwardersStopped", "ServicesStopped", "SupervisorStopped", "LeaseReleased", "MaterializationRemoved", "AdoptedPreserved":
+	case "WorkspaceStoppedOrDeleted", "ForwardersStopped", "ServicesStopped", "SupervisorStopped", "SessionArtifactsRemoved", "LeaseReleased", "MaterializationRemoved", "AdoptedPreserved":
 		return true
 	default:
 		return false
@@ -215,6 +217,8 @@ func closeCleanupTransitionIndex(transition string) (int, bool) {
 		return 2, true
 	case "SupervisorStopped":
 		return 3, true
+	case "SessionArtifactsRemoved":
+		return 4, true
 	default:
 		return 0, false
 	}
@@ -232,6 +236,12 @@ func (u *Close) closeCleanupSteps(ctx context.Context, keepWorkspace bool, snaps
 		{"ForwardersStopped", func() error { return u.effects.StopForwarders(ctx, snapshot) }},
 		{"ServicesStopped", func() error { return u.effects.StopServices(ctx, snapshot) }},
 		{"SupervisorStopped", func() error { return u.effects.StopSupervisor(ctx, snapshot) }},
+	}
+	if snapshot.Recovery.Cleanup.RemoveSessionArtifacts {
+		steps = append(steps, struct {
+			transition string
+			effect     func() error
+		}{"SessionArtifactsRemoved", func() error { return u.effects.RemoveSessionArtifacts(ctx, snapshot) }})
 	}
 	if snapshot.Mode == domain.SessionReadWrite && snapshot.Lease.Lease != nil {
 		steps = append(steps, struct {

@@ -74,13 +74,18 @@ func newLifecycleScenario(t *testing.T, root string, devPod devPodTestIsolation,
 		if err := os.Chmod(runtimeDirectory, 0o700); err != nil {
 			t.Fatalf("secure private XDG runtime directory: %v", err)
 		}
-		observed, err := inspectVerifierPath(runtimeDirectory, true)
-		if err != nil {
-			t.Fatalf("record private XDG runtime identity: %v", err)
-		}
-		scenario.verifierPaths[runtimeDirectory] = observed
 	}
 	return scenario
+}
+
+func TestLifecycleScenarioDoesNotTreatTestOwnedXDGRuntimeParentAsCampArtifact(t *testing.T) {
+	root := t.TempDir()
+	controller := filepath.Join(root, "controller")
+	scenario := newLifecycleScenario(t, root, newDevPodTestIsolation(root), controller)
+	runtimeDirectory := scenarioRuntimeDirectory(controller)
+	if _, ok := scenario.verifierPaths[runtimeDirectory]; ok {
+		t.Fatalf("test-owned XDG runtime parent %q was registered as a Camp-owned artifact", runtimeDirectory)
+	}
 }
 
 func (s *lifecycleScenario) CreateUnrelatedWorkspace(t *testing.T, ctx context.Context) {
@@ -759,7 +764,7 @@ exit 1
 	if _, err := os.Lstat(materializationPath); !errors.Is(err, os.ErrNotExist) {
 		t.Fatalf("owned materialization %q remains: %v", materializationPath, err)
 	}
-	for _, path := range []string{evidencePath, scenarioRuntimeDirectory(controller)} {
+	for _, path := range []string{evidencePath} {
 		if _, err := os.Lstat(path); err != nil {
 			t.Fatalf("verifier-only path %q was removed: %v", path, err)
 		}

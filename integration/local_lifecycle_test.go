@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"github.com/joshyorko/camp/internal/domain"
+	"github.com/joshyorko/camp/internal/ports"
 )
 
 func TestLocalLifecycleVertical(t *testing.T) {
@@ -349,6 +350,68 @@ func writeLifecycleFixture(t *testing.T, source string) {
 
 func shellQuote(value string) string { return "'" + strings.ReplaceAll(value, "'", "'\\''") + "'" }
 
+func TestRunLifecycleOpenRetriesOnlyExactAmbiguousOutcomeOnce(t *testing.T) {
+	root := t.TempDir()
+	countPath := filepath.Join(root, "count")
+	executable := filepath.Join(root, "camp")
+	writeTestExecutable(t, executable, `#!/bin/sh
+count=0
+if test -f "$CAMP_TEST_COUNT"; then count=$(cat "$CAMP_TEST_COUNT"); fi
+count=$((count + 1))
+printf '%s\n' "$count" > "$CAMP_TEST_COUNT"
+if test "$count" -eq 1; then
+  printf '%s\n' 'object mutation outcome is ambiguous'
+  exit 1
+fi
+printf '%s\n' '{"workspaceId":"camp-test"}'
+`)
+
+	output, err := runLifecycleOpenWithAmbiguousRetryAt(
+		context.Background(),
+		[]string{"CAMP_TEST_COUNT=" + countPath},
+		"",
+		executable,
+		"--json",
+		"open",
+	)
+	if err != nil || !bytes.Contains(output, []byte(`"workspaceId":"camp-test"`)) {
+		t.Fatalf("ambiguous retry = %q, %v", output, err)
+	}
+	count, err := os.ReadFile(countPath)
+	if err != nil || strings.TrimSpace(string(count)) != "2" {
+		t.Fatalf("attempt count = %q, %v; want 2", count, err)
+	}
+
+	arbitraryCountPath := filepath.Join(root, "arbitrary-count")
+	arbitraryExecutable := filepath.Join(root, "camp-arbitrary")
+	writeTestExecutable(t, arbitraryExecutable, `#!/bin/sh
+count=0
+if test -f "$CAMP_TEST_COUNT"; then count=$(cat "$CAMP_TEST_COUNT"); fi
+count=$((count + 1))
+printf '%s\n' "$count" > "$CAMP_TEST_COUNT"
+printf '%s\n' 'provider authentication failed'
+exit 1
+`)
+	if _, err := runLifecycleOpenWithAmbiguousRetryAt(
+		context.Background(),
+		[]string{"CAMP_TEST_COUNT=" + arbitraryCountPath},
+		"",
+		arbitraryExecutable,
+		"--json",
+		"open",
+	); err == nil {
+		t.Fatal("arbitrary open failure error = nil")
+	}
+	arbitraryCount, err := os.ReadFile(arbitraryCountPath)
+	if err != nil || strings.TrimSpace(string(arbitraryCount)) != "1" {
+		t.Fatalf("arbitrary failure attempt count = %q, %v; want 1", arbitraryCount, err)
+	}
+
+	if !bytes.Contains([]byte(ports.ErrAmbiguous.Error()), []byte("object mutation outcome is ambiguous")) {
+		t.Fatalf("stable ambiguous sentinel changed: %q", ports.ErrAmbiguous)
+	}
+}
+
 func mustRunLifecycle(t *testing.T, ctx context.Context, environment []string, executable string, argv ...string) []byte {
 	t.Helper()
 	output, err := runLifecycleCommandAt(ctx, environment, "", executable, argv...)
@@ -360,11 +423,19 @@ func mustRunLifecycle(t *testing.T, ctx context.Context, environment []string, e
 
 func mustRunLifecycleAt(t *testing.T, ctx context.Context, environment []string, directory, executable string, argv ...string) []byte {
 	t.Helper()
-	output, err := runLifecycleCommandAt(ctx, environment, directory, executable, argv...)
+	output, err := runLifecycleOpenWithAmbiguousRetryAt(ctx, environment, directory, executable, argv...)
 	if err != nil {
 		t.Fatalf("%s %s: %v\n%s", executable, strings.Join(argv, " "), err, output)
 	}
 	return output
+}
+
+func runLifecycleOpenWithAmbiguousRetryAt(ctx context.Context, environment []string, directory, executable string, argv ...string) ([]byte, error) {
+	output, err := runLifecycleCommandAt(ctx, environment, directory, executable, argv...)
+	if err == nil || !bytes.Contains(output, []byte(ports.ErrAmbiguous.Error())) {
+		return output, err
+	}
+	return runLifecycleCommandAt(ctx, environment, directory, executable, argv...)
 }
 
 func runLifecycleCommand(ctx context.Context, environment []string, executable string, argv ...string) ([]byte, error) {
