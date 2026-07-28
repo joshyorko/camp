@@ -1023,6 +1023,13 @@ func TestNamedImageReopenProofIsDigestQualifiedValidShell(t *testing.T) {
 	if err := exec.Command("sh", "-n", "-c", eviction).Run(); err != nil {
 		t.Fatalf("named image eviction is invalid POSIX shell: %v\n%s", err, eviction)
 	}
+	push := namedImagePushCommand()
+	if !strings.Contains(push, `if test "$engine" = podman; then "$engine" push --tls-verify=false "$reference"`) {
+		t.Fatalf("named image push does not authorize the loopback HTTP registry for Podman: %s", push)
+	}
+	if err := exec.Command("sh", "-n", "-c", push).Run(); err != nil {
+		t.Fatalf("named image push is invalid POSIX shell: %v\n%s", err, push)
+	}
 
 	command := namedImageReopenProofCommand(digest, imageIDPath)
 	for _, required := range []string{
@@ -1030,7 +1037,7 @@ func TestNamedImageReopenProofIsDigestQualifiedValidShell(t *testing.T) {
 		`image_id=$(cat`,
 		`image rm -f`,
 		`$CAMP_REGISTRY/camp/acceptance@$expected_digest`,
-		`pull "$digest_reference"`,
+		`if test "$engine" = podman; then "$engine" pull --tls-verify=false "$digest_reference"`,
 		`json .RepoDigests`,
 		`run --rm "$digest_reference"`,
 	} {
