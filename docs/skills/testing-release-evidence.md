@@ -340,8 +340,9 @@ Dockerfile replaces the image's subordinate UID/GID ranges at build time; the
 image's original range begins at 1001 and overlaps that primary UID on GitHub's
 hosted runner. A lifecycle hook cannot perform this repair because it runs as
 the non-root remote user. Rootless Podman also defaults an unconfigured
-registry to HTTPS, so the fixture passes `--tls-verify=false` only for Podman
-push and pull against Camp's already loopback-confined plain-HTTP endpoint.
+registry to HTTPS, so the fixture marks only `127.0.0.1` insecure in its
+registry configuration. That covers Camp's dynamic loopback-confined
+plain-HTTP endpoint for both harness commands and production image restore.
 Before each file or MinIO lifecycle scenario opens Camp's workspace,
 the harness creates one unrelated workspace in that same private context. Its
 scenario ledger recovers exact Camp workspace IDs, process identities,

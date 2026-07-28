@@ -103,7 +103,7 @@ func TestLocalLifecycleVertical(t *testing.T) {
 	}
 
 	t.Log("mutate files and build an explicitly tagged fixture image through CAMP_REGISTRY")
-	mutate := fmt.Sprintf("set -eu; cd %s; grep -qx attached 'Projects/Unicode space/attach-proof.txt'; printf 'after-open\\n' >> 'Projects/Unicode space/λ-note.txt'; chmod 600 'Projects/Unicode space/λ-note.txt'; test \"$CAMP_REGISTRY\" = %s; test \"$CAMP_FILESERVER\" = %s; curl -fsS \"http://$CAMP_REGISTRY/v2/\" >/dev/null; curl -fsS \"http://$CAMP_FILESERVER/\" >/dev/null; engine=; attempts=0; while test -z \"$engine\"; do for candidate in docker podman nerdctl; do if command -v \"$candidate\" >/dev/null 2>&1 && \"$candidate\" info >/dev/null 2>&1; then engine=$candidate; break; fi; done; attempts=$((attempts+1)); test $attempts -lt 60; sleep 1; done; reference=\"$CAMP_REGISTRY/camp/acceptance:named\"; \"$engine\" build --tag \"$reference\" image-fixture; %s", shellQuote(workspaceRootA), shellQuote(endpoints.Registry), shellQuote(endpoints.Fileserver), namedImagePushCommand())
+	mutate := fmt.Sprintf("set -eu; cd %s; grep -qx attached 'Projects/Unicode space/attach-proof.txt'; printf 'after-open\\n' >> 'Projects/Unicode space/λ-note.txt'; chmod 600 'Projects/Unicode space/λ-note.txt'; test \"$CAMP_REGISTRY\" = %s; test \"$CAMP_FILESERVER\" = %s; curl -fsS \"http://$CAMP_REGISTRY/v2/\" >/dev/null; curl -fsS \"http://$CAMP_FILESERVER/\" >/dev/null; engine=; attempts=0; while test -z \"$engine\"; do for candidate in docker podman nerdctl; do if command -v \"$candidate\" >/dev/null 2>&1 && \"$candidate\" info >/dev/null 2>&1; then engine=$candidate; break; fi; done; attempts=$((attempts+1)); test $attempts -lt 60; sleep 1; done; reference=\"$CAMP_REGISTRY/camp/acceptance:named\"; \"$engine\" build --tag \"$reference\" image-fixture; \"$engine\" push \"$reference\"", shellQuote(workspaceRootA), shellQuote(endpoints.Registry), shellQuote(endpoints.Fileserver))
 	mustRunDevPod(t, ctx, devPod, "ssh", workspaceA, "--command", mutate)
 	namedImageDigest := registryPlatformManifestDigest(t, ctx, endpoints.Registry, "camp/acceptance", "named")
 	evictedImageIDPathA := filepath.ToSlash(filepath.Join(workspaceRootA, "Projects/Unicode space/evicted-image-id.txt"))
@@ -334,7 +334,7 @@ func writeLifecycleFixture(t *testing.T, source string) {
 	if err := os.WriteFile(filepath.Join(devcontainer, "devcontainer.json"), lifecycleDevcontainer, 0o644); err != nil {
 		t.Fatal(err)
 	}
-	lifecycleDockerfile := "ARG BASE_IMAGE\nFROM ${BASE_IMAGE}\nRUN printf 'podman:100000:65536\\n' > /etc/subuid && printf 'podman:100000:65536\\n' > /etc/subgid\n"
+	lifecycleDockerfile := "ARG BASE_IMAGE\nFROM ${BASE_IMAGE}\nRUN printf 'podman:100000:65536\\n' > /etc/subuid && printf 'podman:100000:65536\\n' > /etc/subgid\nRUN mkdir -p /etc/containers/registries.conf.d && printf '[[registry]]\\nlocation = \"127.0.0.1\"\\ninsecure = true\\n' > /etc/containers/registries.conf.d/camp-loopback.conf\n"
 	if err := os.WriteFile(filepath.Join(devcontainer, "Dockerfile"), []byte(lifecycleDockerfile), 0o644); err != nil {
 		t.Fatal(err)
 	}
@@ -398,7 +398,7 @@ func TestWriteLifecycleFixturePinsLightweightContainerEngineDevcontainer(t *test
 	if err != nil {
 		t.Fatalf("read lifecycle Dockerfile: %v", err)
 	}
-	if want := "ARG BASE_IMAGE\nFROM ${BASE_IMAGE}\nRUN printf 'podman:100000:65536\\n' > /etc/subuid && printf 'podman:100000:65536\\n' > /etc/subgid\n"; string(dockerfile) != want {
+	if want := "ARG BASE_IMAGE\nFROM ${BASE_IMAGE}\nRUN printf 'podman:100000:65536\\n' > /etc/subuid && printf 'podman:100000:65536\\n' > /etc/subgid\nRUN mkdir -p /etc/containers/registries.conf.d && printf '[[registry]]\\nlocation = \"127.0.0.1\"\\ninsecure = true\\n' > /etc/containers/registries.conf.d/camp-loopback.conf\n"; string(dockerfile) != want {
 		t.Fatalf("lifecycle Dockerfile = %q, want %q", dockerfile, want)
 	}
 }
