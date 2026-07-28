@@ -79,6 +79,10 @@ func lifecycleFailure(err error, recoveryCommand string) *ExitError {
 	return &ExitError{Code: ExitFailure, Failure: presentation.Failure{Code: "lifecycle_failed", Message: err.Error(), NextCommands: next}, Cause: err}
 }
 
+func renderedLifecycleFailure(err error) *ExitError {
+	return &ExitError{Code: ExitFailure, Cause: err}
+}
+
 type RootExecutor interface {
 	ExecuteContext(context.Context) error
 }

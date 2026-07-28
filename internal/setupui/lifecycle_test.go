@@ -172,6 +172,121 @@ func TestLifecycleModelFailurePreservesOneSafeRecoveryCommand(t *testing.T) {
 	}
 }
 
+func TestLifecycleModelAcceptsTerminalFailureAfterAllStageFacts(t *testing.T) {
+	stages := []presentation.LifecycleStage{presentation.StageUpload, presentation.StagePointer}
+	m := NewLifecycleModel(DefaultPalette(), loadForTest(t), LifecycleWorkflow{Operation: "sync", Stages: stages})
+	for _, stage := range stages {
+		next, _ := m.Update(presentation.RichLifecycleEvent{Kind: presentation.RichLifecycleCompleted, Stage: stage})
+		m = next.(LifecycleModel)
+	}
+	next, _ := m.Update(presentation.RichLifecycleEvent{
+		Kind: presentation.RichLifecycleFailed, Stage: presentation.StagePointer, Message: "finalization failed",
+	})
+	m = next.(LifecycleModel)
+	failed, message, _ := m.Failed()
+	if !failed || message != "finalization failed" {
+		t.Fatalf("terminal failure = (%v, %q)", failed, message)
+	}
+}
+
+func TestLifecycleTerminalFailurePreservesCompletedWaypoints(t *testing.T) {
+	m := NewLifecycleModel(DefaultPalette(), loadForTest(t), LifecycleWorkflow{
+		Operation: "close",
+		Stages:    []presentation.LifecycleStage{presentation.StagePointer, presentation.StageCleanup},
+	})
+	for _, event := range []presentation.RichLifecycleEvent{
+		{Kind: presentation.RichLifecycleCompleted, Stage: presentation.StagePointer},
+		{Kind: presentation.RichLifecycleCompleted, Stage: presentation.StageCleanup},
+		{
+			Kind:            presentation.RichLifecycleTerminalFailed,
+			Message:         "refresh Hauler serving content: helper exited",
+			RecoveryCommand: "camp recover session-1",
+		},
+	} {
+		next, _ := m.Update(event)
+		m = next.(LifecycleModel)
+	}
+	failed, message, recovery := m.Failed()
+	if !failed || message != "refresh Hauler serving content: helper exited" || recovery != "camp recover session-1" {
+		t.Fatalf("terminal failure = (%t, %q, %q)", failed, message, recovery)
+	}
+	if got := m.states[presentation.StageCleanup]; got != WaypointCompleted {
+		t.Fatalf("cleanup state = %v, want completed", got)
+	}
+}
+
+func TestLifecycleModelRendersOnlyTruthfulResumedSuffix(t *testing.T) {
+	m := NewLifecycleModel(DefaultPalette(), loadForTest(t), LifecycleWorkflow{
+		Operation: "sync",
+		Stages: []presentation.LifecycleStage{
+			presentation.StageMirror, presentation.StageImageCapture, presentation.StageArchive,
+			presentation.StageUpload, presentation.StagePointer,
+		},
+	})
+	next, _ := m.Update(presentation.RichLifecycleEvent{
+		Kind: presentation.RichLifecycleResumed, Stage: presentation.StageUpload,
+	})
+	m = next.(LifecycleModel)
+	for _, stage := range []presentation.LifecycleStage{presentation.StageUpload, presentation.StagePointer} {
+		next, _ = m.Update(presentation.RichLifecycleEvent{Kind: presentation.RichLifecycleCompleted, Stage: stage})
+		m = next.(LifecycleModel)
+	}
+	next, _ = m.Update(presentation.RichLifecycleEvent{Kind: presentation.RichLifecycleSucceeded})
+	m = next.(LifecycleModel)
+	if m.Phase() != PhaseReady {
+		t.Fatalf("phase = %v, want ready", m.Phase())
+	}
+	if len(m.stages) != 2 || m.stages[0] != presentation.StageUpload {
+		t.Fatalf("rendered stages = %#v, want upload/pointer suffix", m.stages)
+	}
+	if got := m.StageState(presentation.StageMirror); got == WaypointCompleted {
+		t.Fatal("resumed suffix fabricated mirror completion")
+	}
+}
+
+func TestLifecycleModelAcceptsExplicitNoStageSuccessMessage(t *testing.T) {
+	m := NewLifecycleModel(DefaultPalette(), loadForTest(t), LifecycleWorkflow{
+		Operation: "sync", ReadyLine: "checkpoint published",
+		Stages: []presentation.LifecycleStage{presentation.StageMirror, presentation.StagePointer},
+	})
+	next, _ := m.Update(presentation.RichLifecycleEvent{
+		Kind: presentation.RichLifecycleSucceeded, Message: "read-only session unchanged",
+	})
+	m = next.(LifecycleModel)
+	if m.Phase() != PhaseReady {
+		t.Fatalf("phase = %v, want ready", m.Phase())
+	}
+	data := m.sceneData()
+	if data.ReadyLine != "read-only session unchanged" {
+		t.Fatalf("ready line = %q", data.ReadyLine)
+	}
+	if len(m.stages) != 0 {
+		t.Fatalf("no-stage success retained fabricated stages: %#v", m.stages)
+	}
+}
+
+func TestLifecycleModelDuplicateCompletionFailsWithoutRecovery(t *testing.T) {
+	m := NewLifecycleModel(DefaultPalette(), loadForTest(t), LifecycleWorkflow{
+		Operation: "close",
+		Stages:    []presentation.LifecycleStage{presentation.StageCleanup},
+	})
+	next, _ := m.Update(presentation.RichLifecycleEvent{
+		Kind: presentation.RichLifecycleCompleted, Stage: presentation.StageCleanup,
+	})
+	m = next.(LifecycleModel)
+	next, _ = m.Update(presentation.RichLifecycleEvent{
+		Kind: presentation.RichLifecycleCompleted, Stage: presentation.StageCleanup,
+	})
+	m = next.(LifecycleModel)
+	failed, message, recovery := m.Failed()
+	if !failed || message != "lifecycle completion arrived out of order" {
+		t.Fatalf("duplicate completion failure = (%v, %q)", failed, message)
+	}
+	if recovery != "" {
+		t.Fatalf("duplicate completion invented recovery %q", recovery)
+	}
+}
+
 func TestLifecycleSuccessDoesNotClaimCampReadiness(t *testing.T) {
 	m := newLifecycleTestModel(t, "sync")
 	for _, stage := range presentation.VisualLifecycleStages() {

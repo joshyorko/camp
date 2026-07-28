@@ -33,6 +33,7 @@ type LifecycleModel struct {
 	activity      string
 	failure       string
 	recovery      string
+	readyLine     string
 
 	pal       Palette
 	sprites   map[string]Sprite
@@ -192,6 +193,12 @@ func (m LifecycleModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 func (m LifecycleModel) apply(event presentation.RichLifecycleEvent) (tea.Model, tea.Cmd) {
 	switch event.Kind {
+	case presentation.RichLifecycleResumed:
+		if m.hasProgress() || !m.selectSuffix(event.Stage) {
+			m.protocolFailure("lifecycle resume arrived out of order")
+			return m, nil
+		}
+		return m, m.listen()
 	case presentation.RichLifecycleActivity:
 		if !m.activate(event.Stage) {
 			m.protocolFailure("lifecycle activity arrived out of order")
@@ -208,6 +215,13 @@ func (m LifecycleModel) apply(event presentation.RichLifecycleEvent) (tea.Model,
 		return m, m.listen()
 	case presentation.RichLifecycleSucceeded:
 		m.activity = ""
+		if !m.hasProgress() && event.Message != "" {
+			m.stages = nil
+			m.states = map[presentation.LifecycleStage]WaypointState{}
+			m.readyLine = SafeText(event.Message, "")
+			m.phase = PhaseReady
+			return m, nil
+		}
 		if !m.completeSequence() {
 			m.protocolFailure("lifecycle success arrived before required stages completed")
 			return m, nil
@@ -216,7 +230,8 @@ func (m LifecycleModel) apply(event presentation.RichLifecycleEvent) (tea.Model,
 		return m, nil
 	case presentation.RichLifecycleFailed:
 		m.activity = ""
-		if !m.isExpected(event.Stage) {
+		terminalFailure := m.completeSequence() && len(m.stages) > 0 && event.Stage == m.stages[len(m.stages)-1]
+		if !m.isExpected(event.Stage) && !terminalFailure {
 			m.protocolFailure("lifecycle failure arrived out of order")
 			return m, nil
 		}
@@ -225,9 +240,38 @@ func (m LifecycleModel) apply(event presentation.RichLifecycleEvent) (tea.Model,
 		m.recovery = SafeText(event.RecoveryCommand, "")
 		m.phase = PhaseFailed
 		return m, nil
+	case presentation.RichLifecycleTerminalFailed:
+		m.activity = ""
+		if !m.completeSequence() {
+			m.protocolFailure("terminal lifecycle failure arrived before required stages completed")
+			return m, nil
+		}
+		m.failure = SafeText(event.Message, "lifecycle failed")
+		m.recovery = SafeText(event.RecoveryCommand, "")
+		m.phase = PhaseFailed
+		return m, nil
 	default:
 		return m, m.listen()
 	}
+}
+
+func (m *LifecycleModel) selectSuffix(stage presentation.LifecycleStage) bool {
+	for i, candidate := range m.stages {
+		if candidate == stage {
+			m.stages = append([]presentation.LifecycleStage(nil), m.stages[i:]...)
+			return true
+		}
+	}
+	return false
+}
+
+func (m LifecycleModel) hasProgress() bool {
+	for _, state := range m.states {
+		if state == WaypointActive || state == WaypointCompleted || state == WaypointFailed {
+			return true
+		}
+	}
+	return false
 }
 
 func (m *LifecycleModel) activate(stage presentation.LifecycleStage) bool {
@@ -319,7 +363,7 @@ func (m LifecycleModel) sceneData() SceneData {
 	case PhaseReady:
 		data.Ready = true
 		data.ReadyTitle = "LIFECYCLE COMPLETE"
-		data.ReadyLine = SafeText(m.workflow.ReadyLine, "")
+		data.ReadyLine = SafeText(m.readyLine, SafeText(m.workflow.ReadyLine, ""))
 		data.NextCommand = SafeText(m.workflow.NextCommand, "")
 	case PhaseFailed:
 		data.Failure = m.failure
