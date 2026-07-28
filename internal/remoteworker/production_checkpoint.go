@@ -41,6 +41,7 @@ type productionCheckpointRuntime struct {
 	outputRoot      string
 	storeRoot       string
 	rootReference   string
+	barrierLock     *os.File
 }
 
 func newProductionCheckpointRuntime() *productionCheckpointRuntime {
@@ -179,7 +180,12 @@ func (runtimeState *productionCheckpointRuntime) Quiesce(ctx context.Context, re
 	if err != nil {
 		return ServiceCheckpointEvidence{}, err
 	}
-	defer unlockRemoteServices(lock)
+	keepLock := false
+	defer func() {
+		if !keepLock {
+			unlockRemoteServices(lock)
+		}
+	}()
 	runtimeState.serviceStore, err = journal.NewStore(filepath.Join(serviceRoot, "journal"))
 	if err != nil {
 		return ServiceCheckpointEvidence{}, err
@@ -216,9 +222,21 @@ func (runtimeState *productionCheckpointRuntime) Quiesce(ctx context.Context, re
 		return ServiceCheckpointEvidence{}, err
 	}
 	digest := sha256.Sum256(canonical)
+	runtimeState.barrierLock = lock
+	keepLock = true
 	return ServiceCheckpointEvidence{
 		Token: hex.EncodeToString(digest[:]), Services: append([]domain.ServiceUnitRecord(nil), runtimeState.serviceSnapshot.Services...),
 	}, nil
+}
+
+func (runtimeState *productionCheckpointRuntime) ReleaseBarrier(_ context.Context, _ Request, evidence ServiceCheckpointEvidence) error {
+	if evidence.Token == "" || runtimeState.barrierLock == nil {
+		return errors.New("remote checkpoint registry write barrier is not held")
+	}
+	lock := runtimeState.barrierLock
+	runtimeState.barrierLock = nil
+	unlockRemoteServices(lock)
+	return nil
 }
 
 type checkpointCutBarrier struct{}

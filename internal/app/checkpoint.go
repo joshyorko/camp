@@ -140,6 +140,9 @@ func (p *CheckpointPublisher) Publish(ctx context.Context, operation ports.Opera
 		if p.remoteKit == nil {
 			return CheckpointResult{}, errors.New("remote Hauler checkpoint preparer is unavailable")
 		}
+		if err := p.revalidateRemotePointer(ctx, snapshot); err != nil {
+			return CheckpointResult{}, err
+		}
 		if operation.Owner.Operation != "sync" && operation.Owner.Operation != "close" {
 			return CheckpointResult{}, errors.New("remote Hauler checkpoint requires sync or close ownership")
 		}
@@ -288,6 +291,35 @@ func (p *CheckpointPublisher) Publish(ctx context.Context, operation ports.Opera
 		return result, err
 	}
 	return p.commitPointerAndRefresh(ctx, snapshot, result, next, pointerIntent, cutRoot, built.Artifact.Path, now, nil)
+}
+
+func (p *CheckpointPublisher) revalidateRemotePointer(ctx context.Context, snapshot domain.JournalSnapshot) error {
+	if p.pointers == nil {
+		return errors.New("remote checkpoint pointer repository is unavailable")
+	}
+	live, err := p.pointers.Read(ctx, snapshot.Capsule, snapshot.Lineage)
+	if snapshot.CurrentPointer == nil {
+		if errors.Is(err, os.ErrNotExist) || errors.Is(err, ports.ErrNotFound) {
+			if snapshot.ExpectedPointerRevision != "" || snapshot.CurrentBase != nil {
+				return errors.New("remote checkpoint recorded a partial missing pointer baseline")
+			}
+			return nil
+		}
+		if err != nil {
+			return fmt.Errorf("revalidate missing remote checkpoint pointer: %w", err)
+		}
+		return coordination.ErrPointerChanged
+	}
+	if err != nil {
+		return fmt.Errorf("revalidate remote checkpoint pointer: %w", err)
+	}
+	if snapshot.ExpectedPointerRevision == "" || string(live.Revision) != snapshot.ExpectedPointerRevision ||
+		!reflect.DeepEqual(live.Pointer, *snapshot.CurrentPointer) ||
+		snapshot.CurrentBase == nil || live.Pointer.Generation != *snapshot.CurrentBase ||
+		live.Pointer.Capsule != snapshot.Capsule || live.Pointer.Lineage != snapshot.Lineage {
+		return coordination.ErrPointerChanged
+	}
+	return nil
 }
 
 func (p *CheckpointPublisher) resumePendingUpload(ctx context.Context, snapshot domain.JournalSnapshot, intent ports.IntentRecord, generation uint64, now time.Time) (CheckpointResult, error) {

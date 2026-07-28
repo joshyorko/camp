@@ -6,9 +6,9 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
 	"path/filepath"
 	"strconv"
+	"sync"
 
 	devpodadapter "github.com/joshyorko/camp/internal/adapters/devpod"
 	"github.com/joshyorko/camp/internal/domain"
@@ -43,6 +43,54 @@ type DevPodRemoteCheckpointExecutor struct {
 	devpod remoteCheckpointSSH
 }
 
+type boundedRemoteWriter struct {
+	mu       sync.Mutex
+	body     []byte
+	limit    int
+	overflow bool
+}
+
+func newBoundedRemoteWriter(limit int) *boundedRemoteWriter {
+	return &boundedRemoteWriter{limit: limit}
+}
+
+func (writer *boundedRemoteWriter) Write(body []byte) (int, error) {
+	writer.mu.Lock()
+	defer writer.mu.Unlock()
+	remaining := writer.limit - len(writer.body)
+	if remaining > 0 {
+		if remaining > len(body) {
+			remaining = len(body)
+		}
+		writer.body = append(writer.body, body[:remaining]...)
+	}
+	if len(body) > remaining {
+		writer.overflow = true
+	}
+	return len(body), nil
+}
+
+func (writer *boundedRemoteWriter) Bytes() []byte {
+	writer.mu.Lock()
+	defer writer.mu.Unlock()
+	return append([]byte(nil), writer.body...)
+}
+
+func (writer *boundedRemoteWriter) Overflowed() bool {
+	writer.mu.Lock()
+	defer writer.mu.Unlock()
+	return writer.overflow
+}
+
+type RemoteCheckpointWorkerError struct {
+	Code       string
+	Diagnostic string
+}
+
+func (err *RemoteCheckpointWorkerError) Error() string {
+	return "remote checkpoint worker failed: " + err.Code + ": " + err.Diagnostic
+}
+
 func NewDevPodRemoteCheckpointExecutor(devpod remoteCheckpointSSH) *DevPodRemoteCheckpointExecutor {
 	return &DevPodRemoteCheckpointExecutor{devpod: devpod}
 }
@@ -75,25 +123,30 @@ func (e *DevPodRemoteCheckpointExecutor) Prepare(ctx context.Context, request Re
 	if err != nil {
 		return remoteworker.CheckpointReceipt{}, err
 	}
-	var stdout, stderr bytes.Buffer
+	stdout := newBoundedRemoteWriter(remoteworker.DiagnosticLimit)
+	stderr := newBoundedRemoteWriter(4 << 10)
 	result, runErr := e.devpod.SSH(ctx, devpodadapter.SSHOptions{
 		WorkspaceID: request.WorkspaceID, Context: request.Context, StartServices: false,
 		ForwardedArgv: []string{"--command", ".camp-bootstrap/camp-bootstrap __remote-worker"},
-		Stdin:         bytes.NewReader(body), Stdout: &stdout, Stderr: &stderr,
+		Stdin:         bytes.NewReader(body), Stdout: stdout, Stderr: stderr,
 	})
+	if stdout.Overflowed() {
+		return remoteworker.CheckpointReceipt{}, errors.New("remote checkpoint worker response exceeded the protocol limit")
+	}
 	if runErr != nil || result.ExitCode != 0 {
-		return remoteworker.CheckpointReceipt{}, fmt.Errorf("run remote checkpoint worker: %w: %s", runErr, boundedRemoteDiagnostic(stderr.Bytes()))
+		if envelope, err := decodeRemoteCheckpointEnvelope(stdout.Bytes()); err == nil {
+			var remoteError remoteworker.ErrorReceipt
+			if json.Unmarshal(envelope.Receipt, &remoteError) == nil && remoteError.Status == "error" && remoteError.Code != "" {
+				return remoteworker.CheckpointReceipt{}, &RemoteCheckpointWorkerError{
+					Code: remoteError.Code, Diagnostic: remoteError.Diagnostic,
+				}
+			}
+		}
+		return remoteworker.CheckpointReceipt{}, fmt.Errorf("run remote checkpoint worker: %w: %s", runErr, string(stderr.Bytes()))
 	}
-	var envelope remoteworker.Result
-	decoder := json.NewDecoder(io.LimitReader(&stdout, remoteworker.DiagnosticLimit+1))
-	decoder.DisallowUnknownFields()
-	if err := decoder.Decode(&envelope); err != nil || envelope.SchemaVersion != remoteworker.ProtocolSchemaVersion ||
-		envelope.Operation != remoteworker.OperationCheckpoint {
-		return remoteworker.CheckpointReceipt{}, errors.New("remote checkpoint worker returned an invalid envelope")
-	}
-	var trailing any
-	if err := decoder.Decode(&trailing); !errors.Is(err, io.EOF) {
-		return remoteworker.CheckpointReceipt{}, errors.New("remote checkpoint worker returned trailing output")
+	envelope, err := decodeRemoteCheckpointEnvelope(stdout.Bytes())
+	if err != nil {
+		return remoteworker.CheckpointReceipt{}, err
 	}
 	var receipt remoteworker.CheckpointReceipt
 	if err := json.Unmarshal(envelope.Receipt, &receipt); err != nil {
@@ -102,11 +155,21 @@ func (e *DevPodRemoteCheckpointExecutor) Prepare(ctx context.Context, request Re
 	return receipt, nil
 }
 
-func boundedRemoteDiagnostic(body []byte) string {
-	if len(body) > 4<<10 {
-		body = body[:4<<10]
+func decodeRemoteCheckpointEnvelope(body []byte) (remoteworker.Result, error) {
+	var envelope remoteworker.Result
+	if len(body) == 0 || body[len(body)-1] != '\n' {
+		return envelope, errors.New("remote checkpoint worker returned an invalid envelope")
 	}
-	return string(body)
+	if err := json.Unmarshal(body[:len(body)-1], &envelope); err != nil ||
+		envelope.SchemaVersion != remoteworker.ProtocolSchemaVersion ||
+		envelope.Operation != remoteworker.OperationCheckpoint {
+		return remoteworker.Result{}, errors.New("remote checkpoint worker returned an invalid envelope")
+	}
+	canonical, err := json.Marshal(envelope)
+	if err != nil || !bytes.Equal(body, append(canonical, '\n')) {
+		return remoteworker.Result{}, errors.New("remote checkpoint worker returned trailing or non-canonical output")
+	}
+	return envelope, nil
 }
 
 type RemoteCheckpointPreparer struct {

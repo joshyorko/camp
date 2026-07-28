@@ -1,10 +1,10 @@
 package app
 
 import (
-	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
+	"strings"
 	"testing"
 
 	devpodadapter "github.com/joshyorko/camp/internal/adapters/devpod"
@@ -23,12 +23,19 @@ type fakeRemoteCheckpointSSH struct {
 	options devpodadapter.SSHOptions
 	result  ports.Result
 	err     error
+	chunks  [][]byte
 }
 
 func (f *fakeRemoteCheckpointSSH) SSH(_ context.Context, options devpodadapter.SSHOptions) (ports.Result, error) {
 	f.options = options
 	if options.Stdout != nil {
-		_, _ = options.Stdout.Write(f.result.Stdout)
+		if len(f.chunks) == 0 {
+			_, _ = options.Stdout.Write(f.result.Stdout)
+		} else {
+			for _, chunk := range f.chunks {
+				_, _ = options.Stdout.Write(chunk)
+			}
+		}
 	}
 	if options.Stderr != nil {
 		_, _ = options.Stderr.Write(f.result.Stderr)
@@ -71,6 +78,7 @@ func TestDevPodRemoteCheckpointExecutorUsesStrictWorkerEnvelope(t *testing.T) {
 		SchemaVersion: remoteworker.ProtocolSchemaVersion, Operation: remoteworker.OperationCheckpoint,
 		Receipt: receiptBody,
 	})
+	envelope = append(envelope, '\n')
 	ssh := &fakeRemoteCheckpointSSH{result: ports.Result{Stdout: envelope}}
 	executor := NewDevPodRemoteCheckpointExecutor(ssh)
 	got, err := executor.Prepare(context.Background(), RemoteCheckpointRequest{
@@ -96,8 +104,52 @@ func TestDevPodRemoteCheckpointExecutorUsesStrictWorkerEnvelope(t *testing.T) {
 		request.Expected.Helper.SHA256 != record.HelperSHA256 {
 		t.Fatalf("request = %#v", request)
 	}
-	if _, ok := ssh.options.Stdout.(*bytes.Buffer); !ok {
+	if _, ok := ssh.options.Stdout.(*boundedRemoteWriter); !ok {
 		t.Fatal("executor did not capture the strict response envelope")
+	}
+}
+
+func TestDevPodRemoteCheckpointExecutorBoundsStreamingOutputAndRejectsTrailingBytes(t *testing.T) {
+	valid := remoteCheckpointEnvelope(t, "")
+	tests := []struct {
+		name    string
+		body    []byte
+		chunks  [][]byte
+		wantErr bool
+	}{
+		{name: "streamed", chunks: oneByteChunks(valid)},
+		{name: "trailing whitespace", body: append(append([]byte(nil), valid...), ' '), wantErr: true},
+		{name: "oversized", chunks: repeatedChunks(remoteworker.DiagnosticLimit + 1), wantErr: true},
+		{name: "exact limit", body: remoteCheckpointEnvelopeAtSize(t, remoteworker.DiagnosticLimit)},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			ssh := &fakeRemoteCheckpointSSH{result: ports.Result{Stdout: test.body}, chunks: test.chunks}
+			_, err := NewDevPodRemoteCheckpointExecutor(ssh).Prepare(context.Background(), remoteCheckpointExecutorRequest())
+			if (err != nil) != test.wantErr {
+				t.Fatalf("error = %v", err)
+			}
+			if writer, ok := ssh.options.Stdout.(*boundedRemoteWriter); ok && len(writer.Bytes()) > remoteworker.DiagnosticLimit {
+				t.Fatalf("captured %d bytes", len(writer.Bytes()))
+			}
+		})
+	}
+}
+
+func TestDevPodRemoteCheckpointExecutorReturnsTypedBoundedRemoteError(t *testing.T) {
+	receipt, _ := json.Marshal(remoteworker.ErrorReceipt{Status: "error", Code: "identity_mismatch", Diagnostic: "drift"})
+	body, _ := json.Marshal(remoteworker.Result{
+		SchemaVersion: remoteworker.ProtocolSchemaVersion, Operation: remoteworker.OperationCheckpoint, Receipt: receipt,
+	})
+	body = append(body, '\n')
+	ssh := &fakeRemoteCheckpointSSH{result: ports.Result{ExitCode: 1, Stdout: body, Stderr: make([]byte, 8<<10)}}
+	_, err := NewDevPodRemoteCheckpointExecutor(ssh).Prepare(context.Background(), remoteCheckpointExecutorRequest())
+	var remoteErr *RemoteCheckpointWorkerError
+	if !errors.As(err, &remoteErr) || remoteErr.Code != "identity_mismatch" {
+		t.Fatalf("error = %v", err)
+	}
+	if writer := ssh.options.Stderr.(*boundedRemoteWriter); len(writer.Bytes()) != 4<<10 || !writer.Overflowed() {
+		t.Fatalf("stderr bytes=%d overflow=%v", len(writer.Bytes()), writer.Overflowed())
 	}
 }
 
@@ -165,4 +217,76 @@ func testAppSHA(value string) string {
 		value + value + value + value + value + value + value + value +
 		value + value + value + value + value + value + value + value +
 		value + value + value + value + value + value + value + value
+}
+
+func remoteCheckpointExecutorRequest() RemoteCheckpointRequest {
+	snapshot := remoteCheckpointSnapshot()
+	record := *snapshot.Recovery.RemoteDataPlane
+	return RemoteCheckpointRequest{
+		SessionID: snapshot.SessionID, AttemptID: "session-1-checkpoint-1", Capsule: snapshot.Capsule,
+		Lineage: snapshot.Lineage, Generation: 1, WorkspaceID: snapshot.Workspace.ID,
+		Context: snapshot.Workspace.Context, WorkspaceRoot: record.WorkspaceRoot,
+		RuntimeRoot: record.RuntimeRoot, ManifestPath: record.ManifestPath, DataPlane: record,
+	}
+}
+
+func remoteCheckpointEnvelope(t *testing.T, pad string) []byte {
+	t.Helper()
+	receipt, err := json.Marshal(struct {
+		SchemaVersion uint32 `json:"schemaVersion"`
+		Status        string `json:"status"`
+		SessionID     string `json:"sessionId"`
+		AttemptID     string `json:"attemptId"`
+		Pad           string `json:"pad,omitempty"`
+	}{remoteworker.ProtocolSchemaVersion, "prepared", "session-1", "session-1-checkpoint-1", pad})
+	if err != nil {
+		t.Fatal(err)
+	}
+	body, err := json.Marshal(remoteworker.Result{
+		SchemaVersion: remoteworker.ProtocolSchemaVersion, Operation: remoteworker.OperationCheckpoint, Receipt: receipt,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return append(body, '\n')
+}
+
+func remoteCheckpointEnvelopeAtSize(t *testing.T, size int) []byte {
+	t.Helper()
+	base := remoteCheckpointEnvelope(t, "")
+	padding := size - len(base) - len(`,"pad":""`)
+	if padding < 0 {
+		t.Fatal("target is smaller than the envelope")
+	}
+	for {
+		body := remoteCheckpointEnvelope(t, strings.Repeat("a", padding))
+		if len(body) == size {
+			return body
+		}
+		padding += size - len(body)
+		if padding < 0 {
+			t.Fatal("could not size envelope")
+		}
+	}
+}
+
+func oneByteChunks(body []byte) [][]byte {
+	chunks := make([][]byte, len(body))
+	for index := range body {
+		chunks[index] = body[index : index+1]
+	}
+	return chunks
+}
+
+func repeatedChunks(size int) [][]byte {
+	chunks := make([][]byte, 0, size/257+1)
+	for size > 0 {
+		count := 257
+		if size < count {
+			count = size
+		}
+		chunks = append(chunks, []byte(strings.Repeat("x", count)))
+		size -= count
+	}
+	return chunks
 }

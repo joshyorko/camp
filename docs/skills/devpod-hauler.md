@@ -116,8 +116,9 @@ Do not use Hauler v2.0.2's live `_catalog` response as proof that all direct reg
   accepts one schema-v1 JSON request with strict unknown-field, recursively
   duplicate-key, operation,
   absolute-path, immutable-image, architecture, and helper/kit/manifest
-  identity validation. `activateImage` and `hydrate` are implemented; Task 7
-  service operations remain typed `unsupported`. The bootstrap carries the
+  identity validation. `activateImage`, `hydrate`, `startServices`, and
+  `checkpoint` are implemented; other unimplemented mutation operations remain
+  typed `unsupported`. The bootstrap carries the
   canonical manifest as a seventh descriptor-verified file so provider-side
   activation and container-side hydration can independently verify the uploaded
   archive. `probe` verifies the running helper plus adjacent kit
@@ -219,6 +220,15 @@ Do not use Hauler v2.0.2's live `_catalog` response as proof that all direct reg
   or exposes a second logical Kit. Host download, permanent `hauler store save`, upload,
   pointer CAS, and acknowledgement are separate inbound-publication work and
   must not be inferred from `remotePrepared`.
+- Before remote mutation the host re-reads the authoritative latest pointer
+  after writer-lease revalidation and requires exact equality with the
+  journaled pointer, revision, generation, capsule, and lineage; both an
+  unexpected pointer and a missing recorded pointer fail before DevPod
+  execution. On the remote side the exclusive service lock is retained after
+  exact service quiescence and through registry-cut creation plus tagged-image
+  inventory. The lock is released only at that explicit immutable handoff and
+  is released with cancellation removed on every failure path, so a concurrent
+  service start or restore cannot interleave with the write barrier or cut.
 - Logical mirror attempts increase durably across every sync and final close; attempt-scoped journal IDs must not repeat within a session. The remote transport requires the persisted request workspace ID and DevPod context to exactly match its composition identity, then uses the persisted values for root resolution and transfer commands. Mismatch fails before resolution or staging.
 - Transfer command environment overrides replace inherited keys and remain deterministically ordered. Outcome-unknown errors are safe to format and unwrap even through a typed-nil pointer. Missing tar fallback is transport unavailability, not evidence that the persisted workspace is non-remote.
 - Tar fallback streams producer stdout exclusively into the consumer pipe; archive bytes are never diagnostic output. Captured stdout/stderr diagnostics are capped at 64 KiB per process. Start the producer before the staging-mutating consumer so a producer start failure is a not-started attempt with no consumer mutation; retain staging only after evidence that the consumer may have started mutating it.

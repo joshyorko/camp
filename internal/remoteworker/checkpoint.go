@@ -38,6 +38,7 @@ type checkpointRuntime interface {
 	Verify(context.Context, Request) error
 	Observe(context.Context, Request) (CheckpointReceipt, bool, error)
 	Quiesce(context.Context, Request) (ServiceCheckpointEvidence, error)
+	ReleaseBarrier(context.Context, Request, ServiceCheckpointEvidence) error
 	CutRegistry(context.Context, Request, ServiceCheckpointEvidence) (registry.Snapshot, error)
 	Inventory(context.Context, Request, registry.Snapshot) (domain.ImageInventory, error)
 	ArchiveRoot(context.Context, Request, registry.Snapshot) (archiveadapter.ArchiveInfo, error)
@@ -47,7 +48,7 @@ type checkpointRuntime interface {
 	Resume(context.Context, Request, ServiceCheckpointEvidence) error
 }
 
-func checkpoint(ctx context.Context, request Request, runtime checkpointRuntime) (CheckpointReceipt, error) {
+func checkpoint(ctx context.Context, request Request, runtime checkpointRuntime) (result CheckpointReceipt, resultErr error) {
 	if runtime == nil || request.Checkpoint == nil {
 		return CheckpointReceipt{}, errors.New("remote checkpoint dependencies or request are incomplete")
 	}
@@ -74,6 +75,12 @@ func checkpoint(ctx context.Context, request Request, runtime checkpointRuntime)
 	if services.Token == "" || len(services.Services) != 2 {
 		return CheckpointReceipt{}, errors.New("remote checkpoint service evidence is incomplete")
 	}
+	barrierHeld := true
+	defer func() {
+		if barrierHeld {
+			resultErr = errors.Join(resultErr, runtime.ReleaseBarrier(context.WithoutCancel(ctx), request, services))
+		}
+	}()
 	cut, err := runtime.CutRegistry(ctx, request, services)
 	if err != nil {
 		return CheckpointReceipt{}, fmt.Errorf("create immutable remote registry cut: %w", err)
@@ -82,6 +89,10 @@ func checkpoint(ctx context.Context, request Request, runtime checkpointRuntime)
 	if err != nil {
 		return CheckpointReceipt{}, fmt.Errorf("inventory remote tagged images: %w", err)
 	}
+	if err := runtime.ReleaseBarrier(context.WithoutCancel(ctx), request, services); err != nil {
+		return CheckpointReceipt{}, fmt.Errorf("release remote registry write barrier: %w", err)
+	}
+	barrierHeld = false
 	root, err := runtime.ArchiveRoot(ctx, request, cut)
 	if err != nil {
 		return CheckpointReceipt{}, fmt.Errorf("archive remote workspace root: %w", err)

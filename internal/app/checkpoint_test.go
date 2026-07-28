@@ -10,6 +10,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -212,11 +213,103 @@ type fakeRemoteCheckpointPreparer struct {
 	generation uint64
 	close      bool
 	receipt    remoteworker.CheckpointReceipt
+	calls      int
 }
 
 func (f *fakeRemoteCheckpointPreparer) Prepare(_ context.Context, snapshot domain.JournalSnapshot, generation uint64, close bool) (remoteworker.CheckpointReceipt, error) {
+	f.calls++
 	f.snapshot, f.generation, f.close = snapshot, generation, close
 	return f.receipt, nil
+}
+
+func TestRemoteCheckpointRevalidatesExactLivePointerBeforeExecutor(t *testing.T) {
+	for _, test := range []struct {
+		name        string
+		recorded    *domain.LatestPointer
+		recordedRev string
+		live        *domain.LatestPointer
+		wantErr     bool
+		wantCalls   int
+	}{
+		{name: "missing baseline remains missing", wantCalls: 1},
+		{name: "unexpected live pointer", live: testRemotePointer(1), wantErr: true},
+		{name: "recorded pointer missing", recorded: testRemotePointer(1), recordedRev: "missing-r1", wantErr: true},
+		{name: "pointer revision drift", recorded: testRemotePointer(1), live: testRemotePointer(1), recordedRev: "wrong-r1", wantErr: true},
+		{name: "pointer generation drift", recorded: testRemotePointer(1), live: testRemotePointer(2), recordedRev: "wrong", wantErr: true},
+		{name: "exact pointer", recorded: testRemotePointer(1), live: testRemotePointer(1), wantCalls: 1},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			now := time.Unix(100, 0).UTC()
+			sandbox := t.TempDir()
+			snapshot := remoteCheckpointSnapshot()
+			lease := domain.WriterLease{
+				SchemaVersion: domain.SchemaVersion, SessionID: snapshot.SessionID, Capsule: snapshot.Capsule,
+				Lineage: snapshot.Lineage, Machine: "machine", CreatedAt: now, HeartbeatAt: now, ExpiresAt: now.Add(time.Minute),
+			}
+			snapshot.Mode, snapshot.State = domain.SessionReadWrite, domain.SessionOpen
+			snapshot.Lease = domain.LeaseRecord{Lease: &lease, Revision: "lease-r1"}
+			snapshot.CurrentPointer = test.recorded
+			snapshot.ExpectedPointerRevision = test.recordedRev
+			if test.recorded != nil {
+				generation := test.recorded.Generation
+				snapshot.CurrentBase = &generation
+			}
+			backend, _ := filebackend.New(filepath.Join(sandbox, "backend"))
+			pointers := coordination.NewPointerRepository(backend)
+			if test.live != nil {
+				record, err := pointers.Create(context.Background(), *test.live)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if test.recorded != nil && test.recordedRev == "" {
+					snapshot.ExpectedPointerRevision = string(record.Revision)
+				}
+				if test.recorded != nil && test.recordedRev == "" && reflect.DeepEqual(test.recorded, test.live) {
+					snapshot.ExpectedPointerRevision = string(record.Revision)
+				}
+			}
+			log, _ := journal.NewStore(filepath.Join(sandbox, "journal"))
+			if err := log.Create(context.Background(), snapshot); err != nil {
+				t.Fatal(err)
+			}
+			remote := &fakeRemoteCheckpointPreparer{receipt: remoteworker.CheckpointReceipt{
+				SchemaVersion: remoteworker.ProtocolSchemaVersion, Status: "prepared",
+				SessionID: snapshot.SessionID, AttemptID: snapshot.SessionID + "-checkpoint-" + strconv.FormatUint(nextCheckpointGeneration(snapshot), 10),
+			}}
+			publisher := NewCheckpointPublisher(
+				log, &fakeLockValidator{}, &fakeLeaseValidator{}, CheckpointTransports{RemoteKit: remote},
+				newCheckpointFakes(now).pipeline(), &fakeCheckpointBuilder{},
+				coordination.NewGenerationRepository(backend), pointers, fixedAppClock{now: now},
+			)
+			_, err := publisher.Publish(context.Background(), ports.OperationToken{
+				ID: "lock", Owner: ports.OperationOwner{SessionID: snapshot.SessionID, Operation: "sync"},
+			}, snapshot.SessionID)
+			if (err != nil) != test.wantErr || remote.calls != test.wantCalls {
+				t.Fatalf("error=%v calls=%d", err, remote.calls)
+			}
+		})
+	}
+}
+
+func testRemotePointer(generation uint64) *domain.LatestPointer {
+	digit := "a"
+	if generation%2 == 0 {
+		digit = "b"
+	}
+	ref := domain.GenerationRef{Generation: generation, ArchiveSHA256: strings.Repeat(digit, 64)}
+	objectKey, _ := coordination.GenerationObjectKey("brain", domain.Lineage{Branch: "main"}, ref)
+	return &domain.LatestPointer{
+		SchemaVersion: domain.SchemaVersion, Capsule: "brain", Lineage: domain.Lineage{Branch: "main"},
+		Generation: ref, ObjectKey: objectKey,
+		Size: 1, CreatedAt: time.Unix(50, 0).UTC(), SessionID: "prior",
+	}
+}
+
+func nextCheckpointGeneration(snapshot domain.JournalSnapshot) uint64 {
+	if snapshot.CurrentBase == nil {
+		return 1
+	}
+	return snapshot.CurrentBase.Generation + 1
 }
 
 func TestCheckpointPublisherUsesRemoteKitPreparationWithoutLegacyMirror(t *testing.T) {

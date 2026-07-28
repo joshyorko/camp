@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"reflect"
 	"testing"
+	"time"
 
 	archiveadapter "github.com/joshyorko/camp/internal/adapters/archive"
 	"github.com/joshyorko/camp/internal/domain"
@@ -42,6 +43,10 @@ func (f *fakeCheckpointRuntime) Observe(context.Context, Request) (CheckpointRec
 
 func (f *fakeCheckpointRuntime) Quiesce(context.Context, Request) (ServiceCheckpointEvidence, error) {
 	return ServiceCheckpointEvidence{Token: "services-cut", Services: []domain.ServiceUnitRecord{{Name: "registry"}, {Name: "fileserver"}}}, f.call("quiesce")
+}
+
+func (f *fakeCheckpointRuntime) ReleaseBarrier(context.Context, Request, ServiceCheckpointEvidence) error {
+	return f.call("release")
 }
 
 func (f *fakeCheckpointRuntime) CutRegistry(context.Context, Request, ServiceCheckpointEvidence) (registry.Snapshot, error) {
@@ -86,7 +91,7 @@ func TestCheckpointPreparesOneImmutableAllowListedKitInOrder(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	wantEvents := []string{"verify", "observe", "quiesce", "cut", "inventory", "archive", "store", "kit", "publish", "resume"}
+	wantEvents := []string{"verify", "observe", "quiesce", "cut", "inventory", "release", "archive", "store", "kit", "publish", "resume"}
 	if !reflect.DeepEqual(runtime.events, wantEvents) {
 		t.Fatalf("events = %#v", runtime.events)
 	}
@@ -108,10 +113,10 @@ func TestCheckpointCloseKeepsExactServicesQuiesced(t *testing.T) {
 	if _, err := checkpoint(context.Background(), checkpointRequest(true), runtime); err != nil {
 		t.Fatal(err)
 	}
-	if reflect.DeepEqual(runtime.events, []string{"verify", "observe", "quiesce", "cut", "inventory", "archive", "store", "kit", "publish", "resume"}) {
+	if reflect.DeepEqual(runtime.events, []string{"verify", "observe", "quiesce", "cut", "inventory", "release", "archive", "store", "kit", "publish", "resume"}) {
 		t.Fatal("close resumed services")
 	}
-	want := []string{"verify", "observe", "quiesce", "cut", "inventory", "archive", "store", "kit", "publish"}
+	want := []string{"verify", "observe", "quiesce", "cut", "inventory", "release", "archive", "store", "kit", "publish"}
 	if !reflect.DeepEqual(runtime.events, want) {
 		t.Fatalf("events = %#v", runtime.events)
 	}
@@ -122,9 +127,56 @@ func TestCheckpointFailureAfterBarrierNeverResumesOrPublishes(t *testing.T) {
 	if _, err := checkpoint(context.Background(), checkpointRequest(false), runtime); err == nil {
 		t.Fatal("expected error")
 	}
-	want := []string{"verify", "observe", "quiesce", "cut", "inventory", "archive", "store"}
+	want := []string{"verify", "observe", "quiesce", "cut", "inventory", "release", "archive", "store"}
 	if !reflect.DeepEqual(runtime.events, want) {
 		t.Fatalf("events = %#v", runtime.events)
+	}
+}
+
+func TestCheckpointReleasesBarrierOnCutAndInventoryFailure(t *testing.T) {
+	for _, stage := range []string{"cut", "inventory"} {
+		runtime := &fakeCheckpointRuntime{errAt: stage}
+		if _, err := checkpoint(context.Background(), checkpointRequest(false), runtime); err == nil {
+			t.Fatalf("%s failure was accepted", stage)
+		}
+		if runtime.events[len(runtime.events)-1] != "release" {
+			t.Fatalf("%s events = %#v", stage, runtime.events)
+		}
+	}
+}
+
+func TestRemoteServiceStartLockBlocksUntilCheckpointCutAuthorityReleases(t *testing.T) {
+	root := t.TempDir()
+	first, err := lockRemoteServices(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	acquired := make(chan *os.File, 1)
+	failed := make(chan error, 1)
+	go func() {
+		lock, err := lockRemoteServices(root)
+		if err != nil {
+			failed <- err
+			return
+		}
+		acquired <- lock
+	}()
+	select {
+	case lock := <-acquired:
+		unlockRemoteServices(lock)
+		t.Fatal("concurrent service start acquired authority before cut release")
+	case err := <-failed:
+		t.Fatal(err)
+	case <-time.After(50 * time.Millisecond):
+	}
+	unlockRemoteServices(first)
+	select {
+	case lock := <-acquired:
+		unlockRemoteServices(lock)
+	case err := <-failed:
+		t.Fatal(err)
+	case <-time.After(time.Second):
+		t.Fatal("concurrent service start did not acquire authority after cut release")
 	}
 }
 
