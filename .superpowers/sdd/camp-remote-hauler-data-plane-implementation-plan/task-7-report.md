@@ -558,3 +558,75 @@ Documentation improvement:
   safely authorize deletion against adversarial same-UID replacement.
 - Remaining uncertainty: fresh pinned-provider Task 12 acceptance remains
   unchanged; no real DevPod/Hauler lifecycle gate ran in this redesign.
+
+## Unnamed staging follow-up 1
+
+Status: DONE
+
+### Result
+
+- Stable actor-evidence observation now returns the observed bytes together
+  with the no-follow named identity: device, inode, size, mode, and link count.
+  It also requires mode and link count to remain unchanged across the open-file
+  and still-named observations.
+- Existing-final confirmation retains the first stable identity instead of
+  discarding it. Before the durability barrier it requires exact bounded bytes,
+  a regular mode-0600 file, exact size, and link count one.
+- After parent fsync, confirmation performs a second stable observation and
+  requires the same first device and inode plus exact bytes and single-link
+  shape. An exact-byte replacement before the fsync or after the fsync but
+  before the second observation is preserved and rejected.
+- Hardlinked existing evidence is preserved and rejected. Exact single-link
+  replay remains idempotent.
+- Both initial existing-final replay and the `EEXIST` publication race pass the
+  retained first identity through the same confirmation helper. Fresh unnamed
+  staging and exact-FD publication behavior are unchanged.
+
+### TDD evidence
+
+- RED:
+  `TestServiceActorEvidenceExistingConfirmationRejectsExactByteInodeReplacementAcrossFsync`
+  accepted exact-byte replacement both between the first observation and
+  parent fsync and after fsync before the second observation.
+- RED:
+  `TestServiceActorEvidenceExistingConfirmationRejectsHardlinkedFinal`
+  accepted an existing final with link count two.
+- GREEN: both replacement boundaries now return `ErrServiceEvidence` while the
+  replacement inode remains canonical, and the hardlinked final is rejected
+  with both links preserved.
+- GREEN:
+  `TestServiceActorEvidenceExistingConfirmationAcceptsExactSingleLinkReplay`
+  proves unchanged exact single-link evidence remains idempotent.
+- GREEN: the existing `EEXIST` exact/different race coverage remains green
+  through the shared identity-linked confirmation path.
+
+### Verification
+
+- `rtk go test ./internal/remoteworker ./internal/adapters/supervisor
+  ./internal/adapters/hauler ./internal/capsule ./internal/app -count=1`
+  — passed.
+- `rtk go test -race ./internal/remoteworker -count=1` — passed.
+- `rtk go vet ./internal/remoteworker ./internal/adapters/supervisor
+  ./internal/adapters/hauler ./internal/capsule ./internal/app` — passed.
+- `rtk go build ./cmd/camp` — passed.
+- `rtk git diff --check` — passed.
+
+### Documentation improvement
+
+Documentation improvement:
+- Canonical file changed or proposed: `docs/skills/devpod-hauler.md`
+- Durable learning captured: existing actor evidence is authorized only when a
+  retained first stable device/inode and single-link private-file shape survive
+  the parent-fsync barrier and match a second stable exact-byte observation;
+  equal bytes alone are insufficient durability authority.
+- Evidence: `internal/remoteworker/actor_evidence.go`,
+  `TestServiceActorEvidenceExistingConfirmationRejectsExactByteInodeReplacementAcrossFsync`,
+  `TestServiceActorEvidenceExistingConfirmationRejectsHardlinkedFinal`,
+  `TestServiceActorEvidenceExistingConfirmationAcceptsExactSingleLinkReplay`,
+  the existing `EEXIST` race test, and the verification commands above.
+- Stale or ambiguous guidance removed: the guide no longer implies two
+  independent byte-equal observations authorize idempotent success; it now
+  requires identity continuity and link count one across the durability
+  barrier.
+- Remaining uncertainty: fresh pinned-provider Task 12 acceptance remains
+  unchanged; no real DevPod/Hauler lifecycle gate ran in this follow-up.

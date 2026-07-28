@@ -78,11 +78,11 @@ func publishServiceActorEvidenceWithOps(
 		return actorEvidenceError(err)
 	}
 	defer unix.Close(parentFD)
-	if existing, observeErr := observeServiceActorAt(parentFD, name, nil); observeErr == nil {
+	if existing, identity, observeErr := observeServiceActorAtIdentity(parentFD, name, nil); observeErr == nil {
 		if !bytes.Equal(existing, body) {
 			return actorEvidenceError(errors.New("existing actor evidence differs"))
 		}
-		return confirmExistingServiceActorEvidence(parentFD, name, body, ops)
+		return confirmExistingServiceActorEvidence(parentFD, name, body, identity, ops)
 	} else if !errors.Is(observeErr, syscall.ENOENT) {
 		return actorEvidenceError(observeErr)
 	}
@@ -126,9 +126,9 @@ func publishServiceActorEvidenceWithOps(
 	}
 	if err := publishServiceActorExactFD(parentFD, fd, name, ops); err != nil {
 		if errors.Is(err, syscall.EEXIST) {
-			existing, observeErr := observeServiceActorAt(parentFD, name, nil)
+			existing, identity, observeErr := observeServiceActorAtIdentity(parentFD, name, nil)
 			if observeErr == nil && bytes.Equal(existing, body) {
-				return confirmExistingServiceActorEvidence(parentFD, name, body, ops)
+				return confirmExistingServiceActorEvidence(parentFD, name, body, identity, ops)
 			}
 			return actorEvidenceError(errors.Join(err, observeErr))
 		}
@@ -155,16 +155,30 @@ func confirmExistingServiceActorEvidence(
 	parentFD int,
 	name string,
 	body []byte,
+	first unix.Stat_t,
 	ops serviceActorPublicationOps,
 ) error {
+	if !validExistingServiceActorEvidence(first, int64(len(body))) {
+		return actorEvidenceError(errors.New("existing actor evidence is not an exact single-link file"))
+	}
 	if err := ops.fsync(parentFD); err != nil {
 		return actorEvidenceError(err)
 	}
-	existing, err := observeServiceActorAt(parentFD, name, nil)
-	if err != nil || !bytes.Equal(existing, body) {
+	existing, second, err := observeServiceActorAtIdentity(parentFD, name, nil)
+	if err != nil || !bytes.Equal(existing, body) ||
+		!validExistingServiceActorEvidence(second, int64(len(body))) ||
+		first.Dev != second.Dev || first.Ino != second.Ino {
 		return actorEvidenceError(errors.Join(err, errors.New("existing actor evidence changed")))
 	}
 	return nil
+}
+
+func validExistingServiceActorEvidence(identity unix.Stat_t, size int64) bool {
+	return identity.Mode&unix.S_IFMT == unix.S_IFREG &&
+		identity.Mode&0o777 == 0o600 &&
+		identity.Size == size &&
+		size > 0 && size <= maxDiagnosticBytes &&
+		identity.Nlink == 1
 }
 
 func publishServiceActorExactFD(
@@ -327,6 +341,8 @@ func observeServiceActorAtIdentity(
 	}
 	if before.Dev != after.Dev || before.Ino != after.Ino || before.Size != after.Size ||
 		before.Dev != named.Dev || before.Ino != named.Ino || before.Size != named.Size ||
+		before.Mode != after.Mode || before.Mode != named.Mode ||
+		before.Nlink != after.Nlink || before.Nlink != named.Nlink ||
 		after.Mode&unix.S_IFMT != unix.S_IFREG || after.Mode&0o777 != 0o600 ||
 		named.Mode&unix.S_IFMT != unix.S_IFREG || named.Mode&0o777 != 0o600 {
 		return nil, unix.Stat_t{}, errors.New("actor evidence identity changed")

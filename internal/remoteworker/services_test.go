@@ -166,6 +166,93 @@ func TestServiceActorEvidenceRetryConfirmsParentDurability(t *testing.T) {
 	}
 }
 
+func TestServiceActorEvidenceExistingConfirmationRejectsExactByteInodeReplacementAcrossFsync(t *testing.T) {
+	for _, test := range []struct {
+		name          string
+		replaceBefore bool
+	}{
+		{"between first observation and parent fsync", true},
+		{"after parent fsync before second observation", false},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			root := t.TempDir()
+			path := filepath.Join(root, "actors.json")
+			actors := validServiceActorEvidence()
+			if err := publishServiceActorEvidence(path, actors); err != nil {
+				t.Fatal(err)
+			}
+			replacement := filepath.Join(root, "replacement.json")
+			if err := os.WriteFile(replacement, serviceActorEvidenceBody(actors), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			var replacementStat unix.Stat_t
+			if err := unix.Lstat(replacement, &replacementStat); err != nil {
+				t.Fatal(err)
+			}
+
+			ops := defaultServiceActorPublicationOps()
+			ops.fsync = func(parentFD int) error {
+				if test.replaceBefore {
+					if err := os.Rename(replacement, path); err != nil {
+						return err
+					}
+				}
+				if err := unix.Fsync(parentFD); err != nil {
+					return err
+				}
+				if !test.replaceBefore {
+					return os.Rename(replacement, path)
+				}
+				return nil
+			}
+			if err := publishServiceActorEvidenceWithOps(path, actors, ops); !errors.Is(err, ErrServiceEvidence) {
+				t.Fatalf("replacement confirmation error = %v", err)
+			}
+			var finalStat unix.Stat_t
+			if err := unix.Lstat(path, &finalStat); err != nil {
+				t.Fatal(err)
+			}
+			if finalStat.Dev != replacementStat.Dev || finalStat.Ino != replacementStat.Ino {
+				t.Fatalf("replacement identity was not preserved: final=%d:%d replacement=%d:%d",
+					finalStat.Dev, finalStat.Ino, replacementStat.Dev, replacementStat.Ino)
+			}
+		})
+	}
+}
+
+func TestServiceActorEvidenceExistingConfirmationRejectsHardlinkedFinal(t *testing.T) {
+	root := t.TempDir()
+	path := filepath.Join(root, "actors.json")
+	actors := validServiceActorEvidence()
+	if err := publishServiceActorEvidence(path, actors); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Link(path, filepath.Join(root, "actors-alias.json")); err != nil {
+		t.Fatal(err)
+	}
+	if err := publishServiceActorEvidence(path, actors); !errors.Is(err, ErrServiceEvidence) {
+		t.Fatalf("hardlinked existing confirmation error = %v", err)
+	}
+	var finalStat unix.Stat_t
+	if err := unix.Lstat(path, &finalStat); err != nil {
+		t.Fatal(err)
+	}
+	if finalStat.Nlink != 2 {
+		t.Fatalf("hardlinked final nlink = %d, want preserved 2", finalStat.Nlink)
+	}
+}
+
+func TestServiceActorEvidenceExistingConfirmationAcceptsExactSingleLinkReplay(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "actors.json")
+	actors := validServiceActorEvidence()
+	if err := publishServiceActorEvidence(path, actors); err != nil {
+		t.Fatal(err)
+	}
+	if err := publishServiceActorEvidence(path, actors); err != nil {
+		t.Fatalf("exact single-link replay: %v", err)
+	}
+}
+
 func TestServiceActorEvidenceUnnamedStagingFailuresLeaveNoDirectoryEntries(t *testing.T) {
 	actors := ServiceActorEvidence{
 		SchemaVersion: ProtocolSchemaVersion, SessionID: "session-1",

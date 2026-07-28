@@ -271,9 +271,14 @@ Do not use Hauler v2.0.2's live `_catalog` response as proof that all direct reg
   publication fails closed, and closing the unlinked descriptor reclaims every
   pre-publication failure without a cleanup syscall or directory entry.
   Existing evidence is idempotent only after the same bounded no-follow
-  observer proves a private regular file whose open and named
-  device/inode/size remain stable and a parent fsync confirms directory
-  durability. Fresh publication proves the canonical final and staging
+  observer proves a private regular file whose open and named device, inode,
+  size, mode, and link count remain stable. Confirmation retains that first
+  identity, requires exact bytes with mode 0600 and link count one, fsyncs the
+  parent, then requires a second stable observation of the same device and
+  inode with the same exact shape and bytes. Exact-byte inode replacement on
+  either side of the durability barrier and hardlinked evidence are preserved
+  and rejected; the same confirmation applies after an `EEXIST` publication
+  race. Fresh publication proves the canonical final and staging
   descriptor have the same device and inode, link count one, exact mode, size,
   and bytes both before and after the parent durability barrier. A parent-fsync
   failure after linking is an unknown outcome: the canonical final is left in
