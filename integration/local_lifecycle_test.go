@@ -312,10 +312,15 @@ func writeLifecycleFixture(t *testing.T, source string) {
 	scripts := filepath.Join(source, "bin")
 	claude := filepath.Join(source, ".claude")
 	imageFixture := filepath.Join(source, "image-fixture")
-	for _, directory := range []string{nested, scripts, claude, imageFixture} {
+	devcontainer := filepath.Join(source, ".devcontainer")
+	for _, directory := range []string{nested, scripts, claude, imageFixture, devcontainer} {
 		if err := os.MkdirAll(directory, 0o700); err != nil {
 			t.Fatal(err)
 		}
+	}
+	const lifecycleDevcontainer = `{"image":"docker@sha256:aa3df78ecf320f5fafdce71c659f1629e96e9de0968305fe1de670e0ca9176ce","privileged":true,"remoteUser":"root","overrideCommand":false}`
+	if err := os.WriteFile(filepath.Join(devcontainer, "devcontainer.json"), []byte(lifecycleDevcontainer), 0o644); err != nil {
+		t.Fatal(err)
 	}
 	if err := os.WriteFile(filepath.Join(scripts, "camp-fixture"), []byte("#!/bin/sh\nexit 0\n"), 0o755); err != nil {
 		t.Fatal(err)
@@ -345,6 +350,30 @@ func writeLifecycleFixture(t *testing.T, source string) {
 	}
 	if err := os.Symlink("README.md", filepath.Join(source, "README-link.md")); err != nil {
 		t.Fatal(err)
+	}
+}
+
+func TestWriteLifecycleFixturePinsLightweightDockerInDockerDevcontainer(t *testing.T) {
+	source := t.TempDir()
+	writeLifecycleFixture(t, source)
+
+	document, err := os.ReadFile(filepath.Join(source, ".devcontainer", "devcontainer.json"))
+	if err != nil {
+		t.Fatalf("read lifecycle devcontainer fixture: %v", err)
+	}
+	var config struct {
+		Image           string `json:"image"`
+		Privileged      bool   `json:"privileged"`
+		RemoteUser      string `json:"remoteUser"`
+		OverrideCommand *bool  `json:"overrideCommand"`
+	}
+	if err := json.Unmarshal(document, &config); err != nil {
+		t.Fatalf("decode lifecycle devcontainer fixture: %v", err)
+	}
+	const image = "docker@sha256:aa3df78ecf320f5fafdce71c659f1629e96e9de0968305fe1de670e0ca9176ce"
+	if config.Image != image || !config.Privileged || config.RemoteUser != "root" ||
+		config.OverrideCommand == nil || *config.OverrideCommand {
+		t.Fatalf("lifecycle devcontainer fixture = %#v, want pinned privileged Docker-in-Docker image", config)
 	}
 }
 

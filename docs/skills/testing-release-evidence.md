@@ -323,8 +323,10 @@ DevPod home, config, SSH config, and non-default context. Before scenario
 activity, each initializes the built-in Docker provider with
 `devpod provider add docker --context <private-context> --use --silent` under
 that private environment and passes `CAMP_DEVPOD_PROVIDER=docker` to Camp. The
-Room-of-Requirement remains the devcontainer image fixture, not the DevPod
-provider. Before each file or MinIO lifecycle scenario opens Camp's workspace,
+The lifecycle harness writes an explicit devcontainer configuration using the
+digest-pinned Docker-in-Docker acceptance image documented in
+`local-lifecycle-recovery.md`; Camp's production Room fallback is unchanged.
+Before each file or MinIO lifecycle scenario opens Camp's workspace,
 the harness creates one unrelated workspace in that same private context. Its
 scenario ledger recovers exact Camp workspace IDs, process identities,
 cleanup-permitted materializations, verifier-only path identities, and

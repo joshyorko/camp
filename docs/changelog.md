@@ -31,6 +31,9 @@
 - require exact-candidate RCC lifecycle evidence, ownership-checked cleanup
   receipts, normalized parity results, and candidate-bound release/tag
   verification before publication
+- run hosted exact-candidate lifecycle evidence with a digest-pinned,
+  privileged Docker-in-Docker fixture instead of the heavyweight default Room
+  image hydration
 
 ### Portability and Safety
 
