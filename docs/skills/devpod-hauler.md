@@ -221,10 +221,14 @@ Do not use Hauler v2.0.2's live `_catalog` response as proof that all direct reg
   pointer CAS, and acknowledgement are separate inbound-publication work and
   must not be inferred from `remotePrepared`.
 - Before remote mutation the host re-reads the authoritative latest pointer
-  after writer-lease revalidation and requires exact equality with the
-  journaled pointer, revision, generation, capsule, and lineage; both an
-  unexpected pointer and a missing recorded pointer fail before DevPod
-  execution. On the remote side the exclusive service lock is retained after
+  after writer-lease revalidation. When a pointer is recorded, its revision,
+  generation/current base, capsule, lineage, and complete document must exactly
+  match the backend. An absent pointer requires an empty expected revision.
+  Main may have no current base in that state; a new non-main lineage may
+  retain its non-nil inherited source generation as `CurrentBase` without
+  inventing a branch pointer. An unexpected live pointer, missing recorded
+  pointer, or revision drift fails before DevPod execution. On the remote side
+  the exclusive service lock is retained after
   exact service quiescence and through registry-cut creation plus tagged-image
   inventory. The lock is released only at that explicit immutable handoff and
   is released with cancellation removed on every failure path, so a concurrent

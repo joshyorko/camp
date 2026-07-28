@@ -300,7 +300,7 @@ func (p *CheckpointPublisher) revalidateRemotePointer(ctx context.Context, snaps
 	live, err := p.pointers.Read(ctx, snapshot.Capsule, snapshot.Lineage)
 	if snapshot.CurrentPointer == nil {
 		if errors.Is(err, os.ErrNotExist) || errors.Is(err, ports.ErrNotFound) {
-			if snapshot.ExpectedPointerRevision != "" || snapshot.CurrentBase != nil {
+			if snapshot.ExpectedPointerRevision != "" || (snapshot.Lineage.IsMain() && snapshot.CurrentBase != nil) {
 				return errors.New("remote checkpoint recorded a partial missing pointer baseline")
 			}
 			return nil

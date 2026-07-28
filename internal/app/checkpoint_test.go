@@ -291,16 +291,81 @@ func TestRemoteCheckpointRevalidatesExactLivePointerBeforeExecutor(t *testing.T)
 	}
 }
 
+func TestRemoteCheckpointAbsentPointerHonorsBranchAndMainBaselineSemantics(t *testing.T) {
+	source := domain.GenerationRef{Generation: 7, ArchiveSHA256: strings.Repeat("c", 64)}
+	for _, test := range []struct {
+		name        string
+		lineage     domain.Lineage
+		currentBase *domain.GenerationRef
+		revision    string
+		live        *domain.LatestPointer
+		wantCalls   int
+	}{
+		{name: "new feature branch inherits source without pointer", lineage: domain.Lineage{Branch: "feature"}, currentBase: &source, wantCalls: 1},
+		{name: "new feature branch rejects nonempty absent revision", lineage: domain.Lineage{Branch: "feature"}, currentBase: &source, revision: "unexpected-r1"},
+		{name: "new feature branch rejects unexpected live pointer", lineage: domain.Lineage{Branch: "feature"}, currentBase: &source, live: testRemotePointerFor(domain.Lineage{Branch: "feature"}, 8, &source)},
+		{name: "new main starts without pointer or source", lineage: domain.Lineage{Branch: "main"}, wantCalls: 1},
+		{name: "main rejects absent pointer with inherited source", lineage: domain.Lineage{Branch: "main"}, currentBase: &source},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			now := time.Unix(100, 0).UTC()
+			sandbox := t.TempDir()
+			snapshot := remoteCheckpointSnapshot()
+			snapshot.Lineage = test.lineage
+			snapshot.CurrentBase = cloneGeneration(test.currentBase)
+			snapshot.ExpectedPointerRevision = test.revision
+			snapshot.OpenedGeneration = cloneGeneration(test.currentBase)
+			lease := domain.WriterLease{
+				SchemaVersion: domain.SchemaVersion, SessionID: snapshot.SessionID, Capsule: snapshot.Capsule,
+				Lineage: test.lineage, Machine: "machine", OpenedGeneration: cloneGeneration(test.currentBase),
+				CreatedAt: now, HeartbeatAt: now, ExpiresAt: now.Add(time.Minute),
+			}
+			snapshot.Mode, snapshot.State = domain.SessionReadWrite, domain.SessionOpen
+			snapshot.Lease = domain.LeaseRecord{Lease: &lease, Revision: "lease-r1"}
+			backend, _ := filebackend.New(filepath.Join(sandbox, "backend"))
+			pointers := coordination.NewPointerRepository(backend)
+			if test.live != nil {
+				if _, err := pointers.Create(context.Background(), *test.live); err != nil {
+					t.Fatal(err)
+				}
+			}
+			log, _ := journal.NewStore(filepath.Join(sandbox, "journal"))
+			if err := log.Create(context.Background(), snapshot); err != nil {
+				t.Fatal(err)
+			}
+			remote := &fakeRemoteCheckpointPreparer{receipt: remoteworker.CheckpointReceipt{
+				SchemaVersion: remoteworker.ProtocolSchemaVersion, Status: "prepared",
+				SessionID: snapshot.SessionID, AttemptID: snapshot.SessionID + "-checkpoint-" + strconv.FormatUint(nextCheckpointGeneration(snapshot), 10),
+			}}
+			publisher := NewCheckpointPublisher(
+				log, &fakeLockValidator{}, &fakeLeaseValidator{}, CheckpointTransports{RemoteKit: remote},
+				newCheckpointFakes(now).pipeline(), &fakeCheckpointBuilder{},
+				coordination.NewGenerationRepository(backend), pointers, fixedAppClock{now: now},
+			)
+			_, err := publisher.Publish(context.Background(), ports.OperationToken{
+				ID: "lock", Owner: ports.OperationOwner{SessionID: snapshot.SessionID, Operation: "sync"},
+			}, snapshot.SessionID)
+			if (err == nil) != (test.wantCalls == 1) || remote.calls != test.wantCalls {
+				t.Fatalf("error=%v calls=%d", err, remote.calls)
+			}
+		})
+	}
+}
+
 func testRemotePointer(generation uint64) *domain.LatestPointer {
+	return testRemotePointerFor(domain.Lineage{Branch: "main"}, generation, nil)
+}
+
+func testRemotePointerFor(lineage domain.Lineage, generation uint64, parent *domain.GenerationRef) *domain.LatestPointer {
 	digit := "a"
 	if generation%2 == 0 {
 		digit = "b"
 	}
 	ref := domain.GenerationRef{Generation: generation, ArchiveSHA256: strings.Repeat(digit, 64)}
-	objectKey, _ := coordination.GenerationObjectKey("brain", domain.Lineage{Branch: "main"}, ref)
+	objectKey, _ := coordination.GenerationObjectKey("brain", lineage, ref)
 	return &domain.LatestPointer{
-		SchemaVersion: domain.SchemaVersion, Capsule: "brain", Lineage: domain.Lineage{Branch: "main"},
-		Generation: ref, ObjectKey: objectKey,
+		SchemaVersion: domain.SchemaVersion, Capsule: "brain", Lineage: lineage,
+		Generation: ref, Parent: cloneGeneration(parent), ObjectKey: objectKey,
 		Size: 1, CreatedAt: time.Unix(50, 0).UTC(), SessionID: "prior",
 	}
 }
