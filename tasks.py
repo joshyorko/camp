@@ -270,6 +270,51 @@ def sanitize_failure(error):
     return reason[:512]
 
 
+def remove_robot_controller(controller):
+    controller = pathlib.Path(controller)
+    marker = controller / ".camp-robot-owned"
+    if not controller.name.startswith("camp-robot-"):
+        raise RuntimeError(f"refusing cleanup outside Camp Robot root: {controller}")
+    if not marker.is_file():
+        raise RuntimeError(f"Camp Robot ownership marker is missing: {marker}")
+    shutil.rmtree(controller)
+    if controller.exists():
+        raise RuntimeError(f"Camp Robot controller still exists after teardown: {controller}")
+    EVIDENCE.mkdir(parents=True, exist_ok=True)
+    with (EVIDENCE / "robot-cleanup.jsonl").open("a", encoding="utf-8") as stream:
+        stream.write(
+            json.dumps({"controller": str(controller), "result": "passed"}, sort_keys=True)
+            + "\n"
+        )
+
+
+def write_ci_cleanup_receipt(*, candidate_commit, run_id, run_attempt):
+    events_path = EVIDENCE / "robot-cleanup.jsonl"
+    if not events_path.is_file():
+        raise RuntimeError("no observed Robot teardown evidence")
+    events = [
+        json.loads(line)
+        for line in events_path.read_text(encoding="utf-8").splitlines()
+        if line.strip()
+    ]
+    if not events or any(event.get("result") != "passed" for event in events):
+        raise RuntimeError("no observed Robot teardown evidence")
+    receipt = {
+        "schemaVersion": 1,
+        "candidateCommit": candidate_commit,
+        "candidateSha256": sha256(CANDIDATE),
+        "run": {"id": run_id, "attempt": run_attempt},
+        "cleanup": {
+            "result": "passed",
+            "observedControllers": len(events),
+            "evidence": "robot-cleanup.jsonl",
+        },
+    }
+    (EVIDENCE / "ci-cleanup-receipt.json").write_text(
+        json.dumps(receipt, indent=2, sort_keys=True) + "\n", encoding="utf-8"
+    )
+
+
 MANDATORY_TEST_GATES = (
     "unit",
     "race",
@@ -401,26 +446,39 @@ def robot(_context):
         "CAMP_TEST_REAL_LIFECYCLE": "1",
         "CAMP_TEST_REAL_MINIO_REOPEN": "1",
     })
-    run_gates(
-        "robot",
-        [
-            ("real-go-evidence", ["./scripts/verify-real-evidence.sh", "all"]),
-            (
-                "black-box-robot",
-                [
-                    "python",
-                    "-m",
-                    "robot",
-                    "--outputdir",
-                    str(EVIDENCE / "robot"),
-                    "--variable",
-                    f"CAMP_BINARY:{CANDIDATE}",
-                    "robot_tests",
-                ],
-            ),
-        ],
-        env=env,
-    )
+    cleanup_events = EVIDENCE / "robot-cleanup.jsonl"
+    cleanup_events.unlink(missing_ok=True)
+    try:
+        run_gates(
+            "robot",
+            [
+                ("real-go-evidence", ["./scripts/verify-real-evidence.sh", "all"]),
+                (
+                    "black-box-robot",
+                    [
+                        "python",
+                        "-m",
+                        "robot",
+                        "--outputdir",
+                        str(EVIDENCE / "robot"),
+                        "--variable",
+                        f"CAMP_BINARY:{CANDIDATE}",
+                        "robot_tests",
+                    ],
+                ),
+            ],
+            env=env,
+        )
+    finally:
+        if all(
+            os.environ.get(name)
+            for name in ("CANDIDATE_COMMIT", "GITHUB_RUN_ID", "GITHUB_RUN_ATTEMPT")
+        ):
+            write_ci_cleanup_receipt(
+                candidate_commit=os.environ["CANDIDATE_COMMIT"],
+                run_id=os.environ["GITHUB_RUN_ID"],
+                run_attempt=os.environ["GITHUB_RUN_ATTEMPT"],
+            )
     if sha256(CANDIDATE) != metadata["candidateSha256"]:
         raise RuntimeError("candidate changed during robot evidence")
 

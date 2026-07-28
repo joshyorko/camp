@@ -77,6 +77,73 @@ class TasksTest(unittest.TestCase):
         verify.assert_called_once_with()
         gates.assert_called_once()
 
+    def test_remove_robot_controller_proves_owned_controller_is_absent(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = pathlib.Path(temporary)
+            evidence = root / "evidence"
+            controller = root / "camp-robot-observed"
+            controller.mkdir()
+            (controller / ".camp-robot-owned").write_text("", encoding="utf-8")
+            with mock.patch.object(tasks, "EVIDENCE", evidence):
+                tasks.remove_robot_controller(controller)
+            self.assertFalse(controller.exists())
+            events = [
+                json.loads(line)
+                for line in (evidence / "robot-cleanup.jsonl").read_text(
+                    encoding="utf-8"
+                ).splitlines()
+            ]
+            self.assertEqual(events, [{"controller": str(controller), "result": "passed"}])
+
+    def test_remove_robot_controller_rejects_unowned_controller(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            controller = pathlib.Path(temporary) / "camp-robot-leftover"
+            controller.mkdir()
+            with self.assertRaisesRegex(RuntimeError, "ownership marker"):
+                tasks.remove_robot_controller(controller)
+
+    def test_write_cleanup_receipt_requires_observed_teardown(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            evidence = pathlib.Path(temporary)
+            with mock.patch.object(tasks, "EVIDENCE", evidence):
+                with self.assertRaisesRegex(RuntimeError, "no observed Robot teardown"):
+                    tasks.write_ci_cleanup_receipt(
+                        candidate_commit="a" * 40,
+                        run_id="12",
+                        run_attempt="3",
+                    )
+
+    def test_write_cleanup_receipt_records_observed_teardown_not_job_outcome(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            evidence = pathlib.Path(temporary)
+            events = evidence / "robot-cleanup.jsonl"
+            events.write_text(
+                json.dumps(
+                    {
+                        "controller": "/tmp/camp-robot-observed",
+                        "result": "passed",
+                    }
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+            candidate = evidence.parent / "camp"
+            candidate.write_bytes(b"candidate")
+            with mock.patch.object(tasks, "EVIDENCE", evidence), mock.patch.object(
+                tasks, "CANDIDATE", candidate
+            ):
+                tasks.write_ci_cleanup_receipt(
+                    candidate_commit="a" * 40,
+                    run_id="12",
+                    run_attempt="3",
+                )
+            receipt = json.loads(
+                (evidence / "ci-cleanup-receipt.json").read_text(encoding="utf-8")
+            )
+            self.assertEqual(receipt["cleanup"]["result"], "passed")
+            self.assertEqual(receipt["cleanup"]["observedControllers"], 1)
+            self.assertNotIn("robotOutcome", receipt)
+
     def _write_freeze_fixture(self, root, *, setup_robot, pip_robot):
         (root / "developer").mkdir()
         (root / "go.mod").write_text("module example.invalid/camp\n\ngo 1.26.5\n", encoding="utf-8")

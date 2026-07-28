@@ -41,7 +41,7 @@ Prepare Isolated Controller
 Remove Isolated Controller
     File Should Exist    ${TEST_ROOT}${/}${OWNERSHIP_MARKER}
     Should Contain    ${TEST_ROOT}    camp-robot-
-    Remove Directory    ${TEST_ROOT}    recursive=True
+    Evaluate    tasks.remove_robot_controller($TEST_ROOT)    modules=tasks
 
 Run Candidate
     [Arguments]    ${working_directory}    @{arguments}
