@@ -34,6 +34,7 @@ type remoteServiceController interface {
 
 type productionServicesRuntime struct {
 	manifest haulkit.Manifest
+	worker   domain.ProcessRecord
 }
 
 func (runtimeState *productionServicesRuntime) Verify(ctx context.Context, request Request) error {
@@ -117,10 +118,17 @@ func (runtimeState *productionServicesRuntime) Ensure(ctx context.Context, reque
 		return domain.ProcessRecord{}, nil, errors.Join(err, ErrServiceEvidence)
 	}
 	supervisorRecord := remoteProcessRecord(supervisorStatus.Executable, supervisorStatus)
+	if err := validateServiceActors(runtimeState.worker, supervisorRecord); err != nil {
+		return domain.ProcessRecord{}, nil, err
+	}
 	controller := supervisoradapter.NewServiceSupervisor(
 		store, processes, supervisoradapter.NewUnitInspector(subprocess.NewRunner(), http.DefaultClient),
 	)
-	capability := remoteConfinementCapability(request, runtimeState.manifest.Tools.Pasta.Version)
+	childContextPrefix, err := remoteChildContextPrefix("/sys/fs/selinux/enforce", "/usr/bin/runcon")
+	if err != nil {
+		return domain.ProcessRecord{}, nil, err
+	}
+	capability := remoteConfinementCapability(request, runtimeState.manifest.Tools.Pasta.Version, childContextPrefix)
 	records := make([]domain.ServiceUnitRecord, 0, len(definitions))
 	for _, definition := range definitions {
 		spec, err := remoteServiceSpec(request, definition, capability)
@@ -133,6 +141,22 @@ func (runtimeState *productionServicesRuntime) Ensure(ctx context.Context, reque
 		}
 		records = append(records, record)
 		snapshot = next
+	}
+	actorsRoot := filepath.Join(serviceRoot, "actors")
+	if err := secureMkdirAllOperation(actorsRoot); err != nil {
+		return domain.ProcessRecord{}, nil, err
+	}
+	evidence := ServiceActorEvidence{
+		SchemaVersion: ProtocolSchemaVersion, SessionID: request.SessionID,
+		Worker: runtimeState.worker, Supervisor: supervisorRecord,
+	}
+	evidencePath := filepath.Join(actorsRoot, strconv.Itoa(runtimeState.worker.Identity.PID)+"-"+
+		strconv.FormatUint(runtimeState.worker.Identity.StartTicks, 10)+".json")
+	if err := publishServiceActorEvidence(evidencePath, evidence); err != nil {
+		return domain.ProcessRecord{}, nil, err
+	}
+	if err := observeServiceActorEvidence(evidencePath, evidence); err != nil {
+		return domain.ProcessRecord{}, nil, err
 	}
 	return supervisorRecord, records, nil
 }
@@ -234,6 +258,15 @@ func ensureRemoteService(ctx context.Context, controller remoteServiceController
 
 func recordMatchesRemoteSpec(record domain.ServiceUnitRecord, spec supervisoradapter.ServiceSpec) bool {
 	wantArgv := append([]string{spec.Child.Executable}, spec.Child.Argv...)
+	processSpec, err := supervisoradapter.BuildPastaLoopback(supervisoradapter.PastaLoopback{
+		Capability: spec.Capability, Mapping: spec.Mapping, LogPath: spec.LogPath,
+		PIDPath: spec.PIDPath, Child: spec.Child,
+	})
+	if err != nil {
+		return false
+	}
+	wantHelperArgv := append([]string{processSpec.Command.Executable}, processSpec.Command.Argv...)
+	helperDigest := sha256.Sum256([]byte(strings.Join(wantHelperArgv, "\x00")))
 	return validRemoteLaunchToken(record.LaunchToken, spec.LaunchToken) &&
 		record.Confinement.Executable == spec.Capability.Executable &&
 		record.Confinement.Version == spec.Capability.Version &&
@@ -243,6 +276,9 @@ func recordMatchesRemoteSpec(record domain.ServiceUnitRecord, spec supervisorada
 			HostAddress: spec.Mapping.HostAddress, HostPort: spec.Mapping.HostPort, GuestPort: spec.Mapping.GuestPort,
 		}) &&
 		record.PIDPath == spec.PIDPath && record.LogPath == spec.LogPath &&
+		record.Helper.DesiredExecutable == spec.Capability.Executable &&
+		reflect.DeepEqual(record.Helper.Argv, wantHelperArgv) &&
+		record.Helper.ArgvSHA256 == hex.EncodeToString(helperDigest[:]) &&
 		record.Child.DesiredExecutable == spec.Child.Executable &&
 		reflect.DeepEqual(record.Child.Argv, wantArgv)
 }
@@ -261,16 +297,43 @@ func validRemoteLaunchToken(recorded, initial string) bool {
 	return pid > 0 && pidErr == nil && ticksErr == nil
 }
 
-func remoteConfinementCapability(request Request, version string) supervisoradapter.ConfinementCapability {
+func remoteConfinementCapability(request Request, version string, childContextPrefix []string) supervisoradapter.ConfinementCapability {
 	executable := filepath.Join(request.WorkspaceRoot, ".camp", "runtime", "pasta")
-	source := strings.Join([]string{
+	source := strings.Join(append([]string{
 		executable, version, "remote-workspace", runtime.GOOS, runtime.GOARCH, strconv.Itoa(os.Getuid()),
-	}, "\x00")
+	}, childContextPrefix...), "\x00")
 	digest := sha256.Sum256([]byte(source))
 	return supervisoradapter.ConfinementCapability{
 		Executable: executable, Version: version,
 		EnvironmentFingerprint: hex.EncodeToString(digest[:]), Boundary: "remote-workspace",
+		ChildContextPrefix: append([]string(nil), childContextPrefix...),
 	}
+}
+
+func remoteChildContextPrefix(enforcePath, runconPath string) ([]string, error) {
+	enforcing, err := os.ReadFile(enforcePath)
+	if errors.Is(err, os.ErrNotExist) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, fmt.Errorf("read SELinux enforcement state: %w", err)
+	}
+	if strings.TrimSpace(string(enforcing)) != "1" {
+		return nil, nil
+	}
+	if !filepath.IsAbs(runconPath) || filepath.Clean(runconPath) != runconPath {
+		return nil, errors.New("SELinux runcon path is not exact and absolute")
+	}
+	file, err := os.OpenFile(runconPath, os.O_RDONLY|syscall.O_NOFOLLOW, 0)
+	if err != nil {
+		return nil, fmt.Errorf("open exact SELinux runcon: %w", err)
+	}
+	defer file.Close()
+	info, err := file.Stat()
+	if err != nil || !info.Mode().IsRegular() || info.Mode()&0o111 == 0 {
+		return nil, errors.Join(err, errors.New("exact SELinux runcon is not an executable regular file"))
+	}
+	return []string{runconPath, "-t", "unconfined_t"}, nil
 }
 
 func remoteProcessRecord(desired string, status ports.ProcessStatus) domain.ProcessRecord {

@@ -28,7 +28,7 @@ import (
 type productionOperations struct{}
 
 func (productionOperations) StartServices(ctx context.Context, request Request) (any, error) {
-	return startServices(ctx, request, &productionServicesRuntime{})
+	return launchServiceSupervisor(ctx, request)
 }
 
 type productionActivationRuntime struct {

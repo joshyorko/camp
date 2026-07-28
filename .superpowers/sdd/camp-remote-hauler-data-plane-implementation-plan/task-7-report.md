@@ -108,3 +108,80 @@ Documentation improvement:
 - Evidence: `internal/remoteworker/services.go`, `internal/remoteworker/supervisor.go`, `TestStartServicesVerifiesHydrationBeforeStartingExactUnits`, `TestStartServicesRejectsIncompleteOrUnconfinedEvidence`, `TestRemoteServiceSpecsUseExactInstalledToolsAndPrivateLoopbackMappings`, `TestEnsureRemoteServiceObservesRecordedUnitWithoutDuplicatingIt`, `TestEnsureRemoteServiceRestartsStoppedRecordWithAttemptStableIdentity`, and the 438-test affected-package verification.
 - Stale or ambiguous guidance removed: the host-only reverse-forwarding guidance is now explicitly scoped away from completed remote `haulerKitV1` workspaces; the prior text did not describe their self-contained service lifecycle.
 - Remaining uncertainty: fresh pinned-provider Task 12 acceptance has not yet proven real push/fetch, pod-IP refusal, disconnect survival, or crash-cut adoption.
+
+## Fix round 1
+
+Status: DONE_WITH_CONCERNS
+
+### Result
+
+- Enforcing-SELinux service composition now derives only the exact
+  `/usr/bin/runcon -t unconfined_t` child-context prefix. The executable is
+  opened without following symlinks and must be an executable regular file.
+  Non-enforcing or absent SELinux state produces no prefix.
+- The exact child-context prefix participates in the confinement fingerprint
+  and in `PastaLoopback` construction. Reentry rebuilds the complete expected
+  pasta argv and digest from the exact capability, mapping, private paths, and
+  Hauler child command before any observation or restart. Altered prefix,
+  helper argv, helper digest, or Hauler tail fails closed before the controller
+  can act.
+- The generated worker now launches the exact current Camp executable as a
+  hidden, one-shot `__remote-service-supervisor` subprocess rather than naming
+  its own PID as the supervisor. The supervisor authenticates the complete
+  still-live parent-worker record and parent PID before service work.
+- Receipts contain separate full worker and supervisor process records in
+  addition to each pasta-helper and Hauler-child record. The worker/supervisor
+  pair must have distinct identities, the same boot ID, and an exact
+  parent/child relationship.
+- Before returning readiness, the supervisor publishes and reads back immutable
+  per-worker actor evidence under `.camp/runtime/services/actors/`. Evidence
+  names bind the worker PID and start ticks; changed worker or supervisor
+  identity/argv evidence is rejected. Service facts and the existing
+  unknown-outcome recovery path remain independently durable.
+- No PATH resolution, second DevPod operation, persistent workstation tunnel,
+  alternate Hauler/pasta binary, or unconfined raw launch was introduced.
+
+### TDD evidence
+
+- RED: SELinux tests failed to compile because no remote child-context resolver
+  existed. GREEN: enforcing fixtures require the exact verified runcon prefix
+  and reject a non-executable command; absent and non-enforcing fixtures return
+  no prefix.
+- RED: helper-drift tests reached the fake observation/restart seam because
+  reentry compared only child argv and confinement metadata. GREEN: production
+  reconciliation builds the real `PastaLoopback` process spec and compares the
+  entire helper argv plus its independently derived SHA-256 before calling
+  `Observe` or `Restart`.
+- RED: service tests failed because `ServiceReceipt` had no worker field and no
+  durable actor-evidence contract. GREEN: separate worker/supervisor records
+  are relationship-validated, round-trip through immutable evidence, and
+  reject worker start-tick or supervisor argv-digest mismatch.
+- RED: the CLI test reached the normal Cobra path because
+  `__remote-service-supervisor` was not registered. GREEN: the exact hidden
+  process boundary accepts only the strict internal envelope and remains absent
+  from help.
+
+### Verification
+
+- `rtk go test ./internal/remoteworker ./internal/adapters/supervisor
+  ./internal/capsule ./internal/app ./internal/cli ./cmd/camp -count=1`
+  — 610 passed.
+- `rtk go test -race ./internal/remoteworker
+  ./internal/adapters/supervisor -count=1`
+  — 86 passed.
+- `rtk go vet ./internal/remoteworker ./internal/adapters/supervisor
+  ./internal/capsule ./internal/app ./internal/cli ./cmd/camp`
+  — passed.
+- `rtk go build ./cmd/camp`
+  — passed.
+- `rtk git diff --check`
+  — passed.
+
+### Documentation improvement
+
+Documentation improvement:
+- Canonical file changed or proposed: `docs/skills/devpod-hauler.md`
+- Durable learning captured: remote `haulerKitV1` startup derives and fingerprints the exact enforcing-SELinux runcon prefix, verifies the complete pasta helper argv/digest before reentry, separates the worker from its one-shot supervisor, and publishes immutable actor evidence separately from service-unit evidence.
+- Evidence: `TestRemoteChildContextPrefixUsesOnlyExactVerifiedRunconWhenSELinuxEnforces`, `TestRemoteChildContextPrefixIsEmptyWhenSELinuxIsNotEnforcing`, `TestEnsureRemoteServiceRejectsCompleteHelperArgvOrDigestDriftBeforeRestart`, `TestServiceActorEvidenceRoundTripsAndRejectsEitherIdentityMismatch`, `TestServiceActorEvidenceRejectsConflatedOrWrongRoleCommands`, and `TestRunRegistersHiddenRemoteServiceSupervisorCommand`.
+- Stale or ambiguous guidance removed: the prior guide implied the current worker record was supervisor evidence and did not state that the SELinux prefix or complete helper argv/digest was part of reentry authority.
+- Remaining uncertainty: fresh pinned-provider Task 12 acceptance still must exercise enforcing SELinux, real service restart after worker exit, push/fetch, pod-IP refusal, disconnect survival, and crash-cut adoption.

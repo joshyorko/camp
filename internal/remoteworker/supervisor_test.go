@@ -2,7 +2,13 @@ package remoteworker
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
+	"errors"
+	"os"
+	"path/filepath"
 	"reflect"
+	"strings"
 	"testing"
 
 	hauleradapter "github.com/joshyorko/camp/internal/adapters/hauler"
@@ -102,6 +108,45 @@ func TestRemoteServiceSpecsUseExactInstalledToolsAndPrivateLoopbackMappings(t *t
 	}
 }
 
+func TestRemoteChildContextPrefixUsesOnlyExactVerifiedRunconWhenSELinuxEnforces(t *testing.T) {
+	root := t.TempDir()
+	enforce := filepath.Join(root, "enforce")
+	runcon := filepath.Join(root, "runcon")
+	if err := os.WriteFile(enforce, []byte("1\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(runcon, []byte("verified runcon"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	prefix, err := remoteChildContextPrefix(enforce, runcon)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(prefix, []string{runcon, "-t", "unconfined_t"}) {
+		t.Fatalf("prefix = %#v", prefix)
+	}
+	if err := os.Chmod(runcon, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := remoteChildContextPrefix(enforce, runcon); err == nil {
+		t.Fatal("non-executable runcon was accepted")
+	}
+}
+
+func TestRemoteChildContextPrefixIsEmptyWhenSELinuxIsNotEnforcing(t *testing.T) {
+	root := t.TempDir()
+	enforce := filepath.Join(root, "enforce")
+	if prefix, err := remoteChildContextPrefix(enforce, filepath.Join(root, "missing-runcon")); err != nil || prefix != nil {
+		t.Fatalf("prefix=%#v err=%v", prefix, err)
+	}
+	if err := os.WriteFile(enforce, []byte("0\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if prefix, err := remoteChildContextPrefix(enforce, filepath.Join(root, "missing-runcon")); err != nil || prefix != nil {
+		t.Fatalf("prefix=%#v err=%v", prefix, err)
+	}
+}
+
 func TestEnsureRemoteServiceObservesRecordedUnitWithoutDuplicatingIt(t *testing.T) {
 	request := validRequest()
 	request.WorkspaceRoot = "/workspace"
@@ -127,6 +172,46 @@ func TestEnsureRemoteServiceObservesRecordedUnitWithoutDuplicatingIt(t *testing.
 	}
 }
 
+func TestEnsureRemoteServiceRejectsCompleteHelperArgvOrDigestDriftBeforeRestart(t *testing.T) {
+	request := validRequest()
+	request.WorkspaceRoot = "/workspace"
+	request.RuntimeRoot = "/runtime"
+	definitions, err := remoteServiceDefinitions(request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	capability := testRemoteCapability()
+	capability.ChildContextPrefix = []string{"/usr/bin/runcon", "-t", "unconfined_t"}
+	spec, err := remoteServiceSpec(request, definitions[0], capability)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, test := range []struct {
+		name   string
+		mutate func(*domain.ServiceUnitRecord)
+	}{
+		{"argv", func(record *domain.ServiceUnitRecord) {
+			record.Helper.Argv[len(record.Helper.Argv)-1] = "/tmp/unverified-hauler"
+		}},
+		{"digest", func(record *domain.ServiceUnitRecord) {
+			record.Helper.ArgvSHA256 = "forged"
+		}},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			record := recordForSpec(spec)
+			test.mutate(&record)
+			controller := &recordingRemoteController{record: record, state: supervisoradapter.UnitStopped}
+			snapshot := domain.JournalSnapshot{SessionID: request.SessionID, Services: []domain.ServiceUnitRecord{record}}
+			if _, _, err := ensureRemoteService(t.Context(), controller, snapshot, spec); !errors.Is(err, ErrServiceEvidence) {
+				t.Fatalf("ensureRemoteService() error = %v", err)
+			}
+			if len(controller.observed) != 0 || len(controller.restarted) != 0 || len(controller.ensured) != 0 {
+				t.Fatalf("drift reached controller: %#v", controller)
+			}
+		})
+	}
+}
+
 func testRemoteCapability() supervisoradapter.ConfinementCapability {
 	return supervisoradapter.ConfinementCapability{
 		Executable: "/workspace/.camp/runtime/pasta", Version: "pasta 1",
@@ -135,6 +220,15 @@ func testRemoteCapability() supervisoradapter.ConfinementCapability {
 }
 
 func recordForSpec(spec supervisoradapter.ServiceSpec) domain.ServiceUnitRecord {
+	processSpec, err := supervisoradapter.BuildPastaLoopback(supervisoradapter.PastaLoopback{
+		Capability: spec.Capability, Mapping: spec.Mapping, LogPath: spec.LogPath,
+		PIDPath: spec.PIDPath, Child: spec.Child,
+	})
+	if err != nil {
+		panic(err)
+	}
+	helperArgv := append([]string{processSpec.Command.Executable}, processSpec.Command.Argv...)
+	helperDigest := sha256.Sum256([]byte(strings.Join(helperArgv, "\x00")))
 	return domain.ServiceUnitRecord{
 		Name: spec.Name, LaunchToken: spec.LaunchToken,
 		Confinement: domain.ConfinementRecord{
@@ -148,7 +242,7 @@ func recordForSpec(spec supervisoradapter.ServiceSpec) domain.ServiceUnitRecord 
 		Helper: domain.ProcessRecord{
 			Identity:          domain.ProcessIdentity{PID: 101, BootID: "boot", StartTicks: 10},
 			DesiredExecutable: spec.Capability.Executable, ObservedExecutable: spec.Capability.Executable,
-			Argv: []string{spec.Capability.Executable, "--foreground"}, ArgvSHA256: "helper",
+			Argv: helperArgv, ArgvSHA256: hex.EncodeToString(helperDigest[:]),
 			PGID: 101, SID: 101, NetNS: "net:[host]",
 		},
 		Child: domain.ProcessRecord{

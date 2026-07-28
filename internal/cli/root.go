@@ -265,6 +265,10 @@ func RunRemoteWorker(ctx context.Context, streams Streams) error {
 	return remoteworker.Run(ctx, streams.In, streams.Out, streams.ErrOut)
 }
 
+func RunRemoteServiceSupervisor(ctx context.Context, streams Streams) error {
+	return remoteworker.RunServiceSupervisor(ctx, streams.In, streams.Out)
+}
+
 func newConfigCommand(operations ConfigOperations) *cobra.Command {
 	command := &cobra.Command{Use: "config", Short: "Inspect and update Camp configuration", Args: usageArgs(cobra.NoArgs)}
 	showEffective := false

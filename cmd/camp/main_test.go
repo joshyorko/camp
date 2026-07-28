@@ -68,6 +68,19 @@ func TestRunRegistersHiddenRemoteWorkerCommand(t *testing.T) {
 	}
 }
 
+func TestRunRegistersHiddenRemoteServiceSupervisorCommand(t *testing.T) {
+	var stdout, stderr bytes.Buffer
+	exitCode := run([]string{"__remote-service-supervisor"}, cli.Streams{
+		In: strings.NewReader("{}"), Out: &stdout, ErrOut: &stderr,
+	})
+	if exitCode == int(cli.ExitSuccess) || strings.Contains(stderr.String(), "unknown command") {
+		t.Fatalf("exit=%d stdout=%q stderr=%q", exitCode, stdout.String(), stderr.String())
+	}
+	if strings.Contains(renderRootHelp(t), "__remote-service-supervisor") {
+		t.Fatal("hidden remote service supervisor appeared in help")
+	}
+}
+
 func TestRunRemoteWorkerKeepsProtocolDiagnosticsOffStderr(t *testing.T) {
 	root := t.TempDir()
 	manifest := filepath.Join(root, "manifest.json")

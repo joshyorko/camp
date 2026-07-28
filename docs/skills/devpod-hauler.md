@@ -254,11 +254,22 @@ Do not use Hauler v2.0.2's live `_catalog` response as proof that all direct reg
   installed pasta process in a distinct network namespace; pasta maps only
   IPv4 loopback to private guest ports `15000` and `18080`, disables UDP and
   namespace-to-host forwarding, and requires HTTP 200 at `/v2/` or `/`.
-  Invocation locking, durable start intents, recorded PID/boot/start,
-  executable, argv digest, PGID, SID, and network-namespace evidence let
-  retries adopt an unknown-outcome start, observe an already-live unit without
-  duplication, or identity-safely restore a stopped recorded unit. Recorded
-  command, confinement, endpoint, log, or pidfile drift fails closed.
+  On enforcing SELinux it opens the exact `/usr/bin/runcon` without following
+  symlinks, requires an executable regular file, fingerprints the exact
+  `runcon -t unconfined_t` prefix, and includes that prefix in the expected
+  pasta argv. On non-enforcing systems the prefix is empty. The invocation
+  worker launches one exact, one-shot Camp service-supervisor subprocess; their
+  distinct full process records are validated as a parent/child pair and
+  published as immutable per-invocation actor evidence, separately from the
+  pasta-helper and Hauler-child service records. Invocation locking, durable
+  start intents, and recorded PID/boot/start, executable, complete argv digest,
+  PGID, SID, and network-namespace evidence let retries adopt an unknown-outcome
+  start, observe an already-live unit without duplication, or identity-safely
+  restore a stopped recorded unit. Reentry rebuilds the complete expected pasta
+  argv, including the verified SELinux prefix and exact Hauler command, and
+  compares its digest before observation or restart. Recorded command,
+  confinement, endpoint, log, pidfile, worker, supervisor, argv, or digest drift
+  fails closed.
 - A live `devpod ssh` process is not sufficient forwarder readiness evidence: a
   fresh-controller file lifecycle run observed the process remain alive while
   its fileserver reverse tunnel never became reachable and its forwarder log

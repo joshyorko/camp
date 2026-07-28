@@ -1,11 +1,19 @@
 package remoteworker
 
 import (
+	"bytes"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
+	"os"
+	"reflect"
 
 	"github.com/joshyorko/camp/internal/domain"
+	"github.com/joshyorko/camp/internal/jsonstrict"
 )
 
 var ErrServiceEvidence = errors.New("remote Hauler service evidence is incomplete")
@@ -20,8 +28,16 @@ const (
 type ServiceReceipt struct {
 	Status     string                     `json:"status"`
 	SessionID  string                     `json:"sessionId"`
+	Worker     domain.ProcessRecord       `json:"worker"`
 	Supervisor domain.ProcessRecord       `json:"supervisor"`
 	Services   []domain.ServiceUnitRecord `json:"services"`
+}
+
+type ServiceActorEvidence struct {
+	SchemaVersion uint32               `json:"schemaVersion"`
+	SessionID     string               `json:"sessionId"`
+	Worker        domain.ProcessRecord `json:"worker"`
+	Supervisor    domain.ProcessRecord `json:"supervisor"`
 }
 
 type servicesRuntime interface {
@@ -29,7 +45,7 @@ type servicesRuntime interface {
 	Ensure(context.Context, Request) (domain.ProcessRecord, []domain.ServiceUnitRecord, error)
 }
 
-func startServices(ctx context.Context, request Request, runtime servicesRuntime) (ServiceReceipt, error) {
+func startServices(ctx context.Context, request Request, worker domain.ProcessRecord, runtime servicesRuntime) (ServiceReceipt, error) {
 	if runtime == nil {
 		return ServiceReceipt{}, errors.New("remote service runtime is unavailable")
 	}
@@ -43,12 +59,73 @@ func startServices(ctx context.Context, request Request, runtime servicesRuntime
 	if !completeProcessEvidence(supervisor) {
 		return ServiceReceipt{}, fmt.Errorf("%w: supervisor", ErrServiceEvidence)
 	}
+	if err := validateServiceActors(worker, supervisor); err != nil {
+		return ServiceReceipt{}, err
+	}
 	if err := validateServiceEvidence(records); err != nil {
 		return ServiceReceipt{}, err
 	}
 	return ServiceReceipt{
-		Status: "ready", SessionID: request.SessionID, Supervisor: supervisor, Services: records,
+		Status: "ready", SessionID: request.SessionID, Worker: worker, Supervisor: supervisor, Services: records,
 	}, nil
+}
+
+func validateServiceActors(worker, supervisor domain.ProcessRecord) error {
+	if !completeProcessEvidence(worker) || !completeProcessEvidence(supervisor) ||
+		worker.Identity == supervisor.Identity || supervisor.ParentPID != worker.Identity.PID ||
+		worker.Identity.BootID != supervisor.Identity.BootID ||
+		worker.DesiredExecutable != worker.ObservedExecutable ||
+		supervisor.DesiredExecutable != supervisor.ObservedExecutable ||
+		worker.ObservedExecutable != supervisor.ObservedExecutable ||
+		!processRecordArgvMatches(worker, "__remote-worker") ||
+		!processRecordArgvMatches(supervisor, "__remote-service-supervisor") {
+		return fmt.Errorf("%w: worker and supervisor identities are not distinct and related", ErrServiceEvidence)
+	}
+	return nil
+}
+
+func processRecordArgvMatches(record domain.ProcessRecord, operation string) bool {
+	if len(record.Argv) != 2 || record.Argv[1] != operation {
+		return false
+	}
+	digest := sha256.Sum256([]byte(record.Argv[0] + "\x00" + record.Argv[1]))
+	return record.ArgvSHA256 == hex.EncodeToString(digest[:])
+}
+
+func publishServiceActorEvidence(path string, evidence ServiceActorEvidence) error {
+	if evidence.SchemaVersion != ProtocolSchemaVersion || evidence.SessionID == "" ||
+		validateServiceActors(evidence.Worker, evidence.Supervisor) != nil {
+		return ErrServiceEvidence
+	}
+	body, err := json.Marshal(evidence)
+	if err != nil {
+		return err
+	}
+	return publishReceipt(path, append(body, '\n'))
+}
+
+func observeServiceActorEvidence(path string, expected ServiceActorEvidence) error {
+	body, err := os.ReadFile(path)
+	if err != nil {
+		return err
+	}
+	if len(body) > maxDiagnosticBytes || jsonstrict.RejectDuplicateKeys(body) != nil {
+		return ErrServiceEvidence
+	}
+	var observed ServiceActorEvidence
+	decoder := json.NewDecoder(bytes.NewReader(body))
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(&observed); err != nil {
+		return ErrServiceEvidence
+	}
+	var trailing any
+	if err := decoder.Decode(&trailing); !errors.Is(err, io.EOF) {
+		return ErrServiceEvidence
+	}
+	if !reflect.DeepEqual(observed, expected) || validateServiceActors(observed.Worker, observed.Supervisor) != nil {
+		return ErrServiceEvidence
+	}
+	return nil
 }
 
 func validateServiceEvidence(records []domain.ServiceUnitRecord) error {
