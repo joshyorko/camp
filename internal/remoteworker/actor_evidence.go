@@ -2,8 +2,6 @@ package remoteworker
 
 import (
 	"bytes"
-	"crypto/rand"
-	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -19,21 +17,35 @@ import (
 )
 
 type serviceActorPublicationOps struct {
-	fsync                  func(int) error
-	rename                 func(int, string, int, string, uint) error
-	beforeRename           func(int, string) error
-	afterCleanupCheck      func(int, string) error
-	afterCleanupQuarantine func(int, string) error
-	afterCleanupValidation func(int, string) error
-	write                  func(*os.File, []byte) (int, error)
-	chmod                  func(*os.File, os.FileMode) error
-	fileSync               func(*os.File) error
+	fsync       func(int) error
+	openTmpfile func(int) (int, error)
+	linkDirect  func(int, int, string) error
+	linkProc    func(int, int, string) error
+	beforeLink  func(int, int, string) error
+	afterLink   func(int, int, string) error
+	write       func(*os.File, []byte) (int, error)
+	chmod       func(*os.File, os.FileMode) error
+	fileSync    func(*os.File) error
 }
 
 func defaultServiceActorPublicationOps() serviceActorPublicationOps {
 	return serviceActorPublicationOps{
-		fsync:    unix.Fsync,
-		rename:   unix.Renameat2,
+		fsync: unix.Fsync,
+		openTmpfile: func(parentFD int) (int, error) {
+			return unix.Openat(parentFD, ".", unix.O_TMPFILE|unix.O_RDWR|unix.O_CLOEXEC, 0o600)
+		},
+		linkDirect: func(parentFD, stagingFD int, name string) error {
+			return unix.Linkat(stagingFD, "", parentFD, name, unix.AT_EMPTY_PATH)
+		},
+		linkProc: func(parentFD, stagingFD int, name string) error {
+			return unix.Linkat(
+				unix.AT_FDCWD,
+				fmt.Sprintf("/proc/self/fd/%d", stagingFD),
+				parentFD,
+				name,
+				unix.AT_SYMLINK_FOLLOW,
+			)
+		},
 		write:    func(file *os.File, body []byte) (int, error) { return file.Write(body) },
 		chmod:    func(file *os.File, mode os.FileMode) error { return file.Chmod(mode) },
 		fileSync: func(file *os.File) error { return file.Sync() },
@@ -67,239 +79,142 @@ func publishServiceActorEvidenceWithOps(
 	}
 	defer unix.Close(parentFD)
 	if existing, observeErr := observeServiceActorAt(parentFD, name, nil); observeErr == nil {
-		if bytes.Equal(existing, body) {
-			if err := ops.fsync(parentFD); err != nil {
-				return actorEvidenceError(err)
-			}
-			return nil
+		if !bytes.Equal(existing, body) {
+			return actorEvidenceError(errors.New("existing actor evidence differs"))
 		}
-		return actorEvidenceError(errors.New("existing actor evidence differs"))
+		return confirmExistingServiceActorEvidence(parentFD, name, body, ops)
 	} else if !errors.Is(observeErr, syscall.ENOENT) {
 		return actorEvidenceError(observeErr)
 	}
 
-	random := make([]byte, 16)
-	if _, err := rand.Read(random); err != nil {
-		return err
-	}
-	partial := "." + name + ".partial-" + hex.EncodeToString(random)
-	fd, err := unix.Openat(parentFD, partial, unix.O_WRONLY|unix.O_CREAT|unix.O_EXCL|unix.O_CLOEXEC|unix.O_NOFOLLOW, 0o600)
+	fd, err := ops.openTmpfile(parentFD)
 	if err != nil {
 		return actorEvidenceError(err)
 	}
-	var partialStat unix.Stat_t
-	if err := unix.Fstat(fd, &partialStat); err != nil {
-		unix.Close(fd)
-		return actorEvidenceError(err)
+	file := os.NewFile(uintptr(fd), "unnamed actor evidence staging")
+	if file == nil {
+		_ = unix.Close(fd)
+		return actorEvidenceError(errors.New("open unnamed actor evidence staging"))
 	}
-	file := os.NewFile(uintptr(fd), partial)
-	cleanup := true
 	defer func() {
-		if cleanup {
-			if err := cleanupServiceActorPartial(parentFD, partial, partialStat, int64(len(body)), ops); err != nil {
-				resultErr = actorEvidenceError(errors.Join(resultErr, err))
-			}
+		if err := file.Close(); err != nil && resultErr == nil {
+			resultErr = actorEvidenceError(err)
 		}
 	}()
+	if err := ops.chmod(file, 0o600); err != nil {
+		return actorEvidenceError(err)
+	}
 	if n, err := ops.write(file, body); err != nil {
-		file.Close()
 		return actorEvidenceError(err)
 	} else if n != len(body) {
-		file.Close()
 		return actorEvidenceError(io.ErrShortWrite)
 	}
-	if err := ops.chmod(file, 0o600); err != nil {
-		file.Close()
-		return actorEvidenceError(err)
-	}
 	if err := ops.fileSync(file); err != nil {
-		file.Close()
 		return actorEvidenceError(err)
 	}
-	if err := file.Close(); err != nil {
+	var staged unix.Stat_t
+	if err := unix.Fstat(fd, &staged); err != nil {
 		return actorEvidenceError(err)
 	}
-	if err := ops.fsync(parentFD); err != nil {
-		return actorEvidenceError(err)
+	if !validUnnamedServiceActorStaging(staged, int64(len(body))) {
+		return actorEvidenceError(errors.New("unnamed actor evidence staging has invalid shape"))
 	}
-	if ops.beforeRename != nil {
-		if err := ops.beforeRename(parentFD, partial); err != nil {
+	if ops.beforeLink != nil {
+		if err := ops.beforeLink(parentFD, fd, name); err != nil {
 			return actorEvidenceError(err)
 		}
 	}
-	if err := ops.rename(parentFD, partial, parentFD, name, unix.RENAME_NOREPLACE); err != nil {
+	if err := publishServiceActorExactFD(parentFD, fd, name, ops); err != nil {
 		if errors.Is(err, syscall.EEXIST) {
 			existing, observeErr := observeServiceActorAt(parentFD, name, nil)
 			if observeErr == nil && bytes.Equal(existing, body) {
-				if fsyncErr := ops.fsync(parentFD); fsyncErr != nil {
-					return actorEvidenceError(fsyncErr)
-				}
-				return nil
+				return confirmExistingServiceActorEvidence(parentFD, name, body, ops)
 			}
 			return actorEvidenceError(errors.Join(err, observeErr))
 		}
 		return actorEvidenceError(err)
 	}
-	cleanup = false
+	if ops.afterLink != nil {
+		if err := ops.afterLink(parentFD, fd, name); err != nil {
+			return actorEvidenceError(err)
+		}
+	}
+	if err := validatePublishedServiceActorEvidence(parentFD, fd, name, body); err != nil {
+		return actorEvidenceError(err)
+	}
 	if err := ops.fsync(parentFD); err != nil {
 		return actorEvidenceError(err)
 	}
-	published, err := observeServiceActorAt(parentFD, name, nil)
-	if err != nil || !bytes.Equal(published, body) {
-		return actorEvidenceError(errors.Join(err, errors.New("published actor evidence differs")))
+	if err := validatePublishedServiceActorEvidence(parentFD, fd, name, body); err != nil {
+		return actorEvidenceError(err)
 	}
 	return nil
 }
 
-func cleanupServiceActorPartial(
+func confirmExistingServiceActorEvidence(
 	parentFD int,
 	name string,
-	created unix.Stat_t,
-	maxSize int64,
+	body []byte,
 	ops serviceActorPublicationOps,
 ) error {
-	var named unix.Stat_t
-	if err := unix.Fstatat(parentFD, name, &named, unix.AT_SYMLINK_NOFOLLOW); err != nil {
-		return fmt.Errorf("observe actor evidence partial for cleanup: %w", err)
-	}
-	if !validServiceActorPartial(created, named, maxSize) {
-		return errors.New("actor evidence partial identity or shape changed; refusing cleanup")
-	}
-	if ops.afterCleanupCheck != nil {
-		if err := ops.afterCleanupCheck(parentFD, name); err != nil {
-			return fmt.Errorf("actor evidence cleanup boundary: %w", err)
-		}
-	}
-	random := make([]byte, 16)
-	if _, err := rand.Read(random); err != nil {
-		return fmt.Errorf("allocate actor evidence partial quarantine: %w", err)
-	}
-	quarantine := ".actor-cleanup-" + hex.EncodeToString(random)
-	if err := ops.rename(parentFD, name, parentFD, quarantine, unix.RENAME_NOREPLACE); err != nil {
-		return fmt.Errorf("quarantine actor evidence partial: %w", err)
-	}
 	if err := ops.fsync(parentFD); err != nil {
-		restoreErr := restoreServiceActorPartial(parentFD, quarantine, name, ops)
-		return fmt.Errorf("sync actor evidence partial quarantine: %w", errors.Join(err, restoreErr))
+		return actorEvidenceError(err)
 	}
-	if ops.afterCleanupQuarantine != nil {
-		if err := ops.afterCleanupQuarantine(parentFD, name); err != nil {
-			restoreErr := restoreServiceActorPartial(parentFD, quarantine, name, ops)
-			return fmt.Errorf("actor evidence quarantined cleanup boundary: %w", errors.Join(err, restoreErr))
-		}
-	}
-	var quarantined unix.Stat_t
-	if err := unix.Fstatat(parentFD, quarantine, &quarantined, unix.AT_SYMLINK_NOFOLLOW); err != nil {
-		restoreErr := restoreServiceActorPartial(parentFD, quarantine, name, ops)
-		return fmt.Errorf("observe quarantined actor evidence partial: %w", errors.Join(err, restoreErr))
-	}
-	if !validServiceActorPartial(created, quarantined, maxSize) {
-		restoreErr := restoreServiceActorPartial(parentFD, quarantine, name, ops)
-		return fmt.Errorf(
-			"actor evidence partial identity or shape changed; refusing cleanup: %w",
-			errors.Join(restoreErr, ErrServiceEvidence),
-		)
-	}
-	if ops.afterCleanupValidation != nil {
-		if err := ops.afterCleanupValidation(parentFD, quarantine); err != nil {
-			restoreErr := restoreServiceActorPartial(parentFD, quarantine, name, ops)
-			return fmt.Errorf("actor evidence quarantine validation boundary: %w", errors.Join(err, restoreErr))
-		}
-	}
-	capture, placeholder, err := createServiceActorCleanupPlaceholder(parentFD)
-	if err != nil {
-		restoreErr := restoreServiceActorPartial(parentFD, quarantine, name, ops)
-		return fmt.Errorf("create actor evidence cleanup displacement: %w", errors.Join(err, restoreErr))
-	}
-	if err := ops.fsync(parentFD); err != nil {
-		restoreErr := restoreServiceActorPartial(parentFD, quarantine, name, ops)
-		return fmt.Errorf("sync actor evidence cleanup displacement: %w", errors.Join(err, restoreErr))
-	}
-	if err := ops.rename(parentFD, quarantine, parentFD, capture, unix.RENAME_EXCHANGE); err != nil {
-		restoreErr := restoreServiceActorPartial(parentFD, quarantine, name, ops)
-		return fmt.Errorf("capture actor evidence partial for deletion: %w", errors.Join(err, restoreErr))
-	}
-	if err := ops.fsync(parentFD); err != nil {
-		return fmt.Errorf("sync captured actor evidence partial: %w", err)
-	}
-	var captured, displaced unix.Stat_t
-	capturedErr := unix.Fstatat(parentFD, capture, &captured, unix.AT_SYMLINK_NOFOLLOW)
-	displacedErr := unix.Fstatat(parentFD, quarantine, &displaced, unix.AT_SYMLINK_NOFOLLOW)
-	if capturedErr != nil || displacedErr != nil ||
-		!validServiceActorPartial(created, captured, maxSize) ||
-		!samePrivateEmptyServiceActorPlaceholder(placeholder, displaced) {
-		restoreErr := restoreServiceActorPartial(parentFD, capture, name, ops)
-		return fmt.Errorf(
-			"captured actor evidence partial identity or shape changed; refusing cleanup: %w",
-			errors.Join(capturedErr, displacedErr, restoreErr, ErrServiceEvidence),
-		)
-	}
-	if err := unix.Unlinkat(parentFD, capture, 0); err != nil {
-		return fmt.Errorf("remove captured actor evidence partial: %w", err)
-	}
-	if err := ops.fsync(parentFD); err != nil {
-		return fmt.Errorf("sync removed captured actor evidence partial: %w", err)
-	}
-	if err := unix.Unlinkat(parentFD, quarantine, 0); err != nil {
-		return fmt.Errorf("remove actor evidence cleanup placeholder: %w", err)
-	}
-	if err := ops.fsync(parentFD); err != nil {
-		return fmt.Errorf("sync removed actor evidence cleanup placeholder: %w", err)
+	existing, err := observeServiceActorAt(parentFD, name, nil)
+	if err != nil || !bytes.Equal(existing, body) {
+		return actorEvidenceError(errors.Join(err, errors.New("existing actor evidence changed")))
 	}
 	return nil
 }
 
-func createServiceActorCleanupPlaceholder(parentFD int) (string, unix.Stat_t, error) {
-	random := make([]byte, 16)
-	if _, err := rand.Read(random); err != nil {
-		return "", unix.Stat_t{}, err
-	}
-	name := ".actor-displace-" + hex.EncodeToString(random)
-	fd, err := unix.Openat(
-		parentFD,
-		name,
-		unix.O_RDWR|unix.O_CREAT|unix.O_EXCL|unix.O_CLOEXEC|unix.O_NOFOLLOW,
-		0o600,
-	)
-	if err != nil {
-		return "", unix.Stat_t{}, err
-	}
-	defer unix.Close(fd)
-	var created unix.Stat_t
-	if err := unix.Fstat(fd, &created); err != nil {
-		return "", unix.Stat_t{}, err
-	}
-	if created.Mode&unix.S_IFMT != unix.S_IFREG || created.Mode&0o777 != 0o600 ||
-		created.Size != 0 || created.Nlink != 1 {
-		return "", unix.Stat_t{}, ErrServiceEvidence
-	}
-	return name, created, nil
-}
-
-func samePrivateEmptyServiceActorPlaceholder(created, current unix.Stat_t) bool {
-	return created.Dev == current.Dev && created.Ino == current.Ino &&
-		current.Mode&unix.S_IFMT == unix.S_IFREG && current.Mode&0o777 == 0o600 &&
-		current.Size == 0 && current.Nlink == 1
-}
-
-func validServiceActorPartial(created, current unix.Stat_t, maxSize int64) bool {
-	return created.Mode&unix.S_IFMT == unix.S_IFREG && created.Mode&0o077 == 0 && created.Size == 0 &&
-		created.Dev == current.Dev && created.Ino == current.Ino &&
-		current.Mode&unix.S_IFMT == unix.S_IFREG && current.Mode&0o077 == 0 &&
-		current.Size >= 0 && current.Size <= maxSize && maxSize <= maxDiagnosticBytes
-}
-
-func restoreServiceActorPartial(
+func publishServiceActorExactFD(
 	parentFD int,
-	quarantine string,
+	stagingFD int,
 	name string,
 	ops serviceActorPublicationOps,
 ) error {
-	if err := ops.rename(parentFD, quarantine, parentFD, name, unix.RENAME_NOREPLACE); err != nil {
-		return fmt.Errorf("preserve quarantined actor evidence partial without overwriting current name: %w", err)
+	err := ops.linkDirect(parentFD, stagingFD, name)
+	if err == nil || errors.Is(err, syscall.EEXIST) {
+		return err
 	}
-	if err := ops.fsync(parentFD); err != nil {
-		return fmt.Errorf("sync restored actor evidence partial: %w", err)
+	if !exactFDLinkFallbackAllowed(err) {
+		return err
+	}
+	return ops.linkProc(parentFD, stagingFD, name)
+}
+
+func exactFDLinkFallbackAllowed(err error) bool {
+	return errors.Is(err, syscall.EPERM) ||
+		errors.Is(err, syscall.EOPNOTSUPP) ||
+		errors.Is(err, syscall.EINVAL) ||
+		errors.Is(err, syscall.ENOENT) ||
+		errors.Is(err, syscall.ENOSYS)
+}
+
+func validUnnamedServiceActorStaging(staged unix.Stat_t, size int64) bool {
+	return staged.Mode&unix.S_IFMT == unix.S_IFREG &&
+		staged.Mode&0o777 == 0o600 &&
+		staged.Size == size &&
+		size > 0 && size <= maxDiagnosticBytes &&
+		staged.Nlink == 0
+}
+
+func validatePublishedServiceActorEvidence(parentFD, stagingFD int, name string, body []byte) error {
+	var staged unix.Stat_t
+	if err := unix.Fstat(stagingFD, &staged); err != nil {
+		return err
+	}
+	observed, named, err := observeServiceActorAtIdentity(parentFD, name, nil)
+	if err != nil {
+		return err
+	}
+	if !bytes.Equal(observed, body) ||
+		staged.Dev != named.Dev || staged.Ino != named.Ino ||
+		staged.Mode&unix.S_IFMT != unix.S_IFREG || staged.Mode&0o777 != 0o600 ||
+		staged.Size != int64(len(body)) || staged.Nlink != 1 ||
+		named.Mode&unix.S_IFMT != unix.S_IFREG || named.Mode&0o777 != 0o600 ||
+		named.Size != int64(len(body)) || named.Nlink != 1 {
+		return errors.New("published actor evidence differs from exact staging descriptor")
 	}
 	return nil
 }
@@ -373,41 +288,50 @@ func openServiceActorParent(path string) (int, string, error) {
 }
 
 func observeServiceActorAt(parentFD int, name string, afterRead func()) ([]byte, error) {
+	body, _, err := observeServiceActorAtIdentity(parentFD, name, afterRead)
+	return body, err
+}
+
+func observeServiceActorAtIdentity(
+	parentFD int,
+	name string,
+	afterRead func(),
+) ([]byte, unix.Stat_t, error) {
 	fd, err := unix.Openat(parentFD, name, unix.O_RDONLY|unix.O_CLOEXEC|unix.O_NOFOLLOW|unix.O_NONBLOCK, 0)
 	if err != nil {
-		return nil, err
+		return nil, unix.Stat_t{}, err
 	}
 	file := os.NewFile(uintptr(fd), name)
 	defer file.Close()
 	var before unix.Stat_t
 	if err := unix.Fstat(fd, &before); err != nil {
-		return nil, err
+		return nil, unix.Stat_t{}, err
 	}
 	if before.Mode&unix.S_IFMT != unix.S_IFREG || before.Size <= 0 || before.Size > maxDiagnosticBytes ||
 		before.Mode&0o777 != 0o600 {
-		return nil, errors.New("actor evidence is not a private bounded regular file")
+		return nil, unix.Stat_t{}, errors.New("actor evidence is not a private bounded regular file")
 	}
 	body, err := io.ReadAll(io.LimitReader(file, maxDiagnosticBytes+1))
 	if err != nil || int64(len(body)) != before.Size {
-		return nil, errors.Join(err, errors.New("actor evidence size changed"))
+		return nil, unix.Stat_t{}, errors.Join(err, errors.New("actor evidence size changed"))
 	}
 	if afterRead != nil {
 		afterRead()
 	}
 	var after, named unix.Stat_t
 	if err := unix.Fstat(fd, &after); err != nil {
-		return nil, err
+		return nil, unix.Stat_t{}, err
 	}
 	if err := unix.Fstatat(parentFD, name, &named, unix.AT_SYMLINK_NOFOLLOW); err != nil {
-		return nil, err
+		return nil, unix.Stat_t{}, err
 	}
 	if before.Dev != after.Dev || before.Ino != after.Ino || before.Size != after.Size ||
 		before.Dev != named.Dev || before.Ino != named.Ino || before.Size != named.Size ||
 		after.Mode&unix.S_IFMT != unix.S_IFREG || after.Mode&0o777 != 0o600 ||
 		named.Mode&unix.S_IFMT != unix.S_IFREG || named.Mode&0o777 != 0o600 {
-		return nil, errors.New("actor evidence identity changed")
+		return nil, unix.Stat_t{}, errors.New("actor evidence identity changed")
 	}
-	return body, nil
+	return body, named, nil
 }
 
 func actorEvidenceError(err error) error {

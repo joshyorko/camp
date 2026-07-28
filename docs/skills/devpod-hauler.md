@@ -262,24 +262,25 @@ Do not use Hauler v2.0.2's live `_catalog` response as proof that all direct reg
   distinct full process records are validated as a parent/child pair and
   published as immutable per-invocation actor evidence, separately from the
   pasta-helper and Hauler-child service records. Actor publication opens every
-  parent component descriptor-relatively with `O_NOFOLLOW`, stages mode-0600
-  bytes privately, fsyncs file and parent, and commits with a no-replace rename.
+  parent component descriptor-relatively with `O_NOFOLLOW`, stages bounded
+  mode-0600 bytes only in an unlinked `O_TMPFILE`, fsyncs and validates that
+  exact regular-file descriptor with link count zero, then publishes the exact
+  open inode no-replace with `linkat(AT_EMPTY_PATH)` or the
+  `/proc/self/fd/<fd>` plus `AT_SYMLINK_FOLLOW` exact-FD route. There is no
+  named staging fallback: unsupported unnamed creation or unavailable exact-FD
+  publication fails closed, and closing the unlinked descriptor reclaims every
+  pre-publication failure without a cleanup syscall or directory entry.
   Existing evidence is idempotent only after the same bounded no-follow
   observer proves a private regular file whose open and named
   device/inode/size remain stable and a parent fsync confirms directory
-  durability. Immediately after exclusive creation, deferred partial cleanup
-  captures the empty file's device, inode, type, and private mode, before write,
-  chmod, or file-fsync can fail. Cleanup first checks the named private bounded
-  shape, then atomically quarantines that name with a no-replace rename and
-  fsyncs the parent before deciding ownership. After quarantine validation, it
-  creates and fsyncs an exclusive private placeholder, atomically exchanges
-  that placeholder with the quarantine, and verifies both the displaced inode
-  and placeholder identity before deletion. Every displacement, deletion, and
-  restoration is parent-fsynced. A substituted inode is restored with a
-  no-replace rename; a concurrent occupant is never overwritten, and a failed
-  restoration preserves the displaced evidence. Missing no-replace or exchange
-  support, any directory-fsync failure, symlinks, directories, oversized bytes,
-  replacement races, unequal content, and cleanup identity drift fail closed.
+  durability. Fresh publication proves the canonical final and staging
+  descriptor have the same device and inode, link count one, exact mode, size,
+  and bytes both before and after the parent durability barrier. A parent-fsync
+  failure after linking is an unknown outcome: the canonical final is left in
+  place, and retry accepts it only after exact stable observation and a fresh
+  parent fsync. `EEXIST`, symlinks, directories, oversized bytes, unequal
+  content, or replacement races preserve the contested final and fail closed;
+  actor publication never rolls back or deletes the canonical name.
   Invocation locking,
   durable start intents, and recorded PID/boot/start, executable, complete argv
   digest, PGID, SID, and network-namespace evidence let retries adopt an

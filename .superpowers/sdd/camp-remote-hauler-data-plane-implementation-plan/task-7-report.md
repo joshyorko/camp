@@ -465,3 +465,96 @@ Documentation improvement:
 - Evidence: `internal/remoteworker/actor_evidence.go`, `TestServiceActorEvidenceCleanupNeverDeletesReplacementAfterQuarantineValidation`, `TestServiceActorEvidenceCleanupRemovesExactPartial`, `TestServiceActorEvidenceCleanupNeverOverwritesConcurrentName`, `TestServiceActorEvidenceCleanupDeletionFsyncFailureIsRetryable`, `TestServiceActorEvidenceCleanupRestoreFsyncFailureIsRetryable`, `TestServiceActorEvidenceCleanupFailsClosedWithoutAtomicDisplacement`, and the focused, race, vet, build, and diff-check commands above.
 - Stale or ambiguous guidance removed: the prior guide stopped at validating a random quarantine name before unlink and did not require atomic post-validation displacement, placeholder identity verification, exchange support, or a durability barrier for each new mutation.
 - Remaining uncertainty: fresh pinned-provider Task 12 acceptance remains unchanged; no real DevPod/Hauler lifecycle gate ran in this authorized fix round.
+
+## Authorized unnamed-staging redesign
+
+Status: DONE
+
+### Result
+
+- Actor-evidence publication no longer creates a named partial, quarantine,
+  capture, displacement placeholder, or cleanup path. The entire named cleanup
+  design and every cleanup hook/test were removed.
+- Publication opens `openat(parent, ".", O_TMPFILE|O_RDWR|O_CLOEXEC, 0600)`.
+  Unsupported unnamed staging fails closed without a named fallback. Chmod,
+  exact bounded write, file fsync, and `fstat` prove a regular mode-0600 inode
+  with the exact body size and link count zero before publication.
+- The exact open inode is linked no-replace first with
+  `linkat(fd, "", parent, final, AT_EMPTY_PATH)`. When that route is unavailable,
+  the existing unprivileged `/proc/self/fd/<fd>` plus `AT_SYMLINK_FOLLOW` route
+  links the same descriptor. If neither exact-FD route works, publication fails
+  closed and closing the descriptor reclaims it automatically.
+- A fresh final must match the staging descriptor's device and inode, have link
+  count one and exact regular/private shape and bytes, then survive a parent
+  fsync and a second stable descriptor-relative observation with the same
+  identity. No failure path deletes or rolls back the canonical final.
+- `EEXIST` accepts only exact, stable bytes followed by parent fsync and a
+  second stable observation. Differing, symlinked, malformed, or replaced
+  finals are preserved and rejected.
+- Parent-fsync failure after a successful link is an unknown outcome. The final
+  remains in place; retry re-fsyncs and accepts only an exact stable final.
+  Substitution after that unknown outcome, or after linking and before identity
+  validation, is preserved and rejected.
+- Service receipts, actor schema validation, supervisor relationships, service
+  journals, pending-start adoption, and remote Hauler lifecycle behavior were
+  not changed.
+
+### TDD evidence
+
+- RED: the new tests failed to compile because actor publication exposed no
+  unnamed-open, direct exact-FD link, procfs exact-FD link, pre-link, or
+  post-link seams; production still encoded named partial cleanup.
+- GREEN:
+  `TestServiceActorEvidenceUnnamedStagingFailuresLeaveNoDirectoryEntries`
+  proves write, chmod, file-fsync, and pre-link failures leave zero entries.
+- GREEN:
+  `TestServiceActorEvidenceFailsClosedWithoutUnnamedOrExactFDPublication`
+  proves unsupported `O_TMPFILE` and direct-link `EPERM` plus unavailable
+  procfs fail closed with no final or staging entry.
+- GREEN:
+  `TestServiceActorEvidenceEEXISTRaceAcceptsOnlyExactStableFinal`,
+  `TestServiceActorEvidenceLinkFsyncUnknownOutcomeRetriesOneCanonicalFinal`,
+  `TestServiceActorEvidencePreservesSubstitutionAfterUnknownOutcome`, and
+  `TestServiceActorEvidencePreservesSubstitutionAfterLinkBeforeIdentityCheck`
+  prove idempotency, retry durability, and preservation of contested finals.
+- GREEN: `TestServiceActorEvidencePublishesExactUnnamedInode` proves link count
+  zero before publication, the final and descriptor share device/inode with
+  link count one afterward, and mode, size, and bytes are exact.
+- GREEN: `TestServiceActorObserverRejectsNamedFileReplacementDuringRead`
+  continues to prove the bounded stable observer rejects a replacement race
+  without deleting the replacement.
+
+### Verification
+
+- `rtk go test ./internal/remoteworker ./internal/adapters/supervisor
+  ./internal/adapters/hauler ./internal/capsule ./internal/app -count=1`
+  — passed.
+- `rtk go test -race ./internal/remoteworker -count=1` — passed.
+- `rtk go vet ./internal/remoteworker ./internal/adapters/supervisor
+  ./internal/adapters/hauler ./internal/capsule ./internal/app` — passed.
+- `rtk go build ./cmd/camp` — passed.
+- `rtk git diff --check` — passed.
+
+### Documentation improvement
+
+Documentation improvement:
+- Canonical file changed or proposed: `docs/skills/devpod-hauler.md`
+- Durable learning captured: actor evidence stages only as an unlinked
+  `O_TMPFILE`, publishes the exact descriptor no-replace through
+  `AT_EMPTY_PATH` or `/proc/self/fd`, validates the linked identity before and
+  after the parent durability barrier, treats post-link fsync failure as an
+  unknown outcome, and never deletes or rolls back the canonical final.
+- Evidence: `internal/remoteworker/actor_evidence.go`,
+  `TestServiceActorEvidenceUnnamedStagingFailuresLeaveNoDirectoryEntries`,
+  `TestServiceActorEvidenceFailsClosedWithoutUnnamedOrExactFDPublication`,
+  `TestServiceActorEvidenceEEXISTRaceAcceptsOnlyExactStableFinal`,
+  `TestServiceActorEvidenceLinkFsyncUnknownOutcomeRetriesOneCanonicalFinal`,
+  `TestServiceActorEvidencePreservesSubstitutionAfterUnknownOutcome`,
+  `TestServiceActorEvidencePreservesSubstitutionAfterLinkBeforeIdentityCheck`,
+  `TestServiceActorEvidencePublishesExactUnnamedInode`, the stable-observer
+  replacement test, and the verification commands above.
+- Stale or ambiguous guidance removed: all partial/quarantine/placeholder
+  cleanup guidance was removed because no validate-path-then-delete design can
+  safely authorize deletion against adversarial same-UID replacement.
+- Remaining uncertainty: fresh pinned-provider Task 12 acceptance remains
+  unchanged; no real DevPod/Hauler lifecycle gate ran in this redesign.
