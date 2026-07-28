@@ -37,6 +37,48 @@ The subprocess runner keeps a command with all three terminal streams in Camp's 
 
 Unknown commands and arbitrary arguments return the stable usage exit code 2. Human failures use stderr; JSON failures use stdout and the versioned presentation envelope. Command handlers must obtain the inherited mode through `cli.OutputModeFrom` so success and failure presentation do not invent separate flag plumbing.
 
+## Deferred controller and profile command composition
+
+The implemented domain/application slice validates controller identities,
+blueprints, blueprint references, execution bindings, provenance, and the
+closed profile schema. Blueprint identity accepts only the typed DevPod/Hauler
+tool-version fields using strict v-prefixed SemVer 2.0.0, exact supported schema
+versions, portable identifiers, and canonical lowercase SHA-256 references.
+Every standalone controller, blueprint, blueprint-reference, binding, and
+provenance JSON decoder rejects unknown fields and trailing JSON values.
+Profiles currently allow only `workspaceEngine: devpod`; there is no arbitrary
+setting map. Their decoder also rejects nested unknown fields before digest
+validation. Store-facing profile reads are revalidated, and timeline marks
+absent, zero, malformed, or unsupported bindings `unknown-blueprint`.
+
+The durable profile adapter implements import, deterministic list, show,
+current, activate, and deactivate through one strictly decoded versioned JSON
+document. Updates hold an adjacent exclusive lock across validation and
+mode-0600 temporary-file publication, fsync, rename, and parent-directory
+fsync. The journal owns the optional execution binding: it accepts the first
+binding only through `BindExecution` while the journal has no effects, permits
+an exact idempotent repeat, rejects retargeting, and leaves legacy snapshots
+unbound. `BindExecution`, intent append, and fact composition take the same
+per-session journal lock. Facts preserve the exact durable binding and reject a
+non-nil caller snapshot that would establish or retarget it before journal
+append or snapshot publication.
+
+There is still no Cobra or production lifecycle composition. Therefore no
+controller, timeline, or profile command is implemented or advertised. A
+future surface may add `camp inspect`, `camp timeline`, and `camp profile
+import|list|show|current|activate|deactivate` only after production composition
+selects the profile-store path, derives the blueprint, and routes lifecycle
+entry through the execution guard; each command must use the existing JSON
+envelope and must not expose a profile that fails validation.
+
+Before registering `profile activate`, composition must prove that open calls
+`ExecutionGuard.BeforeEffects` with the selected profile and blueprint digests,
+and that attach, sync, close, and recover call `ExecutionGuard.Require` before
+their effects.
+Timeline must show legacy sessions without such a binding as
+`unknown-blueprint`, never synthesize a compatibility claim. Until those
+production dependencies exist, command help must not advertise this surface.
+
 Cobra's help flag and generated `help` command bypass normal positional validation. Keep strict help-path validation at the `cli.Execute` boundary: unavailable or unknown help topics, extra topic components, and garbage combined with `--help` must exit 2 in both human and JSON modes without emitting successful help. Valid root and completion help must remain available.
 
 Help preflight must normalize explicit values for both `--json` and `--help`/`-h` using every boolean spelling accepted by `strconv.ParseBool`, preserve final-flag-wins behavior, preserve explicit false, and stop interpreting flags after `--`; raw flag presence is not parsed state. Wrap Cobra flag-parse failures as typed usage errors at `FlagErrorFunc`, and classify only typed exit errors afterward. Never infer usage from message fragments such as `requires` or `accepts`, because application failures legitimately use those words.
@@ -108,4 +150,9 @@ A command is usable only when its handler is wired to production dependencies an
 - `internal/adapters/hauler/client_test.go`
 - `internal/cli/shell_recipe.go` and `shell_recipe_test.go`
 - `internal/config/store.go`, `bootstrap.go`, and their focused tests
+- `internal/domain/controller.go`, `blueprint.go`, `validation.go`, and `controller_test.go`
+- `internal/app/profile.go` and `profile_test.go`
+- `internal/adapters/profilestore/store.go` and `store_test.go`
+- `internal/app/execution_binding.go` and `execution_binding_test.go`
+- `internal/journal/store.go` and `store_test.go`
 - pinned DevPod `cmd/provider/options.go`, `cmd/provider/set_options.go`, and `pkg/config/config.go` at `86b6f9f5`
