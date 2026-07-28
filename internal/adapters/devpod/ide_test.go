@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"reflect"
+	"strings"
 	"testing"
 
 	"github.com/joshyorko/camp/internal/ports"
@@ -104,6 +105,26 @@ func TestNestedIDECommandRejectsUnsafeOrNonVSCodeInputs(t *testing.T) {
 		if _, err := NestedIDECommand(options); !errors.Is(err, ErrInvalidIDEEntry) {
 			t.Fatalf("NestedIDECommand(%#v) error = %v, want ErrInvalidIDEEntry", options, err)
 		}
+	}
+}
+
+func TestWorkspaceSSHHostRejectsOverlongDNSLabel(t *testing.T) {
+	t.Parallel()
+	workspaceID := strings.Repeat("a", 64)
+	if _, err := WorkspaceSSHHost(workspaceID); !errors.Is(err, ErrInvalidIDEEntry) {
+		t.Fatalf("WorkspaceSSHHost(%q) error = %v, want ErrInvalidIDEEntry", workspaceID, err)
+	}
+}
+
+func TestWorkspaceSSHHostAcceptsMaximumDNSLabel(t *testing.T) {
+	t.Parallel()
+	workspaceID := strings.Repeat("a", 63)
+	host, err := WorkspaceSSHHost(workspaceID)
+	if err != nil {
+		t.Fatalf("WorkspaceSSHHost(%q) error = %v", workspaceID, err)
+	}
+	if want := workspaceID + ".devpod"; host != want {
+		t.Fatalf("WorkspaceSSHHost(%q) = %q, want %q", workspaceID, host, want)
 	}
 }
 
