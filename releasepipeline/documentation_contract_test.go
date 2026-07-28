@@ -77,6 +77,33 @@ func TestPullRequestReceiptRequiresReleaseNoteClassification(t *testing.T) {
 	}
 }
 
+func TestRCCSourceGateLedgerNamesEveryMandatoryContract(t *testing.T) {
+	tasks := readDocumentationContractFile(t, filepath.Join("..", "tasks.py"))
+	for _, gate := range []string{
+		`"unit"`,
+		`"race"`,
+		`"vet"`,
+		`"vulnerability"`,
+		`"generated-documentation"`,
+		`"rcc-freeze"`,
+		`"packaging"`,
+		`"release-pipeline"`,
+		`"deterministic-amd64"`,
+		`"deterministic-arm64"`,
+		`"contribution-receipt"`,
+		`"whitespace"`,
+	} {
+		if !strings.Contains(tasks, gate) {
+			t.Errorf("tasks.py lacks mandatory RCC source gate %s", gate)
+		}
+	}
+	for _, field := range []string{`"command"`, `"durationMs"`, `"result"`, `result["reason"] = sanitize_failure(error)`} {
+		if !strings.Contains(tasks, field) {
+			t.Errorf("tasks.py evidence ledger lacks %s", field)
+		}
+	}
+}
+
 func readDocumentationContractFile(t *testing.T, path string) string {
 	t.Helper()
 	body, err := os.ReadFile(path)

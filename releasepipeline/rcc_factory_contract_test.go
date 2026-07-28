@@ -81,12 +81,21 @@ func TestRCCFactoryDeclaresPinnedTrustRootAndCanonicalTasks(t *testing.T) {
 		`shutil.which("gcc") or shutil.which("x86_64-conda-linux-gnu-cc")`,
 		`env={"CC": compiler, "CGO_ENABLED": "1"}`,
 		`@task(name="install")`,
-		`"""Compatibility alias for the local build-and-install task."""`,
+		`"""Verify and atomically install the exact local candidate."""`,
+		`verify_candidate()`,
 		`installed = install_candidate(CANDIDATE, install_dir)`,
 		`resolve_package_identity(ROOT, os.environ)`,
 		`package COMMIT must match checked-out HEAD`,
-		`"result": "pending"`,
+		`"result": "gated"`,
 	)
+	localTask := taskSource(t, tasks, "local")
+	if strings.Contains(localTask, "install_candidate(") {
+		t.Fatal("local must stop after repository candidate smoke verification")
+	}
+	installTask := taskSource(t, tasks, "install_task")
+	if !strings.Contains(installTask, "verify_candidate()") || !strings.Contains(installTask, "install_candidate(") {
+		t.Fatal("install must verify and link the exact local candidate")
+	}
 	if strings.Contains(tasks, "if not CANDIDATE.is_file():\n        build_candidate()") {
 		t.Fatal("robot task must consume the local task candidate, not rebuild it")
 	}
@@ -114,6 +123,20 @@ func TestRCCFactoryDeclaresPinnedTrustRootAndCanonicalTasks(t *testing.T) {
 	}
 }
 
+func taskSource(t *testing.T, source, name string) string {
+	t.Helper()
+	marker := "def " + name + "("
+	start := strings.Index(source, marker)
+	if start < 0 {
+		t.Fatalf("tasks.py lacks %s", marker)
+	}
+	rest := source[start+len(marker):]
+	if next := strings.Index(rest, "\n@task"); next >= 0 {
+		return source[start : start+len(marker)+next]
+	}
+	return source[start:]
+}
+
 func TestDeveloperGuideUsesPATHRCCWhileCIKeepsVerifiedBootstrap(t *testing.T) {
 	root := filepath.Clean("..")
 	guide := readRepositoryFile(t, root, "docs/skills/testing-release-evidence.md")
@@ -121,7 +144,9 @@ func TestDeveloperGuideUsesPATHRCCWhileCIKeepsVerifiedBootstrap(t *testing.T) {
 		"rcc run -r developer/toolkit.yaml --dev -t local",
 		"rcc run -r developer/toolkit.yaml --dev -t test",
 		"rcc run -r developer/toolkit.yaml -t package",
-		"`install` remains a compatibility alias for `local`",
+		"`local` stops after repository-only candidate smoke verification",
+		"`install` verifies that exact candidate before atomically linking it",
+		"every gate ledger has that non-empty candidate SHA-256",
 	)
 	if strings.Contains(guide, "Always enter the factory through `./developer/rccw`") {
 		t.Fatal("developer guidance must not require the CI bootstrap wrapper")

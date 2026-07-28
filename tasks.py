@@ -4,9 +4,11 @@ import json
 import os
 import pathlib
 import platform
+import re
 import shlex
 import shutil
 import subprocess
+import tempfile
 import time
 
 from invoke import task
@@ -192,45 +194,150 @@ def managed_tool_environment():
 
 
 def run_gates(suite, gates, *, env=None):
+    metadata = verify_candidate()
+    candidate_digest = metadata.get("candidateSha256")
+    if not isinstance(candidate_digest, str) or not candidate_digest:
+        raise RuntimeError("candidate manifest lacks a non-empty candidate digest")
     EVIDENCE.mkdir(parents=True, exist_ok=True)
     report = {
         "schemaVersion": 1,
         "suite": suite,
-        "candidateSha256": sha256(CANDIDATE) if CANDIDATE.is_file() else None,
-        "gates": [
-            {"name": name, "result": "pending", "durationMs": 0}
-            for name, _command in gates
-        ],
+        "candidateSha256": candidate_digest,
+        "gates": [],
     }
     report_path = EVIDENCE / f"{suite}-gates.json"
     failures = []
+    declared = {name for name, _command in gates}
+    if len(declared) != len(gates):
+        raise RuntimeError(f"{suite} gates contain duplicate names")
+    for name in MANDATORY_TEST_GATES if suite == "test" else ():
+        if name not in declared:
+            report["gates"].append(
+                {
+                    "name": name,
+                    "command": None,
+                    "result": "missing",
+                    "reason": "mandatory gate is not declared",
+                    "durationMs": 0,
+                }
+            )
+    gate_results = {}
+    for name, command in gates:
+        result = {
+            "name": name,
+            "command": shlex.join(command),
+            "result": "gated",
+            "durationMs": 0,
+        }
+        report["gates"].append(result)
+        gate_results[name] = result
     report_path.write_text(
         json.dumps(report, indent=2, sort_keys=True) + "\n", encoding="utf-8"
     )
-    for index, (name, command) in enumerate(gates):
+    for name, command in gates:
+        result = gate_results[name]
         started = time.monotonic()
-        result = report["gates"][index]
         try:
             run(command, env=env)
             result["result"] = "passed"
         except Exception as error:
             result["result"] = "failed"
-            result["reason"] = str(error).splitlines()[0]
+            result["reason"] = sanitize_failure(error)
             failures.append((name, error))
         finally:
             result["durationMs"] = round((time.monotonic() - started) * 1000)
             report_path.write_text(
                 json.dumps(report, indent=2, sort_keys=True) + "\n", encoding="utf-8"
             )
-    if failures:
+    nonterminal = [
+        gate["name"]
+        for gate in report["gates"]
+        if gate["result"] not in {"passed", "failed", "missing", "skipped", "gated"}
+    ]
+    if nonterminal:
+        raise RuntimeError(f"{suite} gates left nonterminal: {', '.join(nonterminal)}")
+    missing = [gate["name"] for gate in report["gates"] if gate["result"] == "missing"]
+    if failures or missing:
         names = ", ".join(name for name, _error in failures)
-        raise RuntimeError(f"{suite} gates failed: {names}")
+        details = ", ".join(filter(None, [names, *missing]))
+        raise RuntimeError(f"{suite} gates failed: {details}")
+
+
+def sanitize_failure(error):
+    reason = str(error).splitlines()[0]
+    reason = re.sub(r"https?://[^\s/@:]+:[^\s/@]+@", "https://***:***@", reason)
+    reason = re.sub(r"(?i)(token|password|secret)=\S+", r"\1=***", reason)
+    return reason[:512]
+
+
+MANDATORY_TEST_GATES = (
+    "unit",
+    "race",
+    "vet",
+    "vulnerability",
+    "generated-documentation",
+    "rcc-freeze",
+    "packaging",
+    "release-pipeline",
+    "deterministic-amd64",
+    "deterministic-arm64",
+    "contribution-receipt",
+    "whitespace",
+)
+
+
+def require_pattern(path, pattern, description):
+    if not re.search(pattern, pathlib.Path(path).read_text(encoding="utf-8"), re.MULTILINE):
+        raise RuntimeError(f"RCC freeze validation failed: {description}")
+
+
+def validate_freeze():
+    setup = ROOT / "developer" / "setup.yaml"
+    requirements = ROOT / "robot_requirements.txt"
+    go_module = ROOT / "go.mod"
+    rcc_lock = ROOT / "developer" / "rcc.lock.yaml"
+    tools_lock = ROOT / "tools.lock.yaml"
+    require_pattern(go_module, r"^go \d+\.\d+\.\d+$", "go.mod lacks an exact Go version")
+    require_pattern(rcc_lock, r"^version: v\d+\.\d+\.\d+$", "RCC lock lacks an exact version")
+    require_pattern(rcc_lock, r"^host: linux/amd64$", "RCC factory host is not linux/amd64")
+    setup_robot = re.search(r"^  - robotframework=([^\s]+)$", setup.read_text(encoding="utf-8"), re.MULTILINE)
+    pip_robot = re.fullmatch(r"robotframework==([^\s]+)\s*", requirements.read_text(encoding="utf-8"))
+    if not setup_robot or not pip_robot or setup_robot.group(1) != pip_robot.group(1):
+        raise RuntimeError("RCC freeze validation failed: Robot declarations disagree")
+    for tool in ("devpod", "hauler"):
+        require_pattern(tools_lock, rf"^  {tool}:\n(?:.*\n)*?    version: v\d+\.\d+\.\d+$", f"{tool} lacks an exact locked version")
+    require_pattern(tools_lock, r"^  room:\n(?:.*\n)*?    version: v\d+\.\d+\.\d+$", "Room lacks an exact locked version")
+
+
+def generated_documentation():
+    run(["go", "run", "./cmd/camp-docs"])
+    run(["git", "diff", "--exit-code", "--", "docs/generated"])
+    run(["go", "test", "./internal/docsgen", "./docs", "-count=1"])
+
+
+def verify_deterministic_build(architecture):
+    with tempfile.TemporaryDirectory() as temporary:
+        first = pathlib.Path(temporary) / "first"
+        second = pathlib.Path(temporary) / "second"
+        env = {"CGO_ENABLED": "0", "GOOS": "linux", "GOARCH": architecture}
+        command = ["go", "build", "-trimpath", "-buildvcs=false", "-o"]
+        run([*command, str(first), "./cmd/camp"], env=env)
+        run([*command, str(second), "./cmd/camp"], env=env)
+        if sha256(first) != sha256(second):
+            raise RuntimeError(f"non-deterministic linux/{architecture} build")
 
 
 @task
 def local(_context):
-    """Build, smoke, and install one truthfully stamped development candidate."""
+    """Build and smoke one repository-only truthfully stamped candidate."""
     metadata = build_and_smoke_candidate()
+    print(json.dumps(metadata, sort_keys=True))
+
+
+@task(name="install")
+def install_task(_context):
+    """Verify and atomically install the exact local candidate."""
+    metadata = verify_candidate()
     install_dir = pathlib.Path(
         os.environ.get("CAMP_INSTALL_DIR", pathlib.Path.home() / ".local" / "bin")
     )
@@ -240,15 +347,11 @@ def local(_context):
     print(json.dumps(metadata, sort_keys=True))
 
 
-@task(name="install")
-def install_task(_context):
-    """Compatibility alias for the local build-and-install task."""
-    local(_context)
-
-
 @task(name="test")
 def test_task(_context):
     """Run source, race, hygiene, vulnerability, and packaging gates."""
+    build_and_smoke_candidate()
+    verify_candidate()
     compiler = shutil.which("gcc") or shutil.which("x86_64-conda-linux-gnu-cc")
     if not compiler:
         raise RuntimeError("race gate requires a C compiler in the RCC environment")
@@ -275,9 +378,14 @@ def test_task(_context):
                 "vulnerability",
                 ["go", "run", "golang.org/x/vuln/cmd/govulncheck@v1.1.4", "./..."],
             ),
-            ("diff", ["git", "diff", "--check"]),
+            ("generated-documentation", ["python", "-c", "import tasks; tasks.generated_documentation()"]),
+            ("rcc-freeze", ["python", "-c", "import tasks; tasks.validate_freeze()"]),
             ("packaging", ["go", "test", "./packaging", "-count=1"]),
-            ("releasepipeline", ["go", "test", "./releasepipeline", "-count=1"]),
+            ("release-pipeline", ["go", "test", "./releasepipeline", "-count=1"]),
+            ("deterministic-amd64", ["python", "-c", "import tasks; tasks.verify_deterministic_build('amd64')"]),
+            ("deterministic-arm64", ["python", "-c", "import tasks; tasks.verify_deterministic_build('arm64')"]),
+            ("contribution-receipt", ["go", "test", "./releasepipeline", "-run", "TestPullRequestReceiptRequiresReleaseNoteClassification", "-count=1"]),
+            ("whitespace", ["git", "diff", "--check"]),
         ],
         env={"CC": compiler, "CGO_ENABLED": "1"},
     )
