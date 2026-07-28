@@ -35,8 +35,9 @@
   privileged Podman fixture instead of the heavyweight default Room
   image hydration
 - make the parity evidence job check out its candidate before invoking the
-  repository verifier, and enforce candidate, real-tool, and publication
-  receipt fields
+  repository verifier, and enforce candidate and real-tool receipt fields
+- pre-pull the locked lifecycle fixture before DevPod agent injection on fresh
+  hosted runners
 
 ### Portability and Safety
 

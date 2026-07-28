@@ -111,6 +111,16 @@ func TestCIAddsRCCParityWithoutCachingPrivateRuntimeHomes(t *testing.T) {
 	if uploadWith["if-no-files-found"] != "error" {
 		t.Fatalf("mandatory Robot evidence missing-file policy = %#v, want error", uploadWith["if-no-files-found"])
 	}
+	prepull := findStepByName(t, document, "rcc-robot", "Pre-pull locked lifecycle fixture")
+	prepullRun := prepull["run"].(string)
+	for _, required := range []string{"tools.lock.yaml", "docker pull"} {
+		if !strings.Contains(prepullRun, required) {
+			t.Errorf("lifecycle fixture pre-pull omits %q", required)
+		}
+	}
+	if strings.Contains(prepullRun, "quay.io/") || strings.Contains(prepullRun, "docker.io/") {
+		t.Error("lifecycle fixture pre-pull duplicates the locked image reference")
+	}
 }
 
 func TestRCCRobotAuthorizesPastaUserNamespacesOnRestrictedUbuntu(t *testing.T) {

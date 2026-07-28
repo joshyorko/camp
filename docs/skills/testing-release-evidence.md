@@ -327,6 +327,11 @@ that private environment and passes `CAMP_DEVPOD_PROVIDER=docker` to Camp. The
 The lifecycle harness writes an explicit devcontainer configuration using the
 digest-pinned Podman acceptance image from
 `tools.lock.yaml`; Camp's production Room fallback is unchanged.
+Hosted exact-candidate CI pre-pulls that locked reference before RCC invokes
+DevPod because fresh image acquisition can outlive DevPod's agent-injection
+deadline. The pre-pull moves acquisition outside that deadline; it does not
+replace the real DevPod create, agent injection, workspace engine, or cleanup
+evidence.
 Before each file or MinIO lifecycle scenario opens Camp's workspace,
 the harness creates one unrelated workspace in that same private context. Its
 scenario ledger recovers exact Camp workspace IDs, process identities,

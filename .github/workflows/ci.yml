@@ -175,6 +175,20 @@ jobs:
             sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
           fi
           unshare --user --map-root-user true
+      - name: Pre-pull locked lifecycle fixture
+        shell: bash
+        run: |
+          lifecycle_image="$(
+            awk '
+              /^  lifecycle:$/ { lifecycle = 1; next }
+              lifecycle && /^    image: / { print $2; exit }
+            ' tools.lock.yaml
+          )"
+          case "$lifecycle_image" in
+            *@sha256:[0-9a-f][0-9a-f]*) ;;
+            *) printf 'invalid locked lifecycle image: %s\n' "$lifecycle_image" >&2; exit 1 ;;
+          esac
+          docker pull "$lifecycle_image"
       - name: Run mandatory exact-candidate Robot lifecycle
         id: robot
         env:
