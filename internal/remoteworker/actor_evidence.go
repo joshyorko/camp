@@ -22,12 +22,18 @@ type serviceActorPublicationOps struct {
 	fsync        func(int) error
 	rename       func(int, string, int, string, uint) error
 	beforeRename func(int, string) error
+	write        func(*os.File, []byte) (int, error)
+	chmod        func(*os.File, os.FileMode) error
+	fileSync     func(*os.File) error
 }
 
 func defaultServiceActorPublicationOps() serviceActorPublicationOps {
 	return serviceActorPublicationOps{
-		fsync:  unix.Fsync,
-		rename: unix.Renameat2,
+		fsync:    unix.Fsync,
+		rename:   unix.Renameat2,
+		write:    func(file *os.File, body []byte) (int, error) { return file.Write(body) },
+		chmod:    func(file *os.File, mode os.FileMode) error { return file.Chmod(mode) },
+		fileSync: func(file *os.File) error { return file.Sync() },
 	}
 }
 
@@ -78,29 +84,32 @@ func publishServiceActorEvidenceWithOps(
 	if err != nil {
 		return actorEvidenceError(err)
 	}
+	var partialStat unix.Stat_t
+	if err := unix.Fstat(fd, &partialStat); err != nil {
+		unix.Close(fd)
+		return actorEvidenceError(err)
+	}
 	file := os.NewFile(uintptr(fd), partial)
 	cleanup := true
-	var partialStat unix.Stat_t
 	defer func() {
 		if cleanup {
-			if err := cleanupServiceActorPartial(parentFD, partial, partialStat); err != nil {
+			if err := cleanupServiceActorPartial(parentFD, partial, partialStat, int64(len(body))); err != nil {
 				resultErr = actorEvidenceError(errors.Join(resultErr, err))
 			}
 		}
 	}()
-	if _, err := file.Write(body); err != nil {
+	if n, err := ops.write(file, body); err != nil {
+		file.Close()
+		return actorEvidenceError(err)
+	} else if n != len(body) {
+		file.Close()
+		return actorEvidenceError(io.ErrShortWrite)
+	}
+	if err := ops.chmod(file, 0o600); err != nil {
 		file.Close()
 		return actorEvidenceError(err)
 	}
-	if err := file.Chmod(0o600); err != nil {
-		file.Close()
-		return actorEvidenceError(err)
-	}
-	if err := file.Sync(); err != nil {
-		file.Close()
-		return actorEvidenceError(err)
-	}
-	if err := unix.Fstat(fd, &partialStat); err != nil {
+	if err := ops.fileSync(file); err != nil {
 		file.Close()
 		return actorEvidenceError(err)
 	}
@@ -139,15 +148,15 @@ func publishServiceActorEvidenceWithOps(
 	return nil
 }
 
-func cleanupServiceActorPartial(parentFD int, name string, expected unix.Stat_t) error {
+func cleanupServiceActorPartial(parentFD int, name string, created unix.Stat_t, maxSize int64) error {
 	var named unix.Stat_t
 	if err := unix.Fstatat(parentFD, name, &named, unix.AT_SYMLINK_NOFOLLOW); err != nil {
 		return fmt.Errorf("observe actor evidence partial for cleanup: %w", err)
 	}
-	if expected.Mode&unix.S_IFMT != unix.S_IFREG || expected.Mode&0o777 != 0o600 ||
-		expected.Dev != named.Dev || expected.Ino != named.Ino || expected.Size != named.Size ||
-		named.Mode&unix.S_IFMT != unix.S_IFREG || named.Mode&0o777 != 0o600 ||
-		named.Size <= 0 || named.Size > maxDiagnosticBytes {
+	if created.Mode&unix.S_IFMT != unix.S_IFREG || created.Mode&0o077 != 0 || created.Size != 0 ||
+		created.Dev != named.Dev || created.Ino != named.Ino ||
+		named.Mode&unix.S_IFMT != unix.S_IFREG || named.Mode&0o077 != 0 ||
+		named.Size < 0 || named.Size > maxSize || maxSize > maxDiagnosticBytes {
 		return errors.New("actor evidence partial identity or shape changed; refusing cleanup")
 	}
 	if err := unix.Unlinkat(parentFD, name, 0); err != nil {

@@ -267,10 +267,12 @@ Do not use Hauler v2.0.2's live `_catalog` response as proof that all direct reg
   Existing evidence is idempotent only after the same bounded no-follow
   observer proves a private regular file whose open and named
   device/inode/size remain stable and a parent fsync confirms directory
-  durability. Deferred partial cleanup retains the created file's device and
-  inode, then unlinks only when a no-follow named observation still proves that
-  exact private regular file and its expected size; substitutions remain
-  untouched and fail closed. Symlinks, directories, oversized bytes,
+  durability. Immediately after exclusive creation, deferred partial cleanup
+  captures the empty file's device, inode, type, and private mode, before write,
+  chmod, or file-fsync can fail. Cleanup later unlinks only when a no-follow
+  named observation still proves that exact private regular file with a size
+  between zero and the bounded evidence length; substitutions remain untouched
+  and fail closed. Symlinks, directories, oversized bytes,
   replacement races, unequal content, and cleanup identity drift fail closed.
   Invocation locking,
   durable start intents, and recorded PID/boot/start, executable, complete argv

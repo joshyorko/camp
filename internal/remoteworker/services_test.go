@@ -228,6 +228,106 @@ func TestServiceActorEvidenceCleanupRemovesExactPartial(t *testing.T) {
 	}
 }
 
+func TestServiceActorEvidenceCleanupRemovesExactPartialAfterEarlyFileFailures(t *testing.T) {
+	actors := ServiceActorEvidence{
+		SchemaVersion: ProtocolSchemaVersion, SessionID: "session-1",
+		Worker: validWorkerRecord(), Supervisor: validSupervisorRecord(),
+	}
+	for _, test := range []struct {
+		name   string
+		inject func(*serviceActorPublicationOps, string, *string)
+	}{
+		{
+			name: "write",
+			inject: func(ops *serviceActorPublicationOps, root string, partialPath *string) {
+				ops.write = func(file *os.File, body []byte) (int, error) {
+					*partialPath = filepath.Join(root, filepath.Base(file.Name()))
+					n, err := file.Write(body[:1])
+					return n, errors.Join(err, errors.New("injected write failure"))
+				}
+			},
+		},
+		{
+			name: "chmod",
+			inject: func(ops *serviceActorPublicationOps, root string, partialPath *string) {
+				ops.chmod = func(file *os.File, _ os.FileMode) error {
+					*partialPath = filepath.Join(root, filepath.Base(file.Name()))
+					return errors.New("injected chmod failure")
+				}
+			},
+		},
+		{
+			name: "file fsync",
+			inject: func(ops *serviceActorPublicationOps, root string, partialPath *string) {
+				ops.fileSync = func(file *os.File) error {
+					*partialPath = filepath.Join(root, filepath.Base(file.Name()))
+					return errors.New("injected file fsync failure")
+				}
+			},
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			root := t.TempDir()
+			path := filepath.Join(root, "actors.json")
+			var partialPath string
+			ops := defaultServiceActorPublicationOps()
+			test.inject(&ops, root, &partialPath)
+
+			err := publishServiceActorEvidenceWithOps(path, actors, ops)
+			if !errors.Is(err, ErrServiceEvidence) {
+				t.Fatalf("publication error = %v", err)
+			}
+			if partialPath == "" {
+				t.Fatal("injected boundary did not observe partial path")
+			}
+			if _, err := os.Lstat(partialPath); !errors.Is(err, os.ErrNotExist) {
+				t.Fatalf("exact partial cleanup error = %v", err)
+			}
+		})
+	}
+}
+
+func TestServiceActorEvidenceCleanupLeavesEarlySubstitutedPartialUntouched(t *testing.T) {
+	root := t.TempDir()
+	path := filepath.Join(root, "actors.json")
+	actors := ServiceActorEvidence{
+		SchemaVersion: ProtocolSchemaVersion, SessionID: "session-1",
+		Worker: validWorkerRecord(), Supervisor: validSupervisorRecord(),
+	}
+	var replacementPath string
+	replacement := []byte("replacement")
+	ops := defaultServiceActorPublicationOps()
+	ops.write = func(file *os.File, _ []byte) (int, error) {
+		originalPath := filepath.Join(root, filepath.Base(file.Name()))
+		if err := os.Rename(originalPath, originalPath+".original"); err != nil {
+			return 0, err
+		}
+		replacementPath = originalPath
+		if err := os.WriteFile(replacementPath, replacement, 0o600); err != nil {
+			return 0, err
+		}
+		return 0, errors.New("injected write failure after substitution")
+	}
+
+	err := publishServiceActorEvidenceWithOps(path, actors, ops)
+	if !errors.Is(err, ErrServiceEvidence) {
+		t.Fatalf("publication error = %v", err)
+	}
+	if !strings.Contains(err.Error(), "refusing cleanup") {
+		t.Fatalf("publication error did not record cleanup mismatch: %v", err)
+	}
+	if !strings.Contains(err.Error(), "injected write failure after substitution") {
+		t.Fatalf("publication error did not preserve primary failure: %v", err)
+	}
+	got, err := os.ReadFile(replacementPath)
+	if err != nil {
+		t.Fatalf("substituted partial was removed: %v", err)
+	}
+	if !bytes.Equal(got, replacement) {
+		t.Fatalf("substituted partial bytes = %q, want %q", got, replacement)
+	}
+}
+
 func TestServiceActorEvidenceRejectsSymlinkedFileAndParent(t *testing.T) {
 	root := t.TempDir()
 	actors := ServiceActorEvidence{

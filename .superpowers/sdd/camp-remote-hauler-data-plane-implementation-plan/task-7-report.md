@@ -242,6 +242,56 @@ Documentation improvement:
 - Stale or ambiguous guidance removed: the earlier word “immutable” did not disclose that existing evidence was followed by pathname and could authorize a replaceable symlink target.
 - Remaining uncertainty: fresh pinned-provider Task 12 acceptance remains unchanged.
 
+## Fix round 4
+
+Status: DONE_WITH_CONCERNS
+
+### Result
+
+- Actor-evidence publication now captures the exclusively created partial's
+  device, inode, regular-file type, private mode, and initial zero size
+  immediately after `openat(O_CREAT|O_EXCL|O_NOFOLLOW)`, before write, chmod,
+  or file-fsync can fail.
+- Deferred cleanup retains that stable creation identity across every later
+  file boundary. It unlinks only when `fstatat(AT_SYMLINK_NOFOLLOW)` proves the
+  still-named entry is the same device/inode, remains a private regular file,
+  and has a size from zero through the bounded evidence length.
+- Early exact partials are removed after injected write, chmod, and file-fsync
+  failures. An early same-name replacement is left untouched, and the returned
+  publication error preserves both the primary boundary failure and cleanup
+  identity mismatch.
+- Short writes now fail explicitly and use the same identity-bound cleanup.
+  No blind unlink, service journal, retry durability, stable observation,
+  no-follow traversal, or no-replace publication behavior changed.
+
+### TDD evidence
+
+- RED: the new boundary tests failed to compile because publication operations
+  had no injectable write, chmod, or file-fsync seams; the production cleanup
+  identity was still populated only after those operations.
+- GREEN: `TestServiceActorEvidenceCleanupRemovesExactPartialAfterEarlyFileFailures`
+  passes at all three injected boundaries and proves each exact owned partial
+  is absent afterward.
+- GREEN: `TestServiceActorEvidenceCleanupLeavesEarlySubstitutedPartialUntouched`
+  proves an early replacement survives and the returned error contains both
+  the injected write failure and the cleanup refusal.
+
+### Verification
+
+- `rtk go test ./internal/remoteworker -count=1` — 64 passed.
+- `rtk go test -race ./internal/remoteworker -count=1` — 64 passed.
+- `rtk go vet ./internal/remoteworker` — passed.
+- `rtk git diff --check` — passed.
+
+### Documentation improvement
+
+Documentation improvement:
+- Canonical file changed or proposed: `docs/skills/devpod-hauler.md`
+- Durable learning captured: immutable actor-evidence cleanup authority must be captured immediately after exclusive no-follow creation, before write/chmod/file-fsync; later cleanup accepts only the same no-follow private regular inode with size bounded from zero through the evidence length.
+- Evidence: `internal/remoteworker/actor_evidence.go`, `TestServiceActorEvidenceCleanupRemovesExactPartialAfterEarlyFileFailures`, `TestServiceActorEvidenceCleanupLeavesEarlySubstitutedPartialUntouched`, and the focused, race, vet, and diff-check commands above.
+- Stale or ambiguous guidance removed: the prior guide's “expected size” wording implied only a fully written partial and did not cover safely owned zero-length or short early partials.
+- Remaining uncertainty: fresh pinned-provider Task 12 acceptance remains unchanged.
+
 ## Fix round 3
 
 Status: DONE_WITH_CONCERNS
