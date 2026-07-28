@@ -77,6 +77,10 @@ source changelog, or `Release-note classification: no-release-note: REASON`
 when it does not. A changelog entry is reviewable
 source evidence, not proof that an artifact was packaged, published, installed,
 or dogfooded. Do not create dated skill entries as a substitute.
+Before opening a pull request, copy every receipt label from
+`.github/pull_request_template.md` exactly and give each one a non-empty value;
+`developer/verify_pr_receipt.py` fails before source gates when a label is
+missing, renamed, or empty.
 
 This policy borrows two upstream patterns without inheriting their product
 claims:
