@@ -244,6 +244,57 @@ Do not use Hauler v2.0.2's live `_catalog` response as proof that all direct reg
   the same candidate.
 - On enforcing SELinux hosts, the packaged `pasta` executable transitions into `pasta_t`; an unwrapped Hauler child inherits that domain and can be denied `cgroup_t` search even though its private store is correctly owned. Camp keeps pasta in `pasta_t` but launches the exact Hauler child through the policy-authorized `/usr/bin/runcon -t unconfined_t` prefix, records that prefix in the confinement fingerprint and launch intent, and still validates the final Hauler PID, argv, namespace, guest listener, loopback mapping, and HTTP endpoint. Evidence: the Bluefin audit log recorded `comm="hauler" ... scontext=...:pasta_t ... tcontext=...:cgroup_t ... denied { search }`; the unwrapped service returned `stat .../store: permission denied`; the wrapped standalone probe returned HTTP 200 on `127.0.0.1:45999/v2/`; and the fresh real `camp open` reached and completed `devpod up` with both services live.
 - A DevPod container cannot reach a host-only `127.0.0.1` registry or fileserver merely because Camp injected `CAMP_REGISTRY` and `CAMP_FILESERVER`. After `devpod up`, production composition starts one supervised `devpod ssh --reverse-forward-ports` process per endpoint, records its PID/start-time/executable/argv identity in `Recovery.Forwarding`, and probes the exact endpoint from the exact workspace before declaring it ready. Startup failure stops only the recorded forwarders; close stops them by recorded identity. Evidence: the unforwarded real workspace returned connection refused for `$CAMP_REGISTRY`; the production-composed workspace subsequently returned HTTP 200 for both `http://$CAMP_REGISTRY/v2/` and `http://$CAMP_FILESERVER/`, with two distinct forwarder process records in the session snapshot.
+- A completed remote `haulerKitV1` hydration does not retain those workstation
+  tunnels. Its generated `postStartCommand` invokes the descriptor-pinned Camp
+  worker, which revalidates the completed hydration receipt, manifest, ready
+  store, and installed Hauler/pasta bytes before service mutation. It serves
+  the ready store plus a persistent writable registry overlay at
+  `127.0.0.1:5000` and the ready store plus `.camp/transfer` at
+  `127.0.0.1:8080`. Each exact installed Hauler child runs behind its own exact
+  installed pasta process in a distinct network namespace; pasta maps only
+  IPv4 loopback to private guest ports `15000` and `18080`, disables UDP and
+  namespace-to-host forwarding, and requires HTTP 200 at `/v2/` or `/`.
+  On enforcing SELinux it opens the exact `/usr/bin/runcon` without following
+  symlinks, requires an executable regular file, fingerprints the exact
+  `runcon -t unconfined_t` prefix, and includes that prefix in the expected
+  pasta argv. On non-enforcing systems the prefix is empty. The invocation
+  worker launches one exact, one-shot Camp service-supervisor subprocess; their
+  distinct full process records are validated as a parent/child pair and
+  published as immutable per-invocation actor evidence, separately from the
+  pasta-helper and Hauler-child service records. Actor publication opens every
+  parent component descriptor-relatively with `O_NOFOLLOW`, stages bounded
+  mode-0600 bytes only in an unlinked `O_TMPFILE`, fsyncs and validates that
+  exact regular-file descriptor with link count zero, then publishes the exact
+  open inode no-replace with `linkat(AT_EMPTY_PATH)` or the
+  `/proc/self/fd/<fd>` plus `AT_SYMLINK_FOLLOW` exact-FD route. There is no
+  named staging fallback: unsupported unnamed creation or unavailable exact-FD
+  publication fails closed, and closing the unlinked descriptor reclaims every
+  pre-publication failure without a cleanup syscall or directory entry.
+  Existing evidence is idempotent only after the same bounded no-follow
+  observer proves a private regular file whose open and named device, inode,
+  size, mode, and link count remain stable. Confirmation retains that first
+  identity, requires exact bytes with mode 0600 and link count one, fsyncs the
+  parent, then requires a second stable observation of the same device and
+  inode with the same exact shape and bytes. Exact-byte inode replacement on
+  either side of the durability barrier and hardlinked evidence are preserved
+  and rejected; the same confirmation applies after an `EEXIST` publication
+  race. Fresh publication proves the canonical final and staging
+  descriptor have the same device and inode, link count one, exact mode, size,
+  and bytes both before and after the parent durability barrier. A parent-fsync
+  failure after linking is an unknown outcome: the canonical final is left in
+  place, and retry accepts it only after exact stable observation and a fresh
+  parent fsync. `EEXIST`, symlinks, directories, oversized bytes, unequal
+  content, or replacement races preserve the contested final and fail closed;
+  actor publication never rolls back or deletes the canonical name.
+  Invocation locking,
+  durable start intents, and recorded PID/boot/start, executable, complete argv
+  digest, PGID, SID, and network-namespace evidence let retries adopt an
+  unknown-outcome start, observe an already-live unit without duplication, or
+  identity-safely restore a stopped recorded unit. Reentry rebuilds the complete
+  expected pasta argv, including the verified SELinux prefix and exact Hauler
+  command, and compares its digest before observation or restart. Recorded
+  command, confinement, endpoint, log, pidfile, worker, supervisor, argv, or
+  digest drift fails closed.
 - A live `devpod ssh` process is not sufficient forwarder readiness evidence: a
   fresh-controller file lifecycle run observed the process remain alive while
   its fileserver reverse tunnel never became reachable and its forwarder log
@@ -272,4 +323,6 @@ Installed-tool tests in `integration/contracts_test.go` skip when the binaries a
 - `internal/domain/remote_data_plane.go`
 - `internal/haulkit/`
 - `internal/adapters/supervisor/confinement.go`
+- `internal/remoteworker/services.go`
+- `internal/remoteworker/supervisor.go`
 - `integration/contracts_test.go`

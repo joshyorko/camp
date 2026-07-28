@@ -27,6 +27,10 @@ import (
 
 type productionOperations struct{}
 
+func (productionOperations) StartServices(ctx context.Context, request Request) (any, error) {
+	return launchServiceSupervisor(ctx, request)
+}
+
 type productionActivationRuntime struct {
 	kit verifiedRuntimeKit
 }

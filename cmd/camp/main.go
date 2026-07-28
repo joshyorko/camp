@@ -23,6 +23,12 @@ func run(args []string, streams cli.Streams) int {
 		}
 		return int(cli.ExitSuccess)
 	}
+	if len(args) == 1 && args[0] == "__remote-service-supervisor" {
+		if err := cli.RunRemoteServiceSupervisor(context.Background(), streams); err != nil {
+			return int(cli.ExitFailure)
+		}
+		return int(cli.ExitSuccess)
+	}
 	if len(args) == 3 && args[0] == "__doctor-listener" {
 		port, err := strconv.Atoi(args[1])
 		if err != nil {
