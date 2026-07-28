@@ -285,6 +285,15 @@ when docs execution does not supply stdin.
 
 When a stacked PR's base merges, restack the child directly onto the resulting `master` commit and compare `master...HEAD` before pushing. The post-rebase diff must contain only the child scope; record the old and new head SHAs, then force-push with a lease pinned to the observed old remote head so concurrent updates fail instead of being overwritten.
 
+When several overlapping PRs are intentionally replaced by one integration
+PR, start the integration branch at the current remote `master` and merge each
+observed PR head with an explicit merge commit in dependency order. Do not use
+an octopus merge for overlapping heads: it obscures which parent introduced a
+conflict and cannot record an ordered resolution. Before publication, require
+`git merge-base --is-ancestor <observed-head> HEAD` for every superseded PR and
+review `git diff --stat origin/master...HEAD`; a green combined test run alone
+does not prove that every source head was included.
+
 Named acceptance gates require discovery evidence before execution evidence. `go test -run` exits zero even when no matching test exists, so first require the exact test name from `go test -list`, then run with `-v` and retain the matching `=== RUN` and `--- PASS` lines. A package-level `PASS` accompanied by `[no tests to run]` is not acceptance evidence.
 
 ```bash
