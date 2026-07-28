@@ -1,13 +1,16 @@
 package remoteworker
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/joshyorko/camp/internal/domain"
+	"golang.org/x/sys/unix"
 )
 
 type recordingServicesRuntime struct {
@@ -124,6 +127,104 @@ func TestServiceActorEvidenceRoundTripsAndRejectsEitherIdentityMismatch(t *testi
 		if err := observeServiceActorEvidence(path, expected); !errors.Is(err, ErrServiceEvidence) {
 			t.Fatalf("observeServiceActorEvidence() error = %v", err)
 		}
+	}
+}
+
+func TestServiceActorEvidenceRetryConfirmsParentDurability(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "actors.json")
+	actors := ServiceActorEvidence{
+		SchemaVersion: ProtocolSchemaVersion, SessionID: "session-1",
+		Worker: validWorkerRecord(), Supervisor: validSupervisorRecord(),
+	}
+	ops := defaultServiceActorPublicationOps()
+	fsyncCalls := 0
+	ops.fsync = func(fd int) error {
+		fsyncCalls++
+		if fsyncCalls == 2 {
+			return errors.New("injected post-rename fsync failure")
+		}
+		return unix.Fsync(fd)
+	}
+	if err := publishServiceActorEvidenceWithOps(path, actors, ops); !errors.Is(err, ErrServiceEvidence) {
+		t.Fatalf("first publication error = %v", err)
+	}
+	if _, err := os.Stat(path); err != nil {
+		t.Fatalf("renamed evidence missing after durability failure: %v", err)
+	}
+
+	retryFsyncCalls := 0
+	ops = defaultServiceActorPublicationOps()
+	ops.fsync = func(fd int) error {
+		retryFsyncCalls++
+		return unix.Fsync(fd)
+	}
+	if err := publishServiceActorEvidenceWithOps(path, actors, ops); err != nil {
+		t.Fatalf("retry publication: %v", err)
+	}
+	if retryFsyncCalls != 1 {
+		t.Fatalf("retry parent fsync calls = %d, want 1", retryFsyncCalls)
+	}
+}
+
+func TestServiceActorEvidenceCleanupLeavesSubstitutedPartialUntouched(t *testing.T) {
+	root := t.TempDir()
+	path := filepath.Join(root, "actors.json")
+	actors := ServiceActorEvidence{
+		SchemaVersion: ProtocolSchemaVersion, SessionID: "session-1",
+		Worker: validWorkerRecord(), Supervisor: validSupervisorRecord(),
+	}
+	var replacementPath string
+	var replacement []byte
+	ops := defaultServiceActorPublicationOps()
+	ops.beforeRename = func(parentFD int, partial string) error {
+		var staged unix.Stat_t
+		if err := unix.Fstatat(parentFD, partial, &staged, unix.AT_SYMLINK_NOFOLLOW); err != nil {
+			return err
+		}
+		if err := unix.Renameat(parentFD, partial, parentFD, partial+".original"); err != nil {
+			return err
+		}
+		replacement = bytes.Repeat([]byte("x"), int(staged.Size))
+		replacementPath = filepath.Join(root, partial)
+		if err := os.WriteFile(replacementPath, replacement, 0o600); err != nil {
+			return err
+		}
+		return errors.New("injected failure before rename")
+	}
+	err := publishServiceActorEvidenceWithOps(path, actors, ops)
+	if !errors.Is(err, ErrServiceEvidence) {
+		t.Fatalf("publication error = %v", err)
+	}
+	if !strings.Contains(err.Error(), "refusing cleanup") {
+		t.Fatalf("publication error did not record cleanup mismatch: %v", err)
+	}
+	got, err := os.ReadFile(replacementPath)
+	if err != nil {
+		t.Fatalf("substituted partial was removed: %v", err)
+	}
+	if !bytes.Equal(got, replacement) {
+		t.Fatalf("substituted partial bytes = %q, want %q", got, replacement)
+	}
+}
+
+func TestServiceActorEvidenceCleanupRemovesExactPartial(t *testing.T) {
+	root := t.TempDir()
+	path := filepath.Join(root, "actors.json")
+	actors := ServiceActorEvidence{
+		SchemaVersion: ProtocolSchemaVersion, SessionID: "session-1",
+		Worker: validWorkerRecord(), Supervisor: validSupervisorRecord(),
+	}
+	var partialPath string
+	ops := defaultServiceActorPublicationOps()
+	ops.beforeRename = func(_ int, partial string) error {
+		partialPath = filepath.Join(root, partial)
+		return errors.New("injected failure before rename")
+	}
+	if err := publishServiceActorEvidenceWithOps(path, actors, ops); !errors.Is(err, ErrServiceEvidence) {
+		t.Fatalf("publication error = %v", err)
+	}
+	if _, err := os.Lstat(partialPath); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("exact partial cleanup error = %v", err)
 	}
 }
 

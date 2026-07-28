@@ -18,7 +18,28 @@ import (
 	"golang.org/x/sys/unix"
 )
 
+type serviceActorPublicationOps struct {
+	fsync        func(int) error
+	rename       func(int, string, int, string, uint) error
+	beforeRename func(int, string) error
+}
+
+func defaultServiceActorPublicationOps() serviceActorPublicationOps {
+	return serviceActorPublicationOps{
+		fsync:  unix.Fsync,
+		rename: unix.Renameat2,
+	}
+}
+
 func publishServiceActorEvidence(path string, evidence ServiceActorEvidence) error {
+	return publishServiceActorEvidenceWithOps(path, evidence, defaultServiceActorPublicationOps())
+}
+
+func publishServiceActorEvidenceWithOps(
+	path string,
+	evidence ServiceActorEvidence,
+	ops serviceActorPublicationOps,
+) (resultErr error) {
 	if evidence.SchemaVersion != ProtocolSchemaVersion || evidence.SessionID == "" ||
 		validateServiceActors(evidence.Worker, evidence.Supervisor) != nil {
 		return ErrServiceEvidence
@@ -38,6 +59,9 @@ func publishServiceActorEvidence(path string, evidence ServiceActorEvidence) err
 	defer unix.Close(parentFD)
 	if existing, observeErr := observeServiceActorAt(parentFD, name, nil); observeErr == nil {
 		if bytes.Equal(existing, body) {
+			if err := ops.fsync(parentFD); err != nil {
+				return actorEvidenceError(err)
+			}
 			return nil
 		}
 		return actorEvidenceError(errors.New("existing actor evidence differs"))
@@ -56,9 +80,12 @@ func publishServiceActorEvidence(path string, evidence ServiceActorEvidence) err
 	}
 	file := os.NewFile(uintptr(fd), partial)
 	cleanup := true
+	var partialStat unix.Stat_t
 	defer func() {
 		if cleanup {
-			_ = unix.Unlinkat(parentFD, partial, 0)
+			if err := cleanupServiceActorPartial(parentFD, partial, partialStat); err != nil {
+				resultErr = actorEvidenceError(errors.Join(resultErr, err))
+			}
 		}
 	}()
 	if _, err := file.Write(body); err != nil {
@@ -73,16 +100,28 @@ func publishServiceActorEvidence(path string, evidence ServiceActorEvidence) err
 		file.Close()
 		return actorEvidenceError(err)
 	}
+	if err := unix.Fstat(fd, &partialStat); err != nil {
+		file.Close()
+		return actorEvidenceError(err)
+	}
 	if err := file.Close(); err != nil {
 		return actorEvidenceError(err)
 	}
-	if err := unix.Fsync(parentFD); err != nil {
+	if err := ops.fsync(parentFD); err != nil {
 		return actorEvidenceError(err)
 	}
-	if err := unix.Renameat2(parentFD, partial, parentFD, name, unix.RENAME_NOREPLACE); err != nil {
+	if ops.beforeRename != nil {
+		if err := ops.beforeRename(parentFD, partial); err != nil {
+			return actorEvidenceError(err)
+		}
+	}
+	if err := ops.rename(parentFD, partial, parentFD, name, unix.RENAME_NOREPLACE); err != nil {
 		if errors.Is(err, syscall.EEXIST) {
 			existing, observeErr := observeServiceActorAt(parentFD, name, nil)
 			if observeErr == nil && bytes.Equal(existing, body) {
+				if fsyncErr := ops.fsync(parentFD); fsyncErr != nil {
+					return actorEvidenceError(fsyncErr)
+				}
 				return nil
 			}
 			return actorEvidenceError(errors.Join(err, observeErr))
@@ -90,12 +129,29 @@ func publishServiceActorEvidence(path string, evidence ServiceActorEvidence) err
 		return actorEvidenceError(err)
 	}
 	cleanup = false
-	if err := unix.Fsync(parentFD); err != nil {
+	if err := ops.fsync(parentFD); err != nil {
 		return actorEvidenceError(err)
 	}
 	published, err := observeServiceActorAt(parentFD, name, nil)
 	if err != nil || !bytes.Equal(published, body) {
 		return actorEvidenceError(errors.Join(err, errors.New("published actor evidence differs")))
+	}
+	return nil
+}
+
+func cleanupServiceActorPartial(parentFD int, name string, expected unix.Stat_t) error {
+	var named unix.Stat_t
+	if err := unix.Fstatat(parentFD, name, &named, unix.AT_SYMLINK_NOFOLLOW); err != nil {
+		return fmt.Errorf("observe actor evidence partial for cleanup: %w", err)
+	}
+	if expected.Mode&unix.S_IFMT != unix.S_IFREG || expected.Mode&0o777 != 0o600 ||
+		expected.Dev != named.Dev || expected.Ino != named.Ino || expected.Size != named.Size ||
+		named.Mode&unix.S_IFMT != unix.S_IFREG || named.Mode&0o777 != 0o600 ||
+		named.Size <= 0 || named.Size > maxDiagnosticBytes {
+		return errors.New("actor evidence partial identity or shape changed; refusing cleanup")
+	}
+	if err := unix.Unlinkat(parentFD, name, 0); err != nil {
+		return fmt.Errorf("remove actor evidence partial: %w", err)
 	}
 	return nil
 }

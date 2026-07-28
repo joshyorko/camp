@@ -241,3 +241,53 @@ Documentation improvement:
 - Evidence: `TestServiceActorEvidenceRejectsSymlinkedFileAndParent`, `TestServiceActorEvidenceRejectsNonRegularAndExcessiveExistingFiles`, `TestServiceActorObserverRejectsNamedFileReplacementDuringRead`, and the idempotent replay in `TestServiceActorEvidenceRoundTripsAndRejectsEitherIdentityMismatch`.
 - Stale or ambiguous guidance removed: the earlier word “immutable” did not disclose that existing evidence was followed by pathname and could authorize a replaceable symlink target.
 - Remaining uncertainty: fresh pinned-provider Task 12 acceptance remains unchanged.
+
+## Fix round 3
+
+Status: DONE_WITH_CONCERNS
+
+### Result
+
+- Exact existing actor evidence is no longer accepted as success until the
+  parent directory is fsynced. A retry after an unknown post-rename durability
+  outcome therefore re-establishes the directory durability barrier.
+- Deferred partial cleanup retains the created file's device, inode, mode, and
+  size. It observes the still-named entry with `fstatat(AT_SYMLINK_NOFOLLOW)`
+  and unlinks only the same private bounded regular file; a substituted name is
+  left untouched and the cleanup mismatch is included in the publication
+  error.
+- Descriptor-relative no-follow traversal, bounded stable observation,
+  no-replace publication, unsupported-`renameat2` failure, idempotency, and
+  service journal behavior remain unchanged.
+
+### TDD evidence
+
+- RED: removing the equal-existing parent fsync made
+  `TestServiceActorEvidenceRetryConfirmsParentDurability` report zero retry
+  durability confirmations.
+- RED: restoring name-only cleanup made
+  `TestServiceActorEvidenceCleanupLeavesSubstitutedPartialUntouched` detect that
+  the substitute was removed without a recorded identity-mismatch error.
+- GREEN: both regressions pass, and
+  `TestServiceActorEvidenceCleanupRemovesExactPartial` proves an unchanged
+  exact partial is still removed after an injected pre-rename failure.
+
+### Verification
+
+- `rtk go test ./internal/remoteworker -count=1`
+  — 59 passed.
+- `rtk go test -race ./internal/remoteworker -count=1`
+  — 59 passed.
+- `rtk go vet ./internal/remoteworker`
+  — passed.
+- `rtk git diff --check`
+  — passed.
+
+### Documentation improvement
+
+Documentation improvement:
+- Canonical file changed or proposed: `docs/skills/devpod-hauler.md`
+- Durable learning captured: idempotent actor-evidence replay requires a fresh parent-directory fsync, and deferred partial cleanup may unlink only after a no-follow named observation matches the created file's device, inode, private regular-file mode, and expected size.
+- Evidence: `TestServiceActorEvidenceRetryConfirmsParentDurability`, `TestServiceActorEvidenceCleanupLeavesSubstitutedPartialUntouched`, `TestServiceActorEvidenceCleanupRemovesExactPartial`, and the focused, race, vet, and diff-check commands above.
+- Stale or ambiguous guidance removed: the prior guide described stable existing-file observation but did not state the retry durability barrier or identity-bound partial cleanup rule.
+- Remaining uncertainty: fresh pinned-provider Task 12 acceptance remains unchanged.

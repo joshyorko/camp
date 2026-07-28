@@ -266,8 +266,13 @@ Do not use Hauler v2.0.2's live `_catalog` response as proof that all direct reg
   bytes privately, fsyncs file and parent, and commits with a no-replace rename.
   Existing evidence is idempotent only after the same bounded no-follow
   observer proves a private regular file whose open and named
-  device/inode/size remain stable; symlinks, directories, oversized bytes,
-  replacement races, and unequal content fail closed. Invocation locking,
+  device/inode/size remain stable and a parent fsync confirms directory
+  durability. Deferred partial cleanup retains the created file's device and
+  inode, then unlinks only when a no-follow named observation still proves that
+  exact private regular file and its expected size; substitutions remain
+  untouched and fail closed. Symlinks, directories, oversized bytes,
+  replacement races, unequal content, and cleanup identity drift fail closed.
+  Invocation locking,
   durable start intents, and recorded PID/boot/start, executable, complete argv
   digest, PGID, SID, and network-namespace evidence let retries adopt an
   unknown-outcome start, observe an already-live unit without duplication, or
