@@ -102,6 +102,9 @@ func (u *Close) Run(ctx context.Context, request CloseRequest) (result CloseResu
 				return result, err
 			}
 			if !published.Published {
+				if published.Disposition == CheckpointDispositionRemotePrepared && published.Remote != nil {
+					return result, errors.New("remote checkpoint is prepared and remains quiesced pending inbound publication")
+				}
 				return result, errors.New("final checkpoint did not publish")
 			}
 			if loaded, _, loadErr := u.journal.Load(ctx, snapshot.SessionID); loadErr == nil {

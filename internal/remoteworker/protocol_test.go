@@ -100,6 +100,7 @@ func TestBoundedDiagnosticNormalizesBeforeApplyingByteCap(t *testing.T) {
 func TestRunEmitsOneBoundedJSONResultForUnsupportedMutation(t *testing.T) {
 	request := validRequest()
 	request.Operation = OperationCheckpoint
+	request.Checkpoint = checkpointRequest(false).Checkpoint
 	body, err := json.Marshal(request)
 	if err != nil {
 		t.Fatal(err)

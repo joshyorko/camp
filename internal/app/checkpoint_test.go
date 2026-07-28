@@ -26,6 +26,7 @@ import (
 	"github.com/joshyorko/camp/internal/journal"
 	"github.com/joshyorko/camp/internal/ports"
 	registryadapter "github.com/joshyorko/camp/internal/registry"
+	"github.com/joshyorko/camp/internal/remoteworker"
 	"github.com/joshyorko/camp/internal/workspace"
 )
 
@@ -204,6 +205,67 @@ type fakeMirror struct {
 
 func localCheckpointTransports(transport ports.WorkspaceTransport) CheckpointTransports {
 	return CheckpointTransports{Local: transport}
+}
+
+type fakeRemoteCheckpointPreparer struct {
+	snapshot   domain.JournalSnapshot
+	generation uint64
+	close      bool
+	receipt    remoteworker.CheckpointReceipt
+}
+
+func (f *fakeRemoteCheckpointPreparer) Prepare(_ context.Context, snapshot domain.JournalSnapshot, generation uint64, close bool) (remoteworker.CheckpointReceipt, error) {
+	f.snapshot, f.generation, f.close = snapshot, generation, close
+	return f.receipt, nil
+}
+
+func TestCheckpointPublisherUsesRemoteKitPreparationWithoutLegacyMirror(t *testing.T) {
+	now := time.Unix(100, 0).UTC()
+	sandbox := t.TempDir()
+	lease := domain.WriterLease{
+		SchemaVersion: domain.SchemaVersion, SessionID: "session-1", Capsule: "brain",
+		Lineage: domain.Lineage{Branch: "main"}, Machine: "machine", CreatedAt: now,
+		HeartbeatAt: now, ExpiresAt: now.Add(time.Minute),
+	}
+	snapshot := remoteCheckpointSnapshot()
+	snapshot.Mode = domain.SessionReadWrite
+	snapshot.State = domain.SessionOpen
+	snapshot.Lease = domain.LeaseRecord{Lease: &lease, Revision: "lease-r1"}
+	snapshot.Workspace.StagingRoot = sandbox
+	snapshot.Recovery.RemoteDataPlane = remoteCheckpointSnapshot().Recovery.RemoteDataPlane
+	snapshot.Workspace = remoteCheckpointSnapshot().Workspace
+	snapshot.Workspace.StagingRoot = sandbox
+	store, err := journal.NewStore(filepath.Join(sandbox, "journal"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Create(context.Background(), snapshot); err != nil {
+		t.Fatal(err)
+	}
+	backend, err := filebackend.New(filepath.Join(sandbox, "backend"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	remote := &fakeRemoteCheckpointPreparer{receipt: remoteworker.CheckpointReceipt{
+		SchemaVersion: remoteworker.ProtocolSchemaVersion, Status: "prepared",
+		SessionID: snapshot.SessionID, AttemptID: snapshot.SessionID + "-checkpoint-1",
+	}}
+	publisher := NewCheckpointPublisher(
+		store, &fakeLockValidator{}, &fakeLeaseValidator{},
+		CheckpointTransports{Remote: &fakeMirror{err: errors.New("legacy mirror must not run")}, RemoteKit: remote},
+		newCheckpointFakes(now).pipeline(), &fakeCheckpointBuilder{},
+		coordination.NewGenerationRepository(backend), coordination.NewPointerRepository(backend), fixedAppClock{now: now},
+	)
+	result, err := publisher.Publish(context.Background(), ports.OperationToken{
+		ID: "lock", Owner: ports.OperationOwner{SessionID: snapshot.SessionID, Operation: "sync"},
+	}, snapshot.SessionID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Disposition != CheckpointDispositionRemotePrepared || result.Published ||
+		remote.generation != 1 || remote.close || remote.snapshot.SessionID != snapshot.SessionID {
+		t.Fatalf("result=%#v remote=%#v", result, remote)
+	}
 }
 
 func (m *fakeMirror) ReturnToStaging(_ context.Context, request ports.MirrorRequest) (ports.MirrorResult, error) {

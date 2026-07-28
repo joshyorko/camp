@@ -199,6 +199,20 @@ Do not use Hauler v2.0.2's live `_catalog` response as proof that all direct reg
 - `sshtransfer.Executor` runs rsync without a shell and connects the SSH tar producer to the local tar consumer with an OS pipe. The tar consumer requires GNU tar options `--same-permissions` and `--delay-directory-restore`; BusyBox tar is not a valid fallback dependency.
 - The real transfer gate covers exact bytes, permission modes, relative symlinks, hard-link inode identity, Unicode and spaces, `.camp/build` and `.camp/runtime` exclusions, rsync deletion, and a 2 MiB file. Forced fallback uses a missing rsync executable so fallback classification and the tar pipe are exercised rather than mocked.
 - Checkpoint mirror intent IDs are the durable attempt anchor. Rsync and tar destinations derive distinct attempt IDs from that anchor, and successful facts persist the returned root, resolved remote root, method, and exclusions. A partial transfer is outcome-unknown: retain its exact staging destination, record an ambiguous mirror fact, and block publication and blind retry until recovery observes it. A controller death after intent but before fact leaves the serialized attempt pending and likewise starts no second transfer.
+- A persisted `haulerKitV1` session never enters the legacy rsync or
+  tar-over-SSH checkpoint mirror. Its generation-derived remote attempt ID is
+  immutable across retry. Remote preparation verifies authority, observes that
+  exact attempt, quiesces the recorded registry and fileserver, cuts the
+  registry, inventories tagged images, archives the root, validates a fresh
+  Hauler store, and builds one verified return Camp Kit. `sync` resumes the
+  exact recorded services after the durable preparation receipt; `close`
+  leaves them quiesced until inbound publication completes. The return
+  fileserver authority is only the canonical manifest and its named 1 GiB
+  chunks; the complete archive and enclosing directories are never valid
+  allow-list entries. An observed durable receipt adopts the same attempt
+  without rebuilding. Host download, permanent `hauler store save`, upload,
+  pointer CAS, and acknowledgement are separate inbound-publication work and
+  must not be inferred from `remotePrepared`.
 - Logical mirror attempts increase durably across every sync and final close; attempt-scoped journal IDs must not repeat within a session. The remote transport requires the persisted request workspace ID and DevPod context to exactly match its composition identity, then uses the persisted values for root resolution and transfer commands. Mismatch fails before resolution or staging.
 - Transfer command environment overrides replace inherited keys and remain deterministically ordered. Outcome-unknown errors are safe to format and unwrap even through a typed-nil pointer. Missing tar fallback is transport unavailability, not evidence that the persisted workspace is non-remote.
 - Tar fallback streams producer stdout exclusively into the consumer pipe; archive bytes are never diagnostic output. Captured stdout/stderr diagnostics are capped at 64 KiB per process. Start the producer before the staging-mutating consumer so a producer start failure is a not-started attempt with no consumer mutation; retain staging only after evidence that the consumer may have started mutating it.

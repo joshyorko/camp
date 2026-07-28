@@ -31,6 +31,10 @@ func (productionOperations) StartServices(ctx context.Context, request Request) 
 	return launchServiceSupervisor(ctx, request)
 }
 
+func (productionOperations) Checkpoint(context.Context, Request) (any, error) {
+	return nil, ErrUnsupportedOperation
+}
+
 type productionActivationRuntime struct {
 	kit verifiedRuntimeKit
 }
