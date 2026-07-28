@@ -148,10 +148,11 @@ Do not use Hauler v2.0.2's live `_catalog` response as proof that all direct reg
   store, and root verification. The persisted/bootstrap manifest digest is a
   required verifier authority at preparation, reentry, provider activation,
   and container hydration; callers must not infer it from the untrusted
-  manifest being verified. Before root extraction or `.camp/runtime` install,
-  hydration admits the workspace descriptor and accepts only
-  `.camp-bootstrap` and `.camp/runtime`; an ineligible workspace receives no
-  root-stage or runtime mutation. It then extracts the root artifact through
+  manifest being verified. Before the verifier can create runtime-root state,
+  root extraction, or `.camp/runtime` installation, hydration admits the
+  workspace descriptor and accepts only `.camp-bootstrap` and `.camp/runtime`;
+  an ineligible workspace receives no runtime-root, root-stage, or workspace
+  mutation. It then extracts the root artifact through
   the existing Hauler and archive adapters into a private stage, installs the
   exact Camp, Hauler, and pasta bytes beneath `.camp/runtime`, and promotes
   entries with descriptor-relative no-replace renames. Hydrated `.camp`

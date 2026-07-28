@@ -12,13 +12,19 @@ import (
 )
 
 type hydrationFixture struct {
-	order     []string
-	workspace string
-	stage     string
+	order         []string
+	workspace     string
+	stage         string
+	mutateRuntime bool
 }
 
-func (fixture *hydrationFixture) Verify(context.Context, Request) (verifiedRuntimeKit, error) {
+func (fixture *hydrationFixture) Verify(_ context.Context, request Request) (verifiedRuntimeKit, error) {
 	fixture.order = append(fixture.order, "verify")
+	if fixture.mutateRuntime {
+		if err := os.MkdirAll(filepath.Join(request.RuntimeRoot, "kit"), 0o700); err != nil {
+			return verifiedRuntimeKit{}, err
+		}
+	}
 	return verifiedRuntimeKit{Store: "/runtime/store", RootSHA256: strings.Repeat("a", 64)}, nil
 }
 
@@ -74,12 +80,12 @@ func TestHydrateVerifiesExtractsPromotesThenPublishesCompletion(t *testing.T) {
 		t.Fatal(err)
 	}
 	if receipt.Status != "completed" ||
-		strings.Join(fixture.order, ",") != "verify,admit,extract,tools,promote,receipt:completed" {
+		strings.Join(fixture.order, ",") != "admit,verify,extract,tools,promote,receipt:completed" {
 		t.Fatalf("receipt=%#v order=%v", receipt, fixture.order)
 	}
 }
 
-func TestHydrateRejectsIneligibleWorkspaceBeforeExtractionOrRuntimeInstall(t *testing.T) {
+func TestHydrateRejectsIneligibleWorkspaceBeforeVerifierRuntimeMutation(t *testing.T) {
 	parent := t.TempDir()
 	workspace := filepath.Join(parent, "workspace")
 	stage := filepath.Join(parent, "stage")
@@ -89,21 +95,29 @@ func TestHydrateRejectsIneligibleWorkspaceBeforeExtractionOrRuntimeInstall(t *te
 	if err := os.WriteFile(filepath.Join(workspace, "user.txt"), []byte("keep"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	fixture := &hydrationFixture{workspace: workspace, stage: stage}
+	fixture := &hydrationFixture{workspace: workspace, stage: stage, mutateRuntime: true}
 	request := validRequest()
 	request.Operation = OperationHydrate
 	request.WorkspaceRoot = workspace
+	request.RuntimeRoot = filepath.Join(workspace, ".camp", "runtime")
 	if _, err := hydrateWorkspace(t.Context(), request, fixture); !errors.Is(err, ErrUnsafeHydration) {
 		t.Fatalf("hydrateWorkspace() error = %v", err)
 	}
-	if got := strings.Join(fixture.order, ","); got != "verify,admit" {
+	if got := strings.Join(fixture.order, ","); got != "admit" {
 		t.Fatalf("hydration order = %q", got)
 	}
 	if _, err := os.Lstat(filepath.Join(workspace, ".camp", "runtime")); !os.IsNotExist(err) {
-		t.Fatalf("runtime was installed before admission failed: %v", err)
+		t.Fatalf("runtime was mutated before admission failed: %v", err)
 	}
 	if _, err := os.Lstat(stage); !os.IsNotExist(err) {
 		t.Fatalf("root was extracted before admission failed: %v", err)
+	}
+	entries, err := os.ReadDir(workspace)
+	if err != nil || len(entries) != 1 || entries[0].Name() != "user.txt" {
+		t.Fatalf("workspace changed before admission failed: entries=%v err=%v", entries, err)
+	}
+	if body, err := os.ReadFile(filepath.Join(workspace, "user.txt")); err != nil || string(body) != "keep" {
+		t.Fatalf("workspace bytes changed before admission failed: body=%q err=%v", body, err)
 	}
 }
 

@@ -112,3 +112,38 @@ Documentation improvement:
 - Evidence: `TestRemoteDataPlanePreparerRequiresBuiltManifestAuthorityForVerification`, `TestRemoteDataPlanePreparerReentryRequiresPersistedManifestAuthority`, and `TestHydrateRejectsIneligibleWorkspaceBeforeExtractionOrRuntimeInstall`.
 - Stale or ambiguous guidance removed: the hydration sequence no longer implies runtime installation may occur before workspace eligibility is established.
 - Remaining uncertainty: a fresh pinned-provider activation/hydration run remains the Task 12 release gate.
+
+## Fix round 2
+
+Status: DONE
+
+### Result
+
+- Hydration now admits the workspace before invoking `Verify`. This prevents
+  the production activation verifier from creating `RuntimeRoot` or publishing
+  its ready kit before an unexpected workspace entry has been rejected.
+- The regression seam faithfully models production verifier staging by creating
+  `RuntimeRoot/kit` when called. For an ineligible workspace, it proves
+  `Verify` is never called, `.camp/runtime` is absent, the root stage is absent,
+  and the original workspace directory and file bytes are unchanged.
+
+### TDD evidence
+
+- RED: `Verify` preceded admission and could create runtime state; GREEN:
+  `TestHydrateRejectsIneligibleWorkspaceBeforeVerifierRuntimeMutation` now
+  proves admission is first and no verifier/extraction/install mutation occurs.
+
+### Verification
+
+- `rtk go test ./internal/remoteworker -count=1` — 24 passed.
+- `rtk go vet ./internal/remoteworker` — passed.
+- `rtk git diff --check` — passed.
+
+### Documentation improvement
+
+Documentation improvement:
+- Canonical file changed or proposed: `docs/skills/devpod-hauler.md`
+- Durable learning captured: workspace admission must precede every verifier-created runtime-root mutation, not only root extraction and runtime installation.
+- Evidence: `TestHydrateRejectsIneligibleWorkspaceBeforeVerifierRuntimeMutation` uses a verifier seam that creates the same runtime-root/kit shape as production verification.
+- Stale or ambiguous guidance removed: the prior rule named extraction and installation but did not make verifier staging subject to admission.
+- Remaining uncertainty: a fresh pinned-provider activation/hydration run remains the Task 12 release gate.

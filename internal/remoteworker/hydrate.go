@@ -36,6 +36,9 @@ type hydrationRuntime interface {
 }
 
 func hydrateWorkspace(ctx context.Context, request Request, runtime hydrationRuntime) (HydrationReceipt, error) {
+	if err := runtime.AdmitWorkspace(request.WorkspaceRoot); err != nil {
+		return HydrationReceipt{}, err
+	}
 	kit, err := runtime.Verify(ctx, request)
 	if err != nil {
 		return HydrationReceipt{}, err
@@ -46,9 +49,6 @@ func hydrateWorkspace(ctx context.Context, request Request, runtime hydrationRun
 		if receipt, complete, err := observer.Observe(request, kit); err != nil || complete {
 			return receipt, err
 		}
-	}
-	if err := runtime.AdmitWorkspace(request.WorkspaceRoot); err != nil {
-		return HydrationReceipt{}, err
 	}
 	stage, err := runtime.ExtractRoot(ctx, request, kit)
 	if err != nil {
