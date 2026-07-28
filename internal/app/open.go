@@ -13,6 +13,7 @@ import (
 	"strings"
 	"syscall"
 	"time"
+	"unicode"
 
 	devpodadapter "github.com/joshyorko/camp/internal/adapters/devpod"
 	"github.com/joshyorko/camp/internal/adapters/hydration"
@@ -474,22 +475,8 @@ func (o *Open) observeWorkspaceUp(ctx context.Context, snapshot domain.JournalSn
 	if err := o.deps.Ownership.Revalidate(snapshot.Materialization); err != nil {
 		return ports.FactRecord{}, snapshot, fmt.Errorf("revalidate workspace materialization: %w", err)
 	}
-	workspaces, err := o.deps.DevPod.ListInContext(ctx, input.Context)
-	if err != nil {
+	if err := o.revalidateWorkspaceSource(ctx, input); err != nil {
 		return ports.FactRecord{}, snapshot, err
-	}
-	matches := 0
-	for _, candidate := range workspaces {
-		if candidate.ID != input.ID {
-			continue
-		}
-		matches++
-		if candidate.Context != input.Context || candidate.Provider.Name != input.Provider || candidate.Source.LocalFolder != input.SourceRoot {
-			return ports.FactRecord{}, snapshot, errors.New("observed DevPod workspace does not match the pending intent")
-		}
-	}
-	if matches != 1 {
-		return ports.FactRecord{}, snapshot, errors.New("pending DevPod workspace is absent or ambiguous")
 	}
 	status, err := o.waitForWorkspaceReady(ctx, input.Context, input.ID, input.Provider)
 	if err != nil {
@@ -497,6 +484,9 @@ func (o *Open) observeWorkspaceUp(ctx context.Context, snapshot domain.JournalSn
 	}
 	if !matchingWorkspaceStatus(status, input.Context, input.ID, input.Provider) || status.State != devpodadapter.StateRunning {
 		return ports.FactRecord{}, snapshot, fmt.Errorf("observed DevPod workspace is not ready in state %q: %w", status.State, devpodadapter.ErrUnknownWorkspaceState)
+	}
+	if err := o.revalidateWorkspaceSource(ctx, input); err != nil {
+		return ports.FactRecord{}, snapshot, err
 	}
 	next := snapshot
 	next.Workspace.ID = input.ID
@@ -508,6 +498,27 @@ func (o *Open) observeWorkspaceUp(ctx context.Context, snapshot domain.JournalSn
 		return ports.FactRecord{}, snapshot, errors.New("open reconciliation clock returned zero time")
 	}
 	return ports.FactRecord{IntentID: intent.ID, SessionID: intent.SessionID, Transition: intent.Transition, Timestamp: now, Output: safeJSON(status)}, next, nil
+}
+
+func (o *Open) revalidateWorkspaceSource(ctx context.Context, input openWorkspaceUpInput) error {
+	workspaces, err := o.deps.DevPod.ListInContext(ctx, input.Context)
+	if err != nil {
+		return err
+	}
+	matches := 0
+	for _, candidate := range workspaces {
+		if candidate.ID != input.ID {
+			continue
+		}
+		matches++
+		if candidate.Context != input.Context || candidate.Provider.Name != input.Provider || candidate.Source.LocalFolder != input.SourceRoot {
+			return errors.New("observed DevPod workspace source identity does not match the pending intent")
+		}
+	}
+	if matches != 1 {
+		return errors.New("pending DevPod workspace source identity is absent or ambiguous")
+	}
+	return nil
 }
 
 func (o *Open) waitForWorkspaceReady(ctx context.Context, devpodContext, workspaceID, provider string) (devpodadapter.WorkspaceStatus, error) {
@@ -1255,7 +1266,7 @@ func (o *Open) continueOpeningFromMaterialization(ctx context.Context, snapshot 
 				return OpenResult{}, errors.Join(err, settleErr)
 			}
 		}
-		return OpenResult{}, err
+		return OpenResult{}, workspaceUpFailureError(err, upResult)
 	}
 	snapshot.Workspace = workspaceRecord
 	if err := journal.recordFact(ctx, intent, &upResult, nil); err != nil {
@@ -1298,18 +1309,54 @@ func (o *Open) settleKnownWorkspaceUpFailure(ctx context.Context, intent ports.I
 }
 
 func ambiguousWorkspaceUpError(result ports.Result) error {
-	diagnostic := strings.TrimSpace(strings.ToValidUTF8(string(result.Stderr), "\uFFFD"))
+	diagnostic := workspaceUpDiagnosticText(result)
 	if diagnostic == "" {
-		diagnostic = strings.TrimSpace(strings.ToValidUTF8(string(result.Stdout), "\uFFFD"))
+		return ports.ErrAmbiguous
+	}
+	return fmt.Errorf("%w; DevPod diagnostic: %s", ports.ErrAmbiguous, diagnostic)
+}
+
+func workspaceUpFailureError(cause error, result ports.Result) error {
+	diagnostic := workspaceUpDiagnosticText(result)
+	if diagnostic == "" {
+		return cause
+	}
+	return fmt.Errorf("%w; DevPod diagnostic: %s", cause, diagnostic)
+}
+
+func workspaceUpDiagnosticText(result ports.Result) string {
+	diagnostic := strings.TrimSpace(sanitizeWorkspaceUpDiagnostic(result.Stderr))
+	if diagnostic == "" {
+		diagnostic = strings.TrimSpace(sanitizeWorkspaceUpDiagnostic(result.Stdout))
 	}
 	if len(diagnostic) > workspaceUpDiagnostic {
 		diagnostic = "[earlier DevPod output omitted]\n" +
 			strings.ToValidUTF8(diagnostic[len(diagnostic)-workspaceUpDiagnostic:], "\uFFFD")
 	}
 	if diagnostic == "" {
-		return ports.ErrAmbiguous
+		return ""
 	}
-	return fmt.Errorf("%w; DevPod diagnostic: %s", ports.ErrAmbiguous, diagnostic)
+	return diagnostic
+}
+
+func sanitizeWorkspaceUpDiagnostic(raw []byte) string {
+	var sanitized strings.Builder
+	for _, value := range strings.ToValidUTF8(string(raw), "\uFFFD") {
+		if value == '\n' || value == '\t' {
+			sanitized.WriteRune(value)
+			continue
+		}
+		if unicode.IsControl(value) {
+			if value <= 0xff {
+				fmt.Fprintf(&sanitized, `\x%02x`, value)
+			} else {
+				fmt.Fprintf(&sanitized, `\u%04x`, value)
+			}
+			continue
+		}
+		sanitized.WriteRune(value)
+	}
+	return sanitized.String()
 }
 
 func (o *Open) reenter(ctx context.Context, snapshot domain.JournalSnapshot, request OpenRequest) (OpenResult, error) {

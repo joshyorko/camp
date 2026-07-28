@@ -80,7 +80,9 @@ or dogfooded. Do not create dated skill entries as a substitute.
 Before opening a pull request, copy every receipt label from
 `.github/pull_request_template.md` exactly and give each one a non-empty value;
 `developer/verify_pr_receipt.py` fails before source gates when a label is
-missing, renamed, or empty.
+missing, renamed, or empty. This includes candidate SHA-256, real-tool evidence,
+and publication state even when their truthful value is pending, unavailable,
+or not published.
 
 This policy borrows two upstream patterns without inheriting their product
 claims:
@@ -324,8 +326,8 @@ activity, each initializes the built-in Docker provider with
 `devpod provider add docker --context <private-context> --use --silent` under
 that private environment and passes `CAMP_DEVPOD_PROVIDER=docker` to Camp. The
 The lifecycle harness writes an explicit devcontainer configuration using the
-digest-pinned Docker-in-Docker acceptance image documented in
-`local-lifecycle-recovery.md`; Camp's production Room fallback is unchanged.
+digest-pinned Podman acceptance image from
+`tools.lock.yaml`; Camp's production Room fallback is unchanged.
 Before each file or MinIO lifecycle scenario opens Camp's workspace,
 the harness creates one unrelated workspace in that same private context. Its
 scenario ledger recovers exact Camp workspace IDs, process identities,

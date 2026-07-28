@@ -274,6 +274,8 @@ func TestPullRequestTemplateRequiresEvidenceAndDocumentationReceipt(t *testing.T
 		"Passed gates:",
 		"Failed gates:",
 		"Missing or skipped gates:",
+		"Candidate SHA-256:",
+		"Real-tool evidence:",
 		"Release-note classification:",
 		"## Documentation improvement",
 		"Canonical file changed or proposed:",
@@ -281,6 +283,7 @@ func TestPullRequestTemplateRequiresEvidenceAndDocumentationReceipt(t *testing.T
 		"Evidence:",
 		"Stale or ambiguous guidance removed:",
 		"Remaining uncertainty:",
+		"## Publication state",
 	)
 }
 
@@ -307,7 +310,43 @@ func TestPullRequestReceiptVerifierRejectsInvalidReleaseNoteClassification(t *te
 		"Passed gates: unit",
 		"Failed gates: none",
 		"Missing or skipped gates: none",
+		"Candidate SHA-256: pending",
+		"Real-tool evidence: none",
 		"Release-note classification: n/a",
+		"Canonical file changed or proposed: docs/skills/testing-release-evidence.md",
+		"Durable learning captured: receipt validation",
+		"Evidence: focused contract test",
+		"Stale or ambiguous guidance removed: none",
+		"Remaining uncertainty: none",
+		"Publication state: not published",
+	}, "\n")
+	eventBody, err := json.Marshal(map[string]any{
+		"pull_request": map[string]any{"body": body},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(event, eventBody, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	command := exec.Command("python3", filepath.Join(root, "developer", "verify_pr_receipt.py"), event)
+	output, err := command.CombinedOutput()
+	if err == nil {
+		t.Fatalf("receipt verifier accepted invalid release-note classification:\n%s", output)
+	}
+	if !strings.Contains(string(output), "invalid release-note classification") {
+		t.Fatalf("receipt verifier output = %q", output)
+	}
+}
+
+func TestPullRequestReceiptVerifierRequiresCandidateAndRealToolEvidence(t *testing.T) {
+	root := filepath.Clean("..")
+	event := filepath.Join(t.TempDir(), "event.json")
+	body := strings.Join([]string{
+		"Passed gates: unit",
+		"Failed gates: none",
+		"Missing or skipped gates: none",
+		"Release-note classification: docs/changelog.md",
 		"Canonical file changed or proposed: docs/skills/testing-release-evidence.md",
 		"Durable learning captured: receipt validation",
 		"Evidence: focused contract test",
@@ -326,10 +365,12 @@ func TestPullRequestReceiptVerifierRejectsInvalidReleaseNoteClassification(t *te
 	command := exec.Command("python3", filepath.Join(root, "developer", "verify_pr_receipt.py"), event)
 	output, err := command.CombinedOutput()
 	if err == nil {
-		t.Fatalf("receipt verifier accepted invalid release-note classification:\n%s", output)
+		t.Fatalf("receipt verifier accepted missing candidate and real-tool evidence:\n%s", output)
 	}
-	if !strings.Contains(string(output), "invalid release-note classification") {
-		t.Fatalf("receipt verifier output = %q", output)
+	for _, field := range []string{"Candidate SHA-256:", "Real-tool evidence:"} {
+		if !strings.Contains(string(output), field) {
+			t.Errorf("receipt verifier output %q omits %q", output, field)
+		}
 	}
 }
 

@@ -32,8 +32,11 @@
   receipts, normalized parity results, and candidate-bound release/tag
   verification before publication
 - run hosted exact-candidate lifecycle evidence with a digest-pinned,
-  privileged Docker-in-Docker fixture instead of the heavyweight default Room
+  privileged Podman fixture instead of the heavyweight default Room
   image hydration
+- make the parity evidence job check out its candidate before invoking the
+  repository verifier, and enforce candidate, real-tool, and publication
+  receipt fields
 
 ### Portability and Safety
 
@@ -44,6 +47,8 @@
   the workspace engine
 - constrain real lifecycle cleanup to exact test-owned DevPod workspace IDs and
   recover interrupted-open IDs from test-owned controller journals
+- escape terminal controls in bounded DevPod failure diagnostics and
+  revalidate workspace source identity after transient readiness waits
 - align real lifecycle fixtures with named Camp initialization and
   directory-based discovery; let a fresh controller reopen from the discovered
   manifest and durable backend pointer when validated local history is empty,

@@ -16,6 +16,7 @@ var (
 	repositoryPattern = regexp.MustCompile(`^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$`)
 	versionPattern    = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._+-]*$`)
 	commitPattern     = regexp.MustCompile(`^[0-9a-f]{40}$`)
+	imagePattern      = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._/:+-]*@sha256:[0-9a-f]{64}$`)
 )
 
 type Lock struct {
@@ -37,13 +38,18 @@ type Asset struct {
 }
 
 type Fixtures struct {
-	Room Fixture `yaml:"room"`
+	Room      Fixture      `yaml:"room"`
+	Lifecycle ImageFixture `yaml:"lifecycle"`
 }
 
 type Fixture struct {
 	Repository string `yaml:"repository"`
 	Version    string `yaml:"version"`
 	Commit     string `yaml:"commit"`
+}
+
+type ImageFixture struct {
+	Image string `yaml:"image"`
 }
 
 func ParseLock(reader io.Reader) (Lock, error) {
@@ -109,6 +115,9 @@ func (l Lock) validate() error {
 	}
 	if l.Fixtures.Room.Repository == "" || l.Fixtures.Room.Version == "" || l.Fixtures.Room.Commit == "" {
 		return errors.New("Room fixture identity is incomplete")
+	}
+	if l.Fixtures.Lifecycle.Image != "" && !imagePattern.MatchString(l.Fixtures.Lifecycle.Image) {
+		return errors.New("lifecycle image fixture identity is incomplete")
 	}
 	return nil
 }

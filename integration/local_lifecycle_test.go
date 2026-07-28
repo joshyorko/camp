@@ -15,6 +15,7 @@ import (
 	"testing"
 	"time"
 
+	tooladapter "github.com/joshyorko/camp/internal/adapters/tools"
 	"github.com/joshyorko/camp/internal/domain"
 	"github.com/joshyorko/camp/internal/ports"
 )
@@ -102,7 +103,7 @@ func TestLocalLifecycleVertical(t *testing.T) {
 	}
 
 	t.Log("mutate files and build an explicitly tagged fixture image through CAMP_REGISTRY")
-	mutate := fmt.Sprintf("set -eu; cd %s; grep -qx attached 'Projects/Unicode space/attach-proof.txt'; printf 'after-open\\n' >> 'Projects/Unicode space/λ-note.txt'; chmod 600 'Projects/Unicode space/λ-note.txt'; test \"$CAMP_REGISTRY\" = %s; test \"$CAMP_FILESERVER\" = %s; wget -qO- \"http://$CAMP_REGISTRY/v2/\" >/dev/null; wget -qO- \"http://$CAMP_FILESERVER/\" >/dev/null; engine=; attempts=0; while test -z \"$engine\"; do for candidate in docker podman nerdctl; do if command -v \"$candidate\" >/dev/null 2>&1 && \"$candidate\" info >/dev/null 2>&1; then engine=$candidate; break; fi; done; attempts=$((attempts+1)); test $attempts -lt 60; sleep 1; done; reference=\"$CAMP_REGISTRY/camp/acceptance:named\"; \"$engine\" build --tag \"$reference\" image-fixture; \"$engine\" push \"$reference\"", shellQuote(workspaceRootA), shellQuote(endpoints.Registry), shellQuote(endpoints.Fileserver))
+	mutate := fmt.Sprintf("set -eu; cd %s; grep -qx attached 'Projects/Unicode space/attach-proof.txt'; printf 'after-open\\n' >> 'Projects/Unicode space/λ-note.txt'; chmod 600 'Projects/Unicode space/λ-note.txt'; test \"$CAMP_REGISTRY\" = %s; test \"$CAMP_FILESERVER\" = %s; curl -fsS \"http://$CAMP_REGISTRY/v2/\" >/dev/null; curl -fsS \"http://$CAMP_FILESERVER/\" >/dev/null; engine=; attempts=0; while test -z \"$engine\"; do for candidate in docker podman nerdctl; do if command -v \"$candidate\" >/dev/null 2>&1 && \"$candidate\" info >/dev/null 2>&1; then engine=$candidate; break; fi; done; attempts=$((attempts+1)); test $attempts -lt 60; sleep 1; done; reference=\"$CAMP_REGISTRY/camp/acceptance:named\"; \"$engine\" build --tag \"$reference\" image-fixture; \"$engine\" push \"$reference\"", shellQuote(workspaceRootA), shellQuote(endpoints.Registry), shellQuote(endpoints.Fileserver))
 	mustRunDevPod(t, ctx, devPod, "ssh", workspaceA, "--command", mutate)
 	namedImageDigest := registryPlatformManifestDigest(t, ctx, endpoints.Registry, "camp/acceptance", "named")
 	evictedImageIDPathA := filepath.ToSlash(filepath.Join(workspaceRootA, "Projects/Unicode space/evicted-image-id.txt"))
@@ -318,8 +319,13 @@ func writeLifecycleFixture(t *testing.T, source string) {
 			t.Fatal(err)
 		}
 	}
-	const lifecycleDevcontainer = `{"image":"docker@sha256:aa3df78ecf320f5fafdce71c659f1629e96e9de0968305fe1de670e0ca9176ce","privileged":true,"remoteUser":"root","overrideCommand":false}`
-	if err := os.WriteFile(filepath.Join(devcontainer, "devcontainer.json"), []byte(lifecycleDevcontainer), 0o644); err != nil {
+	lifecycleDevcontainer, err := json.Marshal(map[string]any{
+		"image": lockedLifecycleImage(t), "privileged": true, "remoteUser": "root", "overrideCommand": false,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(devcontainer, "devcontainer.json"), lifecycleDevcontainer, 0o644); err != nil {
 		t.Fatal(err)
 	}
 	if err := os.WriteFile(filepath.Join(scripts, "camp-fixture"), []byte("#!/bin/sh\nexit 0\n"), 0o755); err != nil {
@@ -353,7 +359,7 @@ func writeLifecycleFixture(t *testing.T, source string) {
 	}
 }
 
-func TestWriteLifecycleFixturePinsLightweightDockerInDockerDevcontainer(t *testing.T) {
+func TestWriteLifecycleFixturePinsLightweightContainerEngineDevcontainer(t *testing.T) {
 	source := t.TempDir()
 	writeLifecycleFixture(t, source)
 
@@ -370,11 +376,25 @@ func TestWriteLifecycleFixturePinsLightweightDockerInDockerDevcontainer(t *testi
 	if err := json.Unmarshal(document, &config); err != nil {
 		t.Fatalf("decode lifecycle devcontainer fixture: %v", err)
 	}
-	const image = "docker@sha256:aa3df78ecf320f5fafdce71c659f1629e96e9de0968305fe1de670e0ca9176ce"
+	image := lockedLifecycleImage(t)
 	if config.Image != image || !config.Privileged || config.RemoteUser != "root" ||
 		config.OverrideCommand == nil || *config.OverrideCommand {
-		t.Fatalf("lifecycle devcontainer fixture = %#v, want pinned privileged Docker-in-Docker image", config)
+		t.Fatalf("lifecycle devcontainer fixture = %#v, want pinned privileged container-engine image", config)
 	}
+}
+
+func lockedLifecycleImage(t *testing.T) string {
+	t.Helper()
+	file, err := os.Open("../tools.lock.yaml")
+	if err != nil {
+		t.Fatalf("open lifecycle fixture lock: %v", err)
+	}
+	defer file.Close()
+	lock, err := tooladapter.ParseLock(file)
+	if err != nil {
+		t.Fatalf("parse lifecycle fixture lock: %v", err)
+	}
+	return lock.Fixtures.Lifecycle.Image
 }
 
 func shellQuote(value string) string { return "'" + strings.ReplaceAll(value, "'", "'\\''") + "'" }

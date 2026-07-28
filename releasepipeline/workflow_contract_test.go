@@ -90,6 +90,7 @@ func TestCIAddsRCCParityWithoutCachingPrivateRuntimeHomes(t *testing.T) {
 	if with["path"] != "." {
 		t.Fatalf("RCC Robot candidate download path = %#v, want repository root", with["path"])
 	}
+	findStepByUses(t, document, "parity-evidence", "actions/checkout@")
 	requireEvidence := findStepByName(t, document, "rcc-robot", "Require mandatory RCC Robot evidence")
 	run := requireEvidence["run"].(string)
 	for _, required := range []string{

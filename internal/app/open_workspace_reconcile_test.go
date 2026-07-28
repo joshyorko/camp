@@ -48,8 +48,8 @@ func TestOpenReconcileWorkspaceUpUnknownOutcomeUsesStatusWithoutSecondUp(t *test
 		reconciled.Workspace.LocalFolder != root || reconciled.Workspace.StagingRoot != root {
 		t.Fatalf("reconciled workspace = %#v", reconciled.Workspace)
 	}
-	if len(devpod.ups) != 1 || devpod.listCalls != 1 || devpod.statusCalls != 1 {
-		t.Fatalf("DevPod calls after reconciliation = up:%d list:%d status:%d, want up:1 list:1 status:1", len(devpod.ups), devpod.listCalls, devpod.statusCalls)
+	if len(devpod.ups) != 1 || devpod.listCalls != 2 || devpod.statusCalls != 1 {
+		t.Fatalf("DevPod calls after reconciliation = up:%d list:%d status:%d, want up:1 list:2 status:1", len(devpod.ups), devpod.listCalls, devpod.statusCalls)
 	}
 	_, pending, err = environment.open.deps.Journal.Load(context.Background(), sessionID)
 	if err != nil || len(pending) != 0 {
@@ -61,7 +61,7 @@ func TestOpenFailedWorkspaceUpAmbiguityIncludesBoundedDevPodStderr(t *testing.T)
 	t.Parallel()
 	environment := newOpenTestEnvironment(t)
 	devpod := &unknownOutcomeWorkspaceDevPod{
-		upResults: []ports.Result{{ExitCode: 17, Stderr: []byte("fatal: workspace agent failed before readiness")}},
+		upResults: []ports.Result{{ExitCode: 17, Stderr: []byte("\x1b]0;spoofed\a\x1b[31mfatal\x1b[0m: workspace agent failed before readiness")}},
 		upErrors:  []error{errors.New("exit status 17")},
 	}
 	environment.open.deps.DevPod = devpod
@@ -76,6 +76,9 @@ func TestOpenFailedWorkspaceUpAmbiguityIncludesBoundedDevPodStderr(t *testing.T)
 	})
 	if !errors.Is(err, ports.ErrAmbiguous) || !strings.Contains(err.Error(), "workspace agent failed before readiness") {
 		t.Fatalf("Open() error = %v, want ambiguous outcome with bounded DevPod diagnostic", err)
+	}
+	if strings.ContainsAny(err.Error(), "\x1b\a") || !strings.Contains(err.Error(), `\x1b`) {
+		t.Fatalf("Open() error contains unsafe or unescaped terminal controls: %q", err)
 	}
 }
 
@@ -115,6 +118,40 @@ func TestOpenReconcileWorkspaceUpWaitsForBusyWorkspaceWithoutSecondUp(t *testing
 	}
 	if len(devpod.ups) != 1 || devpod.statusCalls != 2 {
 		t.Fatalf("DevPod calls = up:%d status:%d, want up:1 status:2", len(devpod.ups), devpod.statusCalls)
+	}
+}
+
+func TestOpenReconcileWorkspaceUpRejectsReplacementSourceAfterBusyWait(t *testing.T) {
+	t.Parallel()
+	environment := newOpenTestEnvironment(t)
+	ticks := make(chan time.Time, 1)
+	ticks <- time.Unix(101, 0).UTC()
+	environment.open.deps.Clock = &controlledClock{
+		now:    time.Unix(100, 0).UTC(),
+		ticker: &controlledTicker{channel: ticks},
+	}
+	devpod := &unknownOutcomeWorkspaceDevPod{
+		replacementSourceAfterFirstList: "/workspaces/replacement",
+		statusStates:                    []devpodadapter.WorkspaceState{devpodadapter.StateBusy, devpodadapter.StateRunning},
+	}
+	environment.open.deps.DevPod = devpod
+	root := filepath.Join(t.TempDir(), "SecondBrain")
+	if err := os.MkdirAll(root, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	request := OpenRequest{
+		SessionID: "workspace-up-busy-replaced", Capsule: "brain", Branch: "main", Mode: domain.SessionReadWrite,
+		ExplicitRoot: root, EntryMode: domain.EntryTerminal, Context: "default", Provider: "docker",
+		Runtime: environment.runtime, Backend: environment.backend,
+	}
+	if _, err := environment.open.Run(context.Background(), request); !errors.Is(err, ports.ErrAmbiguous) {
+		t.Fatalf("first Open() error = %v, want ErrAmbiguous", err)
+	}
+	if _, err := environment.open.Run(context.Background(), request); err == nil || !strings.Contains(err.Error(), "source identity") {
+		t.Fatalf("resumed Open() error = %v, want replacement source rejection", err)
+	}
+	if len(devpod.ups) != 1 || devpod.listCalls != 2 {
+		t.Fatalf("DevPod calls = up:%d list:%d, want up:1 list:2", len(devpod.ups), devpod.listCalls)
 	}
 }
 
@@ -158,7 +195,7 @@ func TestOpenKnownWorkspaceUpFailureClearsAttemptOnlyAfterAbsenceAndRetries(t *t
 	environment := newOpenTestEnvironment(t)
 	devpod := &unknownOutcomeWorkspaceDevPod{
 		workspaceAbsent: true,
-		upResults:       []ports.Result{{ExitCode: 17}, {ExitCode: -1}},
+		upResults:       []ports.Result{{ExitCode: 17, Stderr: []byte("\x1b[31mpull denied\x1b[0m")}, {ExitCode: -1}},
 		upErrors:        []error{errors.New("exit status 17"), ports.ErrAmbiguous},
 	}
 	environment.open.deps.DevPod = devpod
@@ -171,7 +208,9 @@ func TestOpenKnownWorkspaceUpFailureClearsAttemptOnlyAfterAbsenceAndRetries(t *t
 		ExplicitRoot: root, EntryMode: domain.EntryTerminal, Context: "default", Provider: "docker",
 		Runtime: environment.runtime, Backend: environment.backend,
 	}
-	if _, err := environment.open.Run(context.Background(), request); err == nil || !strings.Contains(err.Error(), "exit status 17") {
+	if _, err := environment.open.Run(context.Background(), request); err == nil ||
+		!strings.Contains(err.Error(), "exit status 17") || !strings.Contains(err.Error(), "pull denied") ||
+		strings.Contains(err.Error(), "\x1b") {
 		t.Fatalf("first Open() error = %v", err)
 	}
 	_, pending, err := environment.open.deps.Journal.Load(context.Background(), request.SessionID)
@@ -219,7 +258,7 @@ func TestOpenResumesOpeningAfterWorkspaceUpObservationWithoutSecondUp(t *testing
 	if result.Snapshot.State != domain.SessionOpen || result.Snapshot.Workspace.EffectiveRoot != devpod.folder || result.MappedTarget != filepath.Join(devpod.folder, "MemoryD") {
 		t.Fatalf("resumed result = %#v", result)
 	}
-	if len(devpod.ups) != 1 || devpod.listCalls != 1 || devpod.statusCalls != 1 || devpod.folderCalls != 1 || devpod.sshCalls != 1 {
+	if len(devpod.ups) != 1 || devpod.listCalls != 2 || devpod.statusCalls != 1 || devpod.folderCalls != 1 || devpod.sshCalls != 1 {
 		t.Fatalf("DevPod calls = up:%d list:%d status:%d folder:%d ssh:%d", len(devpod.ups), devpod.listCalls, devpod.statusCalls, devpod.folderCalls, devpod.sshCalls)
 	}
 	loaded, pending, err := environment.open.deps.Journal.Load(context.Background(), request.SessionID)
@@ -778,21 +817,22 @@ func (j *factAppendErrorJournal) RecordFact(ctx context.Context, fact ports.Fact
 }
 
 type unknownOutcomeWorkspaceDevPod struct {
-	ups                []devpodadapter.UpOptions
-	listCalls          int
-	statusCalls        int
-	folder             string
-	folderCalls        int
-	sshCalls           int
-	sshErr             error
-	startErr           error
-	omitStatusIdentity bool
-	entryStarted       chan struct{}
-	releaseEntry       chan struct{}
-	workspaceAbsent    bool
-	upResults          []ports.Result
-	upErrors           []error
-	statusStates       []devpodadapter.WorkspaceState
+	ups                             []devpodadapter.UpOptions
+	listCalls                       int
+	statusCalls                     int
+	folder                          string
+	folderCalls                     int
+	sshCalls                        int
+	sshErr                          error
+	startErr                        error
+	omitStatusIdentity              bool
+	entryStarted                    chan struct{}
+	releaseEntry                    chan struct{}
+	workspaceAbsent                 bool
+	upResults                       []ports.Result
+	upErrors                        []error
+	statusStates                    []devpodadapter.WorkspaceState
+	replacementSourceAfterFirstList string
 }
 
 func (d *unknownOutcomeWorkspaceDevPod) Up(_ context.Context, options devpodadapter.UpOptions) (ports.Result, error) {
@@ -829,6 +869,9 @@ func (d *unknownOutcomeWorkspaceDevPod) ListInContext(_ context.Context, devpodC
 	source := up.WorkspacePath
 	if up.SourceMode == devpodadapter.SourceModeBootstrap {
 		source = up.BootstrapPath
+	}
+	if d.listCalls > 1 && d.replacementSourceAfterFirstList != "" {
+		source = d.replacementSourceAfterFirstList
 	}
 	return []devpodadapter.Workspace{{
 		ID: up.WorkspaceID, Provider: devpodadapter.WorkspaceProvider{Name: up.Provider},

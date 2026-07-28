@@ -7,12 +7,15 @@ REQUIRED_FIELDS = (
     "Passed gates:",
     "Failed gates:",
     "Missing or skipped gates:",
+    "Candidate SHA-256:",
+    "Real-tool evidence:",
     "Release-note classification:",
     "Canonical file changed or proposed:",
     "Durable learning captured:",
     "Evidence:",
     "Stale or ambiguous guidance removed:",
     "Remaining uncertainty:",
+    "Publication state:",
 )
 
 
