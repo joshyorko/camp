@@ -1137,7 +1137,7 @@ func composeLifecycle(ctx context.Context) (lifecycleComposition, error) {
 		transfer,
 		transfer,
 	)
-	publisher := app.NewCheckpointPublisher(base.journal, locks, leases, app.CheckpointTransports{Local: workspace.Local{}, Remote: remote}, pipeline, builder, generations, pointers, base.clock)
+	publisher := app.NewCheckpointPublisher(base.journal, locks, leases, productionCheckpointTransports(base.devpod, remote), pipeline, builder, generations, pointers, base.clock)
 	effects := lifecycleadapter.NewCloseEffects(base.devpod, services.processes, services.units, leases, base.ownership)
 	closeUsecase := app.NewClose(base.journal, locks, publisher, effects, base.clock)
 	observer := lifecycleadapter.NewSessionObserver(services.processes, services.units)
@@ -1148,6 +1148,11 @@ func composeLifecycle(ctx context.Context) (lifecycleComposition, error) {
 	}
 	recover := app.NewRecover(base.journal, observer, guard, openUsecase, newCleanupReconciler(base.journal, closeUsecase))
 	return lifecycleComposition{base: base, locks: locks, leases: leases, publisher: publisher, close: closeUsecase, recover: recover}, nil
+}
+
+func productionCheckpointTransports(devpodClient *devpod.Client, remote ports.WorkspaceTransport) app.CheckpointTransports {
+	remoteKit := app.NewRemoteCheckpointPreparer(app.NewDevPodRemoteCheckpointExecutor(devpodClient))
+	return app.CheckpointTransports{Local: workspace.Local{}, Remote: remote, RemoteKit: remoteKit}
 }
 
 type productionComposition struct {

@@ -21,6 +21,7 @@ import (
 	"github.com/joshyorko/camp/internal/images"
 	"github.com/joshyorko/camp/internal/ports"
 	registryadapter "github.com/joshyorko/camp/internal/registry"
+	"github.com/joshyorko/camp/internal/remoteworker"
 	"github.com/joshyorko/camp/internal/workspace"
 )
 
@@ -42,6 +43,10 @@ type checkpointRegistrySealer interface {
 
 type checkpointServingRefresher interface {
 	Refresh(context.Context, ServingRefreshRequest) error
+}
+
+type remoteCheckpointPreparer interface {
+	Prepare(context.Context, domain.JournalSnapshot, uint64, bool) (remoteworker.CheckpointReceipt, error)
 }
 
 type CheckpointPipeline struct {
@@ -67,11 +72,13 @@ type CheckpointPublisher struct {
 	generations *coordination.GenerationRepository
 	pointers    *coordination.PointerRepository
 	clock       ports.Clock
+	remoteKit   remoteCheckpointPreparer
 }
 
 type CheckpointTransports struct {
-	Local  ports.WorkspaceTransport
-	Remote ports.WorkspaceTransport
+	Local     ports.WorkspaceTransport
+	Remote    ports.WorkspaceTransport
+	RemoteKit remoteCheckpointPreparer
 }
 
 type CheckpointDisposition string
@@ -79,23 +86,25 @@ type CheckpointDisposition string
 const (
 	CheckpointDispositionPublished       CheckpointDisposition = "published"
 	CheckpointDispositionSkippedReadOnly CheckpointDisposition = "skippedReadOnly"
+	CheckpointDispositionRemotePrepared  CheckpointDisposition = "remotePrepared"
 )
 
 type CheckpointResult struct {
-	Disposition     CheckpointDisposition      `json:"disposition,omitempty"`
-	Published       bool                       `json:"published"`
-	Generation      domain.GenerationRef       `json:"generation,omitempty"`
-	Pointer         coordination.PointerRecord `json:"pointer,omitempty"`
-	RefreshError    string                     `json:"refreshError,omitempty"`
-	RecoveryCommand string                     `json:"recoveryCommand,omitempty"`
+	Disposition     CheckpointDisposition           `json:"disposition,omitempty"`
+	Published       bool                            `json:"published"`
+	Generation      domain.GenerationRef            `json:"generation,omitempty"`
+	Pointer         coordination.PointerRecord      `json:"pointer,omitempty"`
+	RefreshError    string                          `json:"refreshError,omitempty"`
+	RecoveryCommand string                          `json:"recoveryCommand,omitempty"`
+	Remote          *remoteworker.CheckpointReceipt `json:"remote,omitempty"`
 }
 
 func NewCheckpointPublisher(journal ports.Journal, locks ports.OperationTokenValidator, leases checkpointLeaseValidator, transports CheckpointTransports, pipeline CheckpointPipeline, builder checkpointBuilder, generations *coordination.GenerationRepository, pointers *coordination.PointerRepository, clock ports.Clock) *CheckpointPublisher {
-	return &CheckpointPublisher{journal: journal, locks: locks, leases: leases, mirror: workspace.NewSelector(transports.Local, transports.Remote), pipeline: pipeline, builder: builder, generations: generations, pointers: pointers, clock: clock}
+	return &CheckpointPublisher{journal: journal, locks: locks, leases: leases, mirror: workspace.NewSelector(transports.Local, transports.Remote), pipeline: pipeline, builder: builder, generations: generations, pointers: pointers, clock: clock, remoteKit: transports.RemoteKit}
 }
 
 func (p *CheckpointPublisher) Publish(ctx context.Context, operation ports.OperationToken, sessionID string) (CheckpointResult, error) {
-	if p == nil || p.journal == nil || p.locks == nil || p.leases == nil || p.mirror == nil || p.pipeline.Capturer == nil || p.pipeline.Sealer == nil || p.pipeline.Refresher == nil || p.builder == nil || p.generations == nil || p.pointers == nil || p.clock == nil {
+	if p == nil || p.journal == nil || p.locks == nil || p.leases == nil || p.clock == nil {
 		return CheckpointResult{}, errors.New("checkpoint publisher dependencies are incomplete")
 	}
 	if operation.Owner.SessionID != sessionID || sessionID == "" {
@@ -126,6 +135,30 @@ func (p *CheckpointPublisher) Publish(ctx context.Context, operation ports.Opera
 	lease := coordination.LeaseToken{Lease: *snapshot.Lease.Lease, Revision: ports.Revision(snapshot.Lease.Revision)}
 	if err := p.leases.Revalidate(ctx, lease, now); err != nil {
 		return CheckpointResult{}, fmt.Errorf("validate checkpoint writer lease: %w", err)
+	}
+	if snapshot.Recovery.RemoteDataPlane != nil && snapshot.Recovery.RemoteDataPlane.Mode == domain.DataPlaneHaulerKitV1 {
+		if p.remoteKit == nil {
+			return CheckpointResult{}, errors.New("remote Hauler checkpoint preparer is unavailable")
+		}
+		if err := p.revalidateRemotePointer(ctx, snapshot); err != nil {
+			return CheckpointResult{}, err
+		}
+		if operation.Owner.Operation != "sync" && operation.Owner.Operation != "close" {
+			return CheckpointResult{}, errors.New("remote Hauler checkpoint requires sync or close ownership")
+		}
+		receipt, err := p.remoteKit.Prepare(ctx, snapshot, generation, operation.Owner.Operation == "close")
+		result := CheckpointResult{
+			Disposition: CheckpointDispositionRemotePrepared, Remote: &receipt,
+			RecoveryCommand: "camp recover " + sessionID,
+		}
+		if err != nil {
+			return result, err
+		}
+		return result, nil
+	}
+	if p.mirror == nil || p.pipeline.Capturer == nil || p.pipeline.Sealer == nil ||
+		p.pipeline.Refresher == nil || p.builder == nil || p.generations == nil || p.pointers == nil {
+		return CheckpointResult{}, errors.New("checkpoint publisher dependencies are incomplete")
 	}
 	if hasPendingTransition(pending, "ServingContentRefreshed") {
 		return p.resumeServingRefresh(ctx, snapshot, pending, now)
@@ -258,6 +291,35 @@ func (p *CheckpointPublisher) Publish(ctx context.Context, operation ports.Opera
 		return result, err
 	}
 	return p.commitPointerAndRefresh(ctx, snapshot, result, next, pointerIntent, cutRoot, built.Artifact.Path, now, nil)
+}
+
+func (p *CheckpointPublisher) revalidateRemotePointer(ctx context.Context, snapshot domain.JournalSnapshot) error {
+	if p.pointers == nil {
+		return errors.New("remote checkpoint pointer repository is unavailable")
+	}
+	live, err := p.pointers.Read(ctx, snapshot.Capsule, snapshot.Lineage)
+	if snapshot.CurrentPointer == nil {
+		if errors.Is(err, os.ErrNotExist) || errors.Is(err, ports.ErrNotFound) {
+			if snapshot.ExpectedPointerRevision != "" || (snapshot.Lineage.IsMain() && snapshot.CurrentBase != nil) {
+				return errors.New("remote checkpoint recorded a partial missing pointer baseline")
+			}
+			return nil
+		}
+		if err != nil {
+			return fmt.Errorf("revalidate missing remote checkpoint pointer: %w", err)
+		}
+		return coordination.ErrPointerChanged
+	}
+	if err != nil {
+		return fmt.Errorf("revalidate remote checkpoint pointer: %w", err)
+	}
+	if snapshot.ExpectedPointerRevision == "" || string(live.Revision) != snapshot.ExpectedPointerRevision ||
+		!reflect.DeepEqual(live.Pointer, *snapshot.CurrentPointer) ||
+		snapshot.CurrentBase == nil || live.Pointer.Generation != *snapshot.CurrentBase ||
+		live.Pointer.Capsule != snapshot.Capsule || live.Pointer.Lineage != snapshot.Lineage {
+		return coordination.ErrPointerChanged
+	}
+	return nil
 }
 
 func (p *CheckpointPublisher) resumePendingUpload(ctx context.Context, snapshot domain.JournalSnapshot, intent ports.IntentRecord, generation uint64, now time.Time) (CheckpointResult, error) {

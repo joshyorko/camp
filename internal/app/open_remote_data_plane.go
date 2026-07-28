@@ -235,6 +235,7 @@ func (p *RemoteDataPlanePreparer) Prepare(ctx context.Context, request RemoteDat
 	record := domain.RemoteDataPlaneRecord{
 		Mode: domain.DataPlaneHaulerKitV1, AttemptID: request.AttemptID, BootstrapRoot: bootstrap.Root,
 		KitSHA256: artifact.SHA256, KitSize: artifact.Size,
+		HelperSHA256: manifest.Tools.Camp.SHA256, HelperSize: manifest.Tools.Camp.Size,
 		ManifestSHA256: manifestIdentity.SHA256, ManifestSize: manifestIdentity.Size,
 		SourceImage: outerImage, OuterImage: localImage,
 		RequestSchema: scope.SchemaVersion, RequestSession: scope.SessionID, WorkspaceRoot: scope.WorkspaceRoot,
@@ -297,6 +298,7 @@ func (p *RemoteDataPlanePreparer) reusePrepared(ctx context.Context, request Rem
 		completion.BootstrapRoot != bootstrapRoot || completion.RequestSession != request.SessionID ||
 		completion.Architecture != manifest.Architecture || completion.KitSHA256 != manifest.Archive.SHA256 ||
 		completion.KitSize != manifest.Archive.Size || completion.ManifestSHA256 != manifestIdentity.SHA256 ||
+		completion.HelperSHA256 != manifest.Tools.Camp.SHA256 || completion.HelperSize != manifest.Tools.Camp.Size ||
 		completion.ManifestSize != manifestIdentity.Size || !immutableImage(completion.SourceImage) ||
 		!localImageID(completion.OuterImage) {
 		return RemoteDataPlaneResult{}, errors.New("prior completion marker is not bound to the requested attempt")

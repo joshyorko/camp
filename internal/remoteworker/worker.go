@@ -32,6 +32,7 @@ type workerOperations interface {
 	ActivateImage(context.Context, Request) (any, error)
 	Hydrate(context.Context, Request) (any, error)
 	StartServices(context.Context, Request) (any, error)
+	Checkpoint(context.Context, Request) (any, error)
 }
 
 func Run(ctx context.Context, input io.Reader, output, _ io.Writer) error {
@@ -57,6 +58,8 @@ func runWithOperations(ctx context.Context, input io.Reader, output io.Writer, o
 		receipt, err = operations.Hydrate(ctx, request)
 	case OperationStartServices:
 		receipt, err = operations.StartServices(ctx, request)
+	case OperationCheckpoint:
+		receipt, err = operations.Checkpoint(ctx, request)
 	default:
 		err = ErrUnsupportedOperation
 	}

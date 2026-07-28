@@ -54,5 +54,12 @@ func (u *Sync) Run(ctx context.Context, sessionID string) (result CheckpointResu
 			resultErr = errors.Join(resultErr, err)
 		}
 	}()
-	return u.publisher.Publish(ctx, token, sessionID)
+	result, err = u.publisher.Publish(ctx, token, sessionID)
+	if err != nil {
+		return result, err
+	}
+	if result.Disposition == CheckpointDispositionRemotePrepared && (result.Published || result.Remote == nil) {
+		return result, errors.New("remote checkpoint preparation returned an invalid publication state")
+	}
+	return result, nil
 }

@@ -12,6 +12,7 @@ import (
 	"unicode"
 	"unicode/utf8"
 
+	"github.com/joshyorko/camp/internal/domain"
 	"github.com/joshyorko/camp/internal/jsonstrict"
 )
 
@@ -59,13 +60,22 @@ type ExpectedIdentity struct {
 }
 
 type Request struct {
-	SchemaVersion uint32           `json:"schemaVersion"`
-	Operation     Operation        `json:"operation"`
-	SessionID     string           `json:"sessionId"`
-	WorkspaceRoot string           `json:"workspaceRoot"`
-	RuntimeRoot   string           `json:"runtimeRoot"`
-	ManifestPath  string           `json:"manifestPath"`
-	Expected      ExpectedIdentity `json:"expected"`
+	SchemaVersion uint32             `json:"schemaVersion"`
+	Operation     Operation          `json:"operation"`
+	SessionID     string             `json:"sessionId"`
+	WorkspaceRoot string             `json:"workspaceRoot"`
+	RuntimeRoot   string             `json:"runtimeRoot"`
+	ManifestPath  string             `json:"manifestPath"`
+	Expected      ExpectedIdentity   `json:"expected"`
+	Checkpoint    *CheckpointRequest `json:"checkpoint,omitempty"`
+}
+
+type CheckpointRequest struct {
+	AttemptID  string         `json:"attemptId"`
+	Capsule    string         `json:"capsule"`
+	Lineage    domain.Lineage `json:"lineage"`
+	Generation uint64         `json:"generation"`
+	Close      bool           `json:"close"`
 }
 
 type Result struct {
@@ -141,6 +151,15 @@ func validateRequest(request Request) error {
 		!validIdentity(request.Expected.Kit) || request.Expected.Kit.Name != "camp-hauler-kit.tar.zst" ||
 		!validIdentity(request.Expected.Manifest) {
 		return invalidRequest("invalid helper or kit identity")
+	}
+	if request.Operation == OperationCheckpoint {
+		if request.Checkpoint == nil || !safeSegment(request.Checkpoint.AttemptID) ||
+			!safeSegment(request.Checkpoint.Capsule) || !safeSegment(request.Checkpoint.Lineage.Branch) ||
+			request.Checkpoint.Generation == 0 {
+			return invalidRequest("invalid checkpoint envelope")
+		}
+	} else if request.Checkpoint != nil {
+		return invalidRequest("checkpoint envelope is only valid for checkpoint")
 	}
 	const digestMarker = "@sha256:"
 	sourceIndex := strings.LastIndex(request.Expected.SourceImage, digestMarker)

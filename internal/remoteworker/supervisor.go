@@ -82,6 +82,8 @@ func (runtimeState *productionServicesRuntime) Ensure(ctx context.Context, reque
 		serviceRoot,
 		filepath.Join(request.WorkspaceRoot, ".camp", "runtime", "registry"),
 		filepath.Join(request.WorkspaceRoot, ".camp", "transfer"),
+		filepath.Join(request.WorkspaceRoot, ".camp", "transfer", "export"),
+		filepath.Join(request.WorkspaceRoot, ".camp", "transfer", "fileserver-store"),
 	} {
 		if err := secureMkdirAllOperation(directory); err != nil {
 			return domain.ProcessRecord{}, nil, err
@@ -201,7 +203,8 @@ func remoteServiceDefinitions(request Request) ([]hauleradapter.ServiceDefinitio
 		return nil, err
 	}
 	fileserverOptions := common
-	fileserverOptions.OverlayDirectory = filepath.Join(request.WorkspaceRoot, ".camp", "transfer")
+	fileserverOptions.StoreDirectory = filepath.Join(request.WorkspaceRoot, ".camp", "transfer", "fileserver-store")
+	fileserverOptions.OverlayDirectory = filepath.Join(request.WorkspaceRoot, ".camp", "transfer", "export")
 	fileserverOptions.GuestPort = remoteFileserverGuestPort
 	fileserverOptions.LogPath = filepath.Join(serviceRoot, "fileserver.log")
 	fileserverOptions.PIDPath = filepath.Join(serviceRoot, "fileserver.pid")
