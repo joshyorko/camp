@@ -319,13 +319,23 @@ func writeLifecycleFixture(t *testing.T, source string) {
 			t.Fatal(err)
 		}
 	}
+	lifecycleImage := lockedLifecycleImage(t)
 	lifecycleDevcontainer, err := json.Marshal(map[string]any{
-		"image": lockedLifecycleImage(t), "privileged": true, "remoteUser": "podman",
+		"build": map[string]any{
+			"dockerfile": "Dockerfile",
+			"args":       map[string]string{"BASE_IMAGE": lifecycleImage},
+		},
+		"privileged": true,
+		"remoteUser": "podman",
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
 	if err := os.WriteFile(filepath.Join(devcontainer, "devcontainer.json"), lifecycleDevcontainer, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	lifecycleDockerfile := "ARG BASE_IMAGE\nFROM ${BASE_IMAGE}\nRUN printf 'podman:100000:65536\\n' > /etc/subuid && printf 'podman:100000:65536\\n' > /etc/subgid\n"
+	if err := os.WriteFile(filepath.Join(devcontainer, "Dockerfile"), []byte(lifecycleDockerfile), 0o644); err != nil {
 		t.Fatal(err)
 	}
 	if err := os.WriteFile(filepath.Join(scripts, "camp-fixture"), []byte("#!/bin/sh\nexit 0\n"), 0o755); err != nil {
@@ -368,7 +378,10 @@ func TestWriteLifecycleFixturePinsLightweightContainerEngineDevcontainer(t *test
 		t.Fatalf("read lifecycle devcontainer fixture: %v", err)
 	}
 	var config struct {
-		Image           string `json:"image"`
+		Build struct {
+			Dockerfile string            `json:"dockerfile"`
+			Args       map[string]string `json:"args"`
+		} `json:"build"`
 		Privileged      bool   `json:"privileged"`
 		RemoteUser      string `json:"remoteUser"`
 		OverrideCommand *bool  `json:"overrideCommand"`
@@ -377,9 +390,16 @@ func TestWriteLifecycleFixturePinsLightweightContainerEngineDevcontainer(t *test
 		t.Fatalf("decode lifecycle devcontainer fixture: %v", err)
 	}
 	image := lockedLifecycleImage(t)
-	if config.Image != image || !config.Privileged || config.RemoteUser != "podman" ||
-		config.OverrideCommand != nil {
+	if config.Build.Dockerfile != "Dockerfile" || config.Build.Args["BASE_IMAGE"] != image ||
+		!config.Privileged || config.RemoteUser != "podman" || config.OverrideCommand != nil {
 		t.Fatalf("lifecycle devcontainer fixture = %#v, want pinned privileged non-root container-engine image", config)
+	}
+	dockerfile, err := os.ReadFile(filepath.Join(source, ".devcontainer", "Dockerfile"))
+	if err != nil {
+		t.Fatalf("read lifecycle Dockerfile: %v", err)
+	}
+	if want := "ARG BASE_IMAGE\nFROM ${BASE_IMAGE}\nRUN printf 'podman:100000:65536\\n' > /etc/subuid && printf 'podman:100000:65536\\n' > /etc/subgid\n"; string(dockerfile) != want {
+		t.Fatalf("lifecycle Dockerfile = %q, want %q", dockerfile, want)
 	}
 }
 

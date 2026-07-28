@@ -335,7 +335,11 @@ evidence. Keep DevPod's default command override for this fixture; forcing the
 Podman image's own command lets the container exit before agent injection.
 Run the workspace as the image's `podman` user; its default root user can make
 the bind-mounted source root-owned, blocking Camp source access and exact
-cleanup.
+cleanup. DevPod updates that user to the host UID, so the fixture's minimal
+Dockerfile replaces the image's subordinate UID/GID ranges at build time; the
+image's original range begins at 1001 and overlaps that primary UID on GitHub's
+hosted runner. A lifecycle hook cannot perform this repair because it runs as
+the non-root remote user.
 Before each file or MinIO lifecycle scenario opens Camp's workspace,
 the harness creates one unrelated workspace in that same private context. Its
 scenario ledger recovers exact Camp workspace IDs, process identities,
