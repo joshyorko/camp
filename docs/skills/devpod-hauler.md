@@ -158,9 +158,14 @@ Do not use Hauler v2.0.2's live `_catalog` response as proof that all direct reg
   entries with descriptor-relative no-replace renames. Hydrated `.camp`
   content is merged without replacing runtime. Each rename fsyncs both
   directories, and the durable hydration receipt is published only after the
-  root is complete. The generated lifecycle boundary releases the preserved
-  user `onCreateCommand` only after that success. It never calls `devpod up`
-  again or falls back to the capsule source.
+  root is complete. Reentry first performs only a descriptor-pinned, no-follow
+  receipt read; it succeeds without admission or verifier mutation only when
+  the completed receipt exactly binds the request session, workspace/runtime
+  roots, manifest path, every expected identity, and root digest. Missing,
+  malformed, stale, mismatched, or linked receipts are not adopted and fall
+  through to admission before any mutation. The generated lifecycle boundary
+  releases the preserved user `onCreateCommand` only after that success. It
+  never calls `devpod up` again or falls back to the capsule source.
 - Do not attempt to activate a devcontainer configuration created only in the
   remote workspace with a second local-folder `devpod up --recreate`. Pinned
   v0.26.1 exposes no supported community command for that remote reconfiguration

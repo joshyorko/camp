@@ -1,6 +1,7 @@
 package remoteworker
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -15,15 +16,20 @@ import (
 	hauleradapter "github.com/joshyorko/camp/internal/adapters/hauler"
 	"github.com/joshyorko/camp/internal/adapters/subprocess"
 	"github.com/joshyorko/camp/internal/haulkit"
+	"github.com/joshyorko/camp/internal/jsonstrict"
 	"golang.org/x/sys/unix"
 )
 
 var ErrUnsafeHydration = errors.New("unsafe remote workspace hydration")
 
 type HydrationReceipt struct {
-	Status        string `json:"status"`
-	WorkspaceRoot string `json:"workspaceRoot"`
-	RootSHA256    string `json:"rootSHA256"`
+	Status        string           `json:"status"`
+	SessionID     string           `json:"sessionId"`
+	WorkspaceRoot string           `json:"workspaceRoot"`
+	RuntimeRoot   string           `json:"runtimeRoot"`
+	ManifestPath  string           `json:"manifestPath"`
+	Expected      ExpectedIdentity `json:"expected"`
+	RootSHA256    string           `json:"rootSHA256"`
 }
 
 type hydrationRuntime interface {
@@ -36,19 +42,19 @@ type hydrationRuntime interface {
 }
 
 func hydrateWorkspace(ctx context.Context, request Request, runtime hydrationRuntime) (HydrationReceipt, error) {
+	if observer, ok := runtime.(interface {
+		ObserveCompleted(Request) (HydrationReceipt, bool, error)
+	}); ok {
+		if receipt, complete, err := observer.ObserveCompleted(request); err != nil || complete {
+			return receipt, err
+		}
+	}
 	if err := runtime.AdmitWorkspace(request.WorkspaceRoot); err != nil {
 		return HydrationReceipt{}, err
 	}
 	kit, err := runtime.Verify(ctx, request)
 	if err != nil {
 		return HydrationReceipt{}, err
-	}
-	if observer, ok := runtime.(interface {
-		Observe(Request, verifiedRuntimeKit) (HydrationReceipt, bool, error)
-	}); ok {
-		if receipt, complete, err := observer.Observe(request, kit); err != nil || complete {
-			return receipt, err
-		}
 	}
 	stage, err := runtime.ExtractRoot(ctx, request, kit)
 	if err != nil {
@@ -60,7 +66,7 @@ func hydrateWorkspace(ctx context.Context, request Request, runtime hydrationRun
 	if err := runtime.Promote(stage, request.WorkspaceRoot); err != nil {
 		return HydrationReceipt{}, err
 	}
-	receipt := HydrationReceipt{Status: "completed", WorkspaceRoot: request.WorkspaceRoot, RootSHA256: kit.RootSHA256}
+	receipt := newHydrationReceipt(request, kit.RootSHA256)
 	if err := runtime.Publish(request, receipt); err != nil {
 		return HydrationReceipt{}, err
 	}
@@ -89,27 +95,73 @@ func (runtimeState *productionHydrationRuntime) Verify(ctx context.Context, requ
 	return kit, err
 }
 
-func (*productionHydrationRuntime) Observe(request Request, kit verifiedRuntimeKit) (HydrationReceipt, bool, error) {
-	path := filepath.Join(request.WorkspaceRoot, ".camp", "runtime", "hydrate.receipt.json")
-	file, err := os.OpenFile(path, os.O_RDONLY|syscall.O_NOFOLLOW, 0)
-	if isNotExist(err) {
+func (*productionHydrationRuntime) ObserveCompleted(request Request) (HydrationReceipt, bool, error) {
+	body, err := readHydrationReceipt(request.WorkspaceRoot)
+	if err != nil {
 		return HydrationReceipt{}, false, nil
 	}
-	if err != nil {
-		return HydrationReceipt{}, false, err
-	}
-	defer file.Close()
-	body, err := io.ReadAll(io.LimitReader(file, maxDiagnosticBytes+1))
-	if err != nil || len(body) > maxDiagnosticBytes {
-		return HydrationReceipt{}, false, errors.Join(err, ErrUnsafeHydration)
+	if err := jsonstrict.RejectDuplicateKeys(body); err != nil {
+		return HydrationReceipt{}, false, nil
 	}
 	var receipt HydrationReceipt
-	if err := json.Unmarshal(body, &receipt); err != nil ||
-		receipt.Status != "completed" || receipt.WorkspaceRoot != request.WorkspaceRoot ||
-		receipt.RootSHA256 != kit.RootSHA256 {
-		return HydrationReceipt{}, false, fmt.Errorf("%w: hydration receipt differs", ErrUnsafeHydration)
+	decoder := json.NewDecoder(bytes.NewReader(body))
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(&receipt); err != nil {
+		return HydrationReceipt{}, false, nil
+	}
+	var trailing any
+	if err := decoder.Decode(&trailing); !errors.Is(err, io.EOF) || !hydrationReceiptMatches(request, receipt) {
+		return HydrationReceipt{}, false, nil
 	}
 	return receipt, true, nil
+}
+
+func newHydrationReceipt(request Request, rootSHA256 string) HydrationReceipt {
+	return HydrationReceipt{
+		Status: "completed", SessionID: request.SessionID, WorkspaceRoot: request.WorkspaceRoot,
+		RuntimeRoot: request.RuntimeRoot, ManifestPath: request.ManifestPath, Expected: request.Expected,
+		RootSHA256: rootSHA256,
+	}
+}
+
+func hydrationReceiptMatches(request Request, receipt HydrationReceipt) bool {
+	return receipt.Status == "completed" && receipt.SessionID == request.SessionID &&
+		receipt.WorkspaceRoot == request.WorkspaceRoot && receipt.RuntimeRoot == request.RuntimeRoot &&
+		receipt.ManifestPath == request.ManifestPath && receipt.Expected == request.Expected &&
+		validDigest(receipt.RootSHA256)
+}
+
+func readHydrationReceipt(workspace string) ([]byte, error) {
+	workspaceFD, _, err := openOperationDirectory(workspace)
+	if err != nil {
+		return nil, err
+	}
+	defer unix.Close(workspaceFD)
+	campFD, err := unix.Openat(workspaceFD, ".camp", unix.O_RDONLY|unix.O_DIRECTORY|unix.O_CLOEXEC|unix.O_NOFOLLOW, 0)
+	if err != nil {
+		return nil, err
+	}
+	defer unix.Close(campFD)
+	runtimeFD, err := unix.Openat(campFD, "runtime", unix.O_RDONLY|unix.O_DIRECTORY|unix.O_CLOEXEC|unix.O_NOFOLLOW, 0)
+	if err != nil {
+		return nil, err
+	}
+	defer unix.Close(runtimeFD)
+	fd, err := unix.Openat(runtimeFD, "hydrate.receipt.json", unix.O_RDONLY|unix.O_CLOEXEC|unix.O_NOFOLLOW, 0)
+	if err != nil {
+		return nil, err
+	}
+	file := os.NewFile(uintptr(fd), "hydrate.receipt.json")
+	defer file.Close()
+	info, err := file.Stat()
+	if err != nil || !info.Mode().IsRegular() || info.Size() > maxDiagnosticBytes {
+		return nil, ErrUnsafeHydration
+	}
+	body, err := io.ReadAll(io.LimitReader(file, maxDiagnosticBytes+1))
+	if err != nil || len(body) > maxDiagnosticBytes {
+		return nil, errors.Join(err, ErrUnsafeHydration)
+	}
+	return body, nil
 }
 
 func (*productionHydrationRuntime) AdmitWorkspace(workspace string) error {

@@ -2,6 +2,7 @@ package remoteworker
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"os"
 	"path/filepath"
@@ -16,6 +17,13 @@ type hydrationFixture struct {
 	workspace     string
 	stage         string
 	mutateRuntime bool
+}
+
+type receiptObservingHydrationFixture struct{ hydrationFixture }
+
+func (fixture *receiptObservingHydrationFixture) ObserveCompleted(request Request) (HydrationReceipt, bool, error) {
+	fixture.order = append(fixture.order, "observe")
+	return newProductionHydrationRuntime().ObserveCompleted(request)
 }
 
 func (fixture *hydrationFixture) Verify(_ context.Context, request Request) (verifiedRuntimeKit, error) {
@@ -118,6 +126,91 @@ func TestHydrateRejectsIneligibleWorkspaceBeforeVerifierRuntimeMutation(t *testi
 	}
 	if body, err := os.ReadFile(filepath.Join(workspace, "user.txt")); err != nil || string(body) != "keep" {
 		t.Fatalf("workspace bytes changed before admission failed: body=%q err=%v", body, err)
+	}
+}
+
+func TestHydrateCompletedReceiptBypassesAdmissionAndVerification(t *testing.T) {
+	workspace := filepath.Join(t.TempDir(), "workspace")
+	request := validRequest()
+	request.Operation = OperationHydrate
+	request.WorkspaceRoot = workspace
+	request.RuntimeRoot = filepath.Join(workspace, ".camp", "runtime")
+	if err := os.MkdirAll(request.RuntimeRoot, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(workspace, "README.md"), []byte("hydrated"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	want := newHydrationReceipt(request, strings.Repeat("a", 64))
+	body, err := json.Marshal(want)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(request.RuntimeRoot, "hydrate.receipt.json"), body, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	fixture := &receiptObservingHydrationFixture{hydrationFixture: hydrationFixture{mutateRuntime: true}}
+	receipt, err := hydrateWorkspace(t.Context(), request, fixture)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if receipt != want || strings.Join(fixture.order, ",") != "observe" {
+		t.Fatalf("receipt=%#v order=%v", receipt, fixture.order)
+	}
+}
+
+func TestInvalidCompletedReceiptDoesNotBypassAdmission(t *testing.T) {
+	for _, test := range []struct {
+		name    string
+		mutate  func(*HydrationReceipt)
+		symlink bool
+	}{
+		{name: "forged", mutate: func(receipt *HydrationReceipt) { receipt.Status = "forged" }},
+		{name: "mismatched", mutate: func(receipt *HydrationReceipt) { receipt.Expected.Kit.SHA256 = strings.Repeat("c", 64) }},
+		{name: "stale", mutate: func(receipt *HydrationReceipt) { receipt.SessionID = "old-session" }},
+		{name: "symlinked", symlink: true},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			workspace := filepath.Join(t.TempDir(), "workspace")
+			request := validRequest()
+			request.Operation = OperationHydrate
+			request.WorkspaceRoot = workspace
+			request.RuntimeRoot = filepath.Join(workspace, ".camp", "runtime")
+			if err := os.MkdirAll(filepath.Join(workspace, ".camp", "runtime"), 0o700); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(filepath.Join(workspace, "user.txt"), []byte("keep"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			receipt := newHydrationReceipt(request, strings.Repeat("a", 64))
+			if test.mutate != nil {
+				test.mutate(&receipt)
+			}
+			path := filepath.Join(workspace, ".camp", "runtime", "hydrate.receipt.json")
+			if test.symlink {
+				if err := os.Symlink("../../user.txt", path); err != nil {
+					t.Fatal(err)
+				}
+			} else {
+				body, err := json.Marshal(receipt)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if err := os.WriteFile(path, body, 0o600); err != nil {
+					t.Fatal(err)
+				}
+			}
+			fixture := &receiptObservingHydrationFixture{hydrationFixture: hydrationFixture{mutateRuntime: true}}
+			if _, err := hydrateWorkspace(t.Context(), request, fixture); !errors.Is(err, ErrUnsafeHydration) {
+				t.Fatalf("hydrateWorkspace() error = %v", err)
+			}
+			if got := strings.Join(fixture.order, ","); got != "observe,admit" {
+				t.Fatalf("hydration order = %q", got)
+			}
+			if _, err := os.Lstat(filepath.Join(request.RuntimeRoot, "kit")); !os.IsNotExist(err) {
+				t.Fatalf("verifier mutated runtime after invalid receipt: %v", err)
+			}
+		})
 	}
 }
 

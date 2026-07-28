@@ -113,6 +113,49 @@ Documentation improvement:
 - Stale or ambiguous guidance removed: the hydration sequence no longer implies runtime installation may occur before workspace eligibility is established.
 - Remaining uncertainty: a fresh pinned-provider activation/hydration run remains the Task 12 release gate.
 
+## Fix round 3
+
+Status: DONE
+
+### Result
+
+- Hydration reentry now first attempts a read-only completed-receipt observation
+  through pinned workspace, `.camp`, runtime, and receipt descriptors with
+  `O_NOFOLLOW` at every boundary.
+- A receipt bypasses admission and verifier mutation only when its completed
+  status, session, workspace/runtime roots, manifest path, full expected
+  identity, and root digest exactly match the request. Invalid evidence falls
+  through to admission before any verifier, runtime, or root mutation.
+- New receipts persist that complete identity binding. Earlier/incomplete
+  receipts fail closed into admission rather than adopting a partial workspace.
+
+### TDD evidence
+
+- RED: admission before receipt observation made a correctly completed
+  workspace non-idempotent; GREEN:
+  `TestHydrateCompletedReceiptBypassesAdmissionAndVerification` proves the
+  production descriptor observer returns the exact receipt without calling
+  admission, verification, or mutation.
+- RED: a receipt-first path could trust arbitrary workspace content; GREEN:
+  `TestInvalidCompletedReceiptDoesNotBypassAdmission` covers forged,
+  mismatched, stale, and symlinked receipts, proves each reaches admission,
+  and proves its mutation-faithful verifier is not called.
+
+### Verification
+
+- `rtk go test ./internal/remoteworker -count=1` — 30 passed.
+- `rtk go vet ./internal/remoteworker` — passed.
+- `rtk git diff --check` — passed.
+
+### Documentation improvement
+
+Documentation improvement:
+- Canonical file changed or proposed: `docs/skills/devpod-hauler.md`
+- Durable learning captured: completed hydration reentry may bypass admission only after a read-only descriptor-pinned receipt check binds all request identities; invalid receipt evidence must return to the pre-mutation admission boundary.
+- Evidence: `TestHydrateCompletedReceiptBypassesAdmissionAndVerification` and `TestInvalidCompletedReceiptDoesNotBypassAdmission`.
+- Stale or ambiguous guidance removed: the prior admission-first rule did not distinguish validated completed reentry from uncompleted workspace admission.
+- Remaining uncertainty: a fresh pinned-provider activation/hydration run remains the Task 12 release gate.
+
 ## Fix round 2
 
 Status: DONE
