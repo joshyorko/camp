@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	devpodadapter "github.com/joshyorko/camp/internal/adapters/devpod"
 	"github.com/joshyorko/camp/internal/domain"
@@ -53,6 +54,45 @@ func TestOpenReconcileWorkspaceUpUnknownOutcomeUsesStatusWithoutSecondUp(t *test
 	_, pending, err = environment.open.deps.Journal.Load(context.Background(), sessionID)
 	if err != nil || len(pending) != 0 {
 		t.Fatalf("post-reconciliation pending=%#v error=%v", pending, err)
+	}
+}
+
+func TestOpenReconcileWorkspaceUpWaitsForBusyWorkspaceWithoutSecondUp(t *testing.T) {
+	t.Parallel()
+	environment := newOpenTestEnvironment(t)
+	ticks := make(chan time.Time, 1)
+	ticks <- time.Unix(101, 0).UTC()
+	environment.open.deps.Clock = &controlledClock{
+		now:    time.Unix(100, 0).UTC(),
+		ticker: &controlledTicker{channel: ticks},
+	}
+	devpod := &unknownOutcomeWorkspaceDevPod{
+		folder:       "/workspaces/root",
+		statusStates: []devpodadapter.WorkspaceState{devpodadapter.StateBusy, devpodadapter.StateRunning},
+	}
+	environment.open.deps.DevPod = devpod
+	root := filepath.Join(t.TempDir(), "SecondBrain")
+	if err := os.MkdirAll(root, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	request := OpenRequest{
+		SessionID: "workspace-up-busy", Capsule: "brain", Branch: "main", Mode: domain.SessionReadWrite,
+		ExplicitRoot: root, EntryMode: domain.EntryTerminal, Context: "default", Provider: "docker",
+		Runtime: environment.runtime, Backend: environment.backend,
+	}
+	if _, err := environment.open.Run(context.Background(), request); !errors.Is(err, ports.ErrAmbiguous) {
+		t.Fatalf("first Open() error = %v, want ErrAmbiguous", err)
+	}
+
+	result, err := environment.open.Run(context.Background(), request)
+	if err != nil {
+		t.Fatalf("resumed Open() error = %v", err)
+	}
+	if result.Snapshot.State != domain.SessionOpen {
+		t.Fatalf("resumed state = %q, want %q", result.Snapshot.State, domain.SessionOpen)
+	}
+	if len(devpod.ups) != 1 || devpod.statusCalls != 2 {
+		t.Fatalf("DevPod calls = up:%d status:%d, want up:1 status:2", len(devpod.ups), devpod.statusCalls)
 	}
 }
 
@@ -730,6 +770,7 @@ type unknownOutcomeWorkspaceDevPod struct {
 	workspaceAbsent    bool
 	upResults          []ports.Result
 	upErrors           []error
+	statusStates       []devpodadapter.WorkspaceState
 }
 
 func (d *unknownOutcomeWorkspaceDevPod) Up(_ context.Context, options devpodadapter.UpOptions) (ports.Result, error) {
@@ -743,14 +784,18 @@ func (d *unknownOutcomeWorkspaceDevPod) Up(_ context.Context, options devpodadap
 
 func (d *unknownOutcomeWorkspaceDevPod) StatusInContext(_ context.Context, devpodContext, workspaceID string) (devpodadapter.WorkspaceStatus, error) {
 	d.statusCalls++
+	state := devpodadapter.StateRunning
+	if index := d.statusCalls - 1; index < len(d.statusStates) {
+		state = d.statusStates[index]
+	}
 	if d.omitStatusIdentity {
-		return devpodadapter.WorkspaceStatus{ID: workspaceID, State: devpodadapter.StateRunning}, nil
+		return devpodadapter.WorkspaceStatus{ID: workspaceID, State: state}, nil
 	}
 	provider := ""
 	if len(d.ups) != 0 {
 		provider = d.ups[0].Provider
 	}
-	return devpodadapter.WorkspaceStatus{ID: workspaceID, Context: devpodContext, Provider: provider, State: devpodadapter.StateRunning}, nil
+	return devpodadapter.WorkspaceStatus{ID: workspaceID, Context: devpodContext, Provider: provider, State: state}, nil
 }
 
 func (d *unknownOutcomeWorkspaceDevPod) ListInContext(_ context.Context, devpodContext string) ([]devpodadapter.Workspace, error) {

@@ -37,6 +37,11 @@ var (
 	ErrOpenIDEUnsupported    = errors.New("IDE entry is not implemented")
 )
 
+const (
+	workspaceReadyTimeout = 30 * time.Second
+	workspaceReadyPoll    = 100 * time.Millisecond
+)
+
 type OpenPointerReader interface {
 	Read(context.Context, string, domain.Lineage) (coordination.PointerRecord, error)
 	Revalidate(context.Context, coordination.PointerRecord) error
@@ -485,12 +490,12 @@ func (o *Open) observeWorkspaceUp(ctx context.Context, snapshot domain.JournalSn
 	if matches != 1 {
 		return ports.FactRecord{}, snapshot, errors.New("pending DevPod workspace is absent or ambiguous")
 	}
-	status, err := o.deps.DevPod.StatusInContext(ctx, input.Context, input.ID)
+	status, err := o.waitForWorkspaceReady(ctx, input.Context, input.ID, input.Provider)
 	if err != nil {
 		return ports.FactRecord{}, snapshot, err
 	}
-	if status.ID != input.ID || (status.Context != "" && status.Context != input.Context) || (status.Provider != "" && status.Provider != input.Provider) || status.State != devpodadapter.StateRunning {
-		return ports.FactRecord{}, snapshot, fmt.Errorf("observed DevPod workspace is not ready: %w", devpodadapter.ErrUnknownWorkspaceState)
+	if !matchingWorkspaceStatus(status, input.Context, input.ID, input.Provider) || status.State != devpodadapter.StateRunning {
+		return ports.FactRecord{}, snapshot, fmt.Errorf("observed DevPod workspace is not ready in state %q: %w", status.State, devpodadapter.ErrUnknownWorkspaceState)
 	}
 	next := snapshot
 	next.Workspace.ID = input.ID
@@ -502,6 +507,38 @@ func (o *Open) observeWorkspaceUp(ctx context.Context, snapshot domain.JournalSn
 		return ports.FactRecord{}, snapshot, errors.New("open reconciliation clock returned zero time")
 	}
 	return ports.FactRecord{IntentID: intent.ID, SessionID: intent.SessionID, Transition: intent.Transition, Timestamp: now, Output: safeJSON(status)}, next, nil
+}
+
+func (o *Open) waitForWorkspaceReady(ctx context.Context, devpodContext, workspaceID, provider string) (devpodadapter.WorkspaceStatus, error) {
+	status, err := o.deps.DevPod.StatusInContext(ctx, devpodContext, workspaceID)
+	if err != nil || !matchingWorkspaceStatus(status, devpodContext, workspaceID, provider) || status.State != devpodadapter.StateBusy {
+		return status, err
+	}
+	waitCtx, cancel := context.WithTimeout(ctx, workspaceReadyTimeout)
+	defer cancel()
+	ticker := o.deps.Clock.NewTicker(workspaceReadyPoll)
+	defer ticker.Stop()
+	for status.State == devpodadapter.StateBusy {
+		select {
+		case <-waitCtx.Done():
+			return status, fmt.Errorf("wait for DevPod workspace %q to leave state %q: %w", workspaceID, status.State, waitCtx.Err())
+		case <-ticker.C():
+			status, err = o.deps.DevPod.StatusInContext(waitCtx, devpodContext, workspaceID)
+			if err != nil {
+				return devpodadapter.WorkspaceStatus{}, err
+			}
+			if !matchingWorkspaceStatus(status, devpodContext, workspaceID, provider) {
+				return status, nil
+			}
+		}
+	}
+	return status, nil
+}
+
+func matchingWorkspaceStatus(status devpodadapter.WorkspaceStatus, devpodContext, workspaceID, provider string) bool {
+	return status.ID == workspaceID &&
+		(status.Context == "" || status.Context == devpodContext) &&
+		(status.Provider == "" || status.Provider == provider)
 }
 
 func committedServicePorts(snapshot domain.JournalSnapshot) (int, int, error) {

@@ -12,6 +12,8 @@
   worker envelopes, and private immutable return exports
 - add portable controller, blueprint, profile, provenance, timeline, and
   execution-binding contracts with strict persisted identity validation
+- let ambiguous-open recovery wait for the exact DevPod workspace to leave its
+  documented transient `Busy` state without issuing a second `devpod up`
 - make successful close remove identity-verified forwarder evidence and the
   allowlisted private session runtime tree while preserving unexpected entries
 

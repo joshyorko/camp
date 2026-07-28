@@ -39,6 +39,9 @@ For GitHub Actions evidence, record runner assignment and executed steps. A
 completed failure with an empty runner name and zero steps is infrastructure
 admission evidence only: it proves neither source failure nor source success
 and must be rerun against the exact candidate before claiming CI proof.
+Inspect each mandatory job conclusion directly while a workflow is running:
+the workflow-level `in_progress` state can coexist with an already-completed
+failed child job and must never be used as evidence that no gate has failed.
 
 ## Durable documentation and release-note boundary
 
