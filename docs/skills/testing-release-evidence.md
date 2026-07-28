@@ -80,9 +80,8 @@ or dogfooded. Do not create dated skill entries as a substitute.
 Before opening a pull request, copy every receipt label from
 `.github/pull_request_template.md` exactly and give each one a non-empty value;
 `developer/verify_pr_receipt.py` fails before source gates when a label is
-missing, renamed, or empty. This includes candidate SHA-256, real-tool evidence,
-and publication state even when their truthful value is pending, unavailable,
-or not published.
+missing, renamed, or empty. This includes candidate SHA-256 and real-tool
+evidence even when their truthful value is pending or unavailable.
 
 This policy borrows two upstream patterns without inheriting their product
 claims:

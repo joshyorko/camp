@@ -15,7 +15,6 @@ REQUIRED_FIELDS = (
     "Evidence:",
     "Stale or ambiguous guidance removed:",
     "Remaining uncertainty:",
-    "Publication state:",
 )
 
 
