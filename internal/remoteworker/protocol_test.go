@@ -97,7 +97,7 @@ func TestBoundedDiagnosticNormalizesBeforeApplyingByteCap(t *testing.T) {
 	}
 }
 
-func TestRunEmitsOneBoundedJSONResultForUnsupportedMutation(t *testing.T) {
+func TestRunDispatchesProductionCheckpointAndEmitsOneBoundedError(t *testing.T) {
 	request := validRequest()
 	request.Operation = OperationCheckpoint
 	request.Checkpoint = checkpointRequest(false).Checkpoint
@@ -107,7 +107,7 @@ func TestRunEmitsOneBoundedJSONResultForUnsupportedMutation(t *testing.T) {
 	}
 	var stdout, stderr bytes.Buffer
 	err = Run(t.Context(), bytes.NewReader(body), &stdout, &stderr)
-	if !errors.Is(err, ErrUnsupportedOperation) {
+	if err == nil || errors.Is(err, ErrUnsupportedOperation) {
 		t.Fatalf("Run() error = %v", err)
 	}
 	if stderr.Len() != 0 {
@@ -122,12 +122,12 @@ func TestRunEmitsOneBoundedJSONResultForUnsupportedMutation(t *testing.T) {
 	if err := decoder.Decode(&result); err != nil {
 		t.Fatal(err)
 	}
-	var receipt UnsupportedReceipt
+	var receipt ErrorReceipt
 	if err := json.Unmarshal(result.Receipt, &receipt); err != nil {
 		t.Fatal(err)
 	}
 	if result.SchemaVersion != ProtocolSchemaVersion || result.Operation != OperationCheckpoint ||
-		receipt.Status != "unsupported" || receipt.Diagnostic == "" {
+		receipt.Status != "error" || receipt.Diagnostic == "" {
 		t.Fatalf("result = %#v, receipt = %#v", result, receipt)
 	}
 }

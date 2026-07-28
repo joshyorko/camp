@@ -11,6 +11,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/joshyorko/camp/internal/adapters/devpod"
+	"github.com/joshyorko/camp/internal/adapters/subprocess"
 	"github.com/joshyorko/camp/internal/adapters/supervisor"
 	"github.com/joshyorko/camp/internal/app"
 	"github.com/joshyorko/camp/internal/campconfig"
@@ -19,6 +21,13 @@ import (
 	journalstore "github.com/joshyorko/camp/internal/journal"
 	"github.com/joshyorko/camp/internal/ports"
 )
+
+func TestProductionCheckpointCompositionIncludesStrictRemoteExecutor(t *testing.T) {
+	transports := productionCheckpointTransports(devpod.NewClient("/usr/bin/devpod", subprocess.NewRunner()), nil)
+	if transports.Local == nil || transports.RemoteKit == nil {
+		t.Fatalf("production checkpoint transports = %#v", transports)
+	}
+}
 
 type productionReopenLister struct {
 	sessions []domain.JournalSnapshot

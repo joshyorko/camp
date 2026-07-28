@@ -209,8 +209,14 @@ Do not use Hauler v2.0.2's live `_catalog` response as proof that all direct reg
   leaves them quiesced until inbound publication completes. The return
   fileserver authority is only the canonical manifest and its named 1 GiB
   chunks; the complete archive and enclosing directories are never valid
-  allow-list entries. An observed durable receipt adopts the same attempt
-  without rebuilding. Host download, permanent `hauler store save`, upload,
+  allow-list entries. The supervised fileserver uses an otherwise empty store
+  and serves only `.camp/transfer/export`; that root contains exactly one
+  mode-0700 attempt directory whose descriptor-verified mode-0400 regular
+  files have single-link, stable inode, size, and digest identity. Extra
+  entries, symlinks, hardlinks, replacements, and directory drift fail closed.
+  A prepared receipt is durable before export publication, so an
+  outcome-unknown retry completes or adopts that same attempt and never builds
+  or exposes a second logical Kit. Host download, permanent `hauler store save`, upload,
   pointer CAS, and acknowledgement are separate inbound-publication work and
   must not be inferred from `remotePrepared`.
 - Logical mirror attempts increase durably across every sync and final close; attempt-scoped journal IDs must not repeat within a session. The remote transport requires the persisted request workspace ID and DevPod context to exactly match its composition identity, then uses the persisted values for root resolution and transfer commands. Mismatch fails before resolution or staging.
@@ -263,7 +269,8 @@ Do not use Hauler v2.0.2's live `_catalog` response as proof that all direct reg
   worker, which revalidates the completed hydration receipt, manifest, ready
   store, and installed Hauler/pasta bytes before service mutation. It serves
   the ready store plus a persistent writable registry overlay at
-  `127.0.0.1:5000` and the ready store plus `.camp/transfer` at
+  `127.0.0.1:5000` and the ready store plus the private
+  `.camp/transfer/export` allow-list root at
   `127.0.0.1:8080`. Each exact installed Hauler child runs behind its own exact
   installed pasta process in a distinct network namespace; pasta maps only
   IPv4 loopback to private guest ports `15000` and `18080`, disables UDP and

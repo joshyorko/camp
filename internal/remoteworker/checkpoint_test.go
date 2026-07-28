@@ -2,7 +2,11 @@ package remoteworker
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
+	"os"
+	"path/filepath"
 	"reflect"
 	"testing"
 
@@ -155,6 +159,155 @@ func TestCheckpointRejectsDirectoryWideOrArchiveAllowList(t *testing.T) {
 			t.Fatalf("accepted allow list %#v", allow)
 		}
 	}
+}
+
+func TestCheckpointExportPublishesOnlyImmutableManifestAndChunks(t *testing.T) {
+	workspace, receipt := checkpointExportFixture(t)
+	if err := publishCheckpointExport(workspace, receipt); err != nil {
+		t.Fatal(err)
+	}
+	root := filepath.Join(workspace, ".camp", "transfer", "export")
+	entries, err := os.ReadDir(filepath.Join(root, receipt.AttemptID))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var names []string
+	for _, entry := range entries {
+		names = append(names, entry.Name())
+	}
+	want := []string{"camp-hauler-kit.json", "camp-hauler-kit.tar.zst.part-000000"}
+	if !reflect.DeepEqual(names, want) {
+		t.Fatalf("export entries = %#v", names)
+	}
+	if _, err := os.Lstat(filepath.Join(root, receipt.AttemptID, "camp-hauler-kit.tar.zst")); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("complete archive was exposed: %v", err)
+	}
+	if err := validateCheckpointExport(workspace, receipt); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestCheckpointExportRejectsExtraLinkReplacementAndHardlinkDrift(t *testing.T) {
+	for _, mutate := range []func(*testing.T, string, CheckpointReceipt){
+		func(t *testing.T, root string, receipt CheckpointReceipt) {
+			t.Helper()
+			if err := os.WriteFile(filepath.Join(root, receipt.AttemptID, "extra"), []byte("extra"), 0o400); err != nil {
+				t.Fatal(err)
+			}
+		},
+		func(t *testing.T, root string, receipt CheckpointReceipt) {
+			t.Helper()
+			path := filepath.Join(root, receipt.AttemptID, receipt.Kit.Chunks[0].Name)
+			if err := os.Remove(path); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.Symlink(receipt.Kit.ManifestPath, path); err != nil {
+				t.Fatal(err)
+			}
+		},
+		func(t *testing.T, root string, receipt CheckpointReceipt) {
+			t.Helper()
+			path := filepath.Join(root, receipt.AttemptID, receipt.Kit.Chunks[0].Name)
+			if err := os.Remove(path); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(path, []byte("replacement"), 0o400); err != nil {
+				t.Fatal(err)
+			}
+		},
+		func(t *testing.T, root string, receipt CheckpointReceipt) {
+			t.Helper()
+			path := filepath.Join(root, receipt.AttemptID, receipt.Kit.Chunks[0].Name)
+			if err := os.Link(path, filepath.Join(t.TempDir(), "alias")); err != nil {
+				t.Fatal(err)
+			}
+		},
+	} {
+		workspace, receipt := checkpointExportFixture(t)
+		if err := publishCheckpointExport(workspace, receipt); err != nil {
+			t.Fatal(err)
+		}
+		root := filepath.Join(workspace, ".camp", "transfer", "export")
+		mutate(t, root, receipt)
+		if err := validateCheckpointExport(workspace, receipt); err == nil {
+			t.Fatal("accepted drifted checkpoint export")
+		}
+	}
+}
+
+func TestCheckpointExportUnknownOutcomeAdoptsExactAttemptAndRejectsSecondAttempt(t *testing.T) {
+	workspace, receipt := checkpointExportFixture(t)
+	if err := publishCheckpointExport(workspace, receipt); err != nil {
+		t.Fatal(err)
+	}
+	if err := publishCheckpointExport(workspace, receipt); err != nil {
+		t.Fatalf("exact replay was not adopted: %v", err)
+	}
+	other := receipt
+	other.AttemptID = "attempt-2"
+	if err := publishCheckpointExport(workspace, other); err == nil {
+		t.Fatal("published a second export beside the durable attempt")
+	}
+}
+
+func TestCheckpointExportObserverRejectsNamedReplacementDuringRead(t *testing.T) {
+	root := t.TempDir()
+	path := filepath.Join(root, "chunk")
+	body := []byte("chunk")
+	if err := os.WriteFile(path, body, 0o400); err != nil {
+		t.Fatal(err)
+	}
+	err := func() error {
+		_, err := observeCheckpointFileWithHook(path, digestCheckpointBytes(body), int64(len(body)), func() {
+			replacement := filepath.Join(root, "replacement")
+			if writeErr := os.WriteFile(replacement, body, 0o400); writeErr != nil {
+				t.Fatal(writeErr)
+			}
+			if renameErr := os.Rename(replacement, path); renameErr != nil {
+				t.Fatal(renameErr)
+			}
+		})
+		return err
+	}()
+	if err == nil {
+		t.Fatal("accepted a replaced named export after reading the original inode")
+	}
+}
+
+func checkpointExportFixture(t *testing.T) (string, CheckpointReceipt) {
+	t.Helper()
+	workspace := t.TempDir()
+	source := t.TempDir()
+	chunks := filepath.Join(source, "chunks")
+	if err := os.Mkdir(chunks, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	manifestBody := []byte("manifest")
+	chunkBody := []byte("chunk")
+	archiveBody := []byte("archive")
+	manifestPath := filepath.Join(source, "camp-hauler-kit.json")
+	chunkName := "camp-hauler-kit.tar.zst.part-000000"
+	chunkPath := filepath.Join(chunks, chunkName)
+	archivePath := filepath.Join(source, "camp-hauler-kit.tar.zst")
+	for path, body := range map[string][]byte{manifestPath: manifestBody, chunkPath: chunkBody, archivePath: archiveBody} {
+		if err := os.WriteFile(path, body, 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	return workspace, CheckpointReceipt{
+		SchemaVersion: ProtocolSchemaVersion, Status: "prepared", SessionID: "session-1", AttemptID: "attempt-1",
+		Kit: haulkit.Artifact{
+			ManifestPath: manifestPath, ManifestSHA256: digestCheckpointBytes(manifestBody),
+			ArchivePath: archivePath, SHA256: digestCheckpointBytes(archiveBody), Size: int64(len(archiveBody)),
+			Chunks: []haulkit.ChunkIdentity{{Index: 0, Name: chunkName, SHA256: digestCheckpointBytes(chunkBody), Size: int64(len(chunkBody))}},
+		},
+		AllowList: []string{"attempt-1/camp-hauler-kit.json", "attempt-1/" + chunkName},
+	}
+}
+
+func digestCheckpointBytes(body []byte) string {
+	digest := sha256.Sum256(body)
+	return hex.EncodeToString(digest[:])
 }
 
 func checkpointRequest(close bool) Request {

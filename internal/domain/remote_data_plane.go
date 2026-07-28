@@ -13,6 +13,8 @@ type RemoteDataPlaneRecord struct {
 	BootstrapRoot  string        `json:"bootstrapRoot,omitempty" yaml:"bootstrapRoot,omitempty"`
 	KitSHA256      string        `json:"kitSHA256,omitempty" yaml:"kitSHA256,omitempty"`
 	KitSize        int64         `json:"kitSize,omitempty" yaml:"kitSize,omitempty"`
+	HelperSHA256   string        `json:"helperSHA256,omitempty" yaml:"helperSHA256,omitempty"`
+	HelperSize     int64         `json:"helperSize,omitempty" yaml:"helperSize,omitempty"`
 	ManifestSHA256 string        `json:"manifestSHA256,omitempty" yaml:"manifestSHA256,omitempty"`
 	ManifestSize   int64         `json:"manifestSize,omitempty" yaml:"manifestSize,omitempty"`
 	SourceImage    string        `json:"sourceImage,omitempty" yaml:"sourceImage,omitempty"`

@@ -31,8 +31,8 @@ func (productionOperations) StartServices(ctx context.Context, request Request) 
 	return launchServiceSupervisor(ctx, request)
 }
 
-func (productionOperations) Checkpoint(context.Context, Request) (any, error) {
-	return nil, ErrUnsupportedOperation
+func (productionOperations) Checkpoint(ctx context.Context, request Request) (any, error) {
+	return checkpoint(ctx, request, newProductionCheckpointRuntime())
 }
 
 type productionActivationRuntime struct {
