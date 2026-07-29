@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	devpodadapter "github.com/joshyorko/camp/internal/adapters/devpod"
 	"github.com/joshyorko/camp/internal/domain"
@@ -47,12 +48,230 @@ func TestOpenReconcileWorkspaceUpUnknownOutcomeUsesStatusWithoutSecondUp(t *test
 		reconciled.Workspace.LocalFolder != root || reconciled.Workspace.StagingRoot != root {
 		t.Fatalf("reconciled workspace = %#v", reconciled.Workspace)
 	}
-	if len(devpod.ups) != 1 || devpod.listCalls != 1 || devpod.statusCalls != 1 {
-		t.Fatalf("DevPod calls after reconciliation = up:%d list:%d status:%d, want up:1 list:1 status:1", len(devpod.ups), devpod.listCalls, devpod.statusCalls)
+	if len(devpod.ups) != 1 || devpod.listCalls != 2 || devpod.statusCalls != 1 {
+		t.Fatalf("DevPod calls after reconciliation = up:%d list:%d status:%d, want up:1 list:2 status:1", len(devpod.ups), devpod.listCalls, devpod.statusCalls)
 	}
 	_, pending, err = environment.open.deps.Journal.Load(context.Background(), sessionID)
 	if err != nil || len(pending) != 0 {
 		t.Fatalf("post-reconciliation pending=%#v error=%v", pending, err)
+	}
+}
+
+func TestOpenFailedWorkspaceUpAmbiguityIncludesBoundedDevPodStderr(t *testing.T) {
+	t.Parallel()
+	environment := newOpenTestEnvironment(t)
+	devpod := &unknownOutcomeWorkspaceDevPod{
+		upResults: []ports.Result{{ExitCode: 17, Stderr: []byte("\x1b]0;spoofed\a\x1b[31mfatal\x1b[0m: workspace agent failed before readiness")}},
+		upErrors:  []error{errors.New("exit status 17")},
+	}
+	environment.open.deps.DevPod = devpod
+	root := filepath.Join(t.TempDir(), "SecondBrain")
+	if err := os.MkdirAll(root, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	_, err := environment.open.Run(context.Background(), OpenRequest{
+		SessionID: "workspace-up-diagnostic", Capsule: "brain", Branch: "main", Mode: domain.SessionReadWrite,
+		ExplicitRoot: root, EntryMode: domain.EntryTerminal, Context: "default", Provider: "docker",
+		Runtime: environment.runtime, Backend: environment.backend,
+	})
+	if !errors.Is(err, ports.ErrAmbiguous) || !strings.Contains(err.Error(), "workspace agent failed before readiness") {
+		t.Fatalf("Open() error = %v, want ambiguous outcome with bounded DevPod diagnostic", err)
+	}
+	if strings.ContainsAny(err.Error(), "\x1b\a") || !strings.Contains(err.Error(), `\x1b`) {
+		t.Fatalf("Open() error contains unsafe or unescaped terminal controls: %q", err)
+	}
+}
+
+func TestWorkspaceUpDiagnosticTextBoundsBeforeSanitizing(t *testing.T) {
+	t.Parallel()
+	diagnostic := workspaceUpDiagnosticText(ports.Result{Stderr: []byte(strings.Repeat("a", workspaceUpDiagnostic-4) + "\x1b" + "tail")})
+	if !strings.HasPrefix(diagnostic, "[earlier DevPod output omitted]\n") {
+		t.Fatalf("diagnostic = %q, want omitted-prefix note", diagnostic)
+	}
+	body := strings.TrimPrefix(diagnostic, "[earlier DevPod output omitted]\n")
+	if !strings.Contains(body, `\x1b`) {
+		t.Fatalf("diagnostic body = %q, want escaped control", body)
+	}
+	control := strings.Index(body, `\x1b`)
+	if control < 0 {
+		t.Fatalf("diagnostic body = %q, want escaped control", body)
+	}
+	if got := strings.Count(body[:control], "a"); got >= workspaceUpDiagnostic {
+		t.Fatalf("diagnostic body prefix length = %d, want bounded raw evidence", got)
+	}
+	if !strings.HasSuffix(body, "tail") {
+		t.Fatalf("diagnostic body = %q, want preserved tail", body)
+	}
+}
+
+func TestWorkspaceUpDiagnosticTextRedactsSecretsAndEscapesFormatControls(t *testing.T) {
+	t.Parallel()
+	diagnostic := workspaceUpDiagnosticText(ports.Result{Stderr: []byte("configured-secret\nghp_1234567890abcdef1234567890abcdef123456\nleft-to-right\u202e\u200eend")})
+	if strings.Contains(diagnostic, "configured-secret") {
+		t.Fatalf("diagnostic leaked secret material: %q", diagnostic)
+	}
+	if strings.Contains(diagnostic, "ghp_1234567890abcdef1234567890abcdef123456") {
+		t.Fatalf("diagnostic leaked opaque credential value: %q", diagnostic)
+	}
+	if strings.ContainsRune(diagnostic, '\u202e') || strings.ContainsRune(diagnostic, '\u200e') {
+		t.Fatalf("diagnostic contains raw bidi/format controls: %q", diagnostic)
+	}
+	if !strings.Contains(diagnostic, `\u202e`) || !strings.Contains(diagnostic, `\u200e`) {
+		t.Fatalf("diagnostic = %q, want escaped bidi/format controls", diagnostic)
+	}
+	if !strings.Contains(diagnostic, "[redacted DevPod secret]") {
+		t.Fatalf("diagnostic = %q, want secret redaction placeholder", diagnostic)
+	}
+}
+
+func TestWorkspaceUpDiagnosticTextEnforcesFinalRenderedBound(t *testing.T) {
+	t.Parallel()
+	diagnostic := workspaceUpDiagnosticText(ports.Result{Stderr: []byte(strings.Repeat("A", workspaceUpDiagnostic) + strings.Repeat("\x1b", 32) + "tail")})
+	if len(diagnostic) > workspaceUpDiagnostic {
+		t.Fatalf("diagnostic length = %d, want <= %d", len(diagnostic), workspaceUpDiagnostic)
+	}
+	if !strings.HasPrefix(diagnostic, "[earlier DevPod output omitted]\n") {
+		t.Fatalf("diagnostic = %q, want rendered truncation note", diagnostic)
+	}
+	if !strings.Contains(diagnostic, `\x1b`) {
+		t.Fatalf("diagnostic = %q, want escaped controls after final bound", diagnostic)
+	}
+	if !strings.HasSuffix(diagnostic, "tail") {
+		t.Fatalf("diagnostic = %q, want preserved tail after final bound", diagnostic)
+	}
+}
+
+func TestOpenWorkspaceUpSettlementFailurePreservesDiagnosticEvidence(t *testing.T) {
+	t.Parallel()
+	environment := newOpenTestEnvironment(t)
+	devpod := &unknownOutcomeWorkspaceDevPod{
+		workspaceAbsent: true,
+		upResults:       []ports.Result{{ExitCode: 17, Stderr: []byte("workspace agent failed before readiness")}},
+		upErrors:        []error{errors.New("exit status 17")},
+	}
+	environment.open.deps.DevPod = devpod
+	environment.open.deps.Journal = &workspaceUpSettlementFailureJournal{Journal: environment.open.deps.Journal, err: errors.New("journal append failed")}
+	root := filepath.Join(t.TempDir(), "SecondBrain")
+	if err := os.MkdirAll(root, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	_, err := environment.open.Run(context.Background(), OpenRequest{
+		SessionID: "workspace-up-settlement-failure", Capsule: "brain", Branch: "main", Mode: domain.SessionReadWrite,
+		ExplicitRoot: root, EntryMode: domain.EntryTerminal, Context: "default", Provider: "docker",
+		Runtime: environment.runtime, Backend: environment.backend,
+	})
+	if err == nil || !strings.Contains(err.Error(), "exit status 17") || !strings.Contains(err.Error(), "workspace agent failed before readiness") || !strings.Contains(err.Error(), "journal append failed") {
+		t.Fatalf("Open() error = %v, want diagnostic and settlement failure evidence", err)
+	}
+}
+
+func TestOpenWorkspaceUpFailureErrorRedactsOpaqueCredentialValues(t *testing.T) {
+	t.Parallel()
+	const diagnostic = "github=ghp_1234567890abcdef1234567890abcdef123456 jwt=eyJhbGciOiJIUzI1NiJ9.opaque.payload aws=AKIAIOSFODNN7EXAMPLE generic=0123456789abcdef0123456789abcdef"
+	err := workspaceUpFailureError(errors.New("exit status 17"), ports.Result{Stderr: []byte(diagnostic)})
+	for _, secret := range []string{"ghp_1234567890abcdef1234567890abcdef123456", "eyJhbGciOiJIUzI1NiJ9.opaque.payload", "AKIAIOSFODNN7EXAMPLE", "0123456789abcdef0123456789abcdef"} {
+		if strings.Contains(err.Error(), secret) {
+			t.Fatalf("workspaceUpFailureError leaked opaque credential %q: %q", secret, err)
+		}
+	}
+	if !strings.Contains(err.Error(), "[redacted DevPod secret]") {
+		t.Fatalf("workspaceUpFailureError = %q, want redaction placeholder", err)
+	}
+}
+
+func TestOpenWaitForWorkspaceReadyUsesTimeoutForInitialStatusProbe(t *testing.T) {
+	t.Parallel()
+	environment := newOpenTestEnvironment(t)
+	ticks := make(chan time.Time, 1)
+	ticks <- time.Unix(101, 0).UTC()
+	environment.open.deps.Clock = &controlledClock{
+		now:    time.Unix(100, 0).UTC(),
+		ticker: &controlledTicker{channel: ticks},
+	}
+	devpod := &unknownOutcomeWorkspaceDevPod{statusStates: []devpodadapter.WorkspaceState{devpodadapter.StateBusy, devpodadapter.StateRunning}}
+	environment.open.deps.DevPod = devpod
+	status, err := environment.open.waitForWorkspaceReady(context.Background(), "default", "workspace-ready", "docker")
+	if err != nil {
+		t.Fatalf("waitForWorkspaceReady() error = %v", err)
+	}
+	if status.State != devpodadapter.StateRunning {
+		t.Fatalf("waitForWorkspaceReady() status = %#v, want running", status)
+	}
+	if len(devpod.statusHasDeadline) != 2 || !devpod.statusHasDeadline[0] || !devpod.statusHasDeadline[1] {
+		t.Fatalf("status deadlines = %#v, want deadlines for initial and poll calls", devpod.statusHasDeadline)
+	}
+}
+
+func TestOpenReconcileWorkspaceUpWaitsForBusyWorkspaceWithoutSecondUp(t *testing.T) {
+	t.Parallel()
+	environment := newOpenTestEnvironment(t)
+	ticks := make(chan time.Time, 1)
+	ticks <- time.Unix(101, 0).UTC()
+	environment.open.deps.Clock = &controlledClock{
+		now:    time.Unix(100, 0).UTC(),
+		ticker: &controlledTicker{channel: ticks},
+	}
+	devpod := &unknownOutcomeWorkspaceDevPod{
+		folder:       "/workspaces/root",
+		statusStates: []devpodadapter.WorkspaceState{devpodadapter.StateBusy, devpodadapter.StateRunning},
+	}
+	environment.open.deps.DevPod = devpod
+	root := filepath.Join(t.TempDir(), "SecondBrain")
+	if err := os.MkdirAll(root, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	request := OpenRequest{
+		SessionID: "workspace-up-busy", Capsule: "brain", Branch: "main", Mode: domain.SessionReadWrite,
+		ExplicitRoot: root, EntryMode: domain.EntryTerminal, Context: "default", Provider: "docker",
+		Runtime: environment.runtime, Backend: environment.backend,
+	}
+	if _, err := environment.open.Run(context.Background(), request); !errors.Is(err, ports.ErrAmbiguous) {
+		t.Fatalf("first Open() error = %v, want ErrAmbiguous", err)
+	}
+
+	result, err := environment.open.Run(context.Background(), request)
+	if err != nil {
+		t.Fatalf("resumed Open() error = %v", err)
+	}
+	if result.Snapshot.State != domain.SessionOpen {
+		t.Fatalf("resumed state = %q, want %q", result.Snapshot.State, domain.SessionOpen)
+	}
+	if len(devpod.ups) != 1 || devpod.statusCalls != 2 {
+		t.Fatalf("DevPod calls = up:%d status:%d, want up:1 status:2", len(devpod.ups), devpod.statusCalls)
+	}
+}
+
+func TestOpenReconcileWorkspaceUpRejectsReplacementSourceAfterBusyWait(t *testing.T) {
+	t.Parallel()
+	environment := newOpenTestEnvironment(t)
+	ticks := make(chan time.Time, 1)
+	ticks <- time.Unix(101, 0).UTC()
+	environment.open.deps.Clock = &controlledClock{
+		now:    time.Unix(100, 0).UTC(),
+		ticker: &controlledTicker{channel: ticks},
+	}
+	devpod := &unknownOutcomeWorkspaceDevPod{
+		replacementSourceAfterFirstList: "/workspaces/replacement",
+		statusStates:                    []devpodadapter.WorkspaceState{devpodadapter.StateBusy, devpodadapter.StateRunning},
+	}
+	environment.open.deps.DevPod = devpod
+	root := filepath.Join(t.TempDir(), "SecondBrain")
+	if err := os.MkdirAll(root, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	request := OpenRequest{
+		SessionID: "workspace-up-busy-replaced", Capsule: "brain", Branch: "main", Mode: domain.SessionReadWrite,
+		ExplicitRoot: root, EntryMode: domain.EntryTerminal, Context: "default", Provider: "docker",
+		Runtime: environment.runtime, Backend: environment.backend,
+	}
+	if _, err := environment.open.Run(context.Background(), request); !errors.Is(err, ports.ErrAmbiguous) {
+		t.Fatalf("first Open() error = %v, want ErrAmbiguous", err)
+	}
+	if _, err := environment.open.Run(context.Background(), request); err == nil || !strings.Contains(err.Error(), "source identity") {
+		t.Fatalf("resumed Open() error = %v, want replacement source rejection", err)
+	}
+	if len(devpod.ups) != 1 || devpod.listCalls != 2 {
+		t.Fatalf("DevPod calls = up:%d list:%d, want up:1 list:2", len(devpod.ups), devpod.listCalls)
 	}
 }
 
@@ -96,7 +315,7 @@ func TestOpenKnownWorkspaceUpFailureClearsAttemptOnlyAfterAbsenceAndRetries(t *t
 	environment := newOpenTestEnvironment(t)
 	devpod := &unknownOutcomeWorkspaceDevPod{
 		workspaceAbsent: true,
-		upResults:       []ports.Result{{ExitCode: 17}, {ExitCode: -1}},
+		upResults:       []ports.Result{{ExitCode: 17, Stderr: []byte("\x1b[31mpull denied\x1b[0m")}, {ExitCode: -1}},
 		upErrors:        []error{errors.New("exit status 17"), ports.ErrAmbiguous},
 	}
 	environment.open.deps.DevPod = devpod
@@ -109,7 +328,9 @@ func TestOpenKnownWorkspaceUpFailureClearsAttemptOnlyAfterAbsenceAndRetries(t *t
 		ExplicitRoot: root, EntryMode: domain.EntryTerminal, Context: "default", Provider: "docker",
 		Runtime: environment.runtime, Backend: environment.backend,
 	}
-	if _, err := environment.open.Run(context.Background(), request); err == nil || !strings.Contains(err.Error(), "exit status 17") {
+	if _, err := environment.open.Run(context.Background(), request); err == nil ||
+		!strings.Contains(err.Error(), "exit status 17") || !strings.Contains(err.Error(), "pull denied") ||
+		strings.Contains(err.Error(), "\x1b") {
 		t.Fatalf("first Open() error = %v", err)
 	}
 	_, pending, err := environment.open.deps.Journal.Load(context.Background(), request.SessionID)
@@ -157,7 +378,7 @@ func TestOpenResumesOpeningAfterWorkspaceUpObservationWithoutSecondUp(t *testing
 	if result.Snapshot.State != domain.SessionOpen || result.Snapshot.Workspace.EffectiveRoot != devpod.folder || result.MappedTarget != filepath.Join(devpod.folder, "MemoryD") {
 		t.Fatalf("resumed result = %#v", result)
 	}
-	if len(devpod.ups) != 1 || devpod.listCalls != 1 || devpod.statusCalls != 1 || devpod.folderCalls != 1 || devpod.sshCalls != 1 {
+	if len(devpod.ups) != 1 || devpod.listCalls != 2 || devpod.statusCalls != 1 || devpod.folderCalls != 1 || devpod.sshCalls != 1 {
 		t.Fatalf("DevPod calls = up:%d list:%d status:%d folder:%d ssh:%d", len(devpod.ups), devpod.listCalls, devpod.statusCalls, devpod.folderCalls, devpod.sshCalls)
 	}
 	loaded, pending, err := environment.open.deps.Journal.Load(context.Background(), request.SessionID)
@@ -715,21 +936,36 @@ func (j *factAppendErrorJournal) RecordFact(ctx context.Context, fact ports.Fact
 	return nil
 }
 
+type workspaceUpSettlementFailureJournal struct {
+	ports.Journal
+	err error
+}
+
+func (j *workspaceUpSettlementFailureJournal) RecordFact(ctx context.Context, fact ports.FactRecord, snapshot domain.JournalSnapshot) error {
+	if fact.Transition == "WorkspaceUp" {
+		return j.err
+	}
+	return j.Journal.RecordFact(ctx, fact, snapshot)
+}
+
 type unknownOutcomeWorkspaceDevPod struct {
-	ups                []devpodadapter.UpOptions
-	listCalls          int
-	statusCalls        int
-	folder             string
-	folderCalls        int
-	sshCalls           int
-	sshErr             error
-	startErr           error
-	omitStatusIdentity bool
-	entryStarted       chan struct{}
-	releaseEntry       chan struct{}
-	workspaceAbsent    bool
-	upResults          []ports.Result
-	upErrors           []error
+	ups                             []devpodadapter.UpOptions
+	listCalls                       int
+	statusCalls                     int
+	statusHasDeadline               []bool
+	folder                          string
+	folderCalls                     int
+	sshCalls                        int
+	sshErr                          error
+	startErr                        error
+	omitStatusIdentity              bool
+	entryStarted                    chan struct{}
+	releaseEntry                    chan struct{}
+	workspaceAbsent                 bool
+	upResults                       []ports.Result
+	upErrors                        []error
+	statusStates                    []devpodadapter.WorkspaceState
+	replacementSourceAfterFirstList string
 }
 
 func (d *unknownOutcomeWorkspaceDevPod) Up(_ context.Context, options devpodadapter.UpOptions) (ports.Result, error) {
@@ -741,16 +977,22 @@ func (d *unknownOutcomeWorkspaceDevPod) Up(_ context.Context, options devpodadap
 	return ports.Result{}, ports.ErrAmbiguous
 }
 
-func (d *unknownOutcomeWorkspaceDevPod) StatusInContext(_ context.Context, devpodContext, workspaceID string) (devpodadapter.WorkspaceStatus, error) {
+func (d *unknownOutcomeWorkspaceDevPod) StatusInContext(ctx context.Context, devpodContext, workspaceID string) (devpodadapter.WorkspaceStatus, error) {
 	d.statusCalls++
+	_, hasDeadline := ctx.Deadline()
+	d.statusHasDeadline = append(d.statusHasDeadline, hasDeadline)
+	state := devpodadapter.StateRunning
+	if index := d.statusCalls - 1; index < len(d.statusStates) {
+		state = d.statusStates[index]
+	}
 	if d.omitStatusIdentity {
-		return devpodadapter.WorkspaceStatus{ID: workspaceID, State: devpodadapter.StateRunning}, nil
+		return devpodadapter.WorkspaceStatus{ID: workspaceID, State: state}, nil
 	}
 	provider := ""
 	if len(d.ups) != 0 {
 		provider = d.ups[0].Provider
 	}
-	return devpodadapter.WorkspaceStatus{ID: workspaceID, Context: devpodContext, Provider: provider, State: devpodadapter.StateRunning}, nil
+	return devpodadapter.WorkspaceStatus{ID: workspaceID, Context: devpodContext, Provider: provider, State: state}, nil
 }
 
 func (d *unknownOutcomeWorkspaceDevPod) ListInContext(_ context.Context, devpodContext string) ([]devpodadapter.Workspace, error) {
@@ -762,6 +1004,9 @@ func (d *unknownOutcomeWorkspaceDevPod) ListInContext(_ context.Context, devpodC
 	source := up.WorkspacePath
 	if up.SourceMode == devpodadapter.SourceModeBootstrap {
 		source = up.BootstrapPath
+	}
+	if d.listCalls > 1 && d.replacementSourceAfterFirstList != "" {
+		source = d.replacementSourceAfterFirstList
 	}
 	return []devpodadapter.Workspace{{
 		ID: up.WorkspaceID, Provider: devpodadapter.WorkspaceProvider{Name: up.Provider},

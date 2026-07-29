@@ -1023,7 +1023,6 @@ func TestNamedImageReopenProofIsDigestQualifiedValidShell(t *testing.T) {
 	if err := exec.Command("sh", "-n", "-c", eviction).Run(); err != nil {
 		t.Fatalf("named image eviction is invalid POSIX shell: %v\n%s", err, eviction)
 	}
-
 	command := namedImageReopenProofCommand(digest, imageIDPath)
 	for _, required := range []string{
 		`$CAMP_REGISTRY/camp/acceptance:named`,

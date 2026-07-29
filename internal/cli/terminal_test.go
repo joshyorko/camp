@@ -13,6 +13,7 @@ import (
 
 	"github.com/joshyorko/camp/internal/app"
 	"github.com/joshyorko/camp/internal/domain"
+	"github.com/joshyorko/camp/internal/ports"
 	"github.com/joshyorko/camp/internal/presentation"
 	"github.com/joshyorko/camp/internal/setupui"
 	"golang.org/x/sys/unix"
@@ -736,6 +737,13 @@ func TestLifecycleFailurePreservesCauseAndOneRecoveryCommand(t *testing.T) {
 	}
 	if err.Failure.Message != cause.Error() || len(err.Failure.NextCommands) != 1 || err.Failure.NextCommands[0] != "camp recover session-1" {
 		t.Fatalf("failure = %#v", err.Failure)
+	}
+}
+
+func TestLifecycleFailureClassifiesAmbiguousOutcome(t *testing.T) {
+	err := lifecycleFailure(fmt.Errorf("workspace up: %w", ports.ErrAmbiguous), "camp recover session-1")
+	if err.Failure.Code != "lifecycle_ambiguous" {
+		t.Fatalf("failure code = %q, want lifecycle_ambiguous", err.Failure.Code)
 	}
 }
 

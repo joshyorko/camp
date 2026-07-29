@@ -47,6 +47,9 @@ func TestCommittedDistributionToolLock(t *testing.T) {
 	if lock.Fixtures.Room.Repository != "joshyorko/room-of-requirement" || lock.Fixtures.Room.Version != "v1.18.3" || lock.Fixtures.Room.Commit != "3d675a1fbc4c2c494730722e6396a42416a35e22" {
 		t.Fatalf("room fixture mismatch: %#v", lock.Fixtures.Room)
 	}
+	if lock.Fixtures.Lifecycle.Image != "quay.io/podman/stable@sha256:25d49cf990843962043942db172c7ef5c6f85012384aada7976aec65906ae209" {
+		t.Fatalf("lifecycle fixture mismatch: %#v", lock.Fixtures.Lifecycle)
+	}
 }
 
 func TestDistributionLockRejectsUnsupportedPlatform(t *testing.T) {

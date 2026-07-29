@@ -12,6 +12,8 @@
   worker envelopes, and private immutable return exports
 - add portable controller, blueprint, profile, provenance, timeline, and
   execution-binding contracts with strict persisted identity validation
+- let ambiguous-open recovery wait for the exact DevPod workspace to leave its
+  documented transient `Busy` state without issuing a second `devpod up`
 - make successful close remove identity-verified forwarder evidence and the
   allowlisted private session runtime tree while preserving unexpected entries
 
@@ -29,6 +31,13 @@
 - require exact-candidate RCC lifecycle evidence, ownership-checked cleanup
   receipts, normalized parity results, and candidate-bound release/tag
   verification before publication
+- run hosted exact-candidate lifecycle evidence with a digest-pinned,
+  privileged Podman fixture instead of the heavyweight default Room
+  image hydration
+- make the parity evidence job check out its candidate before invoking the
+  repository verifier, and enforce candidate and real-tool receipt fields
+- pre-pull the locked lifecycle fixture before DevPod agent injection on fresh
+  hosted runners
 
 ### Portability and Safety
 
@@ -39,6 +48,8 @@
   the workspace engine
 - constrain real lifecycle cleanup to exact test-owned DevPod workspace IDs and
   recover interrupted-open IDs from test-owned controller journals
+- escape terminal controls in bounded DevPod failure diagnostics and
+  revalidate workspace source identity after transient readiness waits
 - align real lifecycle fixtures with named Camp initialization and
   directory-based discovery; let a fresh controller reopen from the discovered
   manifest and durable backend pointer when validated local history is empty,

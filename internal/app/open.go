@@ -9,10 +9,13 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strconv"
 	"strings"
 	"syscall"
 	"time"
+	"unicode"
+	"unicode/utf8"
 
 	devpodadapter "github.com/joshyorko/camp/internal/adapters/devpod"
 	"github.com/joshyorko/camp/internal/adapters/hydration"
@@ -29,12 +32,19 @@ import (
 )
 
 var (
-	ErrOpenDependencies      = errors.New("open dependencies are incomplete")
-	ErrRecoveryRequired      = errors.New("session requires recovery before entry")
-	ErrOpenRecoveryObjective = errors.New("open recovery objective is missing or unsupported")
-	ErrOpenReadOnlyLease     = errors.New("read-only session cannot reconcile a writer lease")
-	ErrOpenSessionMismatch   = errors.New("open request does not match the selected session")
-	ErrOpenIDEUnsupported    = errors.New("IDE entry is not implemented")
+	ErrOpenDependencies              = errors.New("open dependencies are incomplete")
+	ErrRecoveryRequired              = errors.New("session requires recovery before entry")
+	ErrOpenRecoveryObjective         = errors.New("open recovery objective is missing or unsupported")
+	ErrOpenReadOnlyLease             = errors.New("read-only session cannot reconcile a writer lease")
+	ErrOpenSessionMismatch           = errors.New("open request does not match the selected session")
+	ErrOpenIDEUnsupported            = errors.New("IDE entry is not implemented")
+	workspaceOpaqueCredentialPattern = regexp.MustCompile(`(?i)\b(?:[A-Za-z0-9._~+/=-]{20,}|[A-Za-z0-9]{32,})\b`)
+)
+
+const (
+	workspaceReadyTimeout = 30 * time.Second
+	workspaceReadyPoll    = 100 * time.Millisecond
+	workspaceUpDiagnostic = 8 << 10
 )
 
 type OpenPointerReader interface {
@@ -468,29 +478,18 @@ func (o *Open) observeWorkspaceUp(ctx context.Context, snapshot domain.JournalSn
 	if err := o.deps.Ownership.Revalidate(snapshot.Materialization); err != nil {
 		return ports.FactRecord{}, snapshot, fmt.Errorf("revalidate workspace materialization: %w", err)
 	}
-	workspaces, err := o.deps.DevPod.ListInContext(ctx, input.Context)
+	if err := o.revalidateWorkspaceSource(ctx, input); err != nil {
+		return ports.FactRecord{}, snapshot, err
+	}
+	status, err := o.waitForWorkspaceReady(ctx, input.Context, input.ID, input.Provider)
 	if err != nil {
 		return ports.FactRecord{}, snapshot, err
 	}
-	matches := 0
-	for _, candidate := range workspaces {
-		if candidate.ID != input.ID {
-			continue
-		}
-		matches++
-		if candidate.Context != input.Context || candidate.Provider.Name != input.Provider || candidate.Source.LocalFolder != input.SourceRoot {
-			return ports.FactRecord{}, snapshot, errors.New("observed DevPod workspace does not match the pending intent")
-		}
+	if !matchingWorkspaceStatus(status, input.Context, input.ID, input.Provider) || status.State != devpodadapter.StateRunning {
+		return ports.FactRecord{}, snapshot, fmt.Errorf("observed DevPod workspace is not ready in state %q: %w", status.State, devpodadapter.ErrUnknownWorkspaceState)
 	}
-	if matches != 1 {
-		return ports.FactRecord{}, snapshot, errors.New("pending DevPod workspace is absent or ambiguous")
-	}
-	status, err := o.deps.DevPod.StatusInContext(ctx, input.Context, input.ID)
-	if err != nil {
+	if err := o.revalidateWorkspaceSource(ctx, input); err != nil {
 		return ports.FactRecord{}, snapshot, err
-	}
-	if status.ID != input.ID || (status.Context != "" && status.Context != input.Context) || (status.Provider != "" && status.Provider != input.Provider) || status.State != devpodadapter.StateRunning {
-		return ports.FactRecord{}, snapshot, fmt.Errorf("observed DevPod workspace is not ready: %w", devpodadapter.ErrUnknownWorkspaceState)
 	}
 	next := snapshot
 	next.Workspace.ID = input.ID
@@ -502,6 +501,59 @@ func (o *Open) observeWorkspaceUp(ctx context.Context, snapshot domain.JournalSn
 		return ports.FactRecord{}, snapshot, errors.New("open reconciliation clock returned zero time")
 	}
 	return ports.FactRecord{IntentID: intent.ID, SessionID: intent.SessionID, Transition: intent.Transition, Timestamp: now, Output: safeJSON(status)}, next, nil
+}
+
+func (o *Open) revalidateWorkspaceSource(ctx context.Context, input openWorkspaceUpInput) error {
+	workspaces, err := o.deps.DevPod.ListInContext(ctx, input.Context)
+	if err != nil {
+		return err
+	}
+	matches := 0
+	for _, candidate := range workspaces {
+		if candidate.ID != input.ID {
+			continue
+		}
+		matches++
+		if candidate.Context != input.Context || candidate.Provider.Name != input.Provider || candidate.Source.LocalFolder != input.SourceRoot {
+			return errors.New("observed DevPod workspace source identity does not match the pending intent")
+		}
+	}
+	if matches != 1 {
+		return errors.New("pending DevPod workspace source identity is absent or ambiguous")
+	}
+	return nil
+}
+
+func (o *Open) waitForWorkspaceReady(ctx context.Context, devpodContext, workspaceID, provider string) (devpodadapter.WorkspaceStatus, error) {
+	waitCtx, cancel := context.WithTimeout(ctx, workspaceReadyTimeout)
+	defer cancel()
+	status, err := o.deps.DevPod.StatusInContext(waitCtx, devpodContext, workspaceID)
+	if err != nil || !matchingWorkspaceStatus(status, devpodContext, workspaceID, provider) || status.State != devpodadapter.StateBusy {
+		return status, err
+	}
+	ticker := o.deps.Clock.NewTicker(workspaceReadyPoll)
+	defer ticker.Stop()
+	for status.State == devpodadapter.StateBusy {
+		select {
+		case <-waitCtx.Done():
+			return status, fmt.Errorf("wait for DevPod workspace %q to leave state %q: %w", workspaceID, status.State, waitCtx.Err())
+		case <-ticker.C():
+			status, err = o.deps.DevPod.StatusInContext(waitCtx, devpodContext, workspaceID)
+			if err != nil {
+				return devpodadapter.WorkspaceStatus{}, err
+			}
+			if !matchingWorkspaceStatus(status, devpodContext, workspaceID, provider) {
+				return status, nil
+			}
+		}
+	}
+	return status, nil
+}
+
+func matchingWorkspaceStatus(status devpodadapter.WorkspaceStatus, devpodContext, workspaceID, provider string) bool {
+	return status.ID == workspaceID &&
+		(status.Context == "" || status.Context == devpodContext) &&
+		(status.Provider == "" || status.Provider == provider)
 }
 
 func committedServicePorts(snapshot domain.JournalSnapshot) (int, int, error) {
@@ -1214,10 +1266,10 @@ func (o *Open) continueOpeningFromMaterialization(ctx context.Context, snapshot 
 	if err != nil {
 		if upResult.ExitCode > 0 {
 			if settleErr := o.settleKnownWorkspaceUpFailure(ctx, intent, upInput, upResult); settleErr != nil {
-				return OpenResult{}, errors.Join(err, settleErr)
+				return OpenResult{}, errors.Join(workspaceUpFailureError(err, upResult), settleErr)
 			}
 		}
-		return OpenResult{}, err
+		return OpenResult{}, workspaceUpFailureError(err, upResult)
 	}
 	snapshot.Workspace = workspaceRecord
 	if err := journal.recordFact(ctx, intent, &upResult, nil); err != nil {
@@ -1240,7 +1292,7 @@ func (o *Open) settleKnownWorkspaceUpFailure(ctx context.Context, intent ports.I
 		if candidate.Context != input.Context || candidate.Provider.Name != input.Provider || candidate.Source.LocalFolder != input.SourceRoot {
 			return errors.New("failed WorkspaceUp created a workspace with mismatched identity")
 		}
-		return ports.ErrAmbiguous
+		return ambiguousWorkspaceUpError(result)
 	}
 	snapshot, pending, err := o.deps.Journal.Load(ctx, intent.SessionID)
 	if err != nil {
@@ -1257,6 +1309,145 @@ func (o *Open) settleKnownWorkspaceUpFailure(ctx context.Context, intent ports.I
 		return fmt.Errorf("record failed WorkspaceUp attempt: %w", err)
 	}
 	return nil
+}
+
+func ambiguousWorkspaceUpError(result ports.Result) error {
+	diagnostic := workspaceUpDiagnosticText(result)
+	if diagnostic == "" {
+		return ports.ErrAmbiguous
+	}
+	return fmt.Errorf("%w; DevPod diagnostic: %s", ports.ErrAmbiguous, diagnostic)
+}
+
+func workspaceUpFailureError(cause error, result ports.Result) error {
+	diagnostic := workspaceUpDiagnosticText(result)
+	if diagnostic == "" {
+		return cause
+	}
+	return fmt.Errorf("%w; DevPod diagnostic: %s", cause, diagnostic)
+}
+
+func workspaceUpDiagnosticText(result ports.Result) string {
+	diagnostic, omitted := boundedWorkspaceUpDiagnostic(result.Stderr)
+	if diagnostic == "" {
+		diagnostic, omitted = boundedWorkspaceUpDiagnostic(result.Stdout)
+	}
+	if diagnostic == "" {
+		return ""
+	}
+	if omitted {
+		diagnostic = "[earlier DevPod output omitted]\n" + diagnostic
+	}
+	return limitWorkspaceUpDiagnosticRendered(diagnostic)
+}
+
+func boundedWorkspaceUpDiagnostic(raw []byte) (string, bool) {
+	omitted := false
+	if len(raw) > workspaceUpDiagnostic {
+		raw = raw[len(raw)-workspaceUpDiagnostic:]
+		omitted = true
+	}
+	return strings.TrimSpace(sanitizeWorkspaceUpDiagnostic(raw)), omitted
+}
+
+func limitWorkspaceUpDiagnosticRendered(rendered string) string {
+	if len(rendered) <= workspaceUpDiagnostic {
+		return rendered
+	}
+	const note = "[earlier DevPod output omitted]\n"
+	allowance := workspaceUpDiagnostic - len(note)
+	if allowance < 0 {
+		allowance = 0
+	}
+	rendered = suffixAtRuneBoundary(rendered, allowance)
+	if len(rendered) > allowance {
+		rendered = suffixAtRuneBoundary(rendered, allowance)
+	}
+	return note + rendered
+}
+
+func suffixAtRuneBoundary(text string, maxBytes int) string {
+	if maxBytes <= 0 || len(text) <= maxBytes {
+		return text
+	}
+	start := len(text) - maxBytes
+	for start < len(text) && !utf8.RuneStart(text[start]) {
+		start++
+	}
+	return text[start:]
+}
+
+func sanitizeWorkspaceUpDiagnostic(raw []byte) string {
+	var sanitized strings.Builder
+	for _, line := range strings.SplitAfter(strings.ToValidUTF8(string(raw), "\uFFFD"), "\n") {
+		if line == "" {
+			continue
+		}
+		hasTrailingNewline := strings.HasSuffix(line, "\n")
+		line = strings.TrimSuffix(line, "\n")
+		line = redactWorkspaceUpDiagnosticLine(line)
+		for _, value := range line {
+			if value == '\t' {
+				sanitized.WriteRune(value)
+				continue
+			}
+			if unicode.IsControl(value) || unicode.In(value, unicode.Cf) {
+				if value <= 0xff {
+					fmt.Fprintf(&sanitized, `\x%02x`, value)
+				} else if value <= 0xffff {
+					fmt.Fprintf(&sanitized, `\u%04x`, value)
+				} else {
+					fmt.Fprintf(&sanitized, `\U%08x`, value)
+				}
+				continue
+			}
+			sanitized.WriteRune(value)
+		}
+		if hasTrailingNewline {
+			sanitized.WriteByte('\n')
+		}
+	}
+	return sanitized.String()
+}
+
+func redactWorkspaceUpDiagnosticLine(line string) string {
+	trimmed := strings.TrimSpace(line)
+	if trimmed == "" {
+		return trimmed
+	}
+	if key, _, ok := strings.Cut(trimmed, "="); ok && diagnosticKeyLooksSecret(key) {
+		return strings.TrimSpace(key) + "=[redacted]"
+	}
+	if key, _, ok := strings.Cut(trimmed, ":"); ok && diagnosticKeyLooksSecret(key) {
+		return strings.TrimSpace(key) + ": [redacted]"
+	}
+	if redacted := workspaceOpaqueCredentialPattern.ReplaceAllString(trimmed, "[redacted DevPod secret]"); redacted != trimmed {
+		return redacted
+	}
+	if diagnosticContainsSecretMarker(trimmed) {
+		return "[redacted DevPod secret]"
+	}
+	return trimmed
+}
+
+func diagnosticKeyLooksSecret(key string) bool {
+	key = strings.ToLower(strings.TrimSpace(strings.TrimPrefix(key, "export ")))
+	for _, marker := range []string{"secret", "token", "password", "passphrase", "credential", "api_key", "api-key", "apikey", "access_key", "access-key", "private_key", "private-key", "client_secret", "client-secret"} {
+		if strings.Contains(key, marker) {
+			return true
+		}
+	}
+	return false
+}
+
+func diagnosticContainsSecretMarker(line string) bool {
+	lower := strings.ToLower(line)
+	for _, marker := range []string{"secret", "token", "password", "passphrase", "credential", "api_key", "api-key", "apikey", "access_key", "access-key", "private_key", "private-key", "client_secret", "client-secret"} {
+		if strings.Contains(lower, marker) {
+			return true
+		}
+	}
+	return false
 }
 
 func (o *Open) reenter(ctx context.Context, snapshot domain.JournalSnapshot, request OpenRequest) (OpenResult, error) {

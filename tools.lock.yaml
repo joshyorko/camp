@@ -29,3 +29,5 @@ fixtures:
     repository: joshyorko/room-of-requirement
     version: v1.18.3
     commit: 3d675a1fbc4c2c494730722e6396a42416a35e22
+  lifecycle:
+    image: quay.io/podman/stable@sha256:25d49cf990843962043942db172c7ef5c6f85012384aada7976aec65906ae209

@@ -43,48 +43,89 @@ func TestLocalLifecycleCrashMatrix(t *testing.T) {
 	createdWorkspaces := newCreatedWorkspaceTracker()
 	environment := lifecycleEnvironment(controller, backend, devPod)
 	var opening *exec.Cmd
+	var openingDone chan error
 	openingWaited := false
+	retryReceipt := ""
+	cleanupFailed := false
+	sessionInitialized := false
 	t.Cleanup(func() {
 		if opening != nil && !openingWaited && opening.Process != nil {
 			_ = opening.Process.Signal(syscall.SIGCONT)
 			_ = opening.Process.Kill()
-			_ = opening.Wait()
+			if openingDone != nil {
+				_ = <-openingDone
+			}
+		}
+		if t.Failed() {
+			diagnosticCtx, diagnosticCancel := context.WithTimeout(context.Background(), 2*time.Minute)
+			logDevPodFailureEvidence(t, diagnosticCtx, devPod)
+			diagnosticCancel()
 		}
 		cleanupCtx, cleanupCancel := context.WithTimeout(context.Background(), 5*time.Minute)
 		defer cleanupCancel()
-		_, _ = runLifecycleCommand(cleanupCtx, environment, bin, "--json", "close")
-		stopRecordedSessionProcesses(cleanupCtx, controller)
-		if err := createdWorkspaces.TrackController(controller); err != nil {
-			t.Errorf("recover exact workspace IDs from test-owned controller: %v", err)
+		if sessionInitialized {
+			if output, err := runLifecycleCommand(cleanupCtx, environment, bin, "--json", "close"); err != nil {
+				cleanupFailed = true
+				t.Errorf("close test-owned session: %v\n%s", err, output)
+			}
+			stopRecordedSessionProcesses(cleanupCtx, controller)
+			if err := createdWorkspaces.TrackController(controller); err != nil {
+				cleanupFailed = true
+				t.Errorf("recover exact workspace IDs from test-owned controller: %v", err)
+			}
 		}
 		if err := createdWorkspaces.DeleteAll(func(workspaceID string) error {
 			output, err := runDevPodCommand(cleanupCtx, devPod, "delete", "--ignore-not-found", workspaceID)
 			if err != nil {
+				cleanupFailed = true
 				return fmt.Errorf("%w: %s", err, output)
 			}
 			return nil
 		}); err != nil {
+			cleanupFailed = true
 			t.Errorf("clean exact test-owned DevPod workspaces: %v", err)
+		}
+		if !cleanupFailed && retryReceipt != "" {
+			fmt.Println(retryReceipt)
 		}
 	})
 
 	t.Log("bootstrap the Docker provider inside the private DevPod context")
-	mustBootstrapDevPodDockerProvider(t, ctx, devPod)
+	if output, err := bootstrapDevPodDockerProvider(ctx, devPod); err != nil {
+		retryReceipt = `{"retry":"crash-matrix-bootstrap"}`
+		t.Fatalf("retryable crash-matrix setup failure: bootstrap private DevPod Docker provider: %v\n%s", err, output)
+	}
 	mustRunLifecycle(t, ctx, environment, bin, "--json", "init", source, "--name", "forwarder-crash")
+	sessionInitialized = true
 	var openingOutput bytes.Buffer
-	opening = exec.CommandContext(ctx, bin, "--json", "open", "Projects/Unicode space")
-	opening.Env = mergeCommandEnvironment(os.Environ(), environment)
-	opening.Stdout = &openingOutput
-	opening.Stderr = &openingOutput
+	opening = newCrashOpenCommand(ctx, bin, source, environment, &openingOutput)
 	if err := opening.Start(); err != nil {
 		t.Fatal(err)
 	}
+	openingDone = make(chan error, 1)
+	go func() {
+		openingDone <- opening.Wait()
+	}()
 
-	evidencePath := waitForForwarderEvidence(t, ctx, controller, "registry")
+	evidenceCtx, evidenceCancel := context.WithTimeout(ctx, 5*time.Minute)
+	defer evidenceCancel()
+	evidencePath, err := waitForForwarderEvidenceOrExit(evidenceCtx, controller, "registry", openingDone, &openingOutput)
+	if err != nil {
+		if _, exited := err.(*openingExitedBeforeEvidenceError); exited {
+			openingWaited = true
+		} else {
+			_ = opening.Process.Signal(syscall.SIGCONT)
+			_ = opening.Process.Kill()
+			waitErr := <-openingDone
+			openingWaited = true
+			err = fmt.Errorf("%w\ncamp open exit after evidence wait: %v\ncamp open output:\n%s", err, waitErr, openingOutput.String())
+		}
+		t.Fatal(err)
+	}
 	if err := opening.Process.Signal(syscall.SIGSTOP); err != nil {
 		t.Fatalf("stop opening controller: %v", err)
 	}
-	sessionID := filepath.Base(filepath.Dir(filepath.Dir(evidencePath)))
+	sessionID := forwarderEvidenceSessionID(evidencePath)
 	store, err := journalstore.NewStore(filepath.Join(controller, "data", "camp"))
 	if err != nil {
 		t.Fatal(err)
@@ -96,7 +137,7 @@ func TestLocalLifecycleCrashMatrix(t *testing.T) {
 	if !hasPendingTransition(pending, "ForwarderStarted:registry") || hasForwardingRecord(snapshot, "registry") {
 		_ = opening.Process.Signal(syscall.SIGCONT)
 		openingWaited = true
-		_ = opening.Wait()
+		_ = <-openingDone
 		t.Fatalf("did not stop at pending registry forwarder: pending=%v forwarding=%#v\n%s", pendingTransitions(pending), snapshot.Recovery.Forwarding, openingOutput.Bytes())
 	}
 	body, err := os.ReadFile(evidencePath)
@@ -114,7 +155,7 @@ func TestLocalLifecycleCrashMatrix(t *testing.T) {
 		t.Fatalf("kill opening controller: %v", err)
 	}
 	openingWaited = true
-	if err := opening.Wait(); err == nil {
+	if err := <-openingDone; err == nil {
 		t.Fatal("opening controller exited successfully after SIGKILL")
 	}
 
@@ -158,24 +199,50 @@ func TestLocalLifecycleCrashMatrix(t *testing.T) {
 	assertEndpointClosed(t, fileserver.LocalEndpoint)
 }
 
-func waitForForwarderEvidence(t *testing.T, ctx context.Context, controller, name string) string {
-	t.Helper()
-	pattern := filepath.Join(controller, "data", "camp", "sessions", "*", "runtime", name+"-forward.json")
+func newCrashOpenCommand(ctx context.Context, bin, source string, environment []string, output *bytes.Buffer) *exec.Cmd {
+	command := exec.CommandContext(ctx, bin, "--json", "open", "Projects/Unicode space")
+	command.Dir = source
+	command.Env = mergeCommandEnvironment(os.Environ(), environment)
+	command.Stdout = output
+	command.Stderr = output
+	return command
+}
+
+type openingExitedBeforeEvidenceError struct {
+	name   string
+	err    error
+	output string
+}
+
+func (err *openingExitedBeforeEvidenceError) Error() string {
+	return fmt.Sprintf("camp open exited before %s forwarder evidence: %v\ncamp open output:\n%s", err.name, err.err, err.output)
+}
+
+func forwarderEvidenceSessionID(path string) string {
+	return filepath.Base(filepath.Dir(path))
+}
+
+func waitForForwarderEvidenceOrExit(ctx context.Context, controller, name string, openingDone <-chan error, output *bytes.Buffer) (string, error) {
+	pattern := filepath.Join(scenarioRuntimeDirectory(controller), "camp", "*", name+"-forward.json")
+	poll := time.NewTicker(2 * time.Millisecond)
+	defer poll.Stop()
 	for {
 		matches, err := filepath.Glob(pattern)
 		if err != nil {
-			t.Fatal(err)
+			return "", err
 		}
 		if len(matches) == 1 {
-			return matches[0]
+			return matches[0], nil
 		}
 		if len(matches) > 1 {
-			t.Fatalf("ambiguous forwarder evidence: %v", matches)
+			return "", fmt.Errorf("ambiguous forwarder evidence: %v", matches)
 		}
 		select {
+		case err := <-openingDone:
+			return "", &openingExitedBeforeEvidenceError{name: name, err: err, output: output.String()}
 		case <-ctx.Done():
-			t.Fatalf("wait for %s forwarder evidence: %v", name, ctx.Err())
-		case <-time.After(2 * time.Millisecond):
+			return "", fmt.Errorf("wait for %s forwarder evidence: %w", name, ctx.Err())
+		case <-poll.C:
 		}
 	}
 }

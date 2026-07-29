@@ -39,6 +39,9 @@ For GitHub Actions evidence, record runner assignment and executed steps. A
 completed failure with an empty runner name and zero steps is infrastructure
 admission evidence only: it proves neither source failure nor source success
 and must be rerun against the exact candidate before claiming CI proof.
+Inspect each mandatory job conclusion directly while a workflow is running:
+the workflow-level `in_progress` state can coexist with an already-completed
+failed child job and must never be used as evidence that no gate has failed.
 
 ## Durable documentation and release-note boundary
 
@@ -74,6 +77,16 @@ source changelog, or `Release-note classification: no-release-note: REASON`
 when it does not. A changelog entry is reviewable
 source evidence, not proof that an artifact was packaged, published, installed,
 or dogfooded. Do not create dated skill entries as a substitute.
+Before opening a pull request, copy every receipt label from
+`.github/pull_request_template.md` exactly and give each one a non-empty value;
+`developer/verify_pr_receipt.py` fails before source gates when a label is
+missing, renamed, or empty. This includes candidate SHA-256 and real-tool
+evidence even when their truthful value is pending or unavailable.
+The receipt parser accepts bullet-prefixed labels only when the field text
+matches the template exactly after removing the expected prefix.
+`integration/local_lifecycle_test.go` now retries `camp --json open` only when
+the structured failure envelope reports `error.code == "lifecycle_ambiguous"`;
+matching prose in `error.message` alone is not retryable.
 
 This policy borrows two upstream patterns without inheriting their product
 claims:
@@ -166,11 +179,39 @@ the files directly would strip `build/` at the artifact boundary. The cleanup re
 ownership-checked controller removal followed by an observed absent path; it
 is never inferred from a Robot step or job conclusion. A failed or interrupted
 Robot run is evidence of failure, not permission to invent a cleanup result.
-Its
-`qualifiedHistoricalRuns` starts empty: repository tests cannot populate it or
-claim hosted parity. Do not remove the direct jobs until two consecutive,
-actual complete PR/master runs have passed every recorded mandatory gate; add
-those two GitHub Actions run IDs and URLs only after both runs finish.
+Artifact transfers use immutable `actions/upload-artifact` v7.0.1 and
+`actions/download-artifact` v8.0.1 commits. Their authoritative `action.yml`
+files declare the Node 24 action runtime; update upload and download together
+when that runtime contract changes so CI does not retain a deprecated action
+runtime on one side of the candidate boundary.
+The hosted exact-candidate lifecycle step sets `DEVPOD_DEBUG=true`; locked
+DevPod v0.26.1 documents this global switch as printing the stack trace when an
+error occurs. That switch does not guarantee actionable agent stderr: the
+locked implementation's SSH tunnel retains only its final stderr line when it
+wraps an agent failure. Camp sanitizes terminal controls and bounds a surfaced
+workspace-up diagnostic to the final 8 KiB, but a container-run exit can still
+contain only the wrapper. DevPod's CLI debug output is emitted to the invoking
+process rather than persisted under `DEVPOD_HOME`, and `devpod logs` reinjects
+the agent before delegating to `docker logs`; it is therefore not a reliable
+recovery path when agent injection itself failed. On a crash-matrix failure,
+capture diagnostics before cleanup from the private DevPod context: workspace
+status and logs when available, followed by Docker state, logs, and recent
+events selected only with the workspace's `dev.containers.id` label. Bound and
+redact that output. Treat it as evidence for the next fix; do not infer a
+behavioral cause from exit status 128 alone.
+The generated Room fallback separates container startup identity from session
+identity: `containerUser` is `root` so the image entrypoint can finish privileged
+initialization, while `remoteUser` remains `vscode` for DevPod sessions. Do not
+start the entrypoint as `vscode` while DevPod's default remote-user UID update is
+enabled: on a host whose UID differs from the image, DevPod can rewrite
+`/etc/passwd` while the entrypoint is still running under the old numeric UID,
+causing later `sudo` calls to fail with `you do not exist in the passwd
+database`.
+The release-evidence baseline's `qualifiedHistoricalRuns` starts empty:
+repository tests cannot populate it or claim hosted parity. Do not remove the
+direct jobs until two consecutive, actual complete PR/master runs have passed
+every recorded mandatory gate; add those two GitHub Actions run IDs and URLs
+only after both runs finish.
 Do not cache `ROBOCORP_HOME`; the environment is private writable runtime state,
 not a verified immutable cache seed.
 
@@ -316,8 +357,47 @@ DevPod home, config, SSH config, and non-default context. Before scenario
 activity, each initializes the built-in Docker provider with
 `devpod provider add docker --context <private-context> --use --silent` under
 that private environment and passes `CAMP_DEVPOD_PROVIDER=docker` to Camp. The
-Room-of-Requirement remains the devcontainer image fixture, not the DevPod
-provider. Before each file or MinIO lifecycle scenario opens Camp's workspace,
+crash-matrix gate watches the asynchronous `camp open` process while it waits
+for registry-forwarder evidence. An early exit fails immediately with the
+captured command output, and missing evidence has a dedicated five-minute
+deadline instead of consuming the full crash-scenario timeout. Launch that
+command from the initialized temporary Camp source; running it from the Go
+package directory cannot discover the scenario's `.camp/camp.yaml`. Do not
+retry `camp open` inside a workspace whose create outcome was ambiguous: that
+workspace can be durably `Stopped`, so the retry only observes poisoned state.
+Let the test's exact cleanup finish, then rerun the whole crash-matrix gate once
+with a fresh temporary controller, DevPod context, journal, and workspace; a
+second failure remains terminal.
+Script-level retry tests must also set a test-owned `TMPDIR`; otherwise their
+receipt files can race package-level cleanup tests during `go test -race ./...`.
+Crash-cut polling reads forwarder evidence from the controller's XDG runtime
+root (`runtime/camp/<session>/*-forward.json`), not the durable session-data
+tree.
+Crash-matrix retries are receipt-driven: the gate only retries when `TestLocalLifecycleCrashMatrix` emits the exact post-cleanup JSON receipt `{"retry":"crash-matrix-bootstrap"}`. Assertion failures and cleanup failures do not emit that receipt and must fail the gate without a retry.
+The lifecycle harness writes an explicit devcontainer configuration using the
+digest-pinned Podman acceptance image from
+`tools.lock.yaml`; Camp's production Room fallback is unchanged.
+Hosted exact-candidate CI pre-pulls that locked reference before RCC invokes
+DevPod because fresh image acquisition can outlive DevPod's agent-injection
+deadline. The pre-pull moves acquisition outside that deadline; it does not
+replace the real DevPod create, agent injection, workspace engine, or cleanup
+evidence. Keep DevPod's default command override for this fixture; forcing the
+Podman image's own command lets the container exit before agent injection.
+Run the workspace as the image's `podman` user; its default root user can make
+the bind-mounted source root-owned, blocking Camp source access and exact
+cleanup. DevPod updates that user to the host UID, so the fixture's minimal
+Dockerfile selects a subordinate UID/GID base from bounded candidates that stay
+outside the current host UID and GID and keep the full 65,536-ID interval
+within the `uint32` ceiling, then rewrites `/etc/subuid` and `/etc/subgid` at
+build time.
+A lifecycle hook cannot perform this repair because it runs as the non-root
+remote user. Rootless Podman also defaults an unconfigured registry to HTTPS,
+so the fixture marks only `127.0.0.1` insecure in its registry configuration.
+That covers Camp's dynamic loopback-confined plain-HTTP endpoint for both
+harness commands and production image restore. The pre-pull only moves image
+acquisition ahead of the agent-injection deadline; it does not prove the gate
+is independent of registry or image-acquisition behavior.
+Before each file or MinIO lifecycle scenario opens Camp's workspace,
 the harness creates one unrelated workspace in that same private context. Its
 scenario ledger recovers exact Camp workspace IDs, process identities,
 cleanup-permitted materializations, verifier-only path identities, and
@@ -579,11 +659,17 @@ test ref; the fixture removes only Homebrew's test-owned XDG subtree before
 the host deletes its temporary root.
 
 The native package lifecycle fixture defaults to Podman and also supports
-`CONTAINER_ENGINE=docker`. Managed-tool bootstrap runs as root inside Docker,
-so its fallback cleanup removes root-owned fixture state through the same
-container engine when the invoking host user cannot remove it directly. A
-cleanup permission error after otherwise successful DEB/RPM/APK assertions is
-still a failed gate; it must not be reported as package lifecycle evidence.
+`CONTAINER_ENGINE=docker`. Hosted CI selects Docker explicitly so package
+evidence does not depend on compatibility between the runner's Podman and
+`crun`; an OCI runtime failure before the first package assertion is an engine
+prerequisite failure, not package lifecycle evidence. A green hosted Docker
+fixture does not prove the hosted Podman path; keep Podman opt-in until that
+runner/runtime combination is verified separately. Managed-tool bootstrap runs
+as root inside Docker, so its fallback cleanup removes root-owned fixture state
+through the same container engine when the invoking host user cannot remove it
+directly. A cleanup permission error after otherwise successful DEB/RPM/APK
+assertions is still a failed gate; it must not be reported as package lifecycle
+evidence.
 
 ## Evidence
 

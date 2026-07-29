@@ -106,11 +106,12 @@ func ResolveDevcontainer(root, explicit string, lock domain.CapsuleLock) (Devcon
 	}
 	path := filepath.Join(runtimeDirectory, "devcontainer.json")
 	document := map[string]any{
-		"name":       "Camp Room of Requirement",
-		"image":      lock.Room.Image + "@" + lock.Room.Digest,
-		"mounts":     mounts,
-		"runArgs":    []string{"--privileged"},
-		"remoteUser": "vscode",
+		"name":          "Camp Room of Requirement",
+		"image":         lock.Room.Image + "@" + lock.Room.Digest,
+		"mounts":        mounts,
+		"runArgs":       []string{"--privileged"},
+		"containerUser": "root",
+		"remoteUser":    "vscode",
 	}
 	body, err := json.MarshalIndent(document, "", "  ")
 	if err != nil {

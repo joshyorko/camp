@@ -65,6 +65,13 @@ func TestDevcontainerGeneratesDigestLockedFallbackAndIgnoresNestedConfig(t *test
 	if document["image"] != lock.Room.Image+"@"+lock.Room.Digest {
 		t.Fatalf("fallback image = %#v", document["image"])
 	}
+	if document["containerUser"] != "root" || document["remoteUser"] != "vscode" {
+		t.Fatalf(
+			"fallback users = container:%#v remote:%#v, want root container startup and vscode sessions",
+			document["containerUser"],
+			document["remoteUser"],
+		)
+	}
 	compatibilityPath := filepath.Join(root, ".camp", "runtime", "iptables-compat")
 	info, err := os.Stat(compatibilityPath)
 	if err != nil {

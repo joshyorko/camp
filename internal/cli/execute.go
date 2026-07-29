@@ -8,6 +8,7 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/joshyorko/camp/internal/ports"
 	"github.com/joshyorko/camp/internal/presentation"
 	"github.com/spf13/cobra"
 )
@@ -76,7 +77,11 @@ func lifecycleFailure(err error, recoveryCommand string) *ExitError {
 	if recoveryCommand != "" {
 		next = []string{recoveryCommand}
 	}
-	return &ExitError{Code: ExitFailure, Failure: presentation.Failure{Code: "lifecycle_failed", Message: err.Error(), NextCommands: next}, Cause: err}
+	code := "lifecycle_failed"
+	if errors.Is(err, ports.ErrAmbiguous) {
+		code = "lifecycle_ambiguous"
+	}
+	return &ExitError{Code: ExitFailure, Failure: presentation.Failure{Code: code, Message: err.Error(), NextCommands: next}, Cause: err}
 }
 
 func renderedLifecycleFailure(err error) *ExitError {

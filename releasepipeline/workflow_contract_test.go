@@ -38,6 +38,16 @@ func TestCIWorkflowIsMandatoryLeastPrivilegeAndForkSafe(t *testing.T) {
 	assertActionsPinned(t, workflow)
 }
 
+func TestCIPackagingUsesDockerForNativePackageLifecycle(t *testing.T) {
+	workflow := readWorkflow(t, "ci.yml")
+	document := parseWorkflow(t, workflow)
+	step := findStepByName(t, document, "packaging", "Run native package lifecycle")
+	env := step["env"].(map[string]any)
+	if env["CONTAINER_ENGINE"] != "docker" {
+		t.Fatalf("packaging lifecycle container engine = %#v, want docker", env["CONTAINER_ENGINE"])
+	}
+}
+
 func TestCIAddsRCCParityWithoutCachingPrivateRuntimeHomes(t *testing.T) {
 	workflow := readWorkflow(t, "ci.yml")
 	requireContains(t, workflow,
@@ -47,7 +57,8 @@ func TestCIAddsRCCParityWithoutCachingPrivateRuntimeHomes(t *testing.T) {
 		"./developer/rccw run -r developer/toolkit.yaml --dev -t local",
 		"./developer/rccw run -r developer/toolkit.yaml --dev -t test",
 		"./developer/rccw run -r developer/toolkit.yaml -t robot",
-		"actions/download-artifact@",
+		"actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1",
+		"actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1",
 		"developer/verify_pr_receipt.py",
 		"build/evidence/candidate.json",
 		"build/evidence/test-gates.json",
@@ -90,6 +101,7 @@ func TestCIAddsRCCParityWithoutCachingPrivateRuntimeHomes(t *testing.T) {
 	if with["path"] != "." {
 		t.Fatalf("RCC Robot candidate download path = %#v, want repository root", with["path"])
 	}
+	findStepByUses(t, document, "parity-evidence", "actions/checkout@")
 	requireEvidence := findStepByName(t, document, "rcc-robot", "Require mandatory RCC Robot evidence")
 	run := requireEvidence["run"].(string)
 	for _, required := range []string{
@@ -109,6 +121,21 @@ func TestCIAddsRCCParityWithoutCachingPrivateRuntimeHomes(t *testing.T) {
 	uploadWith := upload["with"].(map[string]any)
 	if uploadWith["if-no-files-found"] != "error" {
 		t.Fatalf("mandatory Robot evidence missing-file policy = %#v, want error", uploadWith["if-no-files-found"])
+	}
+	prepull := findStepByName(t, document, "rcc-robot", "Pre-pull locked lifecycle fixture")
+	prepullRun := prepull["run"].(string)
+	for _, required := range []string{"tools.lock.yaml", "docker pull"} {
+		if !strings.Contains(prepullRun, required) {
+			t.Errorf("lifecycle fixture pre-pull omits %q", required)
+		}
+	}
+	if strings.Contains(prepullRun, "quay.io/") || strings.Contains(prepullRun, "docker.io/") {
+		t.Error("lifecycle fixture pre-pull duplicates the locked image reference")
+	}
+	lifecycle := findStepByName(t, document, "rcc-robot", "Run mandatory exact-candidate Robot lifecycle")
+	lifecycleEnvironment := lifecycle["env"].(map[string]any)
+	if lifecycleEnvironment["DEVPOD_DEBUG"] != "true" {
+		t.Fatalf("hosted lifecycle DEVPOD_DEBUG = %#v, want true", lifecycleEnvironment["DEVPOD_DEBUG"])
 	}
 }
 
@@ -333,6 +360,14 @@ func assertActionsPinned(t *testing.T, workflow string) {
 	if strings.Contains(workflow, "actions/setup-go@") && !strings.Contains(workflow, "# v6") {
 		t.Error("setup-go must use the Node.js 24 v6 action")
 	}
+	if strings.Contains(workflow, "actions/upload-artifact@") &&
+		!strings.Contains(workflow, "actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1") {
+		t.Error("upload-artifact must use the Node.js 24 v7.0.1 action")
+	}
+	if strings.Contains(workflow, "actions/download-artifact@") &&
+		!strings.Contains(workflow, "actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1") {
+		t.Error("download-artifact must use the Node.js 24 v8.0.1 action")
+	}
 	uses := regexp.MustCompile(`(?m)^\s*-?\s*uses:\s*([^\s#]+)`).FindAllStringSubmatch(workflow, -1)
 	if len(uses) == 0 {
 		t.Fatal("workflow contains no actions")
@@ -340,6 +375,14 @@ func assertActionsPinned(t *testing.T, workflow string) {
 	for _, match := range uses {
 		if strings.HasPrefix(match[1], "./") || strings.HasPrefix(match[1], "docker://") {
 			continue
+		}
+		if strings.HasPrefix(match[1], "actions/upload-artifact@") &&
+			match[1] != "actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a" {
+			t.Errorf("upload-artifact is not the Node.js 24 v7.0.1 commit: %s", match[1])
+		}
+		if strings.HasPrefix(match[1], "actions/download-artifact@") &&
+			match[1] != "actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c" {
+			t.Errorf("download-artifact is not the Node.js 24 v8.0.1 commit: %s", match[1])
 		}
 		if !immutableAction.MatchString(match[1]) {
 			t.Errorf("action is not pinned to a full commit SHA: %s", match[1])

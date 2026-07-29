@@ -1,0 +1,75 @@
+{
+  "$schema": "https://docs.renovatebot.com/renovate-schema.json",
+  "customManagers": [
+    {
+      "customType": "regex",
+      "managerFilePatterns": [
+        "/^tools\\.lock\\.yaml$/"
+      ],
+      "matchStrings": [
+        "tools:\\n  devpod:\\n    repository: skevetter/devpod\\n    version: (?<currentValue>v\\d+\\.\\d+\\.\\d+)"
+      ],
+      "datasourceTemplate": "github-releases",
+      "depNameTemplate": "skevetter/devpod",
+      "versioningTemplate": "semver"
+    },
+    {
+      "customType": "regex",
+      "managerFilePatterns": [
+        "/^tools\\.lock\\.yaml$/"
+      ],
+      "matchStrings": [
+        "  hauler:\\n    repository: hauler-dev/hauler\\n    version: (?<currentValue>v\\d+\\.\\d+\\.\\d+)"
+      ],
+      "datasourceTemplate": "github-releases",
+      "depNameTemplate": "hauler-dev/hauler",
+      "versioningTemplate": "semver"
+    },
+    {
+      "customType": "regex",
+      "managerFilePatterns": [
+        "/^tools\\.lock\\.yaml$/"
+      ],
+      "matchStrings": [
+        "fixtures:\\n  room:\\n    repository: joshyorko/room-of-requirement\\n    version: (?<currentValue>v\\d+\\.\\d+\\.\\d+)"
+      ],
+      "datasourceTemplate": "github-releases",
+      "depNameTemplate": "joshyorko/room-of-requirement",
+      "versioningTemplate": "semver"
+    },
+    {
+      "customType": "regex",
+      "managerFilePatterns": [
+        "/^developer\\/rcc\\.lock\\.yaml$/"
+      ],
+      "matchStrings": [
+        "version: (?<currentValue>v\\d+\\.\\d+\\.\\d+)"
+      ],
+      "datasourceTemplate": "github-releases",
+      "depNameTemplate": "joshyorko/rcc",
+      "versioningTemplate": "semver"
+    },
+    {
+      "customType": "regex",
+      "managerFilePatterns": [
+        "/^tools\\.lock\\.yaml$/"
+      ],
+      "matchStrings": [
+        "image: (?<depName>quay\\.io/podman/stable)@(?<currentDigest>sha256:[0-9a-f]{64})"
+      ],
+      "currentValueTemplate": "latest",
+      "datasourceTemplate": "docker",
+      "versioningTemplate": "docker"
+    }
+  ],
+  "postUpgradeTasks": {
+    "commands": [
+      "node developer/update_dependency_locks.mjs"
+    ],
+    "executionMode": "update",
+    "fileFilters": [
+      "developer/rcc.lock.yaml",
+      "tools.lock.yaml"
+    ]
+  }
+}
