@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -43,12 +44,15 @@ func TestLocalLifecycleCrashMatrix(t *testing.T) {
 	createdWorkspaces := newCreatedWorkspaceTracker()
 	environment := lifecycleEnvironment(controller, backend, devPod)
 	var opening *exec.Cmd
+	var openingDone chan error
 	openingWaited := false
 	t.Cleanup(func() {
 		if opening != nil && !openingWaited && opening.Process != nil {
 			_ = opening.Process.Signal(syscall.SIGCONT)
 			_ = opening.Process.Kill()
-			_ = opening.Wait()
+			if openingDone != nil {
+				_ = <-openingDone
+			}
 		}
 		cleanupCtx, cleanupCancel := context.WithTimeout(context.Background(), 5*time.Minute)
 		defer cleanupCancel()
@@ -79,8 +83,27 @@ func TestLocalLifecycleCrashMatrix(t *testing.T) {
 	if err := opening.Start(); err != nil {
 		t.Fatal(err)
 	}
+	openingDone = make(chan error, 1)
+	go func() {
+		openingDone <- opening.Wait()
+	}()
 
-	evidencePath := waitForForwarderEvidence(t, ctx, controller, "registry")
+	evidenceCtx, evidenceCancel := context.WithTimeout(ctx, 5*time.Minute)
+	defer evidenceCancel()
+	evidencePath, err := waitForForwarderEvidenceOrExit(evidenceCtx, controller, "registry", openingDone, &openingOutput)
+	if err != nil {
+		var exited *openingExitedBeforeEvidenceError
+		if errors.As(err, &exited) {
+			openingWaited = true
+		} else {
+			_ = opening.Process.Signal(syscall.SIGCONT)
+			_ = opening.Process.Kill()
+			waitErr := <-openingDone
+			openingWaited = true
+			err = fmt.Errorf("%w\ncamp open exit after evidence wait: %v\ncamp open output:\n%s", err, waitErr, openingOutput.String())
+		}
+		t.Fatal(err)
+	}
 	if err := opening.Process.Signal(syscall.SIGSTOP); err != nil {
 		t.Fatalf("stop opening controller: %v", err)
 	}
@@ -114,7 +137,7 @@ func TestLocalLifecycleCrashMatrix(t *testing.T) {
 		t.Fatalf("kill opening controller: %v", err)
 	}
 	openingWaited = true
-	if err := opening.Wait(); err == nil {
+	if err := <-openingDone; err == nil {
 		t.Fatal("opening controller exited successfully after SIGKILL")
 	}
 
@@ -158,24 +181,37 @@ func TestLocalLifecycleCrashMatrix(t *testing.T) {
 	assertEndpointClosed(t, fileserver.LocalEndpoint)
 }
 
-func waitForForwarderEvidence(t *testing.T, ctx context.Context, controller, name string) string {
-	t.Helper()
+type openingExitedBeforeEvidenceError struct {
+	name   string
+	err    error
+	output string
+}
+
+func (err *openingExitedBeforeEvidenceError) Error() string {
+	return fmt.Sprintf("camp open exited before %s forwarder evidence: %v\ncamp open output:\n%s", err.name, err.err, err.output)
+}
+
+func waitForForwarderEvidenceOrExit(ctx context.Context, controller, name string, openingDone <-chan error, output *bytes.Buffer) (string, error) {
 	pattern := filepath.Join(controller, "data", "camp", "sessions", "*", "runtime", name+"-forward.json")
+	poll := time.NewTicker(2 * time.Millisecond)
+	defer poll.Stop()
 	for {
 		matches, err := filepath.Glob(pattern)
 		if err != nil {
-			t.Fatal(err)
+			return "", err
 		}
 		if len(matches) == 1 {
-			return matches[0]
+			return matches[0], nil
 		}
 		if len(matches) > 1 {
-			t.Fatalf("ambiguous forwarder evidence: %v", matches)
+			return "", fmt.Errorf("ambiguous forwarder evidence: %v", matches)
 		}
 		select {
+		case err := <-openingDone:
+			return "", &openingExitedBeforeEvidenceError{name: name, err: err, output: output.String()}
 		case <-ctx.Done():
-			t.Fatalf("wait for %s forwarder evidence: %v", name, ctx.Err())
-		case <-time.After(2 * time.Millisecond):
+			return "", fmt.Errorf("wait for %s forwarder evidence: %w", name, ctx.Err())
+		case <-poll.C:
 		}
 	}
 }

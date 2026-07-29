@@ -324,6 +324,10 @@ DevPod home, config, SSH config, and non-default context. Before scenario
 activity, each initializes the built-in Docker provider with
 `devpod provider add docker --context <private-context> --use --silent` under
 that private environment and passes `CAMP_DEVPOD_PROVIDER=docker` to Camp. The
+crash-matrix gate watches the asynchronous `camp open` process while it waits
+for registry-forwarder evidence. An early exit fails immediately with the
+captured command output, and missing evidence has a dedicated five-minute
+deadline instead of consuming the full crash-scenario timeout.
 The lifecycle harness writes an explicit devcontainer configuration using the
 digest-pinned Podman acceptance image from
 `tools.lock.yaml`; Camp's production Room fallback is unchanged.
