@@ -82,6 +82,9 @@ Before opening a pull request, copy every receipt label from
 `developer/verify_pr_receipt.py` fails before source gates when a label is
 missing, renamed, or empty. This includes candidate SHA-256 and real-tool
 evidence even when their truthful value is pending or unavailable.
+Passing a custom body to `gh pr create` does not merge the repository template,
+so a body-file publication can bypass every label and fail only after CI starts;
+the template and server-side verifier are not a pre-publication easy button.
 The receipt parser accepts bullet-prefixed labels only when the field text
 matches the template exactly after removing the expected prefix.
 `integration/local_lifecycle_test.go` now retries `camp --json open` only when
