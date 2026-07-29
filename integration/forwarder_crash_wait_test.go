@@ -52,6 +52,26 @@ func TestCleanupCrashSessionRunsFromCampSource(t *testing.T) {
 	}
 }
 
+func TestCrashSessionNeedsCleanupClose(t *testing.T) {
+	tests := []struct {
+		name        string
+		initialized bool
+		closed      bool
+		want        bool
+	}{
+		{name: "not initialized", initialized: false, closed: false, want: false},
+		{name: "active", initialized: true, closed: false, want: true},
+		{name: "already closed", initialized: true, closed: true, want: false},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			if got := crashSessionNeedsCleanupClose(test.initialized, test.closed); got != test.want {
+				t.Fatalf("crashSessionNeedsCleanupClose(%t, %t) = %t, want %t", test.initialized, test.closed, got, test.want)
+			}
+		})
+	}
+}
+
 func TestWaitForForwarderEvidenceReportsOpeningExit(t *testing.T) {
 	openingDone := make(chan error, 1)
 	openingDone <- errors.New("open failed")

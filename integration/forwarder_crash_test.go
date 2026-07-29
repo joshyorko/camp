@@ -48,6 +48,7 @@ func TestLocalLifecycleCrashMatrix(t *testing.T) {
 	retryReceipt := ""
 	cleanupFailed := false
 	sessionInitialized := false
+	sessionClosed := false
 	t.Cleanup(func() {
 		if opening != nil && !openingWaited && opening.Process != nil {
 			_ = opening.Process.Signal(syscall.SIGCONT)
@@ -63,7 +64,7 @@ func TestLocalLifecycleCrashMatrix(t *testing.T) {
 		}
 		cleanupCtx, cleanupCancel := context.WithTimeout(context.Background(), 5*time.Minute)
 		defer cleanupCancel()
-		if sessionInitialized {
+		if crashSessionNeedsCleanupClose(sessionInitialized, sessionClosed) {
 			if output, err := cleanupCrashSession(cleanupCtx, environment, source, bin); err != nil {
 				cleanupFailed = true
 				t.Errorf("close test-owned session: %v\n%s", err, output)
@@ -190,6 +191,7 @@ func TestLocalLifecycleCrashMatrix(t *testing.T) {
 	}
 
 	mustRunLifecycle(t, ctx, environment, bin, "--json", "close", "--camp", "forwarder-crash")
+	sessionClosed = true
 	assertDevPodWorkspacesAbsent(t, ctx, devPod, reopened.WorkspaceID)
 	status, err = processes.Inspect(ctx, evidence.Process.Identity)
 	if err == nil && status.Running {
@@ -197,6 +199,10 @@ func TestLocalLifecycleCrashMatrix(t *testing.T) {
 	}
 	assertEndpointClosed(t, registry.LocalEndpoint)
 	assertEndpointClosed(t, fileserver.LocalEndpoint)
+}
+
+func crashSessionNeedsCleanupClose(initialized, closed bool) bool {
+	return initialized && !closed
 }
 
 func cleanupCrashSession(ctx context.Context, environment []string, source, bin string) ([]byte, error) {

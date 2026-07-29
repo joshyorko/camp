@@ -16,6 +16,10 @@ forwarder-start-before-fact gate but does not provide current runtime proof.
 The crash matrix also includes initial `ServiceStart` separately from
 `ServiceRestart`. Required real capabilities must fail the gate explicitly;
 the local crash gate does not require rsync, while remote mirror gates do.
+Its mandatory cleanup runs `camp close` from the initialized source root only
+while that test-owned session remains active; after the scenario completes its
+normal close, cleanup must not issue a second close and turn success into a
+`no active Camp session` failure.
 
 ## Current boundary
 
