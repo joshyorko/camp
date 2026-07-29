@@ -8,6 +8,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/joshyorko/camp/internal/ports"
 )
 
 func TestNewCrashOpenCommandRunsFromCampSource(t *testing.T) {
@@ -50,5 +52,19 @@ func TestWaitForForwarderEvidenceReportsOpeningExit(t *testing.T) {
 		if !strings.Contains(err.Error(), want) {
 			t.Fatalf("waitForForwarderEvidenceOrExit() error = %q, want %q", err, want)
 		}
+	}
+}
+
+func TestCrashOpenRetriesOnlyAmbiguousStartup(t *testing.T) {
+	ambiguous := &openingExitedBeforeEvidenceError{
+		name:   "registry",
+		err:    errors.New("open failed"),
+		output: ports.ErrAmbiguous.Error(),
+	}
+	if !isAmbiguousCrashOpenExit(ambiguous) {
+		t.Fatal("isAmbiguousCrashOpenExit() = false for ambiguous mutation")
+	}
+	if isAmbiguousCrashOpenExit(errors.New("ordinary failure")) {
+		t.Fatal("isAmbiguousCrashOpenExit() = true for ordinary failure")
 	}
 }

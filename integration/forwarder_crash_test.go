@@ -9,6 +9,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"syscall"
 	"testing"
 	"time"
@@ -76,19 +77,27 @@ func TestLocalLifecycleCrashMatrix(t *testing.T) {
 	mustBootstrapDevPodDockerProvider(t, ctx, devPod)
 	mustRunLifecycle(t, ctx, environment, bin, "--json", "init", source, "--name", "forwarder-crash")
 	var openingOutput bytes.Buffer
-	opening = newCrashOpenCommand(ctx, bin, source, environment, &openingOutput)
-	if err := opening.Start(); err != nil {
-		t.Fatal(err)
-	}
-	openingDone = make(chan error, 1)
-	go func() {
-		openingDone <- opening.Wait()
-	}()
-
 	evidenceCtx, evidenceCancel := context.WithTimeout(ctx, 5*time.Minute)
 	defer evidenceCancel()
-	evidencePath, err := waitForForwarderEvidenceOrExit(evidenceCtx, controller, "registry", openingDone, &openingOutput)
-	if err != nil {
+	var evidencePath string
+	var firstAttemptDiagnostic string
+	for attempt := 1; attempt <= 2; attempt++ {
+		openingOutput.Reset()
+		opening = newCrashOpenCommand(ctx, bin, source, environment, &openingOutput)
+		if err := opening.Start(); err != nil {
+			t.Fatal(err)
+		}
+		openingWaited = false
+		openingDone = make(chan error, 1)
+		go func(command *exec.Cmd, done chan<- error) {
+			done <- command.Wait()
+		}(opening, openingDone)
+
+		var err error
+		evidencePath, err = waitForForwarderEvidenceOrExit(evidenceCtx, controller, "registry", openingDone, &openingOutput)
+		if err == nil {
+			break
+		}
 		var exited *openingExitedBeforeEvidenceError
 		if errors.As(err, &exited) {
 			openingWaited = true
@@ -98,6 +107,13 @@ func TestLocalLifecycleCrashMatrix(t *testing.T) {
 			waitErr := <-openingDone
 			openingWaited = true
 			err = fmt.Errorf("%w\ncamp open exit after evidence wait: %v\ncamp open output:\n%s", err, waitErr, openingOutput.String())
+		}
+		if attempt == 1 && isAmbiguousCrashOpenExit(err) {
+			firstAttemptDiagnostic = err.Error()
+			continue
+		}
+		if firstAttemptDiagnostic != "" {
+			err = fmt.Errorf("first ambiguous camp open:\n%s\nretry:\n%w", firstAttemptDiagnostic, err)
 		}
 		t.Fatal(err)
 	}
@@ -116,7 +132,7 @@ func TestLocalLifecycleCrashMatrix(t *testing.T) {
 	if !hasPendingTransition(pending, "ForwarderStarted:registry") || hasForwardingRecord(snapshot, "registry") {
 		_ = opening.Process.Signal(syscall.SIGCONT)
 		openingWaited = true
-		_ = opening.Wait()
+		_ = <-openingDone
 		t.Fatalf("did not stop at pending registry forwarder: pending=%v forwarding=%#v\n%s", pendingTransitions(pending), snapshot.Recovery.Forwarding, openingOutput.Bytes())
 	}
 	body, err := os.ReadFile(evidencePath)
@@ -195,6 +211,11 @@ type openingExitedBeforeEvidenceError struct {
 
 func (err *openingExitedBeforeEvidenceError) Error() string {
 	return fmt.Sprintf("camp open exited before %s forwarder evidence: %v\ncamp open output:\n%s", err.name, err.err, err.output)
+}
+
+func isAmbiguousCrashOpenExit(err error) bool {
+	var exited *openingExitedBeforeEvidenceError
+	return errors.As(err, &exited) && strings.Contains(exited.output, ports.ErrAmbiguous.Error())
 }
 
 func waitForForwarderEvidenceOrExit(ctx context.Context, controller, name string, openingDone <-chan error, output *bytes.Buffer) (string, error) {

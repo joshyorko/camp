@@ -329,7 +329,10 @@ for registry-forwarder evidence. An early exit fails immediately with the
 captured command output, and missing evidence has a dedicated five-minute
 deadline instead of consuming the full crash-scenario timeout. Launch that
 command from the initialized temporary Camp source; running it from the Go
-package directory cannot discover the scenario's `.camp/camp.yaml`.
+package directory cannot discover the scenario's `.camp/camp.yaml`. If the
+first open reports Camp's explicit ambiguous-mutation contract, retry it once
+so normal reconciliation can resolve DevPod's unknown workspace-create
+outcome; retain both diagnostics if that single retry also fails.
 The lifecycle harness writes an explicit devcontainer configuration using the
 digest-pinned Podman acceptance image from
 `tools.lock.yaml`; Camp's production Room fallback is unchanged.
