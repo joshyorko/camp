@@ -76,10 +76,7 @@ func TestLocalLifecycleCrashMatrix(t *testing.T) {
 	mustBootstrapDevPodDockerProvider(t, ctx, devPod)
 	mustRunLifecycle(t, ctx, environment, bin, "--json", "init", source, "--name", "forwarder-crash")
 	var openingOutput bytes.Buffer
-	opening = exec.CommandContext(ctx, bin, "--json", "open", "Projects/Unicode space")
-	opening.Env = mergeCommandEnvironment(os.Environ(), environment)
-	opening.Stdout = &openingOutput
-	opening.Stderr = &openingOutput
+	opening = newCrashOpenCommand(ctx, bin, source, environment, &openingOutput)
 	if err := opening.Start(); err != nil {
 		t.Fatal(err)
 	}
@@ -179,6 +176,15 @@ func TestLocalLifecycleCrashMatrix(t *testing.T) {
 	}
 	assertEndpointClosed(t, registry.LocalEndpoint)
 	assertEndpointClosed(t, fileserver.LocalEndpoint)
+}
+
+func newCrashOpenCommand(ctx context.Context, bin, source string, environment []string, output *bytes.Buffer) *exec.Cmd {
+	command := exec.CommandContext(ctx, bin, "--json", "open", "Projects/Unicode space")
+	command.Dir = source
+	command.Env = mergeCommandEnvironment(os.Environ(), environment)
+	command.Stdout = output
+	command.Stderr = output
+	return command
 }
 
 type openingExitedBeforeEvidenceError struct {
