@@ -45,6 +45,9 @@ func TestLocalLifecycleCrashMatrix(t *testing.T) {
 	var opening *exec.Cmd
 	var openingDone chan error
 	openingWaited := false
+	retryReceipt := ""
+	cleanupFailed := false
+	sessionInitialized := false
 	t.Cleanup(func() {
 		if opening != nil && !openingWaited && opening.Process != nil {
 			_ = opening.Process.Signal(syscall.SIGCONT)
@@ -53,30 +56,47 @@ func TestLocalLifecycleCrashMatrix(t *testing.T) {
 				_ = <-openingDone
 			}
 		}
+		if t.Failed() {
+			diagnosticCtx, diagnosticCancel := context.WithTimeout(context.Background(), 2*time.Minute)
+			logDevPodFailureEvidence(t, diagnosticCtx, devPod)
+			diagnosticCancel()
+		}
 		cleanupCtx, cleanupCancel := context.WithTimeout(context.Background(), 5*time.Minute)
 		defer cleanupCancel()
-		if t.Failed() {
-			logDevPodFailureEvidence(t, cleanupCtx, devPod)
-		}
-		_, _ = runLifecycleCommand(cleanupCtx, environment, bin, "--json", "close")
-		stopRecordedSessionProcesses(cleanupCtx, controller)
-		if err := createdWorkspaces.TrackController(controller); err != nil {
-			t.Errorf("recover exact workspace IDs from test-owned controller: %v", err)
+		if sessionInitialized {
+			if output, err := runLifecycleCommand(cleanupCtx, environment, bin, "--json", "close"); err != nil {
+				cleanupFailed = true
+				t.Errorf("close test-owned session: %v\n%s", err, output)
+			}
+			stopRecordedSessionProcesses(cleanupCtx, controller)
+			if err := createdWorkspaces.TrackController(controller); err != nil {
+				cleanupFailed = true
+				t.Errorf("recover exact workspace IDs from test-owned controller: %v", err)
+			}
 		}
 		if err := createdWorkspaces.DeleteAll(func(workspaceID string) error {
 			output, err := runDevPodCommand(cleanupCtx, devPod, "delete", "--ignore-not-found", workspaceID)
 			if err != nil {
+				cleanupFailed = true
 				return fmt.Errorf("%w: %s", err, output)
 			}
 			return nil
 		}); err != nil {
+			cleanupFailed = true
 			t.Errorf("clean exact test-owned DevPod workspaces: %v", err)
+		}
+		if !cleanupFailed && retryReceipt != "" {
+			fmt.Println(retryReceipt)
 		}
 	})
 
 	t.Log("bootstrap the Docker provider inside the private DevPod context")
-	mustBootstrapDevPodDockerProvider(t, ctx, devPod)
+	if output, err := bootstrapDevPodDockerProvider(ctx, devPod); err != nil {
+		retryReceipt = `{"retry":"crash-matrix-bootstrap"}`
+		t.Fatalf("retryable crash-matrix setup failure: bootstrap private DevPod Docker provider: %v\n%s", err, output)
+	}
 	mustRunLifecycle(t, ctx, environment, bin, "--json", "init", source, "--name", "forwarder-crash")
+	sessionInitialized = true
 	var openingOutput bytes.Buffer
 	opening = newCrashOpenCommand(ctx, bin, source, environment, &openingOutput)
 	if err := opening.Start(); err != nil {

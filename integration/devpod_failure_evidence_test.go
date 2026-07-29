@@ -4,21 +4,28 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
+	"os"
+	"os/exec"
+	"path/filepath"
 	"regexp"
 	"sort"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 )
 
 const (
-	devPodEvidenceSectionLimit = 16 << 10
-	devPodEvidenceTotalLimit   = 64 << 10
+	devPodEvidenceWorkspaceListLimit = 8 << 10
+	devPodEvidenceSectionLimit       = 16 << 10
+	devPodEvidenceTotalLimit         = 64 << 10
 )
 
 var (
 	devPodEvidenceControlPattern = regexp.MustCompile(`[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]|\x1b\[[0-?]*[ -/]*[@-~]`)
 	devPodEvidenceSecretPattern  = regexp.MustCompile(`(?i)(password|secret|token|credential|authorization|access[_-]?key|private[_-]?key)(["'=:\s]+)([^\s",}]+)`)
+	devPodEvidenceOpaquePattern  = regexp.MustCompile(`(?i)\b(?:[A-Za-z0-9._~+/=-]{20,}|[A-Za-z0-9]{32,})\b`)
 	dockerContainerIDPattern     = regexp.MustCompile(`^[0-9a-f]{12,64}$`)
 )
 
@@ -35,10 +42,14 @@ func logDevPodFailureEvidence(t *testing.T, ctx context.Context, isolation devPo
 	sections := collectDevPodFailureEvidence(
 		ctx,
 		func(ctx context.Context, command string, argv ...string) ([]byte, error) {
-			return runDevPodCommand(ctx, isolation, command, argv...)
+			limit := devPodEvidenceSectionLimit
+			if command == "list" {
+				limit = devPodEvidenceWorkspaceListLimit
+			}
+			return runBoundedLifecycleCommand(ctx, limit, isolation.Environment(), "devpod", isolation.CommandArgs(command, argv...)...)
 		},
 		func(ctx context.Context, command string, argv ...string) ([]byte, error) {
-			return runLifecycleCommand(ctx, nil, "docker", append([]string{command}, argv...)...)
+			return runBoundedLifecycleCommand(ctx, devPodEvidenceSectionLimit, nil, "docker", append([]string{command}, argv...)...)
 		},
 	)
 	remaining := devPodEvidenceTotalLimit
@@ -47,7 +58,11 @@ func logDevPodFailureEvidence(t *testing.T, ctx context.Context, isolation devPo
 			t.Log("DevPod failure evidence truncated at 64 KiB")
 			return
 		}
-		body := boundedRedactedDiagnostic(section.output, min(devPodEvidenceSectionLimit, remaining))
+		limit := devPodEvidenceSectionLimit
+		if remaining < limit {
+			limit = remaining
+		}
+		body := boundedRedactedDiagnostic(section.output, limit)
 		remaining -= len(body)
 		t.Logf("DevPod failure evidence %s (command error: %v):\n%s", section.name, section.err, body)
 	}
@@ -167,12 +182,91 @@ func runBoundedDiagnosticCommand(
 	return run(commandCtx, command, argv...)
 }
 
+func runBoundedLifecycleCommand(
+	ctx context.Context,
+	limit int,
+	environment []string,
+	executable string,
+	argv ...string,
+) ([]byte, error) {
+	commandCtx, cancel := context.WithTimeout(ctx, 15*time.Second)
+	defer cancel()
+	command := exec.CommandContext(commandCtx, executable, argv...)
+	command.Env = mergeCommandEnvironment(os.Environ(), environment)
+	var output boundedTailBuffer
+	output.limit = limit
+	stdout, err := command.StdoutPipe()
+	if err != nil {
+		return nil, err
+	}
+	stderr, err := command.StderrPipe()
+	if err != nil {
+		return nil, err
+	}
+	if err := command.Start(); err != nil {
+		return nil, err
+	}
+	var copyErr error
+	var copyMu sync.Mutex
+	copyStream := func(reader io.Reader) {
+		if _, err := io.Copy(&output, reader); err != nil {
+			copyMu.Lock()
+			if copyErr == nil {
+				copyErr = err
+			}
+			copyMu.Unlock()
+		}
+	}
+	done := make(chan struct{}, 2)
+	go func() {
+		copyStream(stdout)
+		done <- struct{}{}
+	}()
+	go func() {
+		copyStream(stderr)
+		done <- struct{}{}
+	}()
+	<-done
+	<-done
+	waitErr := command.Wait()
+	if copyErr != nil {
+		return output.Bytes(), copyErr
+	}
+	return output.Bytes(), waitErr
+}
+
+type boundedTailBuffer struct {
+	mu    sync.Mutex
+	limit int
+	buf   []byte
+}
+
+func (b *boundedTailBuffer) Write(p []byte) (int, error) {
+	if b.limit <= 0 || len(p) == 0 {
+		return len(p), nil
+	}
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	b.buf = append(b.buf, p...)
+	if len(b.buf) > b.limit {
+		b.buf = append([]byte(nil), b.buf[len(b.buf)-b.limit:]...)
+	}
+	return len(p), nil
+}
+
+func (b *boundedTailBuffer) Bytes() []byte {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return append([]byte(nil), b.buf...)
+}
+
 func boundedRedactedDiagnostic(output []byte, limit int) string {
 	if limit <= 0 {
 		return ""
 	}
 	text := devPodEvidenceControlPattern.ReplaceAllString(string(output), "")
 	text = devPodEvidenceSecretPattern.ReplaceAllString(text, `${1}${2}[REDACTED]`)
+	text = devPodEvidenceOpaquePattern.ReplaceAllString(text, "[REDACTED]")
 	if len(text) <= limit {
 		return text
 	}
@@ -227,16 +321,36 @@ func TestCollectDevPodFailureEvidenceUsesExactWorkspaceLabels(t *testing.T) {
 }
 
 func TestBoundedRedactedDiagnostic(t *testing.T) {
-	input := []byte("\x1b[31mstart\x1b[0m token=do-not-log\n" + strings.Repeat("x", 128))
+	input := []byte("\x1b[31mstart\x1b[0m token=do-not-log\nghp_0123456789abcdefghijklmnopqrstuvwxyz\n" + strings.Repeat("tail ", 32))
 	got := boundedRedactedDiagnostic(input, 80)
 	if len(got) != 80 {
 		t.Fatalf("bounded diagnostic length = %d, want 80", len(got))
 	}
-	if strings.Contains(got, "\x1b") || strings.Contains(got, "do-not-log") {
+	if strings.Contains(got, "\x1b") || strings.Contains(got, "do-not-log") || strings.Contains(got, "ghp_") {
 		t.Fatalf("diagnostic leaked controls or secret: %q", got)
 	}
 	if !strings.HasPrefix(got, "[truncated to final diagnostic bytes]\n") {
 		t.Fatalf("diagnostic omitted truncation marker: %q", got)
+	}
+}
+
+func TestRunBoundedLifecycleCommandBoundsCollection(t *testing.T) {
+	root := t.TempDir()
+	executable := filepath.Join(root, "bounded")
+	writeTestExecutable(t, executable, `#!/bin/sh
+printf '%s\n' "$(printf 'A%.0s' $(seq 1 2000))"
+printf '%s\n' "$(printf 'B%.0s' $(seq 1 2000))" >&2
+exit 1
+`)
+	output, err := runBoundedLifecycleCommand(context.Background(), 256, nil, executable)
+	if err == nil {
+		t.Fatal("bounded command error = nil")
+	}
+	if len(output) > 256 {
+		t.Fatalf("bounded command output length = %d, want <= 256", len(output))
+	}
+	if len(output) == 0 {
+		t.Fatal("bounded command output empty")
 	}
 }
 

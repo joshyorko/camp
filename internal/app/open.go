@@ -9,11 +9,13 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strconv"
 	"strings"
 	"syscall"
 	"time"
 	"unicode"
+	"unicode/utf8"
 
 	devpodadapter "github.com/joshyorko/camp/internal/adapters/devpod"
 	"github.com/joshyorko/camp/internal/adapters/hydration"
@@ -30,12 +32,13 @@ import (
 )
 
 var (
-	ErrOpenDependencies      = errors.New("open dependencies are incomplete")
-	ErrRecoveryRequired      = errors.New("session requires recovery before entry")
-	ErrOpenRecoveryObjective = errors.New("open recovery objective is missing or unsupported")
-	ErrOpenReadOnlyLease     = errors.New("read-only session cannot reconcile a writer lease")
-	ErrOpenSessionMismatch   = errors.New("open request does not match the selected session")
-	ErrOpenIDEUnsupported    = errors.New("IDE entry is not implemented")
+	ErrOpenDependencies              = errors.New("open dependencies are incomplete")
+	ErrRecoveryRequired              = errors.New("session requires recovery before entry")
+	ErrOpenRecoveryObjective         = errors.New("open recovery objective is missing or unsupported")
+	ErrOpenReadOnlyLease             = errors.New("read-only session cannot reconcile a writer lease")
+	ErrOpenSessionMismatch           = errors.New("open request does not match the selected session")
+	ErrOpenIDEUnsupported            = errors.New("IDE entry is not implemented")
+	workspaceOpaqueCredentialPattern = regexp.MustCompile(`(?i)\b(?:[A-Za-z0-9._~+/=-]{20,}|[A-Za-z0-9]{32,})\b`)
 )
 
 const (
@@ -522,12 +525,12 @@ func (o *Open) revalidateWorkspaceSource(ctx context.Context, input openWorkspac
 }
 
 func (o *Open) waitForWorkspaceReady(ctx context.Context, devpodContext, workspaceID, provider string) (devpodadapter.WorkspaceStatus, error) {
-	status, err := o.deps.DevPod.StatusInContext(ctx, devpodContext, workspaceID)
+	waitCtx, cancel := context.WithTimeout(ctx, workspaceReadyTimeout)
+	defer cancel()
+	status, err := o.deps.DevPod.StatusInContext(waitCtx, devpodContext, workspaceID)
 	if err != nil || !matchingWorkspaceStatus(status, devpodContext, workspaceID, provider) || status.State != devpodadapter.StateBusy {
 		return status, err
 	}
-	waitCtx, cancel := context.WithTimeout(ctx, workspaceReadyTimeout)
-	defer cancel()
 	ticker := o.deps.Clock.NewTicker(workspaceReadyPoll)
 	defer ticker.Stop()
 	for status.State == devpodadapter.StateBusy {
@@ -1263,7 +1266,7 @@ func (o *Open) continueOpeningFromMaterialization(ctx context.Context, snapshot 
 	if err != nil {
 		if upResult.ExitCode > 0 {
 			if settleErr := o.settleKnownWorkspaceUpFailure(ctx, intent, upInput, upResult); settleErr != nil {
-				return OpenResult{}, errors.Join(err, settleErr)
+				return OpenResult{}, errors.Join(workspaceUpFailureError(err, upResult), settleErr)
 			}
 		}
 		return OpenResult{}, workspaceUpFailureError(err, upResult)
@@ -1325,38 +1328,126 @@ func workspaceUpFailureError(cause error, result ports.Result) error {
 }
 
 func workspaceUpDiagnosticText(result ports.Result) string {
-	diagnostic := strings.TrimSpace(sanitizeWorkspaceUpDiagnostic(result.Stderr))
+	diagnostic, omitted := boundedWorkspaceUpDiagnostic(result.Stderr)
 	if diagnostic == "" {
-		diagnostic = strings.TrimSpace(sanitizeWorkspaceUpDiagnostic(result.Stdout))
-	}
-	if len(diagnostic) > workspaceUpDiagnostic {
-		diagnostic = "[earlier DevPod output omitted]\n" +
-			strings.ToValidUTF8(diagnostic[len(diagnostic)-workspaceUpDiagnostic:], "\uFFFD")
+		diagnostic, omitted = boundedWorkspaceUpDiagnostic(result.Stdout)
 	}
 	if diagnostic == "" {
 		return ""
 	}
-	return diagnostic
+	if omitted {
+		diagnostic = "[earlier DevPod output omitted]\n" + diagnostic
+	}
+	return limitWorkspaceUpDiagnosticRendered(diagnostic)
+}
+
+func boundedWorkspaceUpDiagnostic(raw []byte) (string, bool) {
+	omitted := false
+	if len(raw) > workspaceUpDiagnostic {
+		raw = raw[len(raw)-workspaceUpDiagnostic:]
+		omitted = true
+	}
+	return strings.TrimSpace(sanitizeWorkspaceUpDiagnostic(raw)), omitted
+}
+
+func limitWorkspaceUpDiagnosticRendered(rendered string) string {
+	if len(rendered) <= workspaceUpDiagnostic {
+		return rendered
+	}
+	const note = "[earlier DevPod output omitted]\n"
+	allowance := workspaceUpDiagnostic - len(note)
+	if allowance < 0 {
+		allowance = 0
+	}
+	rendered = suffixAtRuneBoundary(rendered, allowance)
+	if len(rendered) > allowance {
+		rendered = suffixAtRuneBoundary(rendered, allowance)
+	}
+	return note + rendered
+}
+
+func suffixAtRuneBoundary(text string, maxBytes int) string {
+	if maxBytes <= 0 || len(text) <= maxBytes {
+		return text
+	}
+	start := len(text) - maxBytes
+	for start < len(text) && !utf8.RuneStart(text[start]) {
+		start++
+	}
+	return text[start:]
 }
 
 func sanitizeWorkspaceUpDiagnostic(raw []byte) string {
 	var sanitized strings.Builder
-	for _, value := range strings.ToValidUTF8(string(raw), "\uFFFD") {
-		if value == '\n' || value == '\t' {
-			sanitized.WriteRune(value)
+	for _, line := range strings.SplitAfter(strings.ToValidUTF8(string(raw), "\uFFFD"), "\n") {
+		if line == "" {
 			continue
 		}
-		if unicode.IsControl(value) {
-			if value <= 0xff {
-				fmt.Fprintf(&sanitized, `\x%02x`, value)
-			} else {
-				fmt.Fprintf(&sanitized, `\u%04x`, value)
+		hasTrailingNewline := strings.HasSuffix(line, "\n")
+		line = strings.TrimSuffix(line, "\n")
+		line = redactWorkspaceUpDiagnosticLine(line)
+		for _, value := range line {
+			if value == '\t' {
+				sanitized.WriteRune(value)
+				continue
 			}
-			continue
+			if unicode.IsControl(value) || unicode.In(value, unicode.Cf) {
+				if value <= 0xff {
+					fmt.Fprintf(&sanitized, `\x%02x`, value)
+				} else if value <= 0xffff {
+					fmt.Fprintf(&sanitized, `\u%04x`, value)
+				} else {
+					fmt.Fprintf(&sanitized, `\U%08x`, value)
+				}
+				continue
+			}
+			sanitized.WriteRune(value)
 		}
-		sanitized.WriteRune(value)
+		if hasTrailingNewline {
+			sanitized.WriteByte('\n')
+		}
 	}
 	return sanitized.String()
+}
+
+func redactWorkspaceUpDiagnosticLine(line string) string {
+	trimmed := strings.TrimSpace(line)
+	if trimmed == "" {
+		return trimmed
+	}
+	if key, _, ok := strings.Cut(trimmed, "="); ok && diagnosticKeyLooksSecret(key) {
+		return strings.TrimSpace(key) + "=[redacted]"
+	}
+	if key, _, ok := strings.Cut(trimmed, ":"); ok && diagnosticKeyLooksSecret(key) {
+		return strings.TrimSpace(key) + ": [redacted]"
+	}
+	if redacted := workspaceOpaqueCredentialPattern.ReplaceAllString(trimmed, "[redacted DevPod secret]"); redacted != trimmed {
+		return redacted
+	}
+	if diagnosticContainsSecretMarker(trimmed) {
+		return "[redacted DevPod secret]"
+	}
+	return trimmed
+}
+
+func diagnosticKeyLooksSecret(key string) bool {
+	key = strings.ToLower(strings.TrimSpace(strings.TrimPrefix(key, "export ")))
+	for _, marker := range []string{"secret", "token", "password", "passphrase", "credential", "api_key", "api-key", "apikey", "access_key", "access-key", "private_key", "private-key", "client_secret", "client-secret"} {
+		if strings.Contains(key, marker) {
+			return true
+		}
+	}
+	return false
+}
+
+func diagnosticContainsSecretMarker(line string) bool {
+	lower := strings.ToLower(line)
+	for _, marker := range []string{"secret", "token", "password", "passphrase", "credential", "api_key", "api-key", "apikey", "access_key", "access-key", "private_key", "private-key", "client_secret", "client-secret"} {
+		if strings.Contains(lower, marker) {
+			return true
+		}
+	}
+	return false
 }
 
 func (o *Open) reenter(ctx context.Context, snapshot domain.JournalSnapshot, request OpenRequest) (OpenResult, error) {

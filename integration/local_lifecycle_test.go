@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"math"
 	"net"
 	"os"
 	"os/exec"
@@ -334,7 +335,11 @@ func writeLifecycleFixture(t *testing.T, source string) {
 	if err := os.WriteFile(filepath.Join(devcontainer, "devcontainer.json"), lifecycleDevcontainer, 0o644); err != nil {
 		t.Fatal(err)
 	}
-	lifecycleDockerfile := "ARG BASE_IMAGE\nFROM ${BASE_IMAGE}\nRUN printf 'podman:100000:65536\\n' > /etc/subuid && printf 'podman:100000:65536\\n' > /etc/subgid\nRUN mkdir -p /etc/containers/registries.conf.d && printf '[[registry]]\\nlocation = \"127.0.0.1\"\\ninsecure = true\\n' > /etc/containers/registries.conf.d/camp-loopback.conf\n"
+	subordinateBase, err := lifecycleSubordinateBase(uint64(os.Getuid()), uint64(os.Getgid()))
+	if err != nil {
+		t.Fatal(err)
+	}
+	lifecycleDockerfile := fmt.Sprintf("ARG BASE_IMAGE\nFROM ${BASE_IMAGE}\nRUN printf 'podman:%d:65536\\n' > /etc/subuid && printf 'podman:%d:65536\\n' > /etc/subgid\nRUN mkdir -p /etc/containers/registries.conf.d && printf '[[registry]]\\nlocation = \"127.0.0.1\"\\ninsecure = true\\n' > /etc/containers/registries.conf.d/camp-loopback.conf\n", subordinateBase, subordinateBase)
 	if err := os.WriteFile(filepath.Join(devcontainer, "Dockerfile"), []byte(lifecycleDockerfile), 0o644); err != nil {
 		t.Fatal(err)
 	}
@@ -369,6 +374,51 @@ func writeLifecycleFixture(t *testing.T, source string) {
 	}
 }
 
+func lifecycleSubordinateBase(hostUID, hostGID uint64) (uint32, error) {
+	const (
+		defaultBase uint64 = 100000
+		rangeSize   uint64 = 65536
+	)
+	maxBase := uint64(math.MaxUint32) - rangeSize + 1
+	candidates := []uint64{defaultBase}
+	high := max(hostUID, hostGID)
+	if high < maxBase {
+		candidates = append(candidates, high+1)
+	}
+	low := min(hostUID, hostGID)
+	if low >= rangeSize {
+		candidates = append(candidates, low-rangeSize)
+	}
+	for _, candidate := range candidates {
+		if candidate > maxBase {
+			continue
+		}
+		if intervalContains(candidate, rangeSize, hostUID) || intervalContains(candidate, rangeSize, hostGID) {
+			continue
+		}
+		return uint32(candidate), nil
+	}
+	return 0, fmt.Errorf("no subordinate UID/GID range fits under uint32 max for host uid=%d gid=%d", hostUID, hostGID)
+}
+
+func intervalContains(base, size, value uint64) bool {
+	return value >= base && value < base+size
+}
+
+func max(a, b uint64) uint64 {
+	if a > b {
+		return a
+	}
+	return b
+}
+
+func min(a, b uint64) uint64 {
+	if a < b {
+		return a
+	}
+	return b
+}
+
 func TestWriteLifecycleFixturePinsLightweightContainerEngineDevcontainer(t *testing.T) {
 	source := t.TempDir()
 	writeLifecycleFixture(t, source)
@@ -398,7 +448,11 @@ func TestWriteLifecycleFixturePinsLightweightContainerEngineDevcontainer(t *test
 	if err != nil {
 		t.Fatalf("read lifecycle Dockerfile: %v", err)
 	}
-	if want := "ARG BASE_IMAGE\nFROM ${BASE_IMAGE}\nRUN printf 'podman:100000:65536\\n' > /etc/subuid && printf 'podman:100000:65536\\n' > /etc/subgid\nRUN mkdir -p /etc/containers/registries.conf.d && printf '[[registry]]\\nlocation = \"127.0.0.1\"\\ninsecure = true\\n' > /etc/containers/registries.conf.d/camp-loopback.conf\n"; string(dockerfile) != want {
+	wantBase, err := lifecycleSubordinateBase(uint64(os.Getuid()), uint64(os.Getgid()))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := fmt.Sprintf("ARG BASE_IMAGE\nFROM ${BASE_IMAGE}\nRUN printf 'podman:%d:65536\\n' > /etc/subuid && printf 'podman:%d:65536\\n' > /etc/subgid\nRUN mkdir -p /etc/containers/registries.conf.d && printf '[[registry]]\\nlocation = \"127.0.0.1\"\\ninsecure = true\\n' > /etc/containers/registries.conf.d/camp-loopback.conf\n", wantBase, wantBase); string(dockerfile) != want {
 		t.Fatalf("lifecycle Dockerfile = %q, want %q", dockerfile, want)
 	}
 }
@@ -419,7 +473,7 @@ func lockedLifecycleImage(t *testing.T) string {
 
 func shellQuote(value string) string { return "'" + strings.ReplaceAll(value, "'", "'\\''") + "'" }
 
-func TestRunLifecycleOpenRetriesOnlyExactAmbiguousOutcomeOnce(t *testing.T) {
+func TestRunLifecycleOpenRetriesOnlyLifecycleFailedOutcomeOnce(t *testing.T) {
 	root := t.TempDir()
 	countPath := filepath.Join(root, "count")
 	executable := filepath.Join(root, "camp")
@@ -429,7 +483,7 @@ if test -f "$CAMP_TEST_COUNT"; then count=$(cat "$CAMP_TEST_COUNT"); fi
 count=$((count + 1))
 printf '%s\n' "$count" > "$CAMP_TEST_COUNT"
 if test "$count" -eq 1; then
-  printf '%s\n' 'object mutation outcome is ambiguous'
+  printf '%s\n' '{"schemaVersion":1,"kind":"error","error":{"code":"lifecycle_ambiguous","message":"object mutation outcome is ambiguous"}}'
   exit 1
 fi
 printf '%s\n' '{"workspaceId":"camp-test"}'
@@ -458,7 +512,7 @@ count=0
 if test -f "$CAMP_TEST_COUNT"; then count=$(cat "$CAMP_TEST_COUNT"); fi
 count=$((count + 1))
 printf '%s\n' "$count" > "$CAMP_TEST_COUNT"
-printf '%s\n' 'provider authentication failed'
+printf '%s\n' '{"schemaVersion":1,"kind":"error","error":{"code":"workspace_up_failed","message":"provider authentication failed: object mutation outcome is ambiguous"}}'
 exit 1
 `)
 	if _, err := runLifecycleOpenWithAmbiguousRetryAt(
@@ -491,9 +545,9 @@ if test -f "$CAMP_TEST_COUNT"; then count=$(cat "$CAMP_TEST_COUNT"); fi
 count=$((count + 1))
 printf '%s\n' "$count" > "$CAMP_TEST_COUNT"
 if test "$count" -eq 1; then
-  printf '%s\n' 'first DevPod diagnostic: object mutation outcome is ambiguous'
+  printf '%s\n' '{"schemaVersion":1,"kind":"error","error":{"code":"workspace_up_failed","message":"first DevPod diagnostic: object mutation outcome is ambiguous"}}'
 else
-  printf '%s\n' 'second recovery failure'
+  printf '%s\n' '{"schemaVersion":1,"kind":"error","error":{"code":"workspace_up_failed","message":"second recovery failure"}}'
 fi
 exit 1
 `)
@@ -505,9 +559,60 @@ exit 1
 		"--json",
 		"open",
 	)
-	if err == nil || !bytes.Contains(output, []byte("first DevPod diagnostic")) || !bytes.Contains(output, []byte("second recovery failure")) {
-		t.Fatalf("retry output = %q, error = %v; want both attempt diagnostics", output, err)
+	if err == nil || !bytes.Contains(output, []byte("first DevPod diagnostic")) || bytes.Contains(output, []byte("second recovery failure")) {
+		t.Fatalf("retry output = %q, error = %v; want one non-retried attempt", output, err)
 	}
+	count, err := os.ReadFile(countPath)
+	if err != nil || strings.TrimSpace(string(count)) != "1" {
+		t.Fatalf("retry count = %q, %v; want 1", count, err)
+	}
+}
+
+func TestLifecycleSubordinateBaseAvoidsHostUidAndGidOverlap(t *testing.T) {
+	got, err := lifecycleSubordinateBase(42, 77)
+	if err != nil || got != 100000 {
+		t.Fatalf("disjoint base = %d, %v; want 100000", got, err)
+	}
+	got, err = lifecycleSubordinateBase(100000, 77)
+	if err != nil || got != 100001 {
+		t.Fatalf("overlap base for host UID = %d, %v; want 100001", got, err)
+	}
+	got, err = lifecycleSubordinateBase(42, 100000)
+	if err != nil || got != 100001 {
+		t.Fatalf("overlap base for host GID = %d, %v; want 100001", got, err)
+	}
+}
+
+func TestLifecycleSubordinateBaseNearUidCeilingUsesBoundedArithmetic(t *testing.T) {
+	const maxUint32 = math.MaxUint32
+	got, err := lifecycleSubordinateBase(maxUint32-1, 77)
+	if err != nil || got != 100000 {
+		t.Fatalf("near-ceiling disjoint base = %d, %v; want 100000", got, err)
+	}
+	got, err = lifecycleSubordinateBase(maxUint32-1, 100000)
+	if err != nil || got != 34464 {
+		t.Fatalf("near-ceiling fallback base = %d, %v; want 34464", got, err)
+	}
+}
+
+type lifecycleJSONFailureEnvelope struct {
+	SchemaVersion int    `json:"schemaVersion"`
+	Kind          string `json:"kind"`
+	Error         struct {
+		Code    string `json:"code"`
+		Message string `json:"message"`
+	} `json:"error"`
+}
+
+func parseLifecycleJSONFailure(output []byte) (lifecycleJSONFailureEnvelope, bool) {
+	var envelope lifecycleJSONFailureEnvelope
+	if err := json.Unmarshal(output, &envelope); err != nil {
+		return lifecycleJSONFailureEnvelope{}, false
+	}
+	if envelope.Kind != "error" || envelope.Error.Code == "" {
+		return lifecycleJSONFailureEnvelope{}, false
+	}
+	return envelope, true
 }
 
 func mustRunLifecycle(t *testing.T, ctx context.Context, environment []string, executable string, argv ...string) []byte {
@@ -530,7 +635,11 @@ func mustRunLifecycleAt(t *testing.T, ctx context.Context, environment []string,
 
 func runLifecycleOpenWithAmbiguousRetryAt(ctx context.Context, environment []string, directory, executable string, argv ...string) ([]byte, error) {
 	output, err := runLifecycleCommandAt(ctx, environment, directory, executable, argv...)
-	if err == nil || !bytes.Contains(output, []byte(ports.ErrAmbiguous.Error())) {
+	if err == nil {
+		return output, err
+	}
+	failure, ok := parseLifecycleJSONFailure(output)
+	if !ok || failure.Error.Code != "lifecycle_ambiguous" {
 		return output, err
 	}
 	retryOutput, retryErr := runLifecycleCommandAt(ctx, environment, directory, executable, argv...)

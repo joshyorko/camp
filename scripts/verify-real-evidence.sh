@@ -40,6 +40,11 @@ run_named() {
   fi
 }
 
+retryable_crash_matrix_setup_failure() {
+  local output="$1"
+  grep -qFx '{"retry":"crash-matrix-bootstrap"}' "${output}"
+}
+
 discover() {
   local listed
   listed="$(go test -list "${required}" "${package}")"
@@ -70,10 +75,40 @@ run_minio() {
 
 run_lifecycle() {
   CAMP_TEST_REAL_LIFECYCLE=1 run_named TestLocalLifecycleVertical 60m
-  if ! CAMP_TEST_REAL_LIFECYCLE=1 run_named TestLocalLifecycleCrashMatrix 120m; then
-    printf 'crash-matrix gate failed; retrying once with fresh test-owned state\n' >&2
-    CAMP_TEST_REAL_LIFECYCLE=1 run_named TestLocalLifecycleCrashMatrix 120m
+  local output
+  output="$(mktemp "${TMPDIR:-/tmp}/camp-real-evidence.XXXXXX")"
+  cleanup_lifecycle_receipt() {
+    trap - RETURN INT TERM
+    if [[ -f "${output:-}" ]]; then
+      rm -f -- "${output}"
+    fi
+  }
+  trap cleanup_lifecycle_receipt RETURN
+  trap 'cleanup_lifecycle_receipt; exit 130' INT
+  trap 'cleanup_lifecycle_receipt; exit 143' TERM
+  if CAMP_TEST_REAL_LIFECYCLE=1 go test -v "${package}" -run '^TestLocalLifecycleCrashMatrix$' -count=1 -timeout=120m | tee "${output}"; then
+    if grep -qE "(^|[[:space:]])SKIP|no tests to run" "${output}"; then
+      printf 'evidence gate TestLocalLifecycleCrashMatrix skipped or ran no tests\n' >&2
+      rm -f -- "${output}"
+      return 1
+    fi
+    if ! grep -q -- "--- PASS: TestLocalLifecycleCrashMatrix" "${output}"; then
+      printf 'evidence gate TestLocalLifecycleCrashMatrix produced no passing test receipt\n' >&2
+      rm -f -- "${output}"
+      return 1
+    fi
+    rm -f -- "${output}"
+    return 0
   fi
+  if retryable_crash_matrix_setup_failure "${output}"; then
+    printf 'crash-matrix setup failed in the retryable bootstrap phase; retrying once with fresh test-owned state\n' >&2
+    rm -f -- "${output}"
+    CAMP_TEST_REAL_LIFECYCLE=1 run_named TestLocalLifecycleCrashMatrix 120m
+    return 0
+  fi
+  cat "${output}" >&2
+  rm -f -- "${output}"
+  return 1
 }
 
 case "${mode}" in

@@ -133,8 +133,15 @@ Do not use Hauler v2.0.2's live `_catalog` response as proof that all direct reg
   calls `listen`. Every accepted, malformed, or identity-rejected request
   returns exactly one schema-v1 result envelope; failures use a typed receipt and
   the `rejected` result operation when no request operation could be decoded.
-  Diagnostics are normalized to valid UTF-8 before their byte cap is applied.
-  Protocol output is capped at 64 KiB and never contains archive bytes.
+  Workspace-up diagnostics bound raw DevPod output before sanitization, redact
+  unlabeled secret-like lines and bare credential-shaped values such as
+  `ghp_...`, and escape bidi/format controls before any surfaced truncation
+  note. Camp also enforces a final rendered 8 KiB cap after escaping. If
+  settlement of a failed `devpod up` also fails, Camp keeps the bounded
+  diagnostic evidence in the returned error alongside the settlement error.
+  Readiness polling starts its timeout before the first status probe and
+  reuses that context for every probe. Protocol output is capped at 64 KiB and
+  never contains archive bytes.
 - Remote activation distinguishes the source manifest identity from the local
   engine identity. The selected OCI manifest's config digest becomes the
   generated devcontainer image (`sha256:<config-digest>`). Before DevPod's

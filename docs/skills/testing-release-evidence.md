@@ -82,6 +82,11 @@ Before opening a pull request, copy every receipt label from
 `developer/verify_pr_receipt.py` fails before source gates when a label is
 missing, renamed, or empty. This includes candidate SHA-256 and real-tool
 evidence even when their truthful value is pending or unavailable.
+The receipt parser accepts bullet-prefixed labels only when the field text
+matches the template exactly after removing the expected prefix.
+`integration/local_lifecycle_test.go` now retries `camp --json open` only when
+the structured failure envelope reports `error.code == "lifecycle_ambiguous"`;
+matching prose in `error.message` alone is not retryable.
 
 This policy borrows two upstream patterns without inheriting their product
 claims:
@@ -368,6 +373,7 @@ receipt files can race package-level cleanup tests during `go test -race ./...`.
 Crash-cut polling reads forwarder evidence from the controller's XDG runtime
 root (`runtime/camp/<session>/*-forward.json`), not the durable session-data
 tree.
+Crash-matrix retries are receipt-driven: the gate only retries when `TestLocalLifecycleCrashMatrix` emits the exact post-cleanup JSON receipt `{"retry":"crash-matrix-bootstrap"}`. Assertion failures and cleanup failures do not emit that receipt and must fail the gate without a retry.
 The lifecycle harness writes an explicit devcontainer configuration using the
 digest-pinned Podman acceptance image from
 `tools.lock.yaml`; Camp's production Room fallback is unchanged.
@@ -380,13 +386,17 @@ Podman image's own command lets the container exit before agent injection.
 Run the workspace as the image's `podman` user; its default root user can make
 the bind-mounted source root-owned, blocking Camp source access and exact
 cleanup. DevPod updates that user to the host UID, so the fixture's minimal
-Dockerfile replaces the image's subordinate UID/GID ranges at build time; the
-image's original range begins at 1001 and overlaps that primary UID on GitHub's
-hosted runner. A lifecycle hook cannot perform this repair because it runs as
-the non-root remote user. Rootless Podman also defaults an unconfigured
-registry to HTTPS, so the fixture marks only `127.0.0.1` insecure in its
-registry configuration. That covers Camp's dynamic loopback-confined
-plain-HTTP endpoint for both harness commands and production image restore.
+Dockerfile selects a subordinate UID/GID base from bounded candidates that stay
+outside the current host UID and GID and keep the full 65,536-ID interval
+within the `uint32` ceiling, then rewrites `/etc/subuid` and `/etc/subgid` at
+build time.
+A lifecycle hook cannot perform this repair because it runs as the non-root
+remote user. Rootless Podman also defaults an unconfigured registry to HTTPS,
+so the fixture marks only `127.0.0.1` insecure in its registry configuration.
+That covers Camp's dynamic loopback-confined plain-HTTP endpoint for both
+harness commands and production image restore. The pre-pull only moves image
+acquisition ahead of the agent-injection deadline; it does not prove the gate
+is independent of registry or image-acquisition behavior.
 Before each file or MinIO lifecycle scenario opens Camp's workspace,
 the harness creates one unrelated workspace in that same private context. Its
 scenario ledger recovers exact Camp workspace IDs, process identities,
