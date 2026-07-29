@@ -141,6 +141,8 @@ jobs:
         if: github.event_name == 'pull_request'
         run: python3 developer/verify_pr_receipt.py "$GITHUB_EVENT_PATH"
       - name: Run RCC source gates
+        env:
+          CONTAINER_ENGINE: docker
         run: ./developer/rccw run -r developer/toolkit.yaml --dev -t test
       - name: Upload RCC source evidence
         if: always()

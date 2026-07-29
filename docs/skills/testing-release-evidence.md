@@ -244,6 +244,11 @@ options, including `--sort=name`; BusyBox `tar` is insufficient. A packaging
 failure at that option is an environment prerequisite failure, not evidence of
 an archive-content defect. Verify `tar --version` before interpreting direct,
 RCC `test`, or release-package results.
+On GitHub-hosted runners, both the native packaging job and the RCC source-gate
+step set `CONTAINER_ENGINE=docker`. Leaving the RCC step on the fixture's local
+Podman default can fail every packaging invocation with
+`crun: unknown version specified` even while the same candidate passes the
+runner's Docker-backed packaging job.
 
 `robotKubernetes` is a protected, explicitly authorized evidence task. It
 requires `CAMP_KUBERNETES_EVIDENCE=1` and the `TestKubernetesLifecycleVertical`

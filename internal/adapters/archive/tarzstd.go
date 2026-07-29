@@ -144,7 +144,15 @@ func (a *TarZstd) Create(ctx context.Context, root, destination string) (Archive
 			cleanup()
 			return ArchiveInfo{}, err
 		}
-		header, err := tar.FileInfoHeader(info, entry.linkTarget)
+		linkTarget := entry.linkTarget
+		if entry.mode&os.ModeSymlink != 0 {
+			linkTarget, err = archiveSourceLink(canonicalRoot, entry.name, entry.linkTarget)
+			if err != nil {
+				cleanup()
+				return ArchiveInfo{}, fmt.Errorf("symlink %q target %q: %w", entry.name, entry.linkTarget, err)
+			}
+		}
+		header, err := tar.FileInfoHeader(info, linkTarget)
 		if err != nil {
 			cleanup()
 			return ArchiveInfo{}, err
@@ -655,7 +663,7 @@ func inventory(ctx context.Context, root string) ([]sourceEntry, error) {
 		}
 		if inspected.mode&os.ModeSymlink != 0 {
 			if err := validateSourceLink(root, relative, inspected.linkTarget); err != nil {
-				return err
+				return fmt.Errorf("symlink %q target %q: %w", filepath.ToSlash(relative), inspected.linkTarget, err)
 			}
 		} else if !inspected.mode.IsRegular() && !inspected.mode.IsDir() {
 			return fmt.Errorf("special file %q: %w", relative, ErrUnsafeArchive)
@@ -722,7 +730,7 @@ func canonicalRoot(root string) (string, error) {
 }
 
 func safeArchiveName(name string) (string, error) {
-	if name == "" || name == "." || len(name) > 4096 || strings.ContainsAny(name, "\\\x00") || filepath.IsAbs(name) || filepath.VolumeName(name) != "" {
+	if name == "" || name == "." || len(name) > 4096 || strings.ContainsAny(name, "\\\x00") || filepath.IsAbs(name) || filepath.VolumeName(name) != "" || hasDrivePrefix(name) {
 		return "", ErrUnsafeArchive
 	}
 	clean := filepath.ToSlash(filepath.Clean(filepath.FromSlash(name)))
@@ -733,18 +741,38 @@ func safeArchiveName(name string) (string, error) {
 }
 
 func validateSourceLink(root, name, target string) error {
-	if target == "" || filepath.IsAbs(target) || strings.ContainsAny(target, "\\\x00") {
-		return ErrUnsafeArchive
+	_, err := archiveSourceLink(root, name, target)
+	return err
+}
+
+func archiveSourceLink(root, name, target string) (string, error) {
+	if target == "" || strings.ContainsAny(target, "\\\x00") || hasDrivePrefix(target) {
+		return "", ErrUnsafeArchive
+	}
+	if filepath.IsAbs(target) {
+		clean := filepath.Clean(target)
+		if clean != target || !within(root, clean) {
+			return "", ErrUnsafeArchive
+		}
+		relative, err := filepath.Rel(filepath.Join(root, filepath.Dir(filepath.FromSlash(name))), clean)
+		if err != nil {
+			return "", ErrUnsafeArchive
+		}
+		return filepath.ToSlash(relative), nil
 	}
 	resolved := filepath.Clean(filepath.Join(root, filepath.Dir(filepath.FromSlash(name)), target))
 	if !within(root, resolved) {
-		return ErrUnsafeArchive
+		return "", ErrUnsafeArchive
 	}
-	return nil
+	return target, nil
+}
+
+func hasDrivePrefix(path string) bool {
+	return len(path) >= 2 && ((path[0] >= 'A' && path[0] <= 'Z') || (path[0] >= 'a' && path[0] <= 'z')) && path[1] == ':'
 }
 
 func validateLink(stage, name, target string) error {
-	if target == "" || filepath.IsAbs(target) || strings.ContainsAny(target, "\\\x00") {
+	if target == "" || filepath.IsAbs(target) || strings.ContainsAny(target, "\\\x00") || hasDrivePrefix(target) {
 		return ErrUnsafeArchive
 	}
 	resolved := filepath.Clean(filepath.Join(stage, filepath.Dir(filepath.FromSlash(name)), target))

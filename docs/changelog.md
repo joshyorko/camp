@@ -41,6 +41,9 @@
 
 ### Portability and Safety
 
+- preserve clean absolute symlinks that resolve inside a remote snapshot by
+  rebasing them to equivalent relative archive links, while naming and
+  rejecting ambiguous, drive-qualified, or out-of-root targets
 - harden CampKit export, IDE launch, MinIO portability, and real-evidence
   discovery so invalid or incomplete inputs fail before production effects
 - capture only OCI images explicitly pushed through `CAMP_REGISTRY`; derive the

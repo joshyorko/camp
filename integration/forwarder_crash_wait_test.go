@@ -32,6 +32,46 @@ func TestNewCrashOpenCommandRunsFromCampSource(t *testing.T) {
 	}
 }
 
+func TestCleanupCrashSessionRunsFromCampSource(t *testing.T) {
+	root := t.TempDir()
+	source := filepath.Join(root, "camp source")
+	if err := os.Mkdir(source, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	probe := filepath.Join(root, "print-working-directory")
+	if err := os.WriteFile(probe, []byte("#!/bin/sh\npwd\n"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+
+	output, err := cleanupCrashSession(context.Background(), nil, source, probe)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := strings.TrimSpace(string(output)); got != source {
+		t.Fatalf("crash cleanup working directory = %q, want %q", got, source)
+	}
+}
+
+func TestCrashSessionNeedsCleanupClose(t *testing.T) {
+	tests := []struct {
+		name        string
+		initialized bool
+		closed      bool
+		want        bool
+	}{
+		{name: "not initialized", initialized: false, closed: false, want: false},
+		{name: "active", initialized: true, closed: false, want: true},
+		{name: "already closed", initialized: true, closed: true, want: false},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			if got := crashSessionNeedsCleanupClose(test.initialized, test.closed); got != test.want {
+				t.Fatalf("crashSessionNeedsCleanupClose(%t, %t) = %t, want %t", test.initialized, test.closed, got, test.want)
+			}
+		})
+	}
+}
+
 func TestWaitForForwarderEvidenceReportsOpeningExit(t *testing.T) {
 	openingDone := make(chan error, 1)
 	openingDone <- errors.New("open failed")

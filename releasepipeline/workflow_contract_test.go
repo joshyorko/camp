@@ -48,6 +48,16 @@ func TestCIPackagingUsesDockerForNativePackageLifecycle(t *testing.T) {
 	}
 }
 
+func TestCIRCCSourceGatesUseDockerForPackageLifecycle(t *testing.T) {
+	workflow := readWorkflow(t, "ci.yml")
+	document := parseWorkflow(t, workflow)
+	step := findStepByName(t, document, "rcc-test", "Run RCC source gates")
+	env := step["env"].(map[string]any)
+	if env["CONTAINER_ENGINE"] != "docker" {
+		t.Fatalf("RCC source gate container engine = %#v, want docker", env["CONTAINER_ENGINE"])
+	}
+}
+
 func TestCIAddsRCCParityWithoutCachingPrivateRuntimeHomes(t *testing.T) {
 	workflow := readWorkflow(t, "ci.yml")
 	requireContains(t, workflow,
