@@ -32,6 +32,26 @@ func TestNewCrashOpenCommandRunsFromCampSource(t *testing.T) {
 	}
 }
 
+func TestCleanupCrashSessionRunsFromCampSource(t *testing.T) {
+	root := t.TempDir()
+	source := filepath.Join(root, "camp source")
+	if err := os.Mkdir(source, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	probe := filepath.Join(root, "print-working-directory")
+	if err := os.WriteFile(probe, []byte("#!/bin/sh\npwd\n"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+
+	output, err := cleanupCrashSession(context.Background(), nil, source, probe)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := strings.TrimSpace(string(output)); got != source {
+		t.Fatalf("crash cleanup working directory = %q, want %q", got, source)
+	}
+}
+
 func TestWaitForForwarderEvidenceReportsOpeningExit(t *testing.T) {
 	openingDone := make(chan error, 1)
 	openingDone <- errors.New("open failed")
