@@ -194,6 +194,14 @@ status and logs when available, followed by Docker state, logs, and recent
 events selected only with the workspace's `dev.containers.id` label. Bound and
 redact that output. Treat it as evidence for the next fix; do not infer a
 behavioral cause from exit status 128 alone.
+The generated Room fallback separates container startup identity from session
+identity: `containerUser` is `root` so the image entrypoint can finish privileged
+initialization, while `remoteUser` remains `vscode` for DevPod sessions. Do not
+start the entrypoint as `vscode` while DevPod's default remote-user UID update is
+enabled: on a host whose UID differs from the image, DevPod can rewrite
+`/etc/passwd` while the entrypoint is still running under the old numeric UID,
+causing later `sudo` calls to fail with `you do not exist in the passwd
+database`.
 The release-evidence baseline's `qualifiedHistoricalRuns` starts empty:
 repository tests cannot populate it or claim hosted parity. Do not remove the
 direct jobs until two consecutive, actual complete PR/master runs have passed
