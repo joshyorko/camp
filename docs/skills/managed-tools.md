@@ -23,6 +23,21 @@ On every reuse, Camp rechecks the single-link identity marker, locked repository
 
 For a DevPod or Hauler update, review the upstream repository, tag, and commit together; update both Linux amd64 and arm64 assets; independently calculate each asset SHA-256; and rerun the focused and race tests plus real binaries on both architectures. Review raw-versus-archive shape before changing the installer. A checksum committed beside a mutable release source proves that retrieved bytes match the reviewed pin; it is not publisher-authenticity evidence by itself. A skipped real-binary or architecture gate is not proof.
 
+Patchraptor uses the inherited Renovate managers for Go modules and GitHub Actions. Camp's `renovate.json` adds GitHub-release managers for DevPod, Hauler, Room, and RCC plus a Docker manager for the lifecycle image digest. A version-only edit is not a valid managed-tool update: Renovate must run `node developer/update_dependency_locks.mjs` after each release update so the release tag's peeled commit, exact release-asset URL, and SHA-256 fields move together. The updater resolves releases through GitHub's API, hashes the downloaded amd64 and arm64 assets, fails if an expected asset or coupled field is absent, and writes lockfiles only after every dependency resolves. The lifecycle image digest is updated directly by Renovate's Docker datasource and is not rewritten by the release updater.
+
+The self-hosted Patchraptor runner is configured centrally in `joshyorko/renovate-config`, not in this repository. Camp becomes runnable only after the Patchraptor GitHub App is installed on `joshyorko/camp`, the runner adds `joshyorko/camp` to `autodiscoverFilter`, and its global `allowedCommands` contains the anchored regex `/^node developer\/update_dependency_locks\.mjs$/`. Keep the App least-privileged to the central workflow's declared repository permissions: Administration read, Checks write, Contents write, Issues write, Metadata read, Pull requests write, Commit statuses write, Dependabot alerts read, and Workflows write; grant nothing else. Adding Camp must not broaden those installation or workflow permissions. Allowing this command intentionally lets the central runner execute repository-owned JavaScript, so it trusts Camp maintainers and review protections. Do not replace the anchored entry with a broad shell or interpreter allowlist.
+
+The updater never prints authentication tokens. It reports bounded repository, version, asset, HTTP-status, or structural errors without echoing request headers. Validate repository configuration and lock coupling with:
+
+```text
+npx --yes --package=renovate@43 -- renovate-config-validator renovate.json
+node --test developer/update_dependency_locks_test.mjs
+node developer/update_dependency_locks.mjs
+git diff --exit-code -- tools.lock.yaml developer/rcc.lock.yaml
+```
+
+The final diff command proves only that the currently checked-in lock metadata matches the currently selected release versions. A Patchraptor PR still needs the real-tool, architecture, and lifecycle gates below.
+
 The locked Hauler v2.0.2 amd64 and arm64 tarballs both list, in order, `LICENSE` (mode 0644), `README.md` (mode 0644), and `hauler` (mode 0755). Verify a future pin directly rather than assuming this shape:
 
 ```text

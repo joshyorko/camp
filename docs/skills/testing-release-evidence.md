@@ -174,16 +174,31 @@ the files directly would strip `build/` at the artifact boundary. The cleanup re
 ownership-checked controller removal followed by an observed absent path; it
 is never inferred from a Robot step or job conclusion. A failed or interrupted
 Robot run is evidence of failure, not permission to invent a cleanup result.
+Artifact transfers use immutable `actions/upload-artifact` v7.0.1 and
+`actions/download-artifact` v8.0.1 commits. Their authoritative `action.yml`
+files declare the Node 24 action runtime; update upload and download together
+when that runtime contract changes so CI does not retain a deprecated action
+runtime on one side of the candidate boundary.
 The hosted exact-candidate lifecycle step sets `DEVPOD_DEBUG=true`; locked
 DevPod v0.26.1 documents this global switch as printing the stack trace when an
-error occurs. Camp sanitizes terminal controls and bounds a surfaced
-workspace-up diagnostic to the final 8 KiB, so inspect that retained diagnostic
-before adding a behavioral retry for a wrapped DevPod exit.
-Its
-`qualifiedHistoricalRuns` starts empty: repository tests cannot populate it or
-claim hosted parity. Do not remove the direct jobs until two consecutive,
-actual complete PR/master runs have passed every recorded mandatory gate; add
-those two GitHub Actions run IDs and URLs only after both runs finish.
+error occurs. That switch does not guarantee actionable agent stderr: the
+locked implementation's SSH tunnel retains only its final stderr line when it
+wraps an agent failure. Camp sanitizes terminal controls and bounds a surfaced
+workspace-up diagnostic to the final 8 KiB, but a container-run exit can still
+contain only the wrapper. DevPod's CLI debug output is emitted to the invoking
+process rather than persisted under `DEVPOD_HOME`, and `devpod logs` reinjects
+the agent before delegating to `docker logs`; it is therefore not a reliable
+recovery path when agent injection itself failed. On a crash-matrix failure,
+capture diagnostics before cleanup from the private DevPod context: workspace
+status and logs when available, followed by Docker state, logs, and recent
+events selected only with the workspace's `dev.containers.id` label. Bound and
+redact that output. Treat it as evidence for the next fix; do not infer a
+behavioral cause from exit status 128 alone.
+The release-evidence baseline's `qualifiedHistoricalRuns` starts empty:
+repository tests cannot populate it or claim hosted parity. Do not remove the
+direct jobs until two consecutive, actual complete PR/master runs have passed
+every recorded mandatory gate; add those two GitHub Actions run IDs and URLs
+only after both runs finish.
 Do not cache `ROBOCORP_HOME`; the environment is private writable runtime state,
 not a verified immutable cache seed.
 
@@ -626,11 +641,17 @@ test ref; the fixture removes only Homebrew's test-owned XDG subtree before
 the host deletes its temporary root.
 
 The native package lifecycle fixture defaults to Podman and also supports
-`CONTAINER_ENGINE=docker`. Managed-tool bootstrap runs as root inside Docker,
-so its fallback cleanup removes root-owned fixture state through the same
-container engine when the invoking host user cannot remove it directly. A
-cleanup permission error after otherwise successful DEB/RPM/APK assertions is
-still a failed gate; it must not be reported as package lifecycle evidence.
+`CONTAINER_ENGINE=docker`. Hosted CI selects Docker explicitly so package
+evidence does not depend on compatibility between the runner's Podman and
+`crun`; an OCI runtime failure before the first package assertion is an engine
+prerequisite failure, not package lifecycle evidence. A green hosted Docker
+fixture does not prove the hosted Podman path; keep Podman opt-in until that
+runner/runtime combination is verified separately. Managed-tool bootstrap runs
+as root inside Docker, so its fallback cleanup removes root-owned fixture state
+through the same container engine when the invoking host user cannot remove it
+directly. A cleanup permission error after otherwise successful DEB/RPM/APK
+assertions is still a failed gate; it must not be reported as package lifecycle
+evidence.
 
 ## Evidence
 

@@ -55,6 +55,9 @@ func TestLocalLifecycleCrashMatrix(t *testing.T) {
 		}
 		cleanupCtx, cleanupCancel := context.WithTimeout(context.Background(), 5*time.Minute)
 		defer cleanupCancel()
+		if t.Failed() {
+			logDevPodFailureEvidence(t, cleanupCtx, devPod)
+		}
 		_, _ = runLifecycleCommand(cleanupCtx, environment, bin, "--json", "close")
 		stopRecordedSessionProcesses(cleanupCtx, controller)
 		if err := createdWorkspaces.TrackController(controller); err != nil {
