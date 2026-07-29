@@ -215,6 +215,11 @@ Do not use Hauler v2.0.2's live `_catalog` response as proof that all direct reg
   Hauler store, and builds one verified return Camp Kit. `sync` resumes the
   exact recorded services after the durable preparation receipt; `close`
   leaves them quiesced until inbound publication completes. The return
+  root snapshot rebases a clean, platform-neutral absolute symlink whose target
+  is inside the canonical source root to an equivalent relative archive link.
+  Non-clean, drive-qualified, or out-of-root targets remain unsafe and the
+  error names both the source entry and target; do not exclude ignored or
+  generated trees to bypass this whole-root safety check.
   fileserver authority is only the canonical manifest and its named 1 GiB
   chunks; the complete archive and enclosing directories are never valid
   allow-list entries. The supervised fileserver uses an otherwise empty store

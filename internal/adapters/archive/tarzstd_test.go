@@ -93,6 +93,80 @@ func TestTarZstdRoundTripIsDeterministicAndExcludesOnlyRootBuildRuntime(t *testi
 	}
 }
 
+func TestTarZstdCreateRebasesAbsoluteSymlinkWithinRoot(t *testing.T) {
+	t.Parallel()
+	root := filepath.Join(t.TempDir(), "root")
+	target := filepath.Join(root, "nested", "file.txt")
+	if err := os.MkdirAll(filepath.Dir(target), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(target, []byte("content"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(target, filepath.Join(root, "link.txt")); err != nil {
+		t.Fatal(err)
+	}
+
+	archivePath := filepath.Join(t.TempDir(), "root.tar.zst")
+	if _, err := NewTarZstd().Create(context.Background(), root, archivePath); err != nil {
+		t.Fatalf("Create() error = %v", err)
+	}
+	destination := filepath.Join(t.TempDir(), "extracted")
+	if err := NewTarZstd().Extract(context.Background(), archivePath, destination); err != nil {
+		t.Fatalf("Extract() error = %v", err)
+	}
+	if target, err := os.Readlink(filepath.Join(destination, "link.txt")); err != nil || target != "nested/file.txt" {
+		t.Fatalf("rebased symlink target = %q, %v", target, err)
+	}
+}
+
+func TestTarZstdCreateNamesExternalAbsoluteSymlink(t *testing.T) {
+	t.Parallel()
+	root := filepath.Join(t.TempDir(), "root")
+	if err := os.MkdirAll(root, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink("/outside/target", filepath.Join(root, "unsafe-link")); err != nil {
+		t.Fatal(err)
+	}
+
+	archivePath := filepath.Join(t.TempDir(), "root.tar.zst")
+	_, err := NewTarZstd().Create(context.Background(), root, archivePath)
+	if !errors.Is(err, ErrUnsafeArchive) || !strings.Contains(err.Error(), `"unsafe-link"`) || !strings.Contains(err.Error(), `"/outside/target"`) {
+		t.Fatalf("Create() error = %v, want named unsafe link and target", err)
+	}
+}
+
+func TestTarZstdCreateRejectsAmbiguousSourceSymlinkTargets(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name   string
+		target func(string) string
+	}{
+		{name: "absolute dotdot", target: func(root string) string { return root + "/alias/../target" }},
+		{name: "absolute trailing slash", target: func(root string) string { return root + "/target/" }},
+		{name: "drive absolute", target: func(string) string { return "C:/outside" }},
+		{name: "drive relative", target: func(string) string { return "C:outside" }},
+	}
+	for _, test := range tests {
+		test := test
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+			root := filepath.Join(t.TempDir(), "root")
+			if err := os.MkdirAll(root, 0o755); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.Symlink(test.target(root), filepath.Join(root, "unsafe-link")); err != nil {
+				t.Fatal(err)
+			}
+			_, err := NewTarZstd().Create(context.Background(), root, filepath.Join(t.TempDir(), "root.tar.zst"))
+			if !errors.Is(err, ErrUnsafeArchive) {
+				t.Fatalf("Create() error = %v, want ErrUnsafeArchive", err)
+			}
+		})
+	}
+}
+
 func TestExtractRejectsTraversalLinksDuplicatesAndSpecialFiles(t *testing.T) {
 	t.Parallel()
 	tests := []struct {
@@ -102,8 +176,12 @@ func TestExtractRejectsTraversalLinksDuplicatesAndSpecialFiles(t *testing.T) {
 		{"dotdot", []tar.Header{{Name: "../escape", Typeflag: tar.TypeReg, Mode: 0o644}}},
 		{"absolute", []tar.Header{{Name: "/absolute", Typeflag: tar.TypeReg, Mode: 0o644}}},
 		{"backslash", []tar.Header{{Name: `a\evil`, Typeflag: tar.TypeReg, Mode: 0o644}}},
+		{"drive absolute", []tar.Header{{Name: "C:/outside", Typeflag: tar.TypeReg, Mode: 0o644}}},
+		{"drive relative", []tar.Header{{Name: "C:outside", Typeflag: tar.TypeReg, Mode: 0o644}}},
 		{"overlong", []tar.Header{{Name: strings.Repeat("a", 5000), Typeflag: tar.TypeReg, Mode: 0o644}}},
 		{"symlink escape", []tar.Header{{Name: "link", Typeflag: tar.TypeSymlink, Linkname: "../outside", Mode: 0o777}, {Name: "link/pwn", Typeflag: tar.TypeReg, Mode: 0o644}}},
+		{"symlink drive absolute", []tar.Header{{Name: "link", Typeflag: tar.TypeSymlink, Linkname: "C:/outside", Mode: 0o777}}},
+		{"symlink drive relative", []tar.Header{{Name: "link", Typeflag: tar.TypeSymlink, Linkname: "C:outside", Mode: 0o777}}},
 		{"hardlink missing", []tar.Header{{Name: "hard", Typeflag: tar.TypeLink, Linkname: "missing", Mode: 0o644}}},
 		{"duplicate", []tar.Header{{Name: "same", Typeflag: tar.TypeReg, Mode: 0o644}, {Name: "same", Typeflag: tar.TypeReg, Mode: 0o644}}},
 		{"fifo", []tar.Header{{Name: "fifo", Typeflag: tar.TypeFifo, Mode: 0o644}}},
