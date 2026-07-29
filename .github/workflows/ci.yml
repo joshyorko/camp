@@ -193,6 +193,7 @@ jobs:
         id: robot
         env:
           CANDIDATE_COMMIT: ${{ github.sha }}
+          DEVPOD_DEBUG: "true"
         run: ./developer/rccw run -r developer/toolkit.yaml -t robot
       - name: Require mandatory RCC Robot evidence
         if: always()

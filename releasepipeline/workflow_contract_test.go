@@ -121,6 +121,11 @@ func TestCIAddsRCCParityWithoutCachingPrivateRuntimeHomes(t *testing.T) {
 	if strings.Contains(prepullRun, "quay.io/") || strings.Contains(prepullRun, "docker.io/") {
 		t.Error("lifecycle fixture pre-pull duplicates the locked image reference")
 	}
+	lifecycle := findStepByName(t, document, "rcc-robot", "Run mandatory exact-candidate Robot lifecycle")
+	lifecycleEnvironment := lifecycle["env"].(map[string]any)
+	if lifecycleEnvironment["DEVPOD_DEBUG"] != "true" {
+		t.Fatalf("hosted lifecycle DEVPOD_DEBUG = %#v, want true", lifecycleEnvironment["DEVPOD_DEBUG"])
+	}
 }
 
 func TestRCCRobotAuthorizesPastaUserNamespacesOnRestrictedUbuntu(t *testing.T) {

@@ -174,6 +174,11 @@ the files directly would strip `build/` at the artifact boundary. The cleanup re
 ownership-checked controller removal followed by an observed absent path; it
 is never inferred from a Robot step or job conclusion. A failed or interrupted
 Robot run is evidence of failure, not permission to invent a cleanup result.
+The hosted exact-candidate lifecycle step sets `DEVPOD_DEBUG=true`; locked
+DevPod v0.26.1 documents this global switch as printing the stack trace when an
+error occurs. Camp sanitizes terminal controls and bounds a surfaced
+workspace-up diagnostic to the final 8 KiB, so inspect that retained diagnostic
+before adding a behavioral retry for a wrapped DevPod exit.
 Its
 `qualifiedHistoricalRuns` starts empty: repository tests cannot populate it or
 claim hosted parity. Do not remove the direct jobs until two consecutive,
