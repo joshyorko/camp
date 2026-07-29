@@ -8,8 +8,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
-
-	"github.com/joshyorko/camp/internal/ports"
+	"time"
 )
 
 func TestNewCrashOpenCommandRunsFromCampSource(t *testing.T) {
@@ -55,16 +54,26 @@ func TestWaitForForwarderEvidenceReportsOpeningExit(t *testing.T) {
 	}
 }
 
-func TestCrashOpenRetriesOnlyAmbiguousStartup(t *testing.T) {
-	ambiguous := &openingExitedBeforeEvidenceError{
-		name:   "registry",
-		err:    errors.New("open failed"),
-		output: ports.ErrAmbiguous.Error(),
+func TestWaitForForwarderEvidenceUsesControllerRuntimeRoot(t *testing.T) {
+	controller := t.TempDir()
+	want := filepath.Join(scenarioRuntimeDirectory(controller), "camp", "session-1", "registry-forward.json")
+	if err := os.MkdirAll(filepath.Dir(want), 0o700); err != nil {
+		t.Fatal(err)
 	}
-	if !isAmbiguousCrashOpenExit(ambiguous) {
-		t.Fatal("isAmbiguousCrashOpenExit() = false for ambiguous mutation")
+	if err := os.WriteFile(want, []byte("{}"), 0o600); err != nil {
+		t.Fatal(err)
 	}
-	if isAmbiguousCrashOpenExit(errors.New("ordinary failure")) {
-		t.Fatal("isAmbiguousCrashOpenExit() = true for ordinary failure")
+	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
+	defer cancel()
+
+	got, err := waitForForwarderEvidenceOrExit(ctx, controller, "registry", make(chan error), &bytes.Buffer{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got != want {
+		t.Fatalf("forwarder evidence path = %q, want %q", got, want)
+	}
+	if sessionID := forwarderEvidenceSessionID(got); sessionID != "session-1" {
+		t.Fatalf("forwarder evidence session ID = %q, want session-1", sessionID)
 	}
 }

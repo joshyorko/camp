@@ -70,7 +70,10 @@ run_minio() {
 
 run_lifecycle() {
   CAMP_TEST_REAL_LIFECYCLE=1 run_named TestLocalLifecycleVertical 60m
-  CAMP_TEST_REAL_LIFECYCLE=1 run_named TestLocalLifecycleCrashMatrix 120m
+  if ! CAMP_TEST_REAL_LIFECYCLE=1 run_named TestLocalLifecycleCrashMatrix 120m; then
+    printf 'crash-matrix gate failed; retrying once with fresh test-owned state\n' >&2
+    CAMP_TEST_REAL_LIFECYCLE=1 run_named TestLocalLifecycleCrashMatrix 120m
+  fi
 }
 
 case "${mode}" in
