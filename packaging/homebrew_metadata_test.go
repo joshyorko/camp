@@ -9,10 +9,11 @@ import (
 
 func TestHomebrewMetadataNamesTapAndInstallShape(t *testing.T) {
 	type metadata struct {
-		TapRepository string            `json:"tapRepository"`
-		FormulaPath   string            `json:"formulaPath"`
-		Dependency    string            `json:"dependency"`
-		Artifacts     map[string]string `json:"artifacts"`
+		TapRepository   string            `json:"tapRepository"`
+		FormulaPath     string            `json:"formulaPath"`
+		InstallIdentity string            `json:"installIdentity"`
+		Dependency      string            `json:"dependency"`
+		Artifacts       map[string]string `json:"artifacts"`
 	}
 
 	body, err := os.ReadFile("homebrew/metadata.json")
@@ -23,8 +24,11 @@ func TestHomebrewMetadataNamesTapAndInstallShape(t *testing.T) {
 	if err := json.Unmarshal(body, &got); err != nil {
 		t.Fatal(err)
 	}
-	if got.TapRepository != "joshyorko/homebrew-tap" || got.FormulaPath != "Formula/camp.rb" {
+	if got.TapRepository != "joshyorko/homebrew-tools" || got.FormulaPath != "Formula/camp.rb" {
 		t.Fatalf("unexpected tap destination: %+v", got)
+	}
+	if got.InstallIdentity != "joshyorko/tools/camp" {
+		t.Fatalf("install identity = %q, want joshyorko/tools/camp", got.InstallIdentity)
 	}
 	if got.Dependency != "passt" {
 		t.Fatalf("dependency = %q, want passt", got.Dependency)

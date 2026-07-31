@@ -227,6 +227,41 @@ func TestReleaseWorkflowVerifiesDownloadsBeforeProtectedPublication(t *testing.T
 	assertActionsPinned(t, workflow)
 }
 
+func TestReleaseWorkflowUsesRCCPackageAuthorityAndPublishesFormulaFromVerifiedSet(t *testing.T) {
+	workflow := readWorkflow(t, "release.yml")
+	document := parseWorkflow(t, workflow)
+
+	packageSteps := workflowSteps(t, document, "package")
+	packageBuilds := 0
+	for _, step := range packageSteps {
+		run, _ := step["run"].(string)
+		if strings.Contains(run, "build-release-evidence.sh build") || strings.Contains(run, "build-archives.sh") {
+			packageBuilds++
+		}
+	}
+	if packageBuilds != 0 {
+		t.Fatalf("release package job bypasses the RCC package authority %d time(s)", packageBuilds)
+	}
+	packageStep := findStepByName(t, document, "package", "Run RCC release packaging for verified candidate")
+	if run, _ := packageStep["run"].(string); !strings.Contains(run, "./developer/rccw run -r developer/toolkit.yaml -t package") {
+		t.Fatal("release package job must delegate release construction to the RCC package task")
+	}
+
+	publishStep := findStepByName(t, document, "publish", "Publish verified assets")
+	publishRun := publishStep["run"].(string)
+	for _, asset := range []string{
+		"dist/camp_*.tar.gz",
+		"dist/checksums.txt",
+		"dist/*.spdx.json",
+		"dist/camp.rb",
+		"dist/verified-artifacts.json",
+	} {
+		if !strings.Contains(publishRun, asset) {
+			t.Errorf("publication omits verified release asset %q", asset)
+		}
+	}
+}
+
 func parseWorkflow(t *testing.T, workflow string) map[string]any {
 	t.Helper()
 	var document map[string]any

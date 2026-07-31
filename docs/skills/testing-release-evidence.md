@@ -566,7 +566,8 @@ bash/zsh/fish completion paths.
 
 The generic archive declares `passt`/`pasta` as an external host prerequisite.
 `packaging/homebrew/metadata.json` names the intended
-`joshyorko/homebrew-tap/Formula/camp.rb` destination, and
+`joshyorko/homebrew-tools/Formula/camp.rb` destination and the user-facing
+install identity `joshyorko/tools/camp`, and
 `packaging/homebrew/camp.rb.tmpl` records the Linux architecture, checksum,
 dependency, completion, and formula-test shape. Its URL, version, and checksum
 tokens stay unresolved until a separate publication lane supplies real release
@@ -634,7 +635,22 @@ Checksums stored beside mutable release assets detect accidental or transport
 corruption but do not authenticate the publisher. GitHub artifact attestations
 bind final archive digests to the workflow identity; protected tag/manual
 publication remains downstream of downloaded-artifact verification and
-attestation.
+attestation. Camp is the sole builder and verifier: its RCC package task builds
+the candidate, native jobs verify it, the verified set is sealed, then it is
+attested and published as immutable `joshyorko/camp` release assets, including
+`camp.rb`. Camp never receives credentials for `joshyorko/homebrew-tools`.
+
+For the first public Homebrew release, publish the verified Camp release first,
+then retrieve its immutable `camp.rb` asset and place it at
+`Formula/camp.rb` in `joshyorko/homebrew-tools` using that tap's own release
+process and credentials. Consumers install it as `joshyorko/tools/camp`.
+Do not rebuild or re-render the formula in the tap: it is a consumer of the
+published Camp asset.
+
+Camp discovery walks parent directories for `.camp`. A worktree nested below a
+directory containing `.camp` therefore inherits that discovery state and can
+invalidate setup tests. Create deterministic setup-test worktrees outside such
+a parent directory.
 
 A manual release workflow with `publish=false` is the safe hosted validation
 lane: it builds, uploads, downloads, checksum-verifies, and natively exercises

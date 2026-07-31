@@ -1,6 +1,7 @@
 {
-  "tapRepository": "joshyorko/homebrew-tap",
+  "tapRepository": "joshyorko/homebrew-tools",
   "formulaPath": "Formula/camp.rb",
+  "installIdentity": "joshyorko/tools/camp",
   "dependency": "passt",
   "artifacts": {
     "amd64": "camp_{{VERSION}}_linux_amd64.tar.gz",
