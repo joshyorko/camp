@@ -84,6 +84,27 @@ func TestLifecycleRemoteUserDefaultsToForcedContainerUser(t *testing.T) {
 	}
 }
 
+func TestRenderBootstrapDropsControllerLocalIptablesCompatibilityMounts(t *testing.T) {
+	digest := strings.Repeat("a", 64)
+	mounts := make([]string, 0, 6)
+	for _, executable := range []string{"iptables", "iptables-save", "iptables-restore", "ip6tables", "ip6tables-save", "ip6tables-restore"} {
+		mounts = append(mounts, "source=${localWorkspaceFolder}/.camp/runtime/iptables-compat,target=/usr/local/sbin/"+executable+",type=bind,readonly")
+	}
+	mountBody, err := json.Marshal(mounts)
+	if err != nil {
+		t.Fatal(err)
+	}
+	fixture := bootstrapFixtureWithConfig(t, `{"name":"fixture","image":"example/original@sha256:`+digest+`","mounts":`+string(mountBody)+`}`)
+	result, err := renderBootstrap(fixture.request, fixture.openHelper)
+	if err != nil {
+		t.Fatal(err)
+	}
+	document := readBootstrapDocument(t, result.DevcontainerPath)
+	if _, exists := document["mounts"]; exists {
+		t.Fatalf("remote bootstrap retained controller-local mounts: %s", document["mounts"])
+	}
+}
+
 func TestRenderBootstrapHelperFailurePreventsEveryUserHook(t *testing.T) {
 	for name, lifecycle := range map[string]json.RawMessage{
 		"string": json.RawMessage(`"printf 'user\n' >> \"$TRACE\""`),

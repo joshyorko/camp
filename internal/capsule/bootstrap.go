@@ -166,6 +166,7 @@ func renderBootstrap(request BootstrapRequest, openHelper func() (*os.File, erro
 
 	document["image"] = json.RawMessage(mustJSON(request.OuterImage))
 	document["containerUser"] = json.RawMessage(mustJSON("root"))
+	removeControllerLocalCompatibilityMounts(document)
 	lifecycleUser, err := lifecycleRemoteUser(document)
 	if err != nil {
 		return Bootstrap{}, err
@@ -292,6 +293,25 @@ func renderBootstrap(request BootstrapRequest, openHelper func() (*os.File, erro
 		DevcontainerPath: filepath.Join(request.Root, ".camp-bootstrap", "devcontainer.json"),
 		LifecycleUser:    lifecycleUser,
 	}, nil
+}
+
+func removeControllerLocalCompatibilityMounts(document map[string]json.RawMessage) {
+	raw, exists := document["mounts"]
+	if !exists {
+		return
+	}
+	var observed []string
+	if err := json.Unmarshal(raw, &observed); err != nil || len(observed) != 6 {
+		return
+	}
+	executables := []string{"iptables", "iptables-save", "iptables-restore", "ip6tables", "ip6tables-save", "ip6tables-restore"}
+	for index, executable := range executables {
+		expected := "source=${localWorkspaceFolder}/.camp/runtime/iptables-compat,target=/usr/local/sbin/" + executable + ",type=bind,readonly"
+		if observed[index] != expected {
+			return
+		}
+	}
+	delete(document, "mounts")
 }
 
 func lifecycleRemoteUser(document map[string]json.RawMessage) (string, error) {

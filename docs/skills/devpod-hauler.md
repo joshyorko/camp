@@ -88,6 +88,10 @@ Do not use Hauler v2.0.2's live `_catalog` response as proof that all direct reg
   requests must share schema, session, workspace root, runtime root, manifest
   path, and expected identities. DevPod runs `initializeCommand` on the provider
   host, so the renderer preserves that user hook unchanged. The generated
+  remote bootstrap removes only Camp's exact six controller-local
+  `.camp/runtime/iptables-compat` bind mounts; the remote Room image uses its
+  native iptables tools, and retaining those Bluefin-local sources makes pinned
+  DevPod fail its stream mount with EOF before lifecycle hooks run. The generated
   `onCreateCommand` runs `activateImage` and then `hydrate` inside the created
   container before the preserved user hook; `postStartCommand` similarly runs
   `startServices` before its user hook. The generated config sets
