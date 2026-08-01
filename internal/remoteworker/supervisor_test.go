@@ -58,13 +58,30 @@ type recordingRemoteController struct {
 	restarted []domain.ServiceUnitRecord
 	record    domain.ServiceUnitRecord
 	state     supervisoradapter.UnitState
+	ensureErr error
 }
 
 func (controller *recordingRemoteController) Ensure(_ context.Context, snapshot domain.JournalSnapshot, spec supervisoradapter.ServiceSpec) (domain.ServiceUnitRecord, domain.JournalSnapshot, error) {
 	controller.ensured = append(controller.ensured, spec)
+	if controller.ensureErr != nil {
+		return domain.ServiceUnitRecord{}, snapshot, controller.ensureErr
+	}
 	controller.record = recordForSpec(spec)
 	snapshot.Services = append(snapshot.Services, controller.record)
 	return controller.record, snapshot, nil
+}
+
+func TestEnsureRemoteServiceReportsPrivateServiceLogWhenLaunchFails(t *testing.T) {
+	logPath := filepath.Join(t.TempDir(), "registry.log")
+	if err := os.WriteFile(logPath, []byte("pasta: exact launch failure\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	controller := &recordingRemoteController{ensureErr: errors.New("started process exited")}
+	spec := supervisoradapter.ServiceSpec{Name: "registry", LogPath: logPath}
+	_, _, err := ensureRemoteService(t.Context(), controller, domain.JournalSnapshot{}, spec)
+	if err == nil || !strings.Contains(err.Error(), "registry log: pasta: exact launch failure") {
+		t.Fatalf("ensureRemoteService() error = %v", err)
+	}
 }
 
 func (controller *recordingRemoteController) Observe(_ context.Context, record domain.ServiceUnitRecord) (supervisoradapter.UnitObservation, error) {

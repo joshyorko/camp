@@ -277,7 +277,32 @@ func ensureRemoteService(ctx context.Context, controller remoteServiceController
 		restarted, next, err := controller.Restart(ctx, spec.SessionID, spec.Name, restartToken)
 		return restarted, next, err
 	}
-	return controller.Ensure(ctx, snapshot, spec)
+	record, next, err := controller.Ensure(ctx, snapshot, spec)
+	if err != nil {
+		return domain.ServiceUnitRecord{}, snapshot, serviceLaunchError(spec, err)
+	}
+	return record, next, nil
+}
+
+func serviceLaunchError(spec supervisoradapter.ServiceSpec, launchErr error) error {
+	file, err := os.OpenFile(spec.LogPath, os.O_RDONLY|syscall.O_NOFOLLOW, 0)
+	if err != nil {
+		return launchErr
+	}
+	defer file.Close()
+	info, err := file.Stat()
+	if err != nil || !info.Mode().IsRegular() {
+		return launchErr
+	}
+	body, err := io.ReadAll(io.LimitReader(file, maxDiagnosticBytes+1))
+	if err != nil || len(body) == 0 {
+		return launchErr
+	}
+	diagnostic := boundedStderrDiagnostic(body)
+	if diagnostic == "" {
+		return launchErr
+	}
+	return fmt.Errorf("%w; %s log: %s", launchErr, spec.Name, diagnostic)
 }
 
 func recordMatchesRemoteSpec(record domain.ServiceUnitRecord, spec supervisoradapter.ServiceSpec) bool {

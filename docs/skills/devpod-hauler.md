@@ -97,6 +97,9 @@ Do not use Hauler v2.0.2's live `_catalog` response as proof that all direct reg
   `startServices` before its user hook. The generated config sets
   `containerUser` to `root` for container startup while preserving the selected
   `remoteUser`; pinned DevPod v0.26.1 runs lifecycle hooks as that `remoteUser`.
+  If a supervised remote service exits during launch, Camp returns the bounded,
+  sanitized private service log with the process-identity failure; preserve that
+  diagnostic because DevPod may delete the failed workspace immediately.
   Camp derives the rendered lifecycle user (`remoteUser`, or root when absent),
   persists it in the immutable remote data-plane record, revalidates it against
   the bootstrap on reuse, and passes it explicitly to receipt-observation SSH.
