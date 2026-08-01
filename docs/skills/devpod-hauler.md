@@ -208,7 +208,9 @@ Do not use Hauler v2.0.2's live `_catalog` response as proof that all direct reg
   multi-platform source digest to a different platform-manifest digest in its
   verified store. Activation therefore pulls the exact image entry digest from
   the canonical StoreIdentity while retaining the locked source reference in
-  the receipt and requiring the final local config image ID to match.
+  the receipt and requiring the final local config image ID to match. Docker
+  may report that ID as `sha256:<digest>` while Podman reports the same ID as a
+  bare 64-character digest; Camp normalizes either valid form before equality.
 - Container-side `hydrate` repeats helper, kit, manifest, tool, architecture,
   store, and root verification. The persisted/bootstrap manifest digest is a
   required verifier authority at preparation, reentry, provider activation,

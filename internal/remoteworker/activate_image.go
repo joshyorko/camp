@@ -256,7 +256,10 @@ func inspectProviderImage(ctx context.Context, engine, reference string) (string
 		return "", fmt.Errorf("inspect activation image: %w", err)
 	}
 	value := strings.TrimSpace(string(inspected.Stdout))
-	if !strings.HasPrefix(value, "sha256:") || len(value) != 71 {
+	if validDigest(value) {
+		value = "sha256:" + value
+	}
+	if !strings.HasPrefix(value, "sha256:") || !validDigest(strings.TrimPrefix(value, "sha256:")) {
 		return "", fmt.Errorf("%w: provider engine returned invalid local image ID", ErrIdentityMismatch)
 	}
 	return value, nil

@@ -98,7 +98,7 @@ func TestPodmanActivationPullUsesLoopbackRegistryWithoutTLS(t *testing.T) {
 	podman := filepath.Join(directory, "podman")
 	script := "#!/bin/sh\n" +
 		"if [ \"$1\" = pull ]; then [ \"$2\" = --tls-verify=false ] || exit 125; exit 0; fi\n" +
-		"if [ \"$1\" = image ] && [ \"$2\" = inspect ]; then printf 'sha256:" + strings.Repeat("a", 64) + "\\n'; exit 0; fi\n" +
+		"if [ \"$1\" = image ] && [ \"$2\" = inspect ]; then printf '" + strings.Repeat("a", 64) + "\\n'; exit 0; fi\n" +
 		"exit 64\n"
 	if err := os.WriteFile(podman, []byte(script), 0o700); err != nil {
 		t.Fatal(err)
