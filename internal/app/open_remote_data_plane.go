@@ -233,7 +233,7 @@ func (p *RemoteDataPlanePreparer) Prepare(ctx context.Context, request RemoteDat
 	bootstrapRoot := filepath.Join(attemptRoot, "bootstrap")
 	bootstrap, err := p.render(capsule.BootstrapRequest{
 		Root: bootstrapRoot, DevcontainerPath: request.DevcontainerPath,
-		KitArchivePath: artifact.ArchivePath, ManifestPath: artifact.ManifestPath, OuterImage: outerImage,
+		ChunkDirectory: filepath.Join(filepath.Dir(artifact.ArchivePath), "chunks"), ManifestPath: artifact.ManifestPath, OuterImage: outerImage,
 		InitializeRequest: workerRequest(remoteworker.OperationActivateImage),
 		HydrateRequest:    workerRequest(remoteworker.OperationHydrate),
 		ServicesRequest:   workerRequest(remoteworker.OperationStartServices),

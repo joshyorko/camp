@@ -53,10 +53,10 @@ Do not use Hauler v2.0.2's live `_catalog` response as proof that all direct reg
   text. These are operation boundaries, not byte-level download completion
   claims.
 - DevPod command construction preserves context, workspace identity, repeated public flags, environment variables, and argument boundaries through `ports.Command`.
-- The pinned v0.26.1 installed-tool contract proves one bounded local-folder
-  upload: construct `.camp-bootstrap/devcontainer.json` and the immutable
-  `camp-hauler-kit.tar.zst` completely before `devpod up`, pass only that
-  disposable bootstrap root, and perform no post-`up` mutation or ownership
+- The pinned v0.26.1 installed-tool contract uses one bounded local-folder
+  upload: construct `.camp-bootstrap/` and the canonical-manifest-bound
+  `chunks/` directory completely before `devpod up`, pass only that disposable
+  bootstrap root, and perform no post-`up` mutation or ownership
   repair of bootstrap contents; delete only the exact disposable root after
   workspace cleanup. The real Docker-provider gate uploaded a valid kit larger
   than 1 MiB, ran a
@@ -75,8 +75,8 @@ Do not use Hauler v2.0.2's live `_catalog` response as proof that all direct reg
   exact agent `/proc/<pid>/io`; a healthy Kubernetes pod alone is insufficient.
 - Camp's remote bootstrap renderer publishes one new private source root with
   `.camp-bootstrap/{devcontainer.json,camp-bootstrap,initialize-request.json,hydrate-request.json,services-request.json}`
-  and `camp-hauler-kit.tar.zst`; it refuses to replace an existing root. The
-  helper and kit are copied through their verified regular-file descriptors,
+  and `chunks/`; it refuses to replace an existing root. The helper and every
+  manifest-bound chunk are copied through verified regular-file descriptors,
   then the staged copies are independently reverified before publication. Input
   ancestors and the output parent are opened component-by-component without
   following symlinks; staging and no-replace publication stay anchored to
@@ -99,9 +99,12 @@ Do not use Hauler v2.0.2's live `_catalog` response as proof that all direct reg
   This is required because the preserved DevPod workspace showed unset SSH as
   root with `/var/lib/containers/storage` and no image, while `--user podman`
   used `/home/podman/.local/share/containers/storage` and observed the exact
-  activated config ID. The top-level `camp-hauler-kit.tar.zst` is a required,
-  digest-and-size-verified bootstrap input during initial hydration; admission
-  rejects every other unexpected top-level entry. String, argv-array, and named-object lifecycle values
+  activated config ID. DevPod never receives the monolithic Kit archive.
+  Activation verifies the canonical manifest, atomically reassembles its exact
+  chunk allowlist under the runtime root, verifies the resulting archive, and
+  only then extracts it. Initial hydration admits only `.camp-bootstrap`,
+  `chunks/`, and Camp's runtime directory, and rejects missing, extra,
+  symlinked, or digest-mismatched chunks. String, argv-array, and named-object lifecycle values
   retain their top-level JSON form, and each original command or argv appears
   exactly once behind a fail-closed helper boundary. String hooks use a
   same-shell `helper || exit $?` prelude followed by the original text; argv

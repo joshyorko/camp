@@ -51,6 +51,9 @@ func TestRemoteDataPlanePreparerBuildsVerifiesThenRendersBootstrap(t *testing.T)
 		if request.InitializeRequest.Expected.Kit.SHA256 != digestString([]byte("kit")) {
 			t.Fatalf("expected kit = %#v", request.InitializeRequest.Expected.Kit)
 		}
+		if request.ChunkDirectory != filepath.Join(filepath.Dir(request.ManifestPath), "chunks") {
+			t.Fatalf("chunk directory = %q", request.ChunkDirectory)
+		}
 		return writeFakeRenderedBootstrap(request)
 	}
 	ctx := WithProgressReporter(context.Background(), ProgressFunc(func(_ context.Context, event ProgressEvent) error {
@@ -317,7 +320,7 @@ func TestRemoteDataPlanePreparerRejectsTamperedCompletedBootstrapWithoutRebuild(
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(filepath.Join(first.BootstrapRoot, "camp-hauler-kit.tar.zst"), []byte("tampered"), 0o600); err != nil {
+	if err := os.WriteFile(filepath.Join(first.BootstrapRoot, "chunks", "chunk-000000"), []byte("tampered"), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	order = nil
@@ -459,16 +462,18 @@ func (f *fakeRemoteKitBuilder) Build(_ context.Context, request haulkit.BuildReq
 			Pasta:  haulkit.FileIdentity{Name: "pasta", Version: "pasta 2026", SHA256: strings.Repeat("f", 64), Size: 10},
 		},
 		Archive: haulkit.ArchiveIdentity{SHA256: digestString([]byte("kit")), Size: 3},
-		Chunks:  []haulkit.ChunkIdentity{{Index: 0, Name: "chunk-000000", SHA256: strings.Repeat("8", 64), Size: 3}},
+		Chunks:  []haulkit.ChunkIdentity{{Index: 0, Name: "chunk-000000", SHA256: digestString([]byte("kit")), Size: 3}},
 	}
 	body, _ := haulkit.MarshalCanonical(document)
 	_ = os.WriteFile(manifest, body, 0o600)
 	_ = os.WriteFile(archive, []byte("kit"), 0o600)
+	_ = os.Mkdir(filepath.Join(request.OutputDirectory, "chunks"), 0o700)
+	_ = os.WriteFile(filepath.Join(request.OutputDirectory, "chunks", document.Chunks[0].Name), []byte("kit"), 0o600)
 	manifestSHA256 := digestString(body)
 	if f.manifestSHA256 != "" {
 		manifestSHA256 = f.manifestSHA256
 	}
-	return haulkit.Artifact{ManifestPath: manifest, ManifestSHA256: manifestSHA256, ArchivePath: archive, SHA256: digestString([]byte("kit")), Size: 3}, nil
+	return haulkit.Artifact{ManifestPath: manifest, ManifestSHA256: manifestSHA256, ArchivePath: archive, SHA256: digestString([]byte("kit")), Size: 3, Chunks: document.Chunks}, nil
 }
 
 type fakeRemoteKitVerifier struct {
@@ -521,7 +526,7 @@ func writeFakeRenderedBootstrap(request capsule.BootstrapRequest) (capsule.Boots
 	if err := os.MkdirAll(private, 0o700); err != nil {
 		return capsule.Bootstrap{}, err
 	}
-	if err := os.WriteFile(filepath.Join(request.Root, "camp-hauler-kit.tar.zst"), []byte("kit"), 0o600); err != nil {
+	if err := os.Mkdir(filepath.Join(request.Root, "chunks"), 0o700); err != nil {
 		return capsule.Bootstrap{}, err
 	}
 	if err := os.WriteFile(filepath.Join(private, "camp-bootstrap"), []byte("helper"), 0o700); err != nil {
@@ -533,6 +538,19 @@ func writeFakeRenderedBootstrap(request capsule.BootstrapRequest) (capsule.Boots
 	}
 	if err := os.WriteFile(filepath.Join(private, request.InitializeRequest.Expected.Manifest.Name), manifest, 0o600); err != nil {
 		return capsule.Bootstrap{}, err
+	}
+	decoded, err := haulkit.DecodeCanonical(manifest)
+	if err != nil {
+		return capsule.Bootstrap{}, err
+	}
+	for _, chunk := range decoded.Chunks {
+		body, err := os.ReadFile(filepath.Join(request.ChunkDirectory, chunk.Name))
+		if err != nil {
+			return capsule.Bootstrap{}, err
+		}
+		if err := os.WriteFile(filepath.Join(request.Root, "chunks", chunk.Name), body, 0o600); err != nil {
+			return capsule.Bootstrap{}, err
+		}
 	}
 	for name, worker := range map[string]remoteworker.Request{
 		"initialize-request.json": request.InitializeRequest,
