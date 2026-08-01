@@ -82,6 +82,7 @@ func VerifyBootstrap(request BootstrapVerificationRequest) (BootstrapVerificatio
 	}); err != nil {
 		return BootstrapVerification{}, err
 	}
+	result := BootstrapVerification{}
 	helper, helperMode, err := observeRelativeFileWithMode(private, "camp-bootstrap", request.Expected.Helper.Name)
 	if err != nil || helper != request.Expected.Helper || helperMode&0o111 == 0 {
 		return BootstrapVerification{}, fmt.Errorf("%w: helper identity", ErrInvalidBootstrap)

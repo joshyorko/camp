@@ -47,18 +47,21 @@ func (fixture *hydrationFixture) AdmitWorkspace(request Request) error {
 		return err
 	}
 	defer unix.Close(workspaceFD)
-	return validateInitialWorkspace(workspaceFD, request.Expected.Kit)
+	return validateInitialWorkspace(workspaceFD, nil)
 }
 
-func TestValidateInitialWorkspaceAcceptsOnlyVerifiedBootstrapKit(t *testing.T) {
+func TestValidateInitialWorkspaceAcceptsOnlyManifestBoundChunks(t *testing.T) {
 	workspace := t.TempDir()
-	body := []byte("verified kit")
+	body := []byte("verified chunk")
 	digest := sha256.Sum256(body)
-	kit := FileIdentity{Name: "camp-hauler-kit.tar.zst", SHA256: fmt.Sprintf("%x", digest), Size: int64(len(body))}
+	chunks := []haulkit.ChunkIdentity{{Index: 0, Name: "camp-hauler-kit.tar.zst.part-000000", SHA256: fmt.Sprintf("%x", digest), Size: int64(len(body))}}
 	if err := os.Mkdir(filepath.Join(workspace, ".camp-bootstrap"), 0o700); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(filepath.Join(workspace, kit.Name), body, 0o600); err != nil {
+	if err := os.Mkdir(filepath.Join(workspace, "chunks"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(workspace, "chunks", chunks[0].Name), body, 0o600); err != nil {
 		t.Fatal(err)
 	}
 	workspaceFD, _, err := openOperationDirectory(workspace)
@@ -66,7 +69,7 @@ func TestValidateInitialWorkspaceAcceptsOnlyVerifiedBootstrapKit(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer unix.Close(workspaceFD)
-	if err := validateInitialWorkspace(workspaceFD, kit); err != nil {
+	if err := validateInitialWorkspace(workspaceFD, chunks); err != nil {
 		t.Fatal(err)
 	}
 	if err := unix.Close(workspaceFD); err != nil {
@@ -76,8 +79,8 @@ func TestValidateInitialWorkspaceAcceptsOnlyVerifiedBootstrapKit(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	kit.SHA256 = strings.Repeat("a", 64)
-	if err := validateInitialWorkspace(workspaceFD, kit); !errors.Is(err, ErrUnsafeHydration) {
+	chunks[0].SHA256 = strings.Repeat("a", 64)
+	if err := validateInitialWorkspace(workspaceFD, chunks); !errors.Is(err, ErrUnsafeHydration) {
 		t.Fatalf("validateInitialWorkspace() error = %v", err)
 	}
 }
@@ -127,7 +130,7 @@ func (fixture *hydrationFixture) InstallTools(Request, verifiedRuntimeKit) error
 
 func (fixture *hydrationFixture) Promote(stage, workspace string) error {
 	fixture.order = append(fixture.order, "promote")
-	return promoteHydratedRoot(stage, workspace, FileIdentity{}, nil)
+	return promoteHydratedRoot(stage, workspace, nil, nil)
 }
 
 func (fixture *hydrationFixture) Publish(_ Request, receipt HydrationReceipt) error {
@@ -418,7 +421,7 @@ func TestPromoteHydratedRootPreservesOnlyBootstrapAndRuntime(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if err := promoteHydratedRoot(stage, workspace, FileIdentity{}, nil); err != nil {
+	if err := promoteHydratedRoot(stage, workspace, nil, nil); err != nil {
 		t.Fatal(err)
 	}
 	for _, path := range []string{
@@ -459,7 +462,7 @@ func TestPromoteHydratedRootRejectsUnexpectedWorkspaceEntryWithoutMutation(t *te
 		t.Fatal(err)
 	}
 
-	if err := promoteHydratedRoot(stage, workspace, FileIdentity{}, nil); err == nil {
+	if err := promoteHydratedRoot(stage, workspace, nil, nil); err == nil {
 		t.Fatal("promoteHydratedRoot() error = nil")
 	}
 	if body, err := os.ReadFile(filepath.Join(workspace, "user.txt")); err != nil || string(body) != "keep" {

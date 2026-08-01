@@ -17,12 +17,12 @@ import (
 
 const (
 	ManifestSchemaVersion uint32 = 1
-	DefaultChunkSize      int64  = 1 << 30
+	DefaultChunkSize      int64  = 256 << 20
 	manifestKind                 = "camp-hauler-kit"
 	maxManifestBytes             = 4 << 20
 	maxArchiveBytes       int64  = 64 << 30
 	maxChunkBytes         int64  = DefaultChunkSize
-	maxChunkCount                = 64
+	maxChunkCount                = 256
 )
 
 var ErrInvalidManifest = errors.New("invalid Camp Hauler kit manifest")

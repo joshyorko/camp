@@ -14,6 +14,8 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/joshyorko/camp/internal/domain"
+	"github.com/joshyorko/camp/internal/haulkit"
 	"github.com/joshyorko/camp/internal/remoteworker"
 )
 
@@ -256,10 +258,10 @@ func TestRenderBootstrapFailsClosedWithoutChangingOriginal(t *testing.T) {
 	}
 }
 
-func TestRenderBootstrapPublishesKitFromVerifiedDescriptor(t *testing.T) {
+func TestRenderBootstrapRejectsChunkChangedAfterDescriptorVerification(t *testing.T) {
 	for name, mutate := range map[string]func(string) error{
 		"replace path": func(path string) error {
-			replacement := filepath.Join(filepath.Dir(path), "replacement.tar.zst")
+			replacement := filepath.Join(filepath.Dir(path), "replacement.part")
 			if err := os.WriteFile(replacement, []byte("replacement"), 0o600); err != nil {
 				return err
 			}
@@ -271,30 +273,23 @@ func TestRenderBootstrapPublishesKitFromVerifiedDescriptor(t *testing.T) {
 	} {
 		t.Run(name, func(t *testing.T) {
 			fixture := bootstrapFixture(t, json.RawMessage(`"true"`))
-			original, err := os.ReadFile(fixture.request.KitArchivePath)
+			entries, err := os.ReadDir(fixture.request.ChunkDirectory)
 			if err != nil {
 				t.Fatal(err)
 			}
+			chunkPath := filepath.Join(fixture.request.ChunkDirectory, entries[0].Name())
 			openHelper := fixture.openHelper
 			fixture.openHelper = func() (*os.File, error) {
-				if err := mutate(fixture.request.KitArchivePath); err != nil {
+				if err := mutate(chunkPath); err != nil {
 					return nil, err
 				}
 				return openHelper()
 			}
-			result, renderErr := renderBootstrap(fixture.request, fixture.openHelper)
-			if renderErr != nil {
-				if _, err := os.Stat(fixture.request.Root); !os.IsNotExist(err) {
-					t.Fatalf("failed render published root: %v", err)
-				}
-				return
+			if _, err := renderBootstrap(fixture.request, fixture.openHelper); err == nil {
+				t.Fatal("renderBootstrap() error = nil")
 			}
-			published, err := os.ReadFile(filepath.Join(result.Root, "camp-hauler-kit.tar.zst"))
-			if err != nil {
-				t.Fatal(err)
-			}
-			if !bytes.Equal(published, original) {
-				t.Fatalf("published unverified kit bytes %q", published)
+			if _, err := os.Stat(fixture.request.Root); !os.IsNotExist(err) {
+				t.Fatalf("failed render published root: %v", err)
 			}
 		})
 	}
@@ -398,10 +393,10 @@ func TestRenderBootstrapRejectsSymlinkedSourceAncestor(t *testing.T) {
 	fixture := bootstrapFixture(t, json.RawMessage(`"true"`))
 	linkParent := t.TempDir()
 	link := filepath.Join(linkParent, "source")
-	if err := os.Symlink(filepath.Dir(fixture.request.KitArchivePath), link); err != nil {
+	if err := os.Symlink(fixture.request.ChunkDirectory, link); err != nil {
 		t.Fatal(err)
 	}
-	fixture.request.KitArchivePath = filepath.Join(link, filepath.Base(fixture.request.KitArchivePath))
+	fixture.request.ChunkDirectory = link
 	if _, err := renderBootstrap(fixture.request, fixture.openHelper); err == nil {
 		t.Fatal("renderBootstrap() error = nil")
 	}
@@ -432,8 +427,39 @@ func TestVerifyBootstrapAcceptsCompleteRenderedSourceAndAccountsPayloadClasses(t
 
 func TestVerifyBootstrapRejectsTamperedOrUnboundedRenderedSource(t *testing.T) {
 	tests := map[string]func(*testing.T, bootstrapTestFixture, Bootstrap){
-		"kit bytes": func(t *testing.T, _ bootstrapTestFixture, bootstrap Bootstrap) {
-			if err := os.WriteFile(filepath.Join(bootstrap.Root, "camp-hauler-kit.tar.zst"), []byte("tampered"), 0o600); err != nil {
+		"chunk bytes": func(t *testing.T, fixture bootstrapTestFixture, bootstrap Bootstrap) {
+			entries, err := os.ReadDir(fixture.request.ChunkDirectory)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(filepath.Join(bootstrap.Root, "chunks", entries[0].Name()), []byte("tampered"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+		},
+		"missing chunk": func(t *testing.T, fixture bootstrapTestFixture, bootstrap Bootstrap) {
+			entries, err := os.ReadDir(fixture.request.ChunkDirectory)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := os.Remove(filepath.Join(bootstrap.Root, "chunks", entries[0].Name())); err != nil {
+				t.Fatal(err)
+			}
+		},
+		"extra chunk": func(t *testing.T, _ bootstrapTestFixture, bootstrap Bootstrap) {
+			if err := os.WriteFile(filepath.Join(bootstrap.Root, "chunks", "unexpected.part"), []byte("x"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+		},
+		"symlinked chunk": func(t *testing.T, fixture bootstrapTestFixture, bootstrap Bootstrap) {
+			entries, err := os.ReadDir(fixture.request.ChunkDirectory)
+			if err != nil {
+				t.Fatal(err)
+			}
+			path := filepath.Join(bootstrap.Root, "chunks", entries[0].Name())
+			if err := os.Remove(path); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.Symlink("unexpected.part", path); err != nil {
 				t.Fatal(err)
 			}
 		},
@@ -502,7 +528,7 @@ func TestVerifyBootstrapRejectsTamperedOrUnboundedRenderedSource(t *testing.T) {
 			}
 		},
 		"symlink": func(t *testing.T, _ bootstrapTestFixture, bootstrap Bootstrap) {
-			if err := os.Symlink("camp-hauler-kit.tar.zst", filepath.Join(bootstrap.Root, "unexpected-link")); err != nil {
+			if err := os.Symlink("chunks", filepath.Join(bootstrap.Root, "unexpected-link")); err != nil {
 				t.Fatal(err)
 			}
 		},
@@ -561,7 +587,7 @@ func bootstrapFixtureWithConfig(t *testing.T, config string) bootstrapTestFixtur
 	parent := t.TempDir()
 	devcontainer := filepath.Join(parent, "devcontainer.json")
 	helper := filepath.Join(parent, "camp")
-	kit := filepath.Join(parent, "kit.tar.zst")
+	chunkDirectory := filepath.Join(parent, "chunks")
 	manifest := filepath.Join(parent, "manifest.json")
 	if err := os.WriteFile(devcontainer, []byte(config), 0o600); err != nil {
 		t.Fatal(err)
@@ -587,16 +613,39 @@ esac
 	if err := os.WriteFile(helper, helperBody, 0o700); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(kit, []byte("kit"), 0o600); err != nil {
+	helperIdentity := fileIdentity(t, "camp", helper)
+	if err := os.Mkdir(chunkDirectory, 0o700); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(manifest, []byte("{}"), 0o600); err != nil {
+	kit := []byte("kit")
+	chunk := haulkit.ChunkIdentity{Index: 0, Name: "camp-hauler-kit.tar.zst.part-000000", SHA256: sha256Hex(kit), Size: int64(len(kit))}
+	if err := os.WriteFile(filepath.Join(chunkDirectory, chunk.Name), kit, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	manifestBody, err := haulkit.MarshalCanonical(haulkit.Manifest{
+		SchemaVersion: haulkit.ManifestSchemaVersion, Kind: "camp-hauler-kit", SessionID: "session-1", Capsule: "capsule",
+		Lineage: domain.Lineage{Branch: "main"}, Architecture: "linux/" + runtime.GOARCH,
+		Store: haulkit.StoreIdentity{HaulerVersion: "v2.0.2", IndexSHA256: strings.Repeat("a", 64), Entries: []haulkit.StoreEntry{{
+			Reference: "hauler/root.tar.zst:latest", Type: "file", Digest: strings.Repeat("b", 64), Size: 1,
+		}}},
+		Root: haulkit.RootIdentity{Reference: "hauler/root.tar.zst:latest", SHA256: strings.Repeat("b", 64), Size: 1},
+		Tools: haulkit.ToolIdentities{
+			Camp:   haulkit.FileIdentity{Name: helperIdentity.Name, Version: "camp test", SHA256: helperIdentity.SHA256, Size: helperIdentity.Size},
+			Hauler: haulkit.FileIdentity{Name: "hauler", Version: "v2.0.2", SHA256: strings.Repeat("c", 64), Size: 1},
+			Pasta:  haulkit.FileIdentity{Name: "pasta", Version: "pasta 2026", SHA256: strings.Repeat("d", 64), Size: 1},
+		},
+		Archive: haulkit.ArchiveIdentity{SHA256: sha256Hex(kit), Size: int64(len(kit))}, Chunks: []haulkit.ChunkIdentity{chunk},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(manifest, manifestBody, 0o600); err != nil {
 		t.Fatal(err)
 	}
 	expected := remoteworker.ExpectedIdentity{
 		Architecture: "linux/" + runtime.GOARCH,
-		Helper:       fileIdentity(t, "camp", helper),
-		Kit:          fileIdentity(t, "camp-hauler-kit.tar.zst", kit),
+		Helper:       helperIdentity,
+		Kit:          remoteworker.FileIdentity{Name: "camp-hauler-kit.tar.zst", SHA256: sha256Hex(kit), Size: int64(len(kit))},
 		Manifest:     fileIdentity(t, "manifest.json", manifest),
 		SourceImage:  "example/final@sha256:" + strings.Repeat("b", 64),
 		Image:        "sha256:" + strings.Repeat("c", 64),
@@ -616,7 +665,7 @@ esac
 		request: BootstrapRequest{
 			Root:              filepath.Join(parent, "bootstrap"),
 			DevcontainerPath:  devcontainer,
-			KitArchivePath:    kit,
+			ChunkDirectory:    chunkDirectory,
 			ManifestPath:      manifest,
 			OuterImage:        expected.SourceImage,
 			InitializeRequest: requestFor(remoteworker.OperationActivateImage),
@@ -795,4 +844,9 @@ func entryNames(entries []os.DirEntry) []string {
 		names[index] = entries[index].Name()
 	}
 	return names
+}
+
+func sha256Hex(body []byte) string {
+	digest := sha256.Sum256(body)
+	return hex.EncodeToString(digest[:])
 }

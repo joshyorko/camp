@@ -213,13 +213,22 @@ func readHydrationReceipt(workspace string) ([]byte, error) {
 	return body, nil
 }
 
-func (*productionHydrationRuntime) AdmitWorkspace(request Request) error {
+func (runtimeState *productionHydrationRuntime) AdmitWorkspace(request Request) error {
+	body, err := readStableIdentityFile(request.ManifestPath, request.Expected.Manifest)
+	if err != nil {
+		return fmt.Errorf("%w: read activation manifest: %v", ErrUnsafeHydration, err)
+	}
+	manifest, err := haulkit.DecodeCanonical(body)
+	if err != nil || manifest.Archive.SHA256 != request.Expected.Kit.SHA256 || manifest.Archive.Size != request.Expected.Kit.Size {
+		return fmt.Errorf("%w: activation manifest archive identity", ErrUnsafeHydration)
+	}
+	runtimeState.manifest = manifest
 	workspaceFD, _, err := openOperationDirectory(request.WorkspaceRoot)
 	if err != nil {
 		return fmt.Errorf("%w: open workspace: %v", ErrUnsafeHydration, err)
 	}
 	defer unix.Close(workspaceFD)
-	return validateInitialWorkspace(workspaceFD, request.Expected.Kit)
+	return validateInitialWorkspace(workspaceFD, manifest.Chunks)
 }
 
 func (runtimeState *productionHydrationRuntime) ExtractRoot(ctx context.Context, request Request, kit verifiedRuntimeKit) (string, error) {
@@ -319,7 +328,7 @@ func (runtimeState *productionHydrationRuntime) InstallTools(request Request, ki
 }
 
 func (runtimeState *productionHydrationRuntime) Promote(stage, workspace string) error {
-	return promoteHydratedRoot(stage, workspace, runtimeState.kit, nil)
+	return promoteHydratedRoot(stage, workspace, runtimeState.manifest.Chunks, nil)
 }
 
 func (*productionHydrationRuntime) Publish(request Request, receipt HydrationReceipt) error {
@@ -330,7 +339,7 @@ func (*productionHydrationRuntime) Publish(request Request, receipt HydrationRec
 	return publishReceipt(filepath.Join(request.WorkspaceRoot, ".camp", "runtime", "hydrate.receipt.json"), append(body, '\n'))
 }
 
-func promoteHydratedRoot(stage, workspace string, kit FileIdentity, boundary func(string) error) error {
+func promoteHydratedRoot(stage, workspace string, chunks []haulkit.ChunkIdentity, boundary func(string) error) error {
 	stageFD, stageStat, err := openOperationDirectory(stage)
 	if err != nil {
 		return fmt.Errorf("%w: open root stage: %v", ErrUnsafeHydration, err)
@@ -344,7 +353,7 @@ func promoteHydratedRoot(stage, workspace string, kit FileIdentity, boundary fun
 	if stageStat.Dev != workspaceStat.Dev {
 		return fmt.Errorf("%w: stage and workspace cross devices", ErrUnsafeHydration)
 	}
-	if err := validateInitialWorkspace(workspaceFD, kit); err != nil {
+	if err := validateInitialWorkspace(workspaceFD, chunks); err != nil {
 		return err
 	}
 	names, err := readDirectoryNames(stageFD)
@@ -447,7 +456,7 @@ func openOperationDirectory(path string) (int, unix.Stat_t, error) {
 	return fd, stat, nil
 }
 
-func validateInitialWorkspace(workspaceFD int, kit FileIdentity) error {
+func validateInitialWorkspace(workspaceFD int, chunks []haulkit.ChunkIdentity) error {
 	names, err := readDirectoryNames(workspaceFD)
 	if err != nil {
 		return err
@@ -458,8 +467,11 @@ func validateInitialWorkspace(workspaceFD int, kit FileIdentity) error {
 			if err := requireDirectoryAt(workspaceFD, name); err != nil {
 				return err
 			}
-		case kit.Name:
-			if err := requireInitialKitAt(workspaceFD, kit); err != nil {
+		case "chunks":
+			if len(chunks) == 0 {
+				return fmt.Errorf("%w: unexpected initial workspace entry %q", ErrUnsafeHydration, name)
+			}
+			if err := requireInitialChunksAt(workspaceFD, chunks); err != nil {
 				return err
 			}
 		case ".camp":
@@ -482,25 +494,58 @@ func validateInitialWorkspace(workspaceFD int, kit FileIdentity) error {
 			return fmt.Errorf("%w: unexpected initial workspace entry %q", ErrUnsafeHydration, name)
 		}
 	}
+	if len(chunks) > 0 && !containsName(names, "chunks") {
+		return fmt.Errorf("%w: bootstrap chunks are missing", ErrUnsafeHydration)
+	}
 	return nil
 }
 
-func requireInitialKitAt(parentFD int, expected FileIdentity) error {
+func requireInitialChunksAt(parentFD int, chunks []haulkit.ChunkIdentity) error {
+	chunksFD, err := unix.Openat(parentFD, "chunks", unix.O_RDONLY|unix.O_DIRECTORY|unix.O_CLOEXEC|unix.O_NOFOLLOW, 0)
+	if err != nil {
+		return fmt.Errorf("%w: bootstrap chunks are unsafe: %v", ErrUnsafeHydration, err)
+	}
+	defer unix.Close(chunksFD)
+	names, err := readDirectoryNames(chunksFD)
+	if err != nil || len(names) != len(chunks) {
+		return fmt.Errorf("%w: bootstrap chunk allowlist", ErrUnsafeHydration)
+	}
+	for index, chunk := range chunks {
+		if index >= len(names) || names[index] != chunk.Name {
+			return fmt.Errorf("%w: bootstrap chunk allowlist", ErrUnsafeHydration)
+		}
+		if err := requireInitialFileAt(chunksFD, FileIdentity{Name: chunk.Name, SHA256: chunk.SHA256, Size: chunk.Size}); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func requireInitialFileAt(parentFD int, expected FileIdentity) error {
 	fileDescriptor, err := unix.Openat(parentFD, expected.Name, unix.O_RDONLY|unix.O_CLOEXEC|unix.O_NOFOLLOW, 0)
 	if err != nil {
-		return fmt.Errorf("%w: bootstrap kit is unsafe: %v", ErrUnsafeHydration, err)
+		return fmt.Errorf("%w: bootstrap file is unsafe: %v", ErrUnsafeHydration, err)
 	}
 	file := os.NewFile(uintptr(fileDescriptor), expected.Name)
 	defer file.Close()
 	info, err := file.Stat()
 	if err != nil || !info.Mode().IsRegular() || info.Size() != expected.Size {
-		return fmt.Errorf("%w: bootstrap kit identity", ErrUnsafeHydration)
+		return fmt.Errorf("%w: bootstrap file identity", ErrUnsafeHydration)
 	}
 	digest := sha256.New()
 	if _, err := io.Copy(digest, file); err != nil || fmt.Sprintf("%x", digest.Sum(nil)) != expected.SHA256 {
-		return fmt.Errorf("%w: bootstrap kit identity", ErrUnsafeHydration)
+		return fmt.Errorf("%w: bootstrap file identity", ErrUnsafeHydration)
 	}
 	return nil
+}
+
+func containsName(names []string, want string) bool {
+	for _, name := range names {
+		if name == want {
+			return true
+		}
+	}
+	return false
 }
 
 func requireDirectoryAt(parentFD int, name string) error {
