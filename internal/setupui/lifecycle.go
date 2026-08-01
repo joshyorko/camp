@@ -410,9 +410,9 @@ func (m LifecycleModel) helpLine() string {
 	return "ctrl+c quit"
 }
 
-// SampleLifecycleFrame composes deterministic lifecycle frames with the same
-// renderer used by the live model, for scene review and golden tests.
-func SampleLifecycleFrame(state string, w, h int, pal Palette, sprites map[string]Sprite) string {
+// sampleLifecycleFrame composes deterministic lifecycle frames for the shared
+// SampleFrame dispatcher and golden tests.
+func sampleLifecycleFrame(state string, w, h int, pal Palette, sprites map[string]Sprite) string {
 	m := NewLifecycleModel(pal, sprites, LifecycleWorkflow{
 		Operation: "sync", ReadyLine: "session-alpha · docker", NextCommand: "camp status",
 	})
@@ -435,4 +435,10 @@ func SampleLifecycleFrame(state string, w, h int, pal Palette, sprites map[strin
 		m.activity = "uploading generation 42"
 	}
 	return m.View().Content
+}
+
+// SampleLifecycleFrame preserves the focused lifecycle sample API for tests;
+// new callers should use SampleFrame so all sample states share one registry.
+func SampleLifecycleFrame(state string, w, h int, pal Palette, sprites map[string]Sprite) string {
+	return sampleLifecycleFrame(state, w, h, pal, sprites)
 }

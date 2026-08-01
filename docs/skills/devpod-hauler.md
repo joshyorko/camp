@@ -65,6 +65,14 @@ Do not use Hauler v2.0.2's live `_catalog` response as proof that all direct reg
   SHA-256, and recorded the bootstrap root rather than the capsule root as the
   DevPod source. This proves upload and hook ordering only; selected capsule
   devcontainer activation remains a later hydration concern.
+- A running provider pod does not prove that the disposable bootstrap upload is
+  progressing. On Bluefin with the `room-of-requirement` provider, pinned DevPod
+  v0.26.1 stalled while copying a 1,312,394,217-byte Kit: the remote file stayed
+  at 980,025,344 bytes, its modification time and the agent I/O counters stopped
+  changing, the agent slept in `futex_do_wait`, and its TLS socket retained a
+  non-empty send queue while the destination had ample bytes and inodes. Diagnose
+  this boundary by comparing the source and remote file sizes twice plus the
+  exact agent `/proc/<pid>/io`; a healthy Kubernetes pod alone is insufficient.
 - Camp's remote bootstrap renderer publishes one new private source root with
   `.camp-bootstrap/{devcontainer.json,camp-bootstrap,initialize-request.json,hydrate-request.json,services-request.json}`
   and `camp-hauler-kit.tar.zst`; it refuses to replace an existing root. The

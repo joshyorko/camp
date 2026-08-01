@@ -59,6 +59,17 @@ func TestComposeNeverExceedsRequestedSize(t *testing.T) {
 	}
 }
 
+func TestSampleStateRegistryDispatchesEveryAdvertisedState(t *testing.T) {
+	sprites := loadForTest(t)
+	pal := DefaultPalette()
+	for _, state := range SampleStates() {
+		frame := SampleFrame(state, 80, 24, pal, sprites)
+		if frame == "" {
+			t.Fatalf("sample state %q rendered an empty frame", state)
+		}
+	}
+}
+
 func TestComposeNoTrailingWhitespace(t *testing.T) {
 	sprites := loadForTest(t)
 	pal := DefaultPalette()

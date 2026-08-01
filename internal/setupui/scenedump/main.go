@@ -19,7 +19,7 @@ import (
 func main() {
 	w := flag.Int("w", 120, "width in cells")
 	h := flag.Int("h", 40, "height in cells")
-	state := flag.String("state", "ready", "configure|progress|ready|failure|lifecycle-progress|lifecycle-ready|lifecycle-failure")
+	state := flag.String("state", "ready", setupui.SampleStateUsage())
 	out := flag.String("out", "", "optional ANSI output file")
 	flag.Parse()
 
@@ -29,17 +29,7 @@ func main() {
 		os.Exit(1)
 	}
 	pal := setupui.DefaultPalette()
-	var frame string
-	switch *state {
-	case "lifecycle-progress":
-		frame = setupui.SampleLifecycleFrame("progress", *w, *h, pal, sprites)
-	case "lifecycle-ready":
-		frame = setupui.SampleLifecycleFrame("ready", *w, *h, pal, sprites)
-	case "lifecycle-failure":
-		frame = setupui.SampleLifecycleFrame("failure", *w, *h, pal, sprites)
-	default:
-		frame = setupui.SampleFrame(*state, *w, *h, pal, sprites)
-	}
+	frame := setupui.SampleFrame(*state, *w, *h, pal, sprites)
 	if *out != "" {
 		if err := os.WriteFile(*out, []byte(frame), 0o600); err != nil {
 			fmt.Fprintln(os.Stderr, err)
