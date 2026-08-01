@@ -5,6 +5,10 @@ import "context"
 type ProgressStage string
 
 const (
+	ProgressSnapshottingRoot         ProgressStage = "snapshotting-root"
+	ProgressDownloadingRoomImage     ProgressStage = "downloading-room-image"
+	ProgressBuildingHaulerKit        ProgressStage = "building-hauler-kit"
+	ProgressVerifyingHaulerKit       ProgressStage = "verifying-hauler-kit"
 	ProgressWorkspacePrepared        ProgressStage = "workspace-prepared"
 	ProgressImagesCaptured           ProgressStage = "images-captured"
 	ProgressRegistrySealed           ProgressStage = "registry-sealed"
@@ -25,6 +29,7 @@ const (
 type ProgressEvent struct {
 	Stage      ProgressStage `json:"stage"`
 	Message    string        `json:"message,omitempty"`
+	Complete   bool          `json:"complete,omitempty"`
 	Generation uint64        `json:"generation,omitempty"`
 	ImageCount int           `json:"imageCount,omitempty"`
 	Bytes      int64         `json:"bytes,omitempty"`

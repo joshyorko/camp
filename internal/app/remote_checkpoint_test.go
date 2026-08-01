@@ -191,8 +191,9 @@ func TestRemoteCheckpointPreparerRejectsLegacyOrDriftedIdentity(t *testing.T) {
 func remoteCheckpointSnapshot() domain.JournalSnapshot {
 	record := &domain.RemoteDataPlaneRecord{
 		Mode: domain.DataPlaneHaulerKitV1, AttemptID: "session-1-hauler-kit-v1",
-		RequestSession: "session-1", WorkspaceRoot: "/workspaces/brain",
-		RuntimeRoot: "/var/lib/camp/session-1", ManifestPath: "/var/lib/camp/session-1/camp-hauler-kit.json",
+		RequestSession: "session-1", WorkspaceRoot: "/workspaces/camp-brain",
+		RuntimeRoot:   "/workspaces/camp-brain/.camp/runtime/bootstrap/session-1",
+		ManifestPath:  "/workspaces/camp-brain/.camp/runtime/bootstrap/session-1/camp-hauler-kit.json",
 		RequestSchema: remoteworker.ProtocolSchemaVersion, Architecture: "linux/amd64",
 		HelperSHA256: testAppSHA("a"), HelperSize: 10,
 		KitSHA256: testAppSHA("b"), KitSize: 20,

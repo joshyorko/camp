@@ -20,6 +20,7 @@ type recordingWorkerOperations struct {
 	activated    bool
 	hydrated     bool
 	started      bool
+	observed     bool
 	checkpointed bool
 }
 
@@ -75,6 +76,42 @@ func TestActivateImageVerifiesBeforeRegistryAndRequiresExactLocalImageID(t *test
 	}
 }
 
+func TestProviderEngineFallsBackToPodman(t *testing.T) {
+	directory := t.TempDir()
+	podman := filepath.Join(directory, "podman")
+	if err := os.WriteFile(podman, []byte("#!/bin/sh\nexit 0\n"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", directory)
+	engine, err := providerEngine()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if engine != podman {
+		t.Fatalf("providerEngine() = %q, want %q", engine, podman)
+	}
+}
+
+func TestPodmanActivationPullUsesLoopbackRegistryWithoutTLS(t *testing.T) {
+	directory := t.TempDir()
+	podman := filepath.Join(directory, "podman")
+	script := "#!/bin/sh\n" +
+		"if [ \"$1\" = pull ]; then [ \"$2\" = --tls-verify=false ] || exit 125; exit 0; fi\n" +
+		"if [ \"$1\" = image ] && [ \"$2\" = inspect ]; then printf 'sha256:" + strings.Repeat("a", 64) + "\\n'; exit 0; fi\n" +
+		"exit 64\n"
+	if err := os.WriteFile(podman, []byte(script), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", directory)
+	got, err := newProductionActivationRuntime().PullAndInspect(t.Context(), "127.0.0.1:46003/podman/stable@sha256:"+strings.Repeat("b", 64))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got != "sha256:"+strings.Repeat("a", 64) {
+		t.Fatalf("local image ID = %q", got)
+	}
+}
+
 func (operations *recordingWorkerOperations) ActivateImage(context.Context, Request) (any, error) {
 	operations.activated = true
 	return map[string]string{"status": "completed"}, nil
@@ -90,13 +127,18 @@ func (operations *recordingWorkerOperations) StartServices(context.Context, Requ
 	return map[string]string{"status": "ready"}, nil
 }
 
+func (operations *recordingWorkerOperations) Observe(context.Context, Request) (any, error) {
+	operations.observed = true
+	return map[string]string{"status": "ready"}, nil
+}
+
 func (operations *recordingWorkerOperations) Checkpoint(context.Context, Request) (any, error) {
 	operations.checkpointed = true
 	return map[string]string{"status": "prepared"}, nil
 }
 
 func TestRunDispatchesRemoteLifecycleOperations(t *testing.T) {
-	for _, operation := range []Operation{OperationActivateImage, OperationHydrate, OperationStartServices, OperationCheckpoint} {
+	for _, operation := range []Operation{OperationActivateImage, OperationHydrate, OperationStartServices, OperationObserve, OperationCheckpoint} {
 		t.Run(string(operation), func(t *testing.T) {
 			request := validRequest()
 			request.Operation = operation
@@ -116,8 +158,9 @@ func TestRunDispatchesRemoteLifecycleOperations(t *testing.T) {
 			if operations.activated != (operation == OperationActivateImage) ||
 				operations.hydrated != (operation == OperationHydrate) ||
 				operations.started != (operation == OperationStartServices) ||
+				operations.observed != (operation == OperationObserve) ||
 				operations.checkpointed != (operation == OperationCheckpoint) {
-				t.Fatalf("dispatch activate=%v hydrate=%v start=%v", operations.activated, operations.hydrated, operations.started)
+				t.Fatalf("dispatch activate=%v hydrate=%v start=%v observe=%v checkpoint=%v", operations.activated, operations.hydrated, operations.started, operations.observed, operations.checkpointed)
 			}
 			var result Result
 			if err := json.Unmarshal(output.Bytes(), &result); err != nil {

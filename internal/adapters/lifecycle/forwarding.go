@@ -251,8 +251,8 @@ func validateForwardingRequest(request domain.ForwardingRequest) error {
 	if err := validateForwardEndpoint(request.LocalEndpoint); err != nil {
 		return err
 	}
-	if request.WorkspaceEndpoint != request.LocalEndpoint {
-		return errors.New("workspace forwarder endpoints must use the same loopback port")
+	if err := validateForwardEndpoint(request.WorkspaceEndpoint); err != nil {
+		return err
 	}
 	return nil
 }

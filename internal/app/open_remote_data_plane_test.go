@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"reflect"
 	"runtime"
 	"strings"
 	"testing"
@@ -30,6 +31,7 @@ func TestRemoteDataPlanePreparerBuildsVerifiesThenRendersBootstrap(t *testing.T)
 		t.Fatal(err)
 	}
 	var order []string
+	var progress []ProgressEvent
 	hauler := &fakeRemoteHauler{order: &order}
 	builder := &fakeRemoteKitBuilder{order: &order}
 	verifier := &fakeRemoteKitVerifier{order: &order}
@@ -40,7 +42,7 @@ func TestRemoteDataPlanePreparerBuildsVerifiesThenRendersBootstrap(t *testing.T)
 	})
 	preparer.render = func(request capsule.BootstrapRequest) (capsule.Bootstrap, error) {
 		order = append(order, "render")
-		if request.OuterImage != "sha256:"+strings.Repeat("c", 64) {
+		if request.OuterImage != "example.test/workspace:v1@sha256:"+strings.Repeat("d", 64) {
 			t.Fatalf("outer image = %q", request.OuterImage)
 		}
 		if request.InitializeRequest.Expected.SourceImage != "example.test/workspace:v1@sha256:"+strings.Repeat("d", 64) {
@@ -51,7 +53,11 @@ func TestRemoteDataPlanePreparerBuildsVerifiesThenRendersBootstrap(t *testing.T)
 		}
 		return writeFakeRenderedBootstrap(request)
 	}
-	result, err := preparer.Prepare(context.Background(), RemoteDataPlaneRequest{
+	ctx := WithProgressReporter(context.Background(), ProgressFunc(func(_ context.Context, event ProgressEvent) error {
+		progress = append(progress, event)
+		return nil
+	}))
+	result, err := preparer.Prepare(ctx, RemoteDataPlaneRequest{
 		SessionID: "session-1", AttemptID: "session-1-hauler-kit-v1", Capsule: "brain", Lineage: domain.Lineage{Branch: "main"},
 		Materialization: root, DevcontainerPath: devcontainer,
 	})
@@ -61,13 +67,48 @@ func TestRemoteDataPlanePreparerBuildsVerifiesThenRendersBootstrap(t *testing.T)
 	if strings.Join(order, ",") != "archive,add-file,add-image,build,verify,render" {
 		t.Fatalf("preparation order = %v", order)
 	}
+	wantProgress := []ProgressEvent{
+		{Stage: ProgressSnapshottingRoot},
+		{Stage: ProgressSnapshottingRoot, Complete: true},
+		{Stage: ProgressDownloadingRoomImage, Message: "example.test/workspace:v1@sha256:" + strings.Repeat("d", 64)},
+		{Stage: ProgressDownloadingRoomImage, Complete: true},
+		{Stage: ProgressBuildingHaulerKit},
+		{Stage: ProgressBuildingHaulerKit, Complete: true},
+		{Stage: ProgressVerifyingHaulerKit},
+		{Stage: ProgressVerifyingHaulerKit, Complete: true},
+	}
+	if !reflect.DeepEqual(progress, wantProgress) {
+		t.Fatalf("progress = %#v, want %#v", progress, wantProgress)
+	}
 	if result.Record.Mode != domain.DataPlaneHaulerKitV1 || result.Record.AttemptID != "session-1-hauler-kit-v1" ||
 		result.Record.BootstrapRoot != result.BootstrapRoot || result.Record.OuterImage == "" {
 		t.Fatalf("result = %#v", result)
 	}
+	if result.Record.RuntimeRoot != filepath.Join(result.Record.WorkspaceRoot, ".camp", "runtime", "bootstrap", "session-1") ||
+		result.Record.ManifestPath != filepath.Join(result.Record.RuntimeRoot, "camp-hauler-kit.json") {
+		t.Fatalf("remote lifecycle paths are not writable from the selected workspace user: %#v", result.Record)
+	}
 	if builder.request.CampVersion != "" || builder.request.PastaExecutable != "/usr/bin/pasta" ||
 		builder.request.PastaVersion != "pasta 2026" || builder.request.HaulerVersion != "v2.0.2" {
 		t.Fatalf("build request = %#v", builder.request)
+	}
+}
+
+func TestValidRemoteDataPlaneResultAcceptsPreparedSourceAndLocalImageIdentities(t *testing.T) {
+	t.Parallel()
+	digest := strings.Repeat("a", 64)
+	selected := domain.RemoteDataPlaneRecord{Mode: domain.DataPlaneHaulerKitV1, AttemptID: "session-1-hauler-kit-v1"}
+	record := domain.RemoteDataPlaneRecord{
+		Mode: domain.DataPlaneHaulerKitV1, AttemptID: selected.AttemptID, BootstrapRoot: "/controller/attempt/bootstrap",
+		KitSHA256: digest, KitSize: 1, ManifestSHA256: digest, ManifestSize: 1,
+		SourceImage: "example.test/workspace@sha256:" + digest, OuterImage: "sha256:" + digest,
+		RequestSchema: 1, RequestSession: "session-1", WorkspaceRoot: "/workspaces/brain",
+		RuntimeRoot: "/var/lib/camp/session-1", ManifestPath: "/var/lib/camp/session-1/camp-hauler-kit.json",
+		Architecture: "linux/amd64", ConfigSHA256: digest, ConfigSize: 1,
+	}
+	result := RemoteDataPlaneResult{BootstrapRoot: record.BootstrapRoot, Record: record}
+	if !validRemoteDataPlaneResult(result, selected, "/controller/materialization") {
+		t.Fatalf("production-shaped remote data-plane result was rejected: %#v", result)
 	}
 }
 
@@ -503,8 +544,8 @@ func writeFakeRenderedBootstrap(request capsule.BootstrapRequest) (capsule.Boots
 	}
 	document := fmt.Sprintf(`{"image":%q,"initializeCommand":%q,"onCreateCommand":%q,"postStartCommand":%q}`,
 		request.OuterImage,
-		".camp-bootstrap/camp-bootstrap __remote-worker < .camp-bootstrap/initialize-request.json",
-		".camp-bootstrap/camp-bootstrap __remote-worker < .camp-bootstrap/hydrate-request.json",
+		"true",
+		".camp-bootstrap/camp-bootstrap __remote-worker < .camp-bootstrap/initialize-request.json && .camp-bootstrap/camp-bootstrap __remote-worker < .camp-bootstrap/hydrate-request.json",
 		".camp-bootstrap/camp-bootstrap __remote-worker < .camp-bootstrap/services-request.json")
 	path := filepath.Join(private, "devcontainer.json")
 	if err := os.WriteFile(path, []byte(document), 0o600); err != nil {

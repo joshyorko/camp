@@ -185,11 +185,13 @@ func (p *RemoteCheckpointPreparer) Prepare(ctx context.Context, snapshot domain.
 		return remoteworker.CheckpointReceipt{}, errors.New("remote checkpoint dependencies or generation are incomplete")
 	}
 	record := snapshot.Recovery.RemoteDataPlane
+	expectedWorkspaceRoot := filepath.Join("/workspaces", snapshot.Workspace.ID)
+	expectedRuntimeRoot := filepath.Join(expectedWorkspaceRoot, ".camp", "runtime", "bootstrap", snapshot.SessionID)
 	if record == nil || record.Mode != domain.DataPlaneHaulerKitV1 ||
 		record.RequestSchema != remoteworker.ProtocolSchemaVersion ||
 		record.RequestSession != snapshot.SessionID ||
-		record.WorkspaceRoot != filepath.Join("/workspaces", snapshot.Capsule) ||
-		record.RuntimeRoot != filepath.Join("/var/lib/camp", snapshot.SessionID) ||
+		record.WorkspaceRoot != expectedWorkspaceRoot ||
+		record.RuntimeRoot != expectedRuntimeRoot ||
 		record.ManifestPath != filepath.Join(record.RuntimeRoot, "camp-hauler-kit.json") ||
 		record.AttemptID != snapshot.SessionID+"-hauler-kit-v1" ||
 		snapshot.SessionID == "" || snapshot.Capsule == "" ||

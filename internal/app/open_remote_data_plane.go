@@ -20,6 +20,7 @@ import (
 	"github.com/joshyorko/camp/internal/haulkit"
 	"github.com/joshyorko/camp/internal/ports"
 	"github.com/joshyorko/camp/internal/remoteworker"
+	"github.com/joshyorko/camp/internal/workspace"
 	"golang.org/x/sys/unix"
 )
 
@@ -116,6 +117,9 @@ func (p *RemoteDataPlanePreparer) Prepare(ctx context.Context, request RemoteDat
 	}
 	rootName := request.Capsule + ".tar.zst"
 	rootArchive := filepath.Join(attemptRoot, rootName)
+	if err := reportProgress(ctx, ProgressEvent{Stage: ProgressSnapshottingRoot}); err != nil {
+		return RemoteDataPlaneResult{}, err
+	}
 	archiveInfo, err := p.deps.Archiver.Create(ctx, request.Materialization, rootArchive)
 	if err != nil {
 		return RemoteDataPlaneResult{}, fmt.Errorf("snapshot remote root: %w", err)
@@ -127,6 +131,9 @@ func (p *RemoteDataPlanePreparer) Prepare(ctx context.Context, request RemoteDat
 		return RemoteDataPlaneResult{}, fmt.Errorf("add root archive to Hauler store: %w", err)
 	} else if result.ExitCode != 0 {
 		return RemoteDataPlaneResult{}, fmt.Errorf("add root archive to Hauler store exited %d", result.ExitCode)
+	}
+	if err := reportProgress(ctx, ProgressEvent{Stage: ProgressSnapshottingRoot, Complete: true}); err != nil {
+		return RemoteDataPlaneResult{}, err
 	}
 	outerImage, err := p.resolveOuterImage(ctx, request.DevcontainerPath)
 	if err != nil {
@@ -140,6 +147,9 @@ func (p *RemoteDataPlanePreparer) Prepare(ctx context.Context, request RemoteDat
 	if err != nil {
 		return RemoteDataPlaneResult{}, fmt.Errorf("resolve immutable local devcontainer image ID: %w", err)
 	}
+	if err := reportProgress(ctx, ProgressEvent{Stage: ProgressDownloadingRoomImage, Message: outerImage}); err != nil {
+		return RemoteDataPlaneResult{}, err
+	}
 	if result, err := p.deps.Hauler.AddImage(ctx, storeRoot, hauleradapter.AddImageOptions{
 		Reference: outerImage, Platform: "linux/" + runtime.GOARCH,
 	}); err != nil {
@@ -147,9 +157,15 @@ func (p *RemoteDataPlanePreparer) Prepare(ctx context.Context, request RemoteDat
 	} else if result.ExitCode != 0 {
 		return RemoteDataPlaneResult{}, fmt.Errorf("add immutable devcontainer image to Hauler store exited %d", result.ExitCode)
 	}
+	if err := reportProgress(ctx, ProgressEvent{Stage: ProgressDownloadingRoomImage, Complete: true}); err != nil {
+		return RemoteDataPlaneResult{}, err
+	}
 	confinement, err := p.deps.Confinement.Resolve(ctx)
 	if err != nil {
 		return RemoteDataPlaneResult{}, fmt.Errorf("resolve pasta confinement: %w", err)
+	}
+	if err := reportProgress(ctx, ProgressEvent{Stage: ProgressBuildingHaulerKit}); err != nil {
+		return RemoteDataPlaneResult{}, err
 	}
 	artifact, err := p.deps.Builder.Build(ctx, haulkit.BuildRequest{
 		SessionID: request.SessionID, Capsule: request.Capsule, Lineage: request.Lineage, Generation: request.Generation,
@@ -163,6 +179,9 @@ func (p *RemoteDataPlanePreparer) Prepare(ctx context.Context, request RemoteDat
 	if err != nil {
 		return RemoteDataPlaneResult{}, fmt.Errorf("build Camp Hauler Kit v1: %w", err)
 	}
+	if err := reportProgress(ctx, ProgressEvent{Stage: ProgressBuildingHaulerKit, Complete: true}); err != nil {
+		return RemoteDataPlaneResult{}, err
+	}
 	manifestBody, err := os.ReadFile(artifact.ManifestPath)
 	if err != nil {
 		return RemoteDataPlaneResult{}, err
@@ -171,12 +190,18 @@ func (p *RemoteDataPlanePreparer) Prepare(ctx context.Context, request RemoteDat
 	if err != nil {
 		return RemoteDataPlaneResult{}, err
 	}
+	if err := reportProgress(ctx, ProgressEvent{Stage: ProgressVerifyingHaulerKit}); err != nil {
+		return RemoteDataPlaneResult{}, err
+	}
 	verified, err := p.deps.Verifier.Verify(ctx, haulkit.VerifyRequest{
 		ManifestPath: artifact.ManifestPath, ExpectedManifestSHA256: artifact.ManifestSHA256, ArchivePath: artifact.ArchivePath,
 		Architecture: manifest.Architecture, Tools: manifest.Tools, StoreDirectory: storeRoot,
 	})
 	if err != nil {
 		return RemoteDataPlaneResult{}, fmt.Errorf("verify Camp Hauler Kit v1: %w", err)
+	}
+	if err := reportProgress(ctx, ProgressEvent{Stage: ProgressVerifyingHaulerKit, Complete: true}); err != nil {
+		return RemoteDataPlaneResult{}, err
 	}
 	if verified.Manifest.Archive.SHA256 != artifact.SHA256 || verified.Manifest.Archive.Size != artifact.Size ||
 		verified.Manifest.Root.SHA256 != archiveInfo.SHA256 || verified.Manifest.Root.Size != archiveInfo.Size {
@@ -196,8 +221,8 @@ func (p *RemoteDataPlanePreparer) Prepare(ctx context.Context, request RemoteDat
 		SourceImage: outerImage,
 		Image:       localImage,
 	}
-	workspaceRoot := filepath.Join("/workspaces", request.Capsule)
-	runtimeRoot := filepath.Join("/var/lib/camp", request.SessionID)
+	workspaceRoot := filepath.Join("/workspaces", workspace.DeterministicID(request.Capsule, request.Lineage.Branch, request.Materialization))
+	runtimeRoot := filepath.Join(workspaceRoot, ".camp", "runtime", "bootstrap", request.SessionID)
 	remoteManifest := filepath.Join(runtimeRoot, "camp-hauler-kit.json")
 	workerRequest := func(operation remoteworker.Operation) remoteworker.Request {
 		return remoteworker.Request{
@@ -208,7 +233,7 @@ func (p *RemoteDataPlanePreparer) Prepare(ctx context.Context, request RemoteDat
 	bootstrapRoot := filepath.Join(attemptRoot, "bootstrap")
 	bootstrap, err := p.render(capsule.BootstrapRequest{
 		Root: bootstrapRoot, DevcontainerPath: request.DevcontainerPath,
-		KitArchivePath: artifact.ArchivePath, ManifestPath: artifact.ManifestPath, OuterImage: localImage,
+		KitArchivePath: artifact.ArchivePath, ManifestPath: artifact.ManifestPath, OuterImage: outerImage,
 		InitializeRequest: workerRequest(remoteworker.OperationActivateImage),
 		HydrateRequest:    workerRequest(remoteworker.OperationHydrate),
 		ServicesRequest:   workerRequest(remoteworker.OperationStartServices),

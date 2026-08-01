@@ -29,17 +29,17 @@ func TestForwarderManagerStartsExactDevPodReverseForwardAndProbesWorkspace(t *te
 	manager := newTestForwarderManager(client, processes)
 	record, err := manager.Start(context.Background(), domain.ForwardingRequest{
 		Name: "registry", WorkspaceID: "camp-brain", Context: "default",
-		LocalEndpoint: "127.0.0.1:39401", WorkspaceEndpoint: "127.0.0.1:39401", LogPath: filepath.Join(root, "forward.log"),
+		LocalEndpoint: "127.0.0.1:45001", WorkspaceEndpoint: "127.0.0.1:5000", LogPath: filepath.Join(root, "forward.log"),
 		EvidencePath: filepath.Join(root, "registry-forwarding.json"),
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
-	wantOptions := devpod.SSHOptions{WorkspaceID: "camp-brain", Context: "default", ReverseForwards: []string{"127.0.0.1:39401:127.0.0.1:39401"}, StartServices: true, ForwardedArgv: []string{"--command", "sleep 2147483647"}}
+	wantOptions := devpod.SSHOptions{WorkspaceID: "camp-brain", Context: "default", ReverseForwards: []string{"127.0.0.1:5000:127.0.0.1:45001"}, StartServices: true, ForwardedArgv: []string{"--command", "sleep 2147483647"}}
 	if !reflect.DeepEqual(client.options, wantOptions) {
 		t.Fatalf("SSH options = %#v, want %#v", client.options, wantOptions)
 	}
-	if len(client.executed) != 1 || !reflect.DeepEqual(client.executed[0].Argv, []string{"curl", "--fail", "--silent", "--show-error", "--max-time", "5", "http://127.0.0.1:39401/v2/"}) {
+	if len(client.executed) != 1 || !reflect.DeepEqual(client.executed[0].Argv, []string{"curl", "--fail", "--silent", "--show-error", "--max-time", "5", "http://127.0.0.1:5000/v2/"}) {
 		t.Fatalf("probe = %#v", client.executed)
 	}
 	if record.Process.Identity.PID != 41 || record.ObservedState != domain.RuntimeObservedReady {

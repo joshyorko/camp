@@ -708,6 +708,49 @@ func TestLifecycleProgressReporterStreamsTruthfulPlainStages(t *testing.T) {
 	}
 }
 
+func TestLifecycleProgressReporterStreamsOpenPreparationActivity(t *testing.T) {
+	var output bytes.Buffer
+	reporter := newLifecycleProgressReporter(ModeHuman, &output, presentation.TerminalPlain, "open")
+	for _, event := range []app.ProgressEvent{
+		{Stage: app.ProgressSnapshottingRoot},
+		{Stage: app.ProgressSnapshottingRoot, Complete: true},
+		{Stage: app.ProgressDownloadingRoomImage, Message: "registry.example/room@sha256:" + strings.Repeat("a", 64)},
+		{Stage: app.ProgressDownloadingRoomImage, Complete: true},
+		{Stage: app.ProgressBuildingHaulerKit},
+		{Stage: app.ProgressBuildingHaulerKit, Complete: true},
+		{Stage: app.ProgressVerifyingHaulerKit},
+		{Stage: app.ProgressVerifyingHaulerKit, Complete: true},
+	} {
+		if err := reporter.Report(context.Background(), event); err != nil {
+			t.Fatal(err)
+		}
+	}
+	want := "open: preparing capsule snapshot\nopen: capsule snapshot ready\n" +
+		"open: adding Room image registry.example/room@sha256:" + strings.Repeat("a", 64) + " to Hauler store\n" +
+		"open: Room image added to Hauler store\n" +
+		"open: building Camp Hauler Kit\nopen: Camp Hauler Kit built\n" +
+		"open: verifying Camp Hauler Kit\nopen: Camp Hauler Kit verified\n"
+	if output.String() != want {
+		t.Fatalf("output = %q, want %q", output.String(), want)
+	}
+}
+
+func TestLifecycleProgressReporterBoundsAndSanitizesOpenImageReference(t *testing.T) {
+	for _, reference := range []string{
+		"https://user:secret@registry.example/room@sha256:" + strings.Repeat("a", 64),
+		"registry.example/" + strings.Repeat("a", 257),
+	} {
+		var output bytes.Buffer
+		reporter := newLifecycleProgressReporter(ModeHuman, &output, presentation.TerminalPlain, "open")
+		if err := reporter.Report(context.Background(), app.ProgressEvent{Stage: app.ProgressDownloadingRoomImage, Message: reference}); err != nil {
+			t.Fatal(err)
+		}
+		if got, want := output.String(), "open: adding Room image immutable image to Hauler store\n"; got != want {
+			t.Fatalf("output = %q, want %q", got, want)
+		}
+	}
+}
+
 func TestLifecycleProgressReporterIsSilentForJSON(t *testing.T) {
 	var output bytes.Buffer
 	reporter := newLifecycleProgressReporter(ModeJSON, &output, presentation.TerminalPlain, "close")

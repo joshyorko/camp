@@ -217,27 +217,40 @@ func (runtimeState *productionActivationRuntime) StartRegistry(ctx context.Conte
 }
 
 func (*productionActivationRuntime) PullAndInspect(ctx context.Context, reference string) (string, error) {
-	docker, err := exec.LookPath("docker")
+	engine, err := providerEngine()
 	if err != nil {
-		return "", fmt.Errorf("%w: Docker-compatible provider engine is unavailable", ErrUnsupportedCapability)
+		return "", err
 	}
 	runner := subprocess.NewRunner()
-	pulled, err := runner.Run(ctx, ports.Command{Executable: docker, Argv: []string{"pull", reference}})
+	pullArgv := []string{"pull", reference}
+	if filepath.Base(engine) == "podman" {
+		pullArgv = []string{"pull", "--tls-verify=false", reference}
+	}
+	pulled, err := runner.Run(ctx, ports.Command{Executable: engine, Argv: pullArgv})
 	if err != nil || pulled.ExitCode != 0 {
 		return "", fmt.Errorf("pull activation image: %w", err)
 	}
-	return inspectDockerImage(ctx, docker, reference)
+	return inspectProviderImage(ctx, engine, reference)
 }
 
-func inspectDockerImage(ctx context.Context, docker, reference string) (string, error) {
+func providerEngine() (string, error) {
+	for _, name := range []string{"docker", "podman"} {
+		if executable, err := exec.LookPath(name); err == nil {
+			return executable, nil
+		}
+	}
+	return "", fmt.Errorf("%w: Docker- or Podman-compatible provider engine is unavailable", ErrUnsupportedCapability)
+}
+
+func inspectProviderImage(ctx context.Context, engine, reference string) (string, error) {
 	runner := subprocess.NewRunner()
-	inspected, err := runner.Run(ctx, ports.Command{Executable: docker, Argv: []string{"image", "inspect", "--format", "{{.Id}}", reference}})
+	inspected, err := runner.Run(ctx, ports.Command{Executable: engine, Argv: []string{"image", "inspect", "--format", "{{.Id}}", reference}})
 	if err != nil || inspected.ExitCode != 0 {
 		return "", fmt.Errorf("inspect activation image: %w", err)
 	}
 	value := strings.TrimSpace(string(inspected.Stdout))
 	if !strings.HasPrefix(value, "sha256:") || len(value) != 71 {
-		return "", fmt.Errorf("%w: Docker returned invalid local image ID", ErrIdentityMismatch)
+		return "", fmt.Errorf("%w: provider engine returned invalid local image ID", ErrIdentityMismatch)
 	}
 	return value, nil
 }
@@ -261,11 +274,11 @@ func (*productionActivationRuntime) Observe(ctx context.Context, request Request
 		receipt.SourceImage != request.Expected.SourceImage || receipt.LocalImage != request.Expected.Image {
 		return ActivationReceipt{}, false, fmt.Errorf("%w: activation receipt differs", ErrUnsafeHydration)
 	}
-	docker, err := exec.LookPath("docker")
+	engine, err := providerEngine()
 	if err != nil {
-		return ActivationReceipt{}, false, fmt.Errorf("%w: Docker-compatible provider engine is unavailable", ErrUnsupportedCapability)
+		return ActivationReceipt{}, false, err
 	}
-	observed, err := inspectDockerImage(ctx, docker, request.Expected.Image)
+	observed, err := inspectProviderImage(ctx, engine, request.Expected.Image)
 	if err != nil || observed != request.Expected.Image {
 		return ActivationReceipt{}, false, fmt.Errorf("%w: activated provider image changed", ErrIdentityMismatch)
 	}

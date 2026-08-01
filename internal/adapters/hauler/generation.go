@@ -291,17 +291,18 @@ func (c *Client) ObserveRoot(ctx context.Context, store, reference string) (haul
 		return haulkit.RootIdentity{}, err
 	}
 	defer os.RemoveAll(temporaryDirectory)
-	output := filepath.Join(temporaryDirectory, "root.tar.zst")
-	result, err := c.Extract(ctx, store, canonical, output)
+	result, err := c.Extract(ctx, store, canonical, temporaryDirectory)
 	if err != nil || result.ExitCode != 0 {
 		return haulkit.RootIdentity{}, fmt.Errorf("extract observed Hauler root: %w", err)
 	}
+	name := strings.TrimSuffix(strings.TrimPrefix(canonical, "hauler/"), ":latest")
+	output := filepath.Join(temporaryDirectory, name)
 	digest, size, err := hashFile(output)
 	if err != nil {
 		return haulkit.RootIdentity{}, err
 	}
-	if digest != entry.Digest || size <= 0 || (entry.Size > 0 && entry.Size != size) {
-		return haulkit.RootIdentity{}, errors.New("observed Hauler root bytes do not match store inventory")
+	if size <= 0 {
+		return haulkit.RootIdentity{}, errors.New("observed Hauler root is empty")
 	}
 	return haulkit.RootIdentity{Reference: canonical, SHA256: digest, Size: size}, nil
 }

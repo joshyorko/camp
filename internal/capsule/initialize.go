@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"runtime"
 	"time"
 
 	"github.com/joshyorko/camp/internal/domain"
@@ -77,19 +78,60 @@ func (r *CommandDigestResolver) ResolveConfigDigest(ctx context.Context, referen
 	if r == nil || r.executable == "" || r.runner == nil || reference == "" {
 		return "", errors.New("Docker manifest resolver is unconfigured")
 	}
-	result, err := r.runner.Run(ctx, ports.Command{Executable: r.executable, Argv: []string{"manifest", "inspect", reference}})
+	result, err := r.runner.Run(ctx, ports.Command{Executable: r.executable, Argv: []string{"manifest", "inspect", "--verbose", reference}})
 	if err != nil || result.ExitCode != 0 {
 		return "", fmt.Errorf("inspect Docker manifest config: %w", err)
 	}
-	var manifest struct {
+	type manifest struct {
+		Descriptor struct {
+			Platform struct {
+				OS           string `json:"os"`
+				Architecture string `json:"architecture"`
+			} `json:"platform"`
+		} `json:"Descriptor"`
 		Config struct {
 			Digest string `json:"digest"`
 		} `json:"config"`
+		SchemaV2Manifest struct {
+			Config struct {
+				Digest string `json:"digest"`
+			} `json:"config"`
+		} `json:"SchemaV2Manifest"`
+		OCIManifest struct {
+			Config struct {
+				Digest string `json:"digest"`
+			} `json:"config"`
+		} `json:"OCIManifest"`
 	}
-	if err := json.Unmarshal(result.Stdout, &manifest); err != nil || !digestPattern.MatchString(manifest.Config.Digest) {
-		return "", errors.New("Docker manifest output lacks a valid config digest")
+	configDigest := func(candidate manifest) string {
+		if digestPattern.MatchString(candidate.OCIManifest.Config.Digest) {
+			return candidate.OCIManifest.Config.Digest
+		}
+		if digestPattern.MatchString(candidate.SchemaV2Manifest.Config.Digest) {
+			return candidate.SchemaV2Manifest.Config.Digest
+		}
+		if digestPattern.MatchString(candidate.Config.Digest) {
+			return candidate.Config.Digest
+		}
+		return ""
 	}
-	return manifest.Config.Digest, nil
+	var entries []manifest
+	if err := json.Unmarshal(result.Stdout, &entries); err == nil {
+		for _, candidate := range entries {
+			if candidate.Descriptor.Platform.OS == runtime.GOOS && candidate.Descriptor.Platform.Architecture == runtime.GOARCH {
+				if digest := configDigest(candidate); digest != "" {
+					return digest, nil
+				}
+			}
+		}
+	}
+	var single manifest
+	if err := json.Unmarshal(result.Stdout, &single); err == nil {
+		if digest := configDigest(single); digest != "" {
+			return digest, nil
+		}
+	}
+	return "", errors.New("Docker manifest output lacks a valid config digest for the host platform")
 }
 
 type Initializer struct {

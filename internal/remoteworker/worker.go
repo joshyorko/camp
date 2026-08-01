@@ -28,10 +28,17 @@ type ProbeReceipt struct {
 	Capabilities []CapabilityReceipt `json:"capabilities"`
 }
 
+type StartupReceipt struct {
+	Status     string            `json:"status"`
+	Activation ActivationReceipt `json:"activation"`
+	Hydration  HydrationReceipt  `json:"hydration"`
+}
+
 type workerOperations interface {
 	ActivateImage(context.Context, Request) (any, error)
 	Hydrate(context.Context, Request) (any, error)
 	StartServices(context.Context, Request) (any, error)
+	Observe(context.Context, Request) (any, error)
 	Checkpoint(context.Context, Request) (any, error)
 }
 
@@ -58,6 +65,8 @@ func runWithOperations(ctx context.Context, input io.Reader, output io.Writer, o
 		receipt, err = operations.Hydrate(ctx, request)
 	case OperationStartServices:
 		receipt, err = operations.StartServices(ctx, request)
+	case OperationObserve:
+		receipt, err = operations.Observe(ctx, request)
 	case OperationCheckpoint:
 		receipt, err = operations.Checkpoint(ctx, request)
 	default:
@@ -78,6 +87,24 @@ func runWithOperations(ctx context.Context, input io.Reader, output io.Writer, o
 		return encodeErr
 	}
 	return err
+}
+
+func (productionOperations) Observe(ctx context.Context, request Request) (any, error) {
+	activation, complete, err := newProductionActivationRuntime().Observe(ctx, request, verifiedRuntimeKit{})
+	if err != nil {
+		return nil, err
+	}
+	if !complete {
+		return nil, errors.New("remote activation receipt is incomplete")
+	}
+	hydration, complete, err := newProductionHydrationRuntime().ObserveCompleted(request)
+	if err != nil {
+		return nil, err
+	}
+	if !complete {
+		return nil, errors.New("remote hydration receipt is incomplete")
+	}
+	return StartupReceipt{Status: "ready", Activation: activation, Hydration: hydration}, nil
 }
 
 func runProbe(_ context.Context, request Request, output io.Writer) error {

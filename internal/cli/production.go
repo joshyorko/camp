@@ -817,6 +817,7 @@ func (p *ProductionLifecycle) Open(ctx context.Context, value string, mode Outpu
 	if err != nil {
 		return err
 	}
+	ctx = app.WithProgressReporter(ctx, productionLifecycleProgressReporter(mode, out, "open"))
 	result, err := usecase.Run(ctx, request)
 	if err != nil {
 		return lifecycleFailure(err, result.RecoveryCommand)

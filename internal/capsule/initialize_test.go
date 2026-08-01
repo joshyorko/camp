@@ -5,6 +5,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"runtime"
 	"testing"
 	"time"
 
@@ -94,6 +95,16 @@ func (r *configDigestRunner) Run(_ context.Context, command ports.Command) (port
 	return ports.Result{Stdout: []byte(`{"schemaVersion":2,"config":{"digest":"sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"}}`)}, nil
 }
 
+type multiPlatformConfigDigestRunner struct{ command ports.Command }
+
+func (r *multiPlatformConfigDigestRunner) Run(_ context.Context, command ports.Command) (ports.Result, error) {
+	r.command = command
+	return ports.Result{Stdout: []byte(`[
+{"Descriptor":{"platform":{"os":"linux","architecture":"arm64"}},"OCIManifest":{"config":{"digest":"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}}},
+{"Descriptor":{"platform":{"os":"linux","architecture":"amd64"}},"OCIManifest":{"config":{"digest":"sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"}}}
+]`)}, nil
+}
+
 func TestCommandDigestResolverUsesDockerManifestWithoutShell(t *testing.T) {
 	t.Parallel()
 	runner := &digestRunner{}
@@ -115,8 +126,24 @@ func TestCommandDigestResolverReturnsImmutableLocalImageIDFromManifestConfig(t *
 	}
 	if imageID != "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc" ||
 		runner.command.Executable != "/usr/bin/docker" ||
-		len(runner.command.Argv) != 3 || runner.command.Argv[0] != "manifest" ||
-		runner.command.Argv[1] != "inspect" {
+		len(runner.command.Argv) != 4 || runner.command.Argv[0] != "manifest" ||
+		runner.command.Argv[1] != "inspect" || runner.command.Argv[2] != "--verbose" {
 		t.Fatalf("imageID=%q command=%#v", imageID, runner.command)
+	}
+}
+
+func TestCommandDigestResolverSelectsHostConfigFromMultiPlatformManifest(t *testing.T) {
+	t.Parallel()
+	runner := &multiPlatformConfigDigestRunner{}
+	imageID, err := NewCommandDigestResolver("/usr/bin/docker", runner).ResolveConfigDigest(context.Background(), roomImage)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+	if runtime.GOARCH == "arm64" {
+		want = "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+	}
+	if imageID != want || len(runner.command.Argv) != 4 || runner.command.Argv[2] != "--verbose" {
+		t.Fatalf("imageID=%q command=%#v, want %q verbose host selection", imageID, runner.command, want)
 	}
 }

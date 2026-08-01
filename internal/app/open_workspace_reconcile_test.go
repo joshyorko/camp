@@ -2,7 +2,9 @@ package app
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -12,6 +14,7 @@ import (
 	devpodadapter "github.com/joshyorko/camp/internal/adapters/devpod"
 	"github.com/joshyorko/camp/internal/domain"
 	"github.com/joshyorko/camp/internal/ports"
+	"github.com/joshyorko/camp/internal/remoteworker"
 )
 
 func TestOpenReconcileWorkspaceUpUnknownOutcomeUsesStatusWithoutSecondUp(t *testing.T) {
@@ -54,6 +57,59 @@ func TestOpenReconcileWorkspaceUpUnknownOutcomeUsesStatusWithoutSecondUp(t *test
 	_, pending, err = environment.open.deps.Journal.Load(context.Background(), sessionID)
 	if err != nil || len(pending) != 0 {
 		t.Fatalf("post-reconciliation pending=%#v error=%v", pending, err)
+	}
+}
+
+func TestOpenReconcileRemoteWorkspaceUpRequiresActivationAndHydrationReceipts(t *testing.T) {
+	t.Parallel()
+	environment := newRemoteOpenTestEnvironment(t)
+	dataPlane := &recordingRemoteDataPlane{bootstrapRoot: filepath.Join(environment.paths.DataRoot, "bootstrap")}
+	environment.open.deps.RemoteDataPlane = dataPlane
+	devpod := &unknownOutcomeWorkspaceDevPod{folder: "/workspaces/root"}
+	environment.open.deps.DevPod = devpod
+	request := OpenRequest{
+		SessionID: "remote-workspace-up-receipt-observation", Capsule: "brain", Branch: "feature", SourceLineage: domain.Lineage{Branch: "main"},
+		Mode: domain.SessionReadWrite, RemoteAvailable: true, Target: "MemoryD", EntryMode: domain.EntryTerminal,
+		Context: "default", Provider: "ssh", Runtime: environment.runtime, Backend: environment.backend,
+	}
+	if _, err := environment.open.Run(context.Background(), request); !errors.Is(err, ports.ErrAmbiguous) {
+		t.Fatalf("first Open() error = %v, want ErrAmbiguous", err)
+	}
+
+	_, err := environment.open.Run(context.Background(), request)
+	if err == nil {
+		t.Fatal("reconciled remote Open() accepted a running workspace without immutable activation and hydration receipts")
+	}
+	if len(devpod.ups) != 1 {
+		t.Fatalf("reconciliation issued %d DevPod ups, want 1", len(devpod.ups))
+	}
+	_, pending, loadErr := environment.open.deps.Journal.Load(context.Background(), request.SessionID)
+	if loadErr != nil || len(pending) != 1 || pending[0].Intent.Transition != "WorkspaceUp" {
+		t.Fatalf("receipt-less reconciliation pending=%#v error=%v", pending, loadErr)
+	}
+}
+
+func TestOpenReconcileRemoteWorkspaceUpAcceptsBoundStartupReceipts(t *testing.T) {
+	t.Parallel()
+	environment := newRemoteOpenTestEnvironment(t)
+	dataPlane := &recordingRemoteDataPlane{bootstrapRoot: filepath.Join(environment.paths.DataRoot, "bootstrap")}
+	environment.open.deps.RemoteDataPlane = dataPlane
+	devpod := &unknownOutcomeWorkspaceDevPod{folder: "/workspaces/root", startupReady: true}
+	environment.open.deps.DevPod = devpod
+	request := OpenRequest{
+		SessionID: "remote-workspace-up-bound-receipts", Capsule: "brain", Branch: "feature", SourceLineage: domain.Lineage{Branch: "main"},
+		Mode: domain.SessionReadWrite, RemoteAvailable: true, Target: "MemoryD", EntryMode: domain.EntryTerminal,
+		Context: "default", Provider: "ssh", Runtime: environment.runtime, Backend: environment.backend,
+	}
+	if _, err := environment.open.Run(context.Background(), request); !errors.Is(err, ports.ErrAmbiguous) {
+		t.Fatalf("first Open() error = %v, want ErrAmbiguous", err)
+	}
+	result, err := environment.open.Run(context.Background(), request)
+	if err != nil {
+		t.Fatalf("reconciled remote Open() error = %v", err)
+	}
+	if result.Snapshot.State != domain.SessionOpen || len(devpod.ups) != 1 || devpod.startupObservations != 1 {
+		t.Fatalf("reconciled result=%#v ups=%d startup observations=%d", result, len(devpod.ups), devpod.startupObservations)
 	}
 }
 
@@ -966,6 +1022,8 @@ type unknownOutcomeWorkspaceDevPod struct {
 	upErrors                        []error
 	statusStates                    []devpodadapter.WorkspaceState
 	replacementSourceAfterFirstList string
+	startupReady                    bool
+	startupObservations             int
 }
 
 func (d *unknownOutcomeWorkspaceDevPod) Up(_ context.Context, options devpodadapter.UpOptions) (ports.Result, error) {
@@ -1022,8 +1080,40 @@ func (d *unknownOutcomeWorkspaceDevPod) ResolveWorkspaceFolderInContext(context.
 	return d.folder, nil
 }
 
-func (d *unknownOutcomeWorkspaceDevPod) SSH(context.Context, devpodadapter.SSHOptions) (ports.Result, error) {
+func (d *unknownOutcomeWorkspaceDevPod) SSH(_ context.Context, options devpodadapter.SSHOptions) (ports.Result, error) {
 	d.sshCalls++
+	if len(options.ForwardedArgv) != 0 {
+		d.startupObservations++
+		if !d.startupReady {
+			return ports.Result{ExitCode: 1}, errors.New("remote startup receipts are missing")
+		}
+		body, err := io.ReadAll(options.Stdin)
+		if err != nil {
+			return ports.Result{ExitCode: 1}, err
+		}
+		var request remoteworker.Request
+		if err := json.Unmarshal(body, &request); err != nil {
+			return ports.Result{ExitCode: 1}, err
+		}
+		receipt := remoteworker.StartupReceipt{
+			Status:     "ready",
+			Activation: remoteworker.ActivationReceipt{Status: "completed", SourceImage: request.Expected.SourceImage, LocalImage: request.Expected.Image},
+			Hydration: remoteworker.HydrationReceipt{Status: "completed", SessionID: request.SessionID, WorkspaceRoot: request.WorkspaceRoot,
+				RuntimeRoot: request.RuntimeRoot, ManifestPath: request.ManifestPath, Expected: request.Expected, RootSHA256: strings.Repeat("a", 64)},
+		}
+		receiptBody, err := json.Marshal(receipt)
+		if err != nil {
+			return ports.Result{ExitCode: 1}, err
+		}
+		envelope, err := json.Marshal(remoteworker.Result{SchemaVersion: remoteworker.ProtocolSchemaVersion, Operation: remoteworker.OperationObserve, Receipt: receiptBody})
+		if err != nil {
+			return ports.Result{ExitCode: 1}, err
+		}
+		if _, err := options.Stdout.Write(append(envelope, '\n')); err != nil {
+			return ports.Result{ExitCode: 1}, err
+		}
+		return ports.Result{}, nil
+	}
 	if d.entryStarted != nil {
 		close(d.entryStarted)
 	}

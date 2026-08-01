@@ -8,18 +8,48 @@ Do not use Hauler v2.0.2's live `_catalog` response as proof that all direct reg
 
 ## Implemented adapter behavior
 
+- Hauler v2.0.2's `store extract --output` argument names a destination
+  directory, not an output file. Root observation passes a private directory,
+  then hashes the normalized root-reference filename created inside it. Test
+  runners must reproduce that directory contract; writing directly to the
+  `--output` path can conceal a first-open regression that the real binary
+  exposes as `is a directory`. Hauler's store inventory digest identifies the
+  OCI descriptor, not the extracted file bytes; root observation hashes the
+  extracted file, while the Kit builder compares that content identity with
+  the original root archive supplied by Camp.
+- Runtime version verification accepts the locked identity only as the complete
+  trimmed output, an exact output line, or an exact single token. This preserves
+  multi-word pasta versions when its copied executable emits license text on a
+  different stream without permitting substring matches.
+- Fedora and Bluefin package `pasta` as a dispatcher beside `pasta.avx2`.
+  Snapshotting the dispatcher alone makes it select its built-in fallback and
+  append the exact `-pasta` suffix to the first version line. The Kit builder
+  permits only that exact staged suffix transition, records the staged version,
+  and still binds the copied executable by its SHA-256 identity.
+- RCC's conda `pasta` can write `Can't run AVX2 build, using non-AVX2 version`
+  to stderr before its real version line. Staged verification scans the complete
+  combined output but accepts only the exact locked `pasta` line or its exact
+  permitted `-pasta` form; warning text is never recorded as tool identity.
+- Docker `manifest inspect --verbose` exposes host-platform config identity
+  under `OCIManifest.config.digest` for OCI entries and
+  `SchemaV2Manifest.config.digest` for Docker-v2 entries. Camp selects the exact
+  `linux/<host architecture>` entry; a multi-platform index's top-level digest
+  is not a runnable local config identity.
+- Remote data-plane records keep `SourceImage` as the immutable
+  `repository@sha256:...` reference and `OuterImage` as the host-platform local
+  config ID `sha256:...`. Open validates each field against its own contract;
+  swapping the predicates rejects correctly prepared bootstrap state. The
+  rendered bootstrap devcontainer uses `SourceImage`, because DevPod providers
+  must receive a registry-pullable image reference; the remote worker uses the
+  separate local config ID to verify the image loaded from the Hauler store.
+- Human `camp open` reports the remote preparation start and completion for
+  snapshotting the capsule, adding the Room image, building the Hauler Kit, and
+  verifying the Kit. The image-start event carries the resolved immutable image
+  reference only when it is control-free, credential-free, and at most 256
+  bytes; otherwise it uses a generic label. JSON mode remains free of progress
+  text. These are operation boundaries, not byte-level download completion
+  claims.
 - DevPod command construction preserves context, workspace identity, repeated public flags, environment variables, and argument boundaries through `ports.Command`.
-- Bootstrap source mode is currently an adapter-only contract; production
-  `app.Open` still uses capsule mode and does not construct, select, journal, or
-  clean a bootstrap root. The adapter resolves both source identities before
-  execution, rejects missing, non-directory, aliased, or nested
-  bootstrap/capsule roots, and passes the canonical absolute bootstrap path to
-  DevPod. `os.SameFile` proves exact observable filesystem identity and
-  resolved paths prove lexical nesting; this does not prove isolation from
-  privileged bind-mounted descendants or mount/path replacement after
-  validation. Production `app.Open` must close that ownership and time-of-use
-  boundary before selecting bootstrap mode. Default and explicit capsule modes
-  retain the existing capsule source.
 - The pinned v0.26.1 installed-tool contract proves one bounded local-folder
   upload: construct `.camp-bootstrap/devcontainer.json` and the immutable
   `camp-hauler-kit.tar.zst` completely before `devpod up`, pass only that
@@ -45,10 +75,13 @@ Do not use Hauler v2.0.2's live `_catalog` response as proof that all direct reg
   replacement target is atomically restored and preserved. The generated config
   pins the supplied immutable outer image, and all three operation
   requests must share schema, session, workspace root, runtime root, manifest
-  path, and expected identities. Generated
-  `initializeCommand`, `onCreateCommand`, and `postStartCommand` run
-  `activateImage`, `hydrate`, and `startServices` respectively before the
-  corresponding user hook. String, argv-array, and named-object lifecycle values
+  path, and expected identities. DevPod runs `initializeCommand` on the provider
+  host, so the renderer preserves that user hook unchanged. The generated
+  `onCreateCommand` runs `activateImage` and then `hydrate` inside the created
+  container before the preserved user hook; `postStartCommand` similarly runs
+  `startServices` before its user hook. The generated config sets
+  `containerUser` to `root` for those system-runtime operations while preserving
+  the selected `remoteUser`. String, argv-array, and named-object lifecycle values
   retain their top-level JSON form, and each original command or argv appears
   exactly once behind a fail-closed helper boundary. String hooks use a
   same-shell `helper || exit $?` prelude followed by the original text; argv
@@ -107,7 +140,19 @@ Do not use Hauler v2.0.2's live `_catalog` response as proof that all direct reg
   attempt ID only after Camp verifies its owner marker, directory descriptor,
   inode, and quarantine identity; unowned paths are preserved. The
   `WorkspaceUp` intent records the bootstrap source root, so reconciliation
-  observes the exact DevPod source and never issues a second `up`.
+  observes the exact DevPod source and never issues a second `up`. A matching
+  `Running` workspace proves only DevPod transport readiness: before recording
+  the reconciled `WorkspaceUp` fact, Camp runs the structured read-only
+  `observe` worker operation and requires activation and hydration receipts
+  bound to the persisted data-plane identity. Missing or drifted receipts keep
+  the original intent pending and prevent forwarders or `SessionOpened`.
+- The generated fallback devcontainer lives under the intentionally ephemeral
+  root `.camp/runtime`. If a pending `RemoteDataPlanePrepared` intent outlives
+  that directory, reconciliation rereads the capsule lock and regenerates only
+  the reserved `.camp/runtime/devcontainer.json` path before retrying the same
+  attempt. Existing user-selected devcontainer paths are revalidated and are
+  never replaced. `TestOpenRemoteDataPlaneRecoveryRegeneratesMissingFallbackDevcontainer`
+  covers deletion between an ambiguous first preparation and reconciliation.
 - A missing `Recovery.RemoteDataPlane` record is the legacy routing marker.
   Existing schema-v1 sessions with no record keep the capsule-source lifecycle
   and are not upgraded in place. This compatibility marker does not change the
@@ -116,8 +161,9 @@ Do not use Hauler v2.0.2's live `_catalog` response as proof that all direct reg
   accepts one schema-v1 JSON request with strict unknown-field, recursively
   duplicate-key, operation,
   absolute-path, immutable-image, architecture, and helper/kit/manifest
-  identity validation. `activateImage`, `hydrate`, `startServices`, and
-  `checkpoint` are implemented; other unimplemented mutation operations remain
+  identity validation. `activateImage`, `hydrate`, `startServices`, read-only
+  `observe`, and `checkpoint` are implemented; other unimplemented mutation
+  operations remain
   typed `unsupported`. The bootstrap carries the
   canonical manifest as a seventh descriptor-verified file so provider-side
   activation and container-side hydration can independently verify the uploaded
@@ -143,15 +189,22 @@ Do not use Hauler v2.0.2's live `_catalog` response as proof that all direct reg
   reuses that context for every probe. Protocol output is capped at 64 KiB and
   never contains archive bytes.
 - Remote activation distinguishes the source manifest identity from the local
-  engine identity. The selected OCI manifest's config digest becomes the
-  generated devcontainer image (`sha256:<config-digest>`). Before DevPod's
-  Docker driver inspects that image, `initializeCommand` verifies and extracts
-  the complete Kit v1, exposes its ready store through an exact pinned-Hauler
-  registry behind pinned-pasta IPv4 loopback confinement, pulls the source
-  manifest digest, and requires Docker inspection to return the expected local
-  image ID. The temporary registry is stopped before a no-replace activation
-  receipt is published. A non-Docker provider engine fails as an unsupported
-  capability; there is no provider-plugin or network-pull fallback.
+  engine identity. The generated devcontainer uses the immutable source image
+  so the provider can pull it, while the expected local config digest remains a
+  separate worker identity. Container-side `onCreateCommand` verifies and
+  extracts the complete Kit v1, exposes its ready store through an exact
+  pinned-Hauler registry behind pinned-pasta IPv4 loopback confinement, pulls
+  the source manifest digest with Docker or Podman, and requires engine
+  inspection to return the expected local image ID. The Kit extractor creates
+  files privately, then applies the already validated archive mode before
+  verification or execution; in particular `bin/{camp,hauler,pasta}` publish as
+  `0555`, not the temporary `0600` creation mode. The temporary registry is
+  stopped before a no-replace activation receipt is published. If neither
+  Docker nor Podman is available, activation fails as unsupported; there is no
+  provider-plugin or network-pull fallback. Podman pulls from Camp's temporary
+  loopback HTTP registry with `--tls-verify=false`; without that explicit
+  provider-specific flag, rootless Podman attempts HTTPS, exits 125, and never
+  reaches the otherwise healthy Hauler registry.
 - Container-side `hydrate` repeats helper, kit, manifest, tool, architecture,
   store, and root verification. The persisted/bootstrap manifest digest is a
   required verifier authority at preparation, reentry, provider activation,
@@ -174,6 +227,15 @@ Do not use Hauler v2.0.2's live `_catalog` response as proof that all direct reg
   SHA-256 and size match `Expected.Manifest`. Digest syntax alone is never
   authority. Missing, malformed, stale, mismatched, replaced, or linked
   evidence is not adopted and falls through to admission before any mutation.
+  The locked workspace root is `/workspaces/<deterministic DevPod workspace
+  ID>`, matching DevPod's actual local-folder mount rather than merely using the
+  capsule name.
+  The worker runtime root is
+  `/workspaces/<deterministic DevPod workspace ID>/.camp/runtime/bootstrap/<session>`.
+  Keeping it beneath the workspace is required because DevPod lifecycle hooks
+  run as the preserved `remoteUser`; the pinned Podman image's `podman` user
+  cannot write `/var/lib/camp` and has no passwordless sudo. The manifest path
+  is beneath that runtime root, and checkpoint validation binds the same paths.
   The generated lifecycle boundary
   releases the preserved user `onCreateCommand` only after that success. It
   never calls `devpod up` again or falls back to the capsule source.
@@ -289,7 +351,7 @@ Do not use Hauler v2.0.2's live `_catalog` response as proof that all direct reg
   lifecycle test so file, image, recovery, and cleanup evidence all describe
   the same candidate.
 - On enforcing SELinux hosts, the packaged `pasta` executable transitions into `pasta_t`; an unwrapped Hauler child inherits that domain and can be denied `cgroup_t` search even though its private store is correctly owned. Camp keeps pasta in `pasta_t` but launches the exact Hauler child through the policy-authorized `/usr/bin/runcon -t unconfined_t` prefix, records that prefix in the confinement fingerprint and launch intent, and still validates the final Hauler PID, argv, namespace, guest listener, loopback mapping, and HTTP endpoint. Evidence: the Bluefin audit log recorded `comm="hauler" ... scontext=...:pasta_t ... tcontext=...:cgroup_t ... denied { search }`; the unwrapped service returned `stat .../store: permission denied`; the wrapped standalone probe returned HTTP 200 on `127.0.0.1:45999/v2/`; and the fresh real `camp open` reached and completed `devpod up` with both services live.
-- A DevPod container cannot reach a host-only `127.0.0.1` registry or fileserver merely because Camp injected `CAMP_REGISTRY` and `CAMP_FILESERVER`. After `devpod up`, production composition starts one supervised `devpod ssh --reverse-forward-ports` process per endpoint, records its PID/start-time/executable/argv identity in `Recovery.Forwarding`, and probes the exact endpoint from the exact workspace before declaring it ready. Startup failure stops only the recorded forwarders; close stops them by recorded identity. Evidence: the unforwarded real workspace returned connection refused for `$CAMP_REGISTRY`; the production-composed workspace subsequently returned HTTP 200 for both `http://$CAMP_REGISTRY/v2/` and `http://$CAMP_FILESERVER/`, with two distinct forwarder process records in the session snapshot.
+- A DevPod container cannot reach a host-only `127.0.0.1` registry or fileserver merely because Camp injected `CAMP_REGISTRY` and `CAMP_FILESERVER`. After `devpod up`, production composition starts one supervised `devpod ssh --reverse-forward-ports` process per endpoint, records its PID/start-time/executable/argv identity in `Recovery.Forwarding`, and probes the exact endpoint from the exact workspace before declaring it ready. Each reverse forward binds the fixed workspace guest listener (`5000` or `8080`) to the committed host-side service port; durable recovery derives the local endpoint from `ServiceUnitRecord.Mapping.HostPort` and never reuses a stale preferred guest port. Startup failure stops only the recorded forwarders; close stops them by recorded identity. Evidence: the unforwarded real workspace returned connection refused for `$CAMP_REGISTRY`; the production-composed workspace subsequently returned HTTP 200 for both `http://$CAMP_REGISTRY/v2/` and `http://$CAMP_FILESERVER/`, with two distinct forwarder process records in the session snapshot.
 - A completed remote `haulerKitV1` hydration does not retain those workstation
   tunnels. Its generated `postStartCommand` invokes the descriptor-pinned Camp
   worker, which revalidates the completed hydration receipt, manifest, ready

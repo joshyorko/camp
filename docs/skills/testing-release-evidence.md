@@ -140,11 +140,28 @@ rcc run -r developer/toolkit.yaml -t robot
 rcc run -r developer/toolkit.yaml -t robotKubernetes
 ```
 
-`local` creates one truthfully stamped repository-only `build/camp` and `build/evidence/candidate.json`. `local` stops after repository-only candidate smoke verification. `install` verifies that exact candidate before atomically linking it at `~/.local/bin/camp` so subsequent commands are simply `camp setup`, `camp init`, and `camp open`. Neither task edits shell startup files; Bluefin already includes `~/.local/bin` in PATH. `robot` verifies that candidate digest, asks
-the candidate to install the exact DevPod and Hauler assets from
-`tools.lock.yaml`, runs named Go evidence directly, then runs black-box Robot
-Framework suites against the same executable. Go tests are not hidden inside
-Robot keywords. Gate manifests distinguish passed and failed gates; an absent
+`local` creates one truthfully stamped repository-only `build/camp` and `build/evidence/candidate.json`. `local` stops after repository-only candidate smoke verification. `install` verifies that exact candidate before atomically linking it at `~/.local/bin/camp` so subsequent commands are simply `camp setup`, `camp init`, and `camp open`. Neither task edits shell startup files; Bluefin already includes `~/.local/bin` in PATH. `robot_tests/full_cli_surface.robot` walks every public command and subcommand help path, executes the safe machine/read-only handlers in an isolated XDG controller, and proves lifecycle commands fail with structured errors when no session exists. This complements rather than replaces the real DevPod/Hauler lifecycle gates: help coverage alone is not behavioral lifecycle evidence.
+
+For a direct Linux host acceptance run, use `rcc run --dev -r developer/toolkit.yaml -t doesItWorkOnMyMachine`. The developer-toolkit task builds the current source, selects the effective configured DevPod provider and context, runs a test-owned `camp setup` and `camp open` against the locked lightweight image-based workspace, and then runs the complete black-box Robot suite against the same candidate. `CAMP_TEST_DEVPOD_PROVIDER` and `CAMP_TEST_DEVPOD_CONTEXT` override provider selection for matrix runs. The host contract is Linux plus one usable DevPod provider; Bluefin and Docker are not product requirements. A build-based devcontainer is intentionally rejected by the remote Hauler data plane, so the acceptance fixture must retain its direct immutable `image` field. Passing only the command-surface suite is not a substitute for the real lifecycle gate.
+
+The machine task retries an identical `camp open` once only after
+`lifecycle_ambiguous`, matching Camp's reconciliation contract. Final cleanup
+uses `camp close --discard` after a successful provider open. A failed provider
+close is itself a gate failure: the harness runs the same exact workspace and
+controller cleanup path and never deletes test roots merely because close was
+invoked with non-throwing subprocess handling. A failed provider
+open first lists the selected DevPod context and deletes only the single
+workspace whose provider, context, and local source are bound beneath that
+run's unique controller-owned `remote-data-planes` root. It then uses
+`camp strike --purge --yes` against the test controller's managed local backend
+to stop pre-workspace services and purge local state. Zero matching workspaces
+is already clean; multiple matches are ambiguous and must be preserved. If
+either cleanup step fails, preserve and report both controller and provider
+roots instead of deleting paths while test-owned resources may still be live.
+The candidate installs the exact DevPod and Hauler
+assets from `tools.lock.yaml`, runs named Go evidence directly, then runs
+black-box Robot Framework suites against the same executable. Gate manifests
+distinguish passed and failed gates; an absent
 named test, opt-in skip, Robot skip, missing executable, or candidate mutation
 is a failure. RCC `test` builds and verifies its candidate before source gates; every gate ledger has that non-empty candidate SHA-256 and only terminal `passed`, `failed`, `missing`, `skipped`, or `gated` results. A missing mandatory gate is recorded as `missing` and fails the task rather than being hidden by a broad test command. Generated documentation is a gate only when regeneration leaves `docs/generated/` unchanged; a post-generation diff fails it. The RCC and pip Robot Framework declarations are both 7.4.2; that current factory pin supersedes the older 6.1.1 planning reference.
 

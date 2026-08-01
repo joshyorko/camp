@@ -13,6 +13,8 @@ devTasks:
     shell: python call_invoke.py install
   test:
     shell: python call_invoke.py test
+  doesItWorkOnMyMachine:
+    shell: python ../robot_tests/resources/DoesItWorkOnMyMachine.py
 
 environmentConfigs:
   - setup.yaml

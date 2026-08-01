@@ -32,7 +32,7 @@ func TestOpenReconcileAdoptsPendingForwarderFromExactDurableEvidence(t *testing.
 		ID: "forwarder-crash-intent", SessionID: first.Snapshot.SessionID, Transition: "ForwarderStarted:registry",
 		Timestamp: time.Unix(99, 0).UTC(), Input: safeJSON(domain.ForwardingRequest{
 			Name: "registry", WorkspaceID: first.Snapshot.Workspace.ID, Context: first.Snapshot.Workspace.Context,
-			LocalEndpoint: registryEndpoint, WorkspaceEndpoint: registryEndpoint,
+			LocalEndpoint: registryEndpoint, WorkspaceEndpoint: endpoint(5000),
 			LogPath: filepath.Join(runtimeRoot, "registry-forward.log"), EvidencePath: filepath.Join(runtimeRoot, "registry-forward.json"),
 		}),
 	}
@@ -103,6 +103,43 @@ func TestOpenCompleteWorkspaceOpenRevalidatesCommittedForwarders(t *testing.T) {
 	}
 }
 
+func TestOpenCompleteWorkspaceOpenUsesCommittedHostPortsAfterDurableReload(t *testing.T) {
+	t.Parallel()
+	environment := newRemoteOpenTestEnvironment(t)
+	events := []string{}
+	forwarders := &openForwarders{events: &events}
+	environment.open.deps.Forwarders = forwarders
+	first, err := environment.open.Run(context.Background(), OpenRequest{
+		SessionID: "forwarder-durable-service-ports", Capsule: "brain", Branch: "feature", SourceLineage: domain.Lineage{Branch: "main"},
+		Mode: domain.SessionReadWrite, RemoteAvailable: true, Target: "MemoryD", Context: "default", Provider: "docker", Machine: "machine-a", Runtime: environment.runtime, Backend: environment.backend,
+	})
+	if err != nil {
+		t.Fatalf("initial Open() error = %v", err)
+	}
+	registryPort, fileserverPort, err := committedServicePorts(first.Snapshot)
+	if err != nil {
+		t.Fatal(err)
+	}
+	snapshot := first.Snapshot
+	snapshot.Recovery.Configuration.RegistryPort = 5000
+	snapshot.Recovery.Configuration.FileserverPort = 8080
+	snapshot.Recovery.Forwarding = nil
+	forwarders.records = nil
+	events = nil
+	if _, err := environment.open.completeWorkspaceOpen(context.Background(), snapshot, OpenRequest{}, target.Result{}); err != nil {
+		t.Fatalf("completeWorkspaceOpen() error = %v", err)
+	}
+	for name, want := range map[string]struct{ local, workspace string }{
+		"registry":   {endpoint(registryPort), endpoint(5000)},
+		"fileserver": {endpoint(fileserverPort), endpoint(8080)},
+	} {
+		record := forwarders.records[name]
+		if record.LocalEndpoint != want.local || record.WorkspaceEndpoint != want.workspace {
+			t.Fatalf("%s forwarder endpoints = %s -> %s, want %s -> %s", name, record.WorkspaceEndpoint, record.LocalEndpoint, want.workspace, want.local)
+		}
+	}
+}
+
 func TestOpenCompleteWorkspaceOpenRestartsUnhealthyCommittedForwarder(t *testing.T) {
 	t.Parallel()
 	environment := newRemoteOpenTestEnvironment(t)
@@ -166,7 +203,7 @@ func TestOpenReconcilePendingForwarderFailsClosedWithoutExactEvidence(t *testing
 				ID: "forwarder-fail-closed-intent", SessionID: first.Snapshot.SessionID, Transition: "ForwarderStarted:registry", Timestamp: time.Unix(99, 0).UTC(),
 				Input: safeJSON(domain.ForwardingRequest{
 					Name: "registry", WorkspaceID: first.Snapshot.Workspace.ID, Context: first.Snapshot.Workspace.Context,
-					LocalEndpoint: registryEndpoint, WorkspaceEndpoint: registryEndpoint,
+					LocalEndpoint: registryEndpoint, WorkspaceEndpoint: endpoint(5000),
 					LogPath: filepath.Join(runtimeRoot, "registry-forward.log"), EvidencePath: filepath.Join(runtimeRoot, "registry-forward.json"),
 				}),
 			}

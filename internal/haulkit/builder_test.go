@@ -277,6 +277,42 @@ func TestProductionRuntimeObserverUsesCampDashDashVersion(t *testing.T) {
 	}
 }
 
+func TestContainsExactIdentityAcceptsMultiwordVersionLine(t *testing.T) {
+	t.Parallel()
+	expected := "pasta 0^20260611.ga9c61ff-1.fc44.x86_64"
+	output := expected + "\nCopyright Red Hat\nGNU General Public License"
+	if !containsExactIdentity(output, expected) {
+		t.Fatalf("containsExactIdentity(%q, %q) = false", output, expected)
+	}
+}
+
+func TestBuilderAcceptsPastaDispatcherFallbackAndRecordsStagedVersion(t *testing.T) {
+	request, validator := buildFixture(t)
+	builder := NewBuilder(validator)
+	builder.chunkSize = 64
+	builder.runtimeObserver = fakeRuntimeObserver{runningCamp: request.CampExecutable, probe: func(ctx context.Context, path, kind string) (string, error) {
+		if kind == "pasta" {
+			return "Can't run AVX2 build, using non-AVX2 version: No such file or directory\npasta 1-pasta\nCopyright test", nil
+		}
+		return fixtureRuntimeProbe(ctx, path, kind)
+	}}
+	artifact, err := builder.Build(context.Background(), request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	body, err := os.ReadFile(artifact.ManifestPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	manifest, err := DecodeCanonical(body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if manifest.Tools.Pasta.Version != "pasta 1-pasta" {
+		t.Fatalf("pasta version = %q", manifest.Tools.Pasta.Version)
+	}
+}
+
 func TestBuilderUsesObservedRunningCampExecutableInsteadOfCallerPath(t *testing.T) {
 	request, validator := buildFixture(t)
 	runningCamp := filepath.Join(t.TempDir(), "running-camp")

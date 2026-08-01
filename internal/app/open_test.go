@@ -757,11 +757,17 @@ type openServices struct {
 func (s *openServices) Start(_ context.Context, snapshot domain.JournalSnapshot) (domain.JournalSnapshot, error) {
 	*s.events = append(*s.events, "services")
 	if s.registry {
-		snapshot.Services = append(snapshot.Services, domain.ServiceUnitRecord{
-			Name: "registry", DesiredState: domain.RuntimeDesiredRunning, ObservedState: domain.RuntimeObservedReady,
-			Mapping: domain.EndpointMapping{HostAddress: "127.0.0.1", HostPort: 5000},
-			Child:   domain.ProcessRecord{Argv: []string{"hauler", "store", "serve", "registry", "--directory", "/tmp/camp-registry"}},
-		})
+		snapshot.Services = append(snapshot.Services,
+			domain.ServiceUnitRecord{
+				Name: "registry", DesiredState: domain.RuntimeDesiredRunning, ObservedState: domain.RuntimeObservedReady,
+				Mapping: domain.EndpointMapping{HostAddress: "127.0.0.1", HostPort: 45000, GuestPort: 5000},
+				Child:   domain.ProcessRecord{Argv: []string{"hauler", "store", "serve", "registry", "--directory", "/tmp/camp-registry"}},
+			},
+			domain.ServiceUnitRecord{
+				Name: "fileserver", DesiredState: domain.RuntimeDesiredRunning, ObservedState: domain.RuntimeObservedReady,
+				Mapping: domain.EndpointMapping{HostAddress: "127.0.0.1", HostPort: 48080, GuestPort: 8080},
+			},
+		)
 	}
 	return snapshot, nil
 }

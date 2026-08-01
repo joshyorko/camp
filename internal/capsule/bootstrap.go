@@ -91,7 +91,7 @@ func renderBootstrap(request BootstrapRequest, openHelper func() (*os.File, erro
 		{"services-request.json", remoteworker.OperationStartServices, request.ServicesRequest},
 	}
 	for _, item := range requests {
-		if item.request.Operation != item.operation || item.request.Expected.Image != request.OuterImage {
+		if item.request.Operation != item.operation || item.request.Expected.SourceImage != request.OuterImage {
 			return Bootstrap{}, fmt.Errorf("%w: mismatched %s", ErrInvalidBootstrap, item.name)
 		}
 		body, err := json.Marshal(item.request)
@@ -159,16 +159,16 @@ func renderBootstrap(request BootstrapRequest, openHelper func() (*os.File, erro
 	}
 
 	document["image"] = json.RawMessage(mustJSON(request.OuterImage))
+	document["containerUser"] = json.RawMessage(mustJSON("root"))
 	hooks := []struct {
-		field   string
-		request string
+		field    string
+		requests []string
 	}{
-		{"initializeCommand", "initialize-request.json"},
-		{"onCreateCommand", "hydrate-request.json"},
-		{"postStartCommand", "services-request.json"},
+		{"onCreateCommand", []string{"initialize-request.json", "hydrate-request.json"}},
+		{"postStartCommand", []string{"services-request.json"}},
 	}
 	for _, hook := range hooks {
-		composed, err := composeLifecycle(document[hook.field], hook.request)
+		composed, err := composeLifecycle(document[hook.field], hook.requests...)
 		if err != nil {
 			return Bootstrap{}, fmt.Errorf("%w: %s: %v", ErrInvalidBootstrap, hook.field, err)
 		}
@@ -466,8 +466,12 @@ func decodeRawObject(body []byte) (map[string]json.RawMessage, error) {
 	return document, nil
 }
 
-func composeLifecycle(original json.RawMessage, requestName string) (json.RawMessage, error) {
-	helper := ".camp-bootstrap/camp-bootstrap __remote-worker < .camp-bootstrap/" + requestName
+func composeLifecycle(original json.RawMessage, requestNames ...string) (json.RawMessage, error) {
+	helpers := make([]string, len(requestNames))
+	for index, requestName := range requestNames {
+		helpers[index] = ".camp-bootstrap/camp-bootstrap __remote-worker < .camp-bootstrap/" + requestName
+	}
+	helper := strings.Join(helpers, " && ")
 	if len(original) == 0 {
 		return json.RawMessage(mustJSON(helper)), nil
 	}

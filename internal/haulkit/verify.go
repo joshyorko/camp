@@ -289,6 +289,7 @@ func extractReadyArchive(ctx context.Context, archive *os.File, destination stri
 			return err
 		}
 		written, copyErr := io.CopyN(output, reader, header.Size)
+		chmodErr := output.Chmod(os.FileMode(header.Mode))
 		if err := runAtomicBoundaryHook("extraction-file-fsync"); err != nil {
 			_ = output.Close()
 			_ = os.Remove(target)
@@ -298,6 +299,9 @@ func extractReadyArchive(ctx context.Context, archive *os.File, destination stri
 		closeErr := output.Close()
 		if copyErr != nil || written != header.Size {
 			return fmt.Errorf("extract %q: %w", header.Name, copyErr)
+		}
+		if chmodErr != nil {
+			return chmodErr
 		}
 		if syncErr != nil {
 			return syncErr

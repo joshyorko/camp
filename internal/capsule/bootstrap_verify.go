@@ -139,20 +139,31 @@ func VerifyBootstrap(request BootstrapVerificationRequest) (BootstrapVerificatio
 		return BootstrapVerification{}, err
 	}
 	var image string
-	if err := decodeRawString(document["image"], &image); err != nil || image != request.Expected.Image {
+	if err := decodeRawString(document["image"], &image); err != nil || image != request.Expected.SourceImage {
 		return BootstrapVerification{}, fmt.Errorf("%w: devcontainer image identity", ErrInvalidBootstrap)
 	}
+	if strings.Contains(string(document["initializeCommand"]), ".camp-bootstrap/camp-bootstrap __remote-worker") {
+		return BootstrapVerification{}, fmt.Errorf("%w: devcontainer initializeCommand helper boundary", ErrInvalidBootstrap)
+	}
 	for _, hook := range []struct {
-		field, request string
+		field    string
+		requests []string
 	}{
-		{"initializeCommand", "initialize-request.json"},
-		{"onCreateCommand", "hydrate-request.json"},
-		{"postStartCommand", "services-request.json"},
+		{"onCreateCommand", []string{"initialize-request.json", "hydrate-request.json"}},
+		{"postStartCommand", []string{"services-request.json"}},
 	} {
 		raw := string(document[hook.field])
-		if strings.Count(raw, ".camp-bootstrap/camp-bootstrap __remote-worker") != 1 ||
-			strings.Count(raw, ".camp-bootstrap/"+hook.request) != 1 {
+		if strings.Count(raw, ".camp-bootstrap/camp-bootstrap __remote-worker") != len(hook.requests) {
 			return BootstrapVerification{}, fmt.Errorf("%w: devcontainer %s helper boundary", ErrInvalidBootstrap, hook.field)
+		}
+		previous := -1
+		for _, requestName := range hook.requests {
+			marker := ".camp-bootstrap/" + requestName
+			index := strings.Index(raw, marker)
+			if strings.Count(raw, marker) != 1 || index <= previous {
+				return BootstrapVerification{}, fmt.Errorf("%w: devcontainer %s helper boundary", ErrInvalidBootstrap, hook.field)
+			}
+			previous = index
 		}
 	}
 	return result, nil

@@ -19,9 +19,9 @@ import (
 
 func TestRenderBootstrapExecutesHelperBeforeEveryLifecycleForm(t *testing.T) {
 	for name, lifecycle := range map[string]json.RawMessage{
-		"string": json.RawMessage(`"printf 'user\\n' >> \"$TRACE\""`),
-		"argv":   json.RawMessage(`["/bin/sh","-c","printf 'user\\n' >> \"$TRACE\""]`),
-		"named":  json.RawMessage(`{"b":["/bin/sh","-c","printf 'user-b\\n' >> \"$TRACE\""],"a":"printf 'user-a\\n' >> \"$TRACE\""}`),
+		"string": json.RawMessage(`"printf 'user\n' >> \"$TRACE\""`),
+		"argv":   json.RawMessage(`["/bin/sh","-c","printf 'user\n' >> \"$TRACE\""]`),
+		"named":  json.RawMessage(`{"b":["/bin/sh","-c","printf 'user-b\n' >> \"$TRACE\""],"a":"printf 'user-a\n' >> \"$TRACE\""}`),
 	} {
 		t.Run(name, func(t *testing.T) {
 			fixture := bootstrapFixture(t, lifecycle)
@@ -50,8 +50,17 @@ func TestRenderBootstrapExecutesHelperBeforeEveryLifecycleForm(t *testing.T) {
 			trace := filepath.Join(t.TempDir(), "trace")
 			t.Setenv("TRACE", trace)
 			document := readBootstrapDocument(t, result.DevcontainerPath)
-			assertLifecycleForm(t, name, document["initializeCommand"])
+			if strings.Contains(string(document["initializeCommand"]), "camp-bootstrap __remote-worker") {
+				t.Fatalf("initializeCommand contains a container worker: %s", document["initializeCommand"])
+			}
+			var containerUser, remoteUser string
+			containerErr := decodeRawString(document["containerUser"], &containerUser)
+			remoteErr := decodeRawString(document["remoteUser"], &remoteUser)
+			if containerErr != nil || remoteErr != nil || containerUser != "root" || remoteUser != "podman" {
+				t.Fatalf("bootstrap users = container:%q remote:%q errors:%v/%v", containerUser, remoteUser, containerErr, remoteErr)
+			}
 			runLifecycle(t, result.Root, document["initializeCommand"])
+			assertLifecycleForm(t, name, document["onCreateCommand"])
 			runLifecycle(t, result.Root, document["onCreateCommand"])
 			runLifecycle(t, result.Root, document["postStartCommand"])
 			body, err := os.ReadFile(trace)
@@ -65,9 +74,9 @@ func TestRenderBootstrapExecutesHelperBeforeEveryLifecycleForm(t *testing.T) {
 
 func TestRenderBootstrapHelperFailurePreventsEveryUserHook(t *testing.T) {
 	for name, lifecycle := range map[string]json.RawMessage{
-		"string": json.RawMessage(`"printf 'user\\n' >> \"$TRACE\""`),
-		"argv":   json.RawMessage(`["/bin/sh","-c","printf 'user\\n' >> \"$TRACE\""]`),
-		"named":  json.RawMessage(`{"a":"printf 'user-a\\n' >> \"$TRACE\"","b":["/bin/sh","-c","printf 'user-b\\n' >> \"$TRACE\""]}`),
+		"string": json.RawMessage(`"printf 'user\n' >> \"$TRACE\""`),
+		"argv":   json.RawMessage(`["/bin/sh","-c","printf 'user\n' >> \"$TRACE\""]`),
+		"named":  json.RawMessage(`{"a":"printf 'user-a\n' >> \"$TRACE\"","b":["/bin/sh","-c","printf 'user-b\n' >> \"$TRACE\""]}`),
 	} {
 		t.Run(name, func(t *testing.T) {
 			fixture := bootstrapFixture(t, lifecycle)
@@ -79,8 +88,8 @@ func TestRenderBootstrapHelperFailurePreventsEveryUserHook(t *testing.T) {
 			t.Setenv("TRACE", trace)
 			t.Setenv("HELPER_FAIL", "1")
 			document := readBootstrapDocument(t, result.DevcontainerPath)
-			assertLifecycleForm(t, name, document["initializeCommand"])
-			if err := executeLifecycle(result.Root, document["initializeCommand"]); err == nil {
+			assertLifecycleForm(t, name, document["onCreateCommand"])
+			if err := executeLifecycle(result.Root, document["onCreateCommand"]); err == nil {
 				t.Fatal("lifecycle succeeded after helper failure")
 			}
 			if body, err := os.ReadFile(trace); err == nil && strings.Contains(string(body), "user") {
@@ -528,7 +537,7 @@ type bootstrapTestFixture struct {
 func bootstrapFixture(t *testing.T, lifecycle json.RawMessage) bootstrapTestFixture {
 	t.Helper()
 	digest := strings.Repeat("a", 64)
-	config := `{"name":"fixture","image":"example/original@sha256:` + digest + `",` +
+	config := `{"name":"fixture","image":"example/original@sha256:` + digest + `","remoteUser":"podman",` +
 		`"initializeCommand":` + string(lifecycle) + `,"onCreateCommand":` + string(lifecycle) +
 		`,"postStartCommand":` + string(lifecycle) + `}`
 	return bootstrapFixtureWithConfig(t, config)
@@ -596,7 +605,7 @@ esac
 			DevcontainerPath:  devcontainer,
 			KitArchivePath:    kit,
 			ManifestPath:      manifest,
-			OuterImage:        expected.Image,
+			OuterImage:        expected.SourceImage,
 			InitializeRequest: requestFor(remoteworker.OperationActivateImage),
 			HydrateRequest:    requestFor(remoteworker.OperationHydrate),
 			ServicesRequest:   requestFor(remoteworker.OperationStartServices),
@@ -737,37 +746,29 @@ func assertLifecycleForm(t *testing.T, form string, raw json.RawMessage) {
 func assertLifecycleTrace(t *testing.T, form, trace string) {
 	t.Helper()
 	lines := strings.Split(strings.TrimSuffix(trace, "\n"), "\n")
-	operations := []string{"activateImage", "hydrate", "startServices"}
+	operations := [][]string{{}, {"activateImage", "hydrate"}, {"startServices"}}
 	index := 0
-	for _, operation := range operations {
-		helperCount := 1
+	for _, helpers := range operations {
+		for _, operation := range helpers {
+			if index >= len(lines) || lines[index] != "helper-"+operation {
+				t.Fatalf("%s lifecycle helper order for %s: %q", form, operation, trace)
+			}
+			index++
+		}
 		wantUsers := map[string]int{"user": 1}
 		if form == "named" {
 			wantUsers = map[string]int{"user-a": 1, "user-b": 1}
 		}
-		seenHelpers := 0
-		seenUsers := 0
-		for range helperCount + len(wantUsers) {
+		for range len(wantUsers) {
 			if index >= len(lines) {
-				t.Fatalf("%s lifecycle ended during %s: %q", form, operation, trace)
+				t.Fatalf("%s lifecycle ended before user commands: %q", form, trace)
 			}
 			line := lines[index]
-			switch {
-			case line == "helper-"+operation:
-				seenHelpers++
-			case wantUsers[line] > 0:
-				seenUsers++
-				wantUsers[line]--
-			default:
-				t.Fatalf("%s lifecycle did not preserve %s commands: %q", form, operation, trace)
+			if wantUsers[line] == 0 {
+				t.Fatalf("%s lifecycle did not preserve user commands: %q", form, trace)
 			}
-			if seenHelpers == 0 && seenUsers > 0 {
-				t.Fatalf("%s lifecycle ran a user before its helper for %s: %q", form, operation, trace)
-			}
+			wantUsers[line]--
 			index++
-		}
-		if seenHelpers != helperCount || seenUsers != len(wantUsers) {
-			t.Fatalf("%s lifecycle counts differ for %s: %q", form, operation, trace)
 		}
 	}
 	if index != len(lines) {

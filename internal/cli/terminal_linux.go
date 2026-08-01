@@ -7,8 +7,10 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net/url"
 	"os"
 	"strings"
+	"unicode"
 
 	"github.com/joshyorko/camp/internal/app"
 	"github.com/joshyorko/camp/internal/domain"
@@ -330,6 +332,26 @@ func (r *lifecycleProgressReporter) Report(ctx context.Context, event app.Progre
 
 func lifecycleProgressMessage(event app.ProgressEvent) string {
 	switch event.Stage {
+	case app.ProgressSnapshottingRoot:
+		if event.Complete {
+			return "capsule snapshot ready"
+		}
+		return "preparing capsule snapshot"
+	case app.ProgressDownloadingRoomImage:
+		if event.Complete {
+			return "Room image added to Hauler store"
+		}
+		return fmt.Sprintf("adding Room image %s to Hauler store", safeProgressDetail(event.Message, "immutable image"))
+	case app.ProgressBuildingHaulerKit:
+		if event.Complete {
+			return "Camp Hauler Kit built"
+		}
+		return "building Camp Hauler Kit"
+	case app.ProgressVerifyingHaulerKit:
+		if event.Complete {
+			return "Camp Hauler Kit verified"
+		}
+		return "verifying Camp Hauler Kit"
 	case app.ProgressWorkspacePrepared:
 		return "prepared workspace snapshot"
 	case app.ProgressImagesCaptured:
@@ -363,6 +385,33 @@ func lifecycleProgressMessage(event app.ProgressEvent) string {
 	default:
 		return ""
 	}
+}
+
+func safeProgressDetail(value, replacement string) string {
+	value = strings.TrimSpace(value)
+	if value == "" || len(value) > 256 {
+		return replacement
+	}
+	for _, character := range value {
+		if unicode.IsControl(character) {
+			return replacement
+		}
+	}
+	parsed, err := url.Parse(value)
+	if err == nil && parsed.Scheme != "" {
+		if parsed.User != nil {
+			return replacement
+		}
+		for key := range parsed.Query() {
+			normalized := strings.ToLower(key)
+			for _, marker := range []string{"token", "secret", "password", "credential", "access_key"} {
+				if strings.Contains(normalized, marker) {
+					return replacement
+				}
+			}
+		}
+	}
+	return value
 }
 
 func formatIECBytes(value int64) string {

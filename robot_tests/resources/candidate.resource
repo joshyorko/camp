@@ -41,7 +41,9 @@ Prepare Isolated Controller
 Remove Isolated Controller
     File Should Exist    ${TEST_ROOT}${/}${OWNERSHIP_MARKER}
     Should Contain    ${TEST_ROOT}    camp-robot-
-    Evaluate    tasks.remove_robot_controller($TEST_ROOT)    modules=tasks
+    Evaluate
+    ...    sys.path.insert(0, $REPOSITORY_ROOT) or __import__("tasks").remove_robot_controller($TEST_ROOT)
+    ...    modules=sys
 
 Run Candidate
     [Arguments]    ${working_directory}    @{arguments}

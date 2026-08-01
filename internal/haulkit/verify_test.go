@@ -64,6 +64,46 @@ func TestVerifierRejectsWrongArchitectureToolIdentityAndStoreDrift(t *testing.T)
 	}
 }
 
+func TestVerifierPublishesValidatedFileModes(t *testing.T) {
+	request, validator := buildFixture(t)
+	builder := NewBuilder(validator)
+	builder.chunkSize = 64
+	builder.runtimeObserver = fakeRuntimeObserver{runningCamp: request.CampExecutable}
+	artifact, err := builder.Build(context.Background(), request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	body, err := os.ReadFile(artifact.ManifestPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	manifest, err := DecodeCanonical(body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	destination := filepath.Join(t.TempDir(), "ready")
+	if _, err := NewVerifier(validator).Verify(context.Background(), VerifyRequest{
+		ManifestPath:           artifact.ManifestPath,
+		ExpectedManifestSHA256: digestBytes(body),
+		ArchivePath:            artifact.ArchivePath,
+		Architecture:           manifest.Architecture,
+		Tools:                  manifest.Tools,
+		StoreDirectory:         request.StoreDirectory,
+		Destination:            destination,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	for _, name := range []string{"camp", "hauler", "pasta"} {
+		info, err := os.Stat(filepath.Join(destination, "bin", name))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got := info.Mode().Perm(); got != 0o555 {
+			t.Fatalf("%s mode = %o, want 555", name, got)
+		}
+	}
+}
+
 func TestVerifierBindsRootReferenceDigestAndSizeToObservedStore(t *testing.T) {
 	for _, test := range []struct {
 		name   string

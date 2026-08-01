@@ -355,10 +355,14 @@ func (o *Open) observeRemoteDataPlanePrepared(ctx context.Context, snapshot doma
 		selected.AttemptID != snapshot.SessionID+"-hauler-kit-v1" || selected.BootstrapRoot != "" {
 		return ports.FactRecord{}, snapshot, errors.New("remote data-plane intent does not match the pending session")
 	}
+	devcontainerPath, err := o.resolveRecoveryDevcontainer(ctx, snapshot)
+	if err != nil {
+		return ports.FactRecord{}, snapshot, err
+	}
 	prepared, err := o.deps.RemoteDataPlane.Prepare(ctx, RemoteDataPlaneRequest{
 		SessionID: snapshot.SessionID, AttemptID: selected.AttemptID, Capsule: snapshot.Capsule, Lineage: snapshot.Lineage,
 		Generation: cloneGeneration(snapshot.OpenedGeneration), Materialization: snapshot.Materialization.CanonicalPath,
-		DevcontainerPath: snapshot.Recovery.Configuration.DevcontainerPath,
+		DevcontainerPath: devcontainerPath,
 	})
 	if err != nil {
 		return ports.FactRecord{}, snapshot, err
@@ -377,6 +381,32 @@ func (o *Open) observeRemoteDataPlanePrepared(ctx context.Context, snapshot doma
 	}, next, nil
 }
 
+func (o *Open) resolveRecoveryDevcontainer(ctx context.Context, snapshot domain.JournalSnapshot) (string, error) {
+	root := snapshot.Materialization.CanonicalPath
+	configured := snapshot.Recovery.Configuration.DevcontainerPath
+	generated := filepath.Join(root, ".camp", "runtime", "devcontainer.json")
+	explicit := configured
+	if filepath.Clean(configured) == generated {
+		if _, err := os.Lstat(configured); errors.Is(err, os.ErrNotExist) {
+			explicit = ""
+		} else if err != nil {
+			return "", err
+		}
+	}
+	initialization, err := o.deps.Initializer.Initialize(ctx, root, snapshot.Capsule)
+	if err != nil {
+		return "", err
+	}
+	resolved, err := capsule.ResolveDevcontainer(root, explicit, initialization.Lock)
+	if err != nil {
+		return "", err
+	}
+	if resolved.Path != configured {
+		return "", errors.New("recovered devcontainer path does not match the pending session")
+	}
+	return resolved.Path, nil
+}
+
 func (o *Open) observeForwarderStarted(ctx context.Context, snapshot domain.JournalSnapshot, intent ports.IntentRecord) (ports.FactRecord, domain.JournalSnapshot, error) {
 	if o.deps.Forwarders == nil {
 		return ports.FactRecord{}, snapshot, errors.New("workspace forwarder recovery dependency is incomplete")
@@ -389,21 +419,25 @@ func (o *Open) observeForwarderStarted(ctx context.Context, snapshot domain.Jour
 	if err != nil {
 		return ports.FactRecord{}, snapshot, err
 	}
-	expectedPort := 0
+	expectedLocalPort := 0
+	expectedWorkspacePort := 0
 	switch request.Name {
 	case "registry":
-		expectedPort = registryPort
+		expectedLocalPort = registryPort
+		expectedWorkspacePort = 5000
 	case "fileserver":
-		expectedPort = fileserverPort
+		expectedLocalPort = fileserverPort
+		expectedWorkspacePort = 8080
 	default:
 		return ports.FactRecord{}, snapshot, errors.New("workspace forwarder intent names an unsupported service")
 	}
-	expectedEndpoint := endpoint(expectedPort)
+	expectedLocalEndpoint := endpoint(expectedLocalPort)
+	expectedWorkspaceEndpoint := endpoint(expectedWorkspacePort)
 	expectedLogPath := filepath.Join(snapshot.Recovery.Session.RuntimeRoot, request.Name+"-forward.log")
 	expectedEvidencePath := filepath.Join(snapshot.Recovery.Session.RuntimeRoot, request.Name+"-forward.json")
 	if intent.SessionID != snapshot.SessionID || intent.Transition != "ForwarderStarted:"+request.Name ||
 		request.WorkspaceID == "" || request.WorkspaceID != snapshot.Workspace.ID || request.Context == "" || request.Context != snapshot.Workspace.Context ||
-		request.LocalEndpoint != expectedEndpoint || request.WorkspaceEndpoint != expectedEndpoint ||
+		request.LocalEndpoint != expectedLocalEndpoint || request.WorkspaceEndpoint != expectedWorkspaceEndpoint ||
 		request.LogPath != expectedLogPath || request.EvidencePath != expectedEvidencePath {
 		return ports.FactRecord{}, snapshot, errors.New("workspace forwarder intent does not match the pending session")
 	}
@@ -489,6 +523,9 @@ func (o *Open) observeWorkspaceUp(ctx context.Context, snapshot domain.JournalSn
 		return ports.FactRecord{}, snapshot, fmt.Errorf("observed DevPod workspace is not ready in state %q: %w", status.State, devpodadapter.ErrUnknownWorkspaceState)
 	}
 	if err := o.revalidateWorkspaceSource(ctx, input); err != nil {
+		return ports.FactRecord{}, snapshot, err
+	}
+	if err := o.observeRemoteStartup(ctx, snapshot, input); err != nil {
 		return ports.FactRecord{}, snapshot, err
 	}
 	next := snapshot
@@ -1134,7 +1171,7 @@ func validRemoteDataPlaneResult(result RemoteDataPlaneResult, selected domain.Re
 		record.Mode == selected.Mode && record.AttemptID == selected.AttemptID &&
 		len(record.KitSHA256) == 64 && record.KitSize > 0 &&
 		len(record.ManifestSHA256) == 64 && record.ManifestSize > 0 &&
-		strings.Contains(record.OuterImage, "@sha256:") && len(record.OuterImage[strings.LastIndex(record.OuterImage, "@sha256:")+8:]) == 64 &&
+		immutableImage(record.SourceImage) && localImageID(record.OuterImage) &&
 		record.RequestSchema != 0 && strings.HasSuffix(record.AttemptID, "-hauler-kit-v1") &&
 		record.RequestSession == strings.TrimSuffix(record.AttemptID, "-hauler-kit-v1") &&
 		validRoot(record.WorkspaceRoot) && validRoot(record.RuntimeRoot) && validRoot(record.ManifestPath) &&
@@ -1668,17 +1705,22 @@ func (o *Open) completeWorkspaceOpen(ctx context.Context, snapshot domain.Journa
 		return OpenResult{}, err
 	}
 	if o.deps.Forwarders != nil {
+		registryPort, fileserverPort, err := committedServicePorts(snapshot)
+		if err != nil {
+			return OpenResult{}, err
+		}
 		indexByName := make(map[string]int, len(snapshot.Recovery.Forwarding))
 		for index, record := range snapshot.Recovery.Forwarding {
 			indexByName[record.Name] = index
 		}
 		for _, item := range []struct {
-			name string
-			port int
-		}{{"registry", snapshot.Recovery.Configuration.RegistryPort}, {"fileserver", snapshot.Recovery.Configuration.FileserverPort}} {
+			name          string
+			localPort     int
+			workspacePort int
+		}{{"registry", registryPort, 5000}, {"fileserver", fileserverPort, 8080}} {
 			request := domain.ForwardingRequest{
 				Name: item.name, WorkspaceID: snapshot.Workspace.ID, Context: snapshot.Workspace.Context,
-				LocalEndpoint: endpoint(item.port), WorkspaceEndpoint: endpoint(item.port),
+				LocalEndpoint: endpoint(item.localPort), WorkspaceEndpoint: endpoint(item.workspacePort),
 				LogPath:      filepath.Join(snapshot.Recovery.Session.RuntimeRoot, item.name+"-forward.log"),
 				EvidencePath: filepath.Join(snapshot.Recovery.Session.RuntimeRoot, item.name+"-forward.json"),
 			}

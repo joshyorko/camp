@@ -176,6 +176,16 @@ func (builder *KitBuilder) Build(ctx context.Context, request BuildRequest) (Art
 		if observed == "" {
 			return Artifact{}, fmt.Errorf("%w: observed %s runtime identity is empty", ErrIdentityMismatch, kind)
 		}
+		if kind == "pasta" {
+			expected := firstIdentityLine(expectedVersions[kind])
+			matched, ok := exactPastaIdentity(observed, expected)
+			if !ok {
+				return Artifact{}, fmt.Errorf("%w: observed pasta runtime identity does not match the locked version", ErrIdentityMismatch)
+			}
+			expectedVersions[kind] = matched
+			observedVersions[kind] = matched
+			continue
+		}
 		if expectedVersions[kind] != "" && !containsExactIdentity(output, expectedVersions[kind]) {
 			return Artifact{}, fmt.Errorf("%w: observed %s runtime identity does not match the locked version", ErrIdentityMismatch, kind)
 		}
@@ -185,8 +195,9 @@ func (builder *KitBuilder) Build(ctx context.Context, request BuildRequest) (Art
 		observedVersions[kind] = expectedVersions[kind]
 	}
 	preparedRequest.CampVersion = expectedVersions["camp"]
+	preparedRequest.PastaVersion = expectedVersions["pasta"]
 	if observedVersions["camp"] != preparedRequest.CampVersion || observedVersions["hauler"] != request.HaulerVersion ||
-		observedVersions["pasta"] != request.PastaVersion || preparedStore.HaulerVersion != observedVersions["hauler"] {
+		observedVersions["pasta"] != preparedRequest.PastaVersion || preparedStore.HaulerVersion != observedVersions["hauler"] {
 		return Artifact{}, fmt.Errorf("%w: caller and observed runtime versions differ", ErrIdentityMismatch)
 	}
 	tools, err := identifyTools(preparedRequest)
@@ -307,12 +318,35 @@ func (builder *KitBuilder) Build(ctx context.Context, request BuildRequest) (Art
 	return artifact, nil
 }
 
+func firstIdentityLine(output string) string {
+	line, _, _ := strings.Cut(strings.TrimSpace(output), "\n")
+	return strings.TrimSpace(line)
+}
+
+func exactPastaIdentity(output, expected string) (string, bool) {
+	if expected == "" {
+		return "", false
+	}
+	for _, line := range strings.Split(output, "\n") {
+		candidate := strings.TrimSpace(line)
+		if candidate == expected || candidate == expected+"-pasta" {
+			return candidate, true
+		}
+	}
+	return "", false
+}
+
 func containsExactIdentity(output, expected string) bool {
 	if expected == "" {
 		return false
 	}
 	if strings.TrimSpace(output) == expected {
 		return true
+	}
+	for _, line := range strings.Split(output, "\n") {
+		if strings.TrimSpace(line) == expected {
+			return true
+		}
 	}
 	for _, field := range strings.Fields(output) {
 		if field == expected {

@@ -130,7 +130,7 @@ func TestOpenRemoteUnknownWorkspaceOutcomeReusesRecordedKitAttempt(t *testing.T)
 	dataPlane := &recordingRemoteDataPlane{bootstrapRoot: filepath.Join(environment.paths.DataRoot, "bootstrap")}
 	environment.open.deps.RemoteDataPlane = dataPlane
 	devpod := &unknownOutcomeWorkspaceDevPod{
-		folder: "/workspaces/root", upResults: []ports.Result{{}}, upErrors: []error{ports.ErrAmbiguous},
+		folder: "/workspaces/root", startupReady: true, upResults: []ports.Result{{}}, upErrors: []error{ports.ErrAmbiguous},
 	}
 	environment.open.deps.DevPod = devpod
 	request := OpenRequest{
@@ -174,6 +174,38 @@ func TestOpenRemoteDataPlaneFailurePreventsDevPodUp(t *testing.T) {
 	}
 	if len(environment.devpod.ups) != 0 {
 		t.Fatalf("DevPod up called after preparation failure: %#v", environment.devpod.ups)
+	}
+}
+
+func TestOpenRemoteDataPlaneRecoveryRegeneratesMissingFallbackDevcontainer(t *testing.T) {
+	environment := newRemoteOpenTestEnvironment(t)
+	dataPlane := &recordingRemoteDataPlane{
+		bootstrapRoot:       filepath.Join(environment.paths.DataRoot, "bootstrap"),
+		err:                 ports.ErrAmbiguous,
+		requireDevcontainer: true,
+	}
+	environment.open.deps.RemoteDataPlane = dataPlane
+	request := OpenRequest{
+		SessionID: "remote-missing-fallback-recovery", Capsule: "brain", Branch: "feature", SourceLineage: domain.Lineage{Branch: "main"},
+		Mode: domain.SessionReadWrite, RemoteAvailable: true, Target: "MemoryD", EntryMode: domain.EntryTerminal,
+		Context: "default", Provider: "ssh", Runtime: environment.runtime, Backend: environment.backend,
+	}
+	if _, err := environment.open.Run(context.Background(), request); !errors.Is(err, ports.ErrAmbiguous) {
+		t.Fatalf("first Open() error = %v, want ambiguous", err)
+	}
+	if len(dataPlane.requests) != 1 {
+		t.Fatalf("first preparation requests = %#v", dataPlane.requests)
+	}
+	generated := dataPlane.requests[0].DevcontainerPath
+	if err := os.RemoveAll(filepath.Dir(generated)); err != nil {
+		t.Fatal(err)
+	}
+	dataPlane.err = nil
+	if _, err := environment.open.Run(context.Background(), request); err != nil {
+		t.Fatalf("recovered Open() error = %v", err)
+	}
+	if _, err := os.Stat(generated); err != nil {
+		t.Fatalf("regenerated fallback devcontainer: %v", err)
 	}
 }
 
@@ -258,7 +290,7 @@ func TestOpenRemoteRestoresHydratedNamedImagesBeforeEntry(t *testing.T) {
 	if restorer.request.Scope.WorkspaceID != result.WorkspaceID || restorer.request.Scope.Context != "default" {
 		t.Fatalf("image restore scope = %#v", restorer.request.Scope)
 	}
-	if restorer.request.RegistryAuthority != "127.0.0.1:5000" || restorer.request.RegistryEndpoint != "http://127.0.0.1:5000" {
+	if restorer.request.RegistryAuthority != "127.0.0.1:45000" || restorer.request.RegistryEndpoint != "http://127.0.0.1:45000" {
 		t.Fatalf("image restore registry = %#v", restorer.request)
 	}
 	if !result.Snapshot.Workspace.ImagesRestored {
@@ -1134,10 +1166,11 @@ type remoteOpenTestEnvironment struct {
 }
 
 type recordingRemoteDataPlane struct {
-	bootstrapRoot string
-	calls         int
-	requests      []RemoteDataPlaneRequest
-	err           error
+	bootstrapRoot       string
+	calls               int
+	requests            []RemoteDataPlaneRequest
+	err                 error
+	requireDevcontainer bool
 }
 
 var errLegacyJournalCut = errors.New("legacy journal cut")
@@ -1181,6 +1214,11 @@ func (j *legacyRemoteDataPlaneJournal) RecordFact(ctx context.Context, fact port
 func (r *recordingRemoteDataPlane) Prepare(_ context.Context, request RemoteDataPlaneRequest) (RemoteDataPlaneResult, error) {
 	r.calls++
 	r.requests = append(r.requests, request)
+	if r.requireDevcontainer {
+		if _, err := os.Stat(request.DevcontainerPath); err != nil {
+			return RemoteDataPlaneResult{}, err
+		}
+	}
 	if r.err != nil {
 		return RemoteDataPlaneResult{}, r.err
 	}
@@ -1188,8 +1226,10 @@ func (r *recordingRemoteDataPlane) Prepare(_ context.Context, request RemoteData
 		BootstrapRoot: r.bootstrapRoot,
 		Record: domain.RemoteDataPlaneRecord{
 			Mode: domain.DataPlaneHaulerKitV1, AttemptID: request.AttemptID, BootstrapRoot: r.bootstrapRoot,
-			KitSHA256: strings.Repeat("a", 64), KitSize: 1, ManifestSHA256: strings.Repeat("b", 64), ManifestSize: 1,
-			OuterImage:    "example.test/room@sha256:" + strings.Repeat("c", 64),
+			KitSHA256: strings.Repeat("a", 64), KitSize: 1, HelperSHA256: strings.Repeat("f", 64), HelperSize: 1,
+			ManifestSHA256: strings.Repeat("b", 64), ManifestSize: 1,
+			SourceImage:   "example.test/room@sha256:" + strings.Repeat("c", 64),
+			OuterImage:    "sha256:" + strings.Repeat("e", 64),
 			RequestSchema: remoteworker.ProtocolSchemaVersion, RequestSession: request.SessionID,
 			WorkspaceRoot: "/workspaces/brain", RuntimeRoot: "/var/lib/camp/" + request.SessionID,
 			ManifestPath: "/var/lib/camp/" + request.SessionID + "/camp-hauler-kit.json", Architecture: "linux/" + runtime.GOARCH,

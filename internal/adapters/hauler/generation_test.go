@@ -49,7 +49,11 @@ func (r *generationRunner) Run(_ context.Context, command ports.Command) (ports.
 			}
 		}
 		if argument == "extract" && index+3 < len(command.Argv) && command.Argv[index+2] == "--output" {
-			if err := os.WriteFile(command.Argv[index+3], r.extract, 0o600); err != nil {
+			outputDirectory := command.Argv[index+3]
+			if err := os.MkdirAll(outputDirectory, 0o700); err != nil {
+				return ports.Result{}, err
+			}
+			if err := os.WriteFile(filepath.Join(outputDirectory, "root.tar.zst"), r.extract, 0o600); err != nil {
 				return ports.Result{}, err
 			}
 		}
@@ -319,10 +323,11 @@ func TestClientObservesCanonicalRootBytesWhenInfoOmitsSize(t *testing.T) {
 	rootBytes := []byte("root-archive-bytes")
 	sum := sha256.Sum256(rootBytes)
 	digest := hex.EncodeToString(sum[:])
+	storeDescriptorDigest := strings.Repeat("a", 64)
 	runner := &generationRunner{
 		version: []byte("v2.0.2\n"),
 		extract: rootBytes,
-		info:    []byte(`[{"Reference":"hauler/root.tar.zst:latest","Type":"file","Platform":"-","Digest":"sha256:` + digest + `"}]`),
+		info:    []byte(`[{"Reference":"hauler/root.tar.zst:latest","Type":"file","Platform":"-","Digest":"sha256:` + storeDescriptorDigest + `"}]`),
 	}
 	identity, err := NewClientWithVersion("/opt/hauler", "v2.0.2", runner).
 		ObserveRoot(context.Background(), "/tmp/store", "root.tar.zst")

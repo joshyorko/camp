@@ -50,6 +50,30 @@
       "summary": "Every Robot test maps to a known active requirement and every required-now requirement has an executing test."
     },
     {
+      "id": "CAMP-BB-COMMAND-SURFACE-001",
+      "tier": "required-now",
+      "source": "docs/skills/cli-composition.md#CLI-composition",
+      "summary": "Every public command path exposes callable truthful help from the exact candidate."
+    },
+    {
+      "id": "CAMP-BB-SETUP-001",
+      "tier": "required-now",
+      "source": "docs/skills/terminal-experience.md#Terminal-lifecycle-and-restoration",
+      "summary": "Machine setup resolves Camp's pinned managed DevPod and Hauler tools and reports a stable setup receipt."
+    },
+    {
+      "id": "CAMP-BB-SAFE-COMMANDS-001",
+      "tier": "required-now",
+      "source": "docs/skills/cli-composition.md#Configuration-and-provider-boundary",
+      "summary": "Configuration, provider inspection, and doctor execute their production handlers safely in an isolated controller."
+    },
+    {
+      "id": "CAMP-BB-LIFECYCLE-ERRORS-001",
+      "tier": "required-now",
+      "source": "docs/skills/cli-composition.md#CLI-composition",
+      "summary": "Lifecycle commands without selected session state fail with stable JSON error envelopes rather than fabricating success."
+    },
+    {
       "id": "CAMP-PROOF-OPEN-001",
       "tier": "roadmap-gated",
       "source": "prompts/camp-codex-build-prompt.md#camp-open-target",
