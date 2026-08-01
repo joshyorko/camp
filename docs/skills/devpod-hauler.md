@@ -13,7 +13,10 @@ Do not use Hauler v2.0.2's live `_catalog` response as proof that all direct reg
   then hashes the normalized root-reference filename created inside it. Test
   runners must reproduce that directory contract; writing directly to the
   `--output` path can conceal a first-open regression that the real binary
-  exposes as `is a directory`. Hauler's store inventory digest identifies the
+  exposes as `is a directory`. Hydration retains that output directory as
+  `.camp/runtime/bootstrap/<session>/root.tar.zst/`, admits exactly the one
+  normalized root archive inside it, then extracts that archive. Hauler's
+  store inventory digest identifies the
   OCI descriptor, not the extracted file bytes; root observation hashes the
   extracted file, while the Kit builder compares that content identity with
   the original root archive supplied by Camp.
@@ -88,7 +91,9 @@ Do not use Hauler v2.0.2's live `_catalog` response as proof that all direct reg
   This is required because the preserved DevPod workspace showed unset SSH as
   root with `/var/lib/containers/storage` and no image, while `--user podman`
   used `/home/podman/.local/share/containers/storage` and observed the exact
-  activated config ID. String, argv-array, and named-object lifecycle values
+  activated config ID. The top-level `camp-hauler-kit.tar.zst` is a required,
+  digest-and-size-verified bootstrap input during initial hydration; admission
+  rejects every other unexpected top-level entry. String, argv-array, and named-object lifecycle values
   retain their top-level JSON form, and each original command or argv appears
   exactly once behind a fail-closed helper boundary. String hooks use a
   same-shell `helper || exit $?` prelude followed by the original text; argv

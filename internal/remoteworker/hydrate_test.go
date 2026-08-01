@@ -40,14 +40,79 @@ func (fixture *hydrationFixture) Verify(_ context.Context, request Request) (ver
 	return verifiedRuntimeKit{Store: "/runtime/store", RootSHA256: strings.Repeat("a", 64)}, nil
 }
 
-func (fixture *hydrationFixture) AdmitWorkspace(workspace string) error {
+func (fixture *hydrationFixture) AdmitWorkspace(request Request) error {
 	fixture.order = append(fixture.order, "admit")
-	workspaceFD, _, err := openOperationDirectory(workspace)
+	workspaceFD, _, err := openOperationDirectory(request.WorkspaceRoot)
 	if err != nil {
 		return err
 	}
 	defer unix.Close(workspaceFD)
-	return validateInitialWorkspace(workspaceFD)
+	return validateInitialWorkspace(workspaceFD, request.Expected.Kit)
+}
+
+func TestValidateInitialWorkspaceAcceptsOnlyVerifiedBootstrapKit(t *testing.T) {
+	workspace := t.TempDir()
+	body := []byte("verified kit")
+	digest := sha256.Sum256(body)
+	kit := FileIdentity{Name: "camp-hauler-kit.tar.zst", SHA256: fmt.Sprintf("%x", digest), Size: int64(len(body))}
+	if err := os.Mkdir(filepath.Join(workspace, ".camp-bootstrap"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(workspace, kit.Name), body, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	workspaceFD, _, err := openOperationDirectory(workspace)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer unix.Close(workspaceFD)
+	if err := validateInitialWorkspace(workspaceFD, kit); err != nil {
+		t.Fatal(err)
+	}
+	if err := unix.Close(workspaceFD); err != nil {
+		t.Fatal(err)
+	}
+	workspaceFD, _, err = openOperationDirectory(workspace)
+	if err != nil {
+		t.Fatal(err)
+	}
+	kit.SHA256 = strings.Repeat("a", 64)
+	if err := validateInitialWorkspace(workspaceFD, kit); !errors.Is(err, ErrUnsafeHydration) {
+		t.Fatalf("validateInitialWorkspace() error = %v", err)
+	}
+}
+
+func TestValidateExtractedRootRequiresHaulerOutputDirectoryAndExactArtifact(t *testing.T) {
+	runtimeRoot := t.TempDir()
+	body := []byte("root archive")
+	digest := sha256.Sum256(body)
+	expected := haulkit.RootIdentity{
+		Reference: "hauler/root.tar.zst:latest",
+		SHA256:    fmt.Sprintf("%x", digest),
+		Size:      int64(len(body)),
+	}
+	output, archive, err := rootExtractionPaths(runtimeRoot, expected.Reference)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if output != filepath.Join(runtimeRoot, "root.tar.zst") || archive != filepath.Join(output, "root.tar.zst") {
+		t.Fatalf("paths = (%q, %q)", output, archive)
+	}
+	if err := os.Mkdir(output, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(archive, body, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := validateExtractedRoot(output, archive, expected); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(output, "unexpected"), []byte("no"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := validateExtractedRoot(output, archive, expected); !errors.Is(err, ErrIdentityMismatch) {
+		t.Fatalf("validateExtractedRoot() error = %v", err)
+	}
 }
 
 func (fixture *hydrationFixture) ExtractRoot(context.Context, Request, verifiedRuntimeKit) (string, error) {
@@ -62,7 +127,7 @@ func (fixture *hydrationFixture) InstallTools(Request, verifiedRuntimeKit) error
 
 func (fixture *hydrationFixture) Promote(stage, workspace string) error {
 	fixture.order = append(fixture.order, "promote")
-	return promoteHydratedRoot(stage, workspace, nil)
+	return promoteHydratedRoot(stage, workspace, FileIdentity{}, nil)
 }
 
 func (fixture *hydrationFixture) Publish(_ Request, receipt HydrationReceipt) error {
@@ -353,7 +418,7 @@ func TestPromoteHydratedRootPreservesOnlyBootstrapAndRuntime(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if err := promoteHydratedRoot(stage, workspace, nil); err != nil {
+	if err := promoteHydratedRoot(stage, workspace, FileIdentity{}, nil); err != nil {
 		t.Fatal(err)
 	}
 	for _, path := range []string{
@@ -394,7 +459,7 @@ func TestPromoteHydratedRootRejectsUnexpectedWorkspaceEntryWithoutMutation(t *te
 		t.Fatal(err)
 	}
 
-	if err := promoteHydratedRoot(stage, workspace, nil); err == nil {
+	if err := promoteHydratedRoot(stage, workspace, FileIdentity{}, nil); err == nil {
 		t.Fatal("promoteHydratedRoot() error = nil")
 	}
 	if body, err := os.ReadFile(filepath.Join(workspace, "user.txt")); err != nil || string(body) != "keep" {

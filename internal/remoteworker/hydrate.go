@@ -11,6 +11,7 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strings"
 	"syscall"
 
 	archiveadapter "github.com/joshyorko/camp/internal/adapters/archive"
@@ -35,7 +36,7 @@ type HydrationReceipt struct {
 
 type hydrationRuntime interface {
 	Verify(context.Context, Request) (verifiedRuntimeKit, error)
-	AdmitWorkspace(string) error
+	AdmitWorkspace(Request) error
 	ExtractRoot(context.Context, Request, verifiedRuntimeKit) (string, error)
 	InstallTools(Request, verifiedRuntimeKit) error
 	Promote(string, string) error
@@ -50,7 +51,7 @@ func hydrateWorkspace(ctx context.Context, request Request, runtime hydrationRun
 			return receipt, err
 		}
 	}
-	if err := runtime.AdmitWorkspace(request.WorkspaceRoot); err != nil {
+	if err := runtime.AdmitWorkspace(request); err != nil {
 		return HydrationReceipt{}, err
 	}
 	kit, err := runtime.Verify(ctx, request)
@@ -77,6 +78,7 @@ func hydrateWorkspace(ctx context.Context, request Request, runtime hydrationRun
 type productionHydrationRuntime struct {
 	activation *productionActivationRuntime
 	manifest   haulkit.Manifest
+	kit        FileIdentity
 }
 
 func newProductionHydrationRuntime() *productionHydrationRuntime {
@@ -93,6 +95,7 @@ func (runtimeState *productionHydrationRuntime) Verify(ctx context.Context, requ
 		return verifiedRuntimeKit{}, err
 	}
 	runtimeState.manifest, err = haulkit.DecodeCanonical(body)
+	runtimeState.kit = request.Expected.Kit
 	return kit, err
 }
 
@@ -210,32 +213,33 @@ func readHydrationReceipt(workspace string) ([]byte, error) {
 	return body, nil
 }
 
-func (*productionHydrationRuntime) AdmitWorkspace(workspace string) error {
-	workspaceFD, _, err := openOperationDirectory(workspace)
+func (*productionHydrationRuntime) AdmitWorkspace(request Request) error {
+	workspaceFD, _, err := openOperationDirectory(request.WorkspaceRoot)
 	if err != nil {
 		return fmt.Errorf("%w: open workspace: %v", ErrUnsafeHydration, err)
 	}
 	defer unix.Close(workspaceFD)
-	return validateInitialWorkspace(workspaceFD)
+	return validateInitialWorkspace(workspaceFD, request.Expected.Kit)
 }
 
 func (runtimeState *productionHydrationRuntime) ExtractRoot(ctx context.Context, request Request, kit verifiedRuntimeKit) (string, error) {
 	ready := filepath.Dir(kit.Store)
 	hauler := hauleradapter.NewClient(filepath.Join(ready, "bin", "hauler"), subprocess.NewRunner())
-	rootArchive := filepath.Join(request.RuntimeRoot, "root.tar.zst")
-	if _, err := os.Lstat(rootArchive); err == nil {
-		observed, observeErr := observeFile(filepath.Base(rootArchive), rootArchive)
-		if observeErr != nil || observed.SHA256 != runtimeState.manifest.Root.SHA256 || observed.Size != runtimeState.manifest.Root.Size {
-			return "", fmt.Errorf("%w: existing root artifact", ErrIdentityMismatch)
+	rootOutput, rootArchive, err := rootExtractionPaths(request.RuntimeRoot, runtimeState.manifest.Root.Reference)
+	if err != nil {
+		return "", err
+	}
+	if _, err := os.Lstat(rootOutput); err == nil {
+		if err := validateExtractedRoot(rootOutput, rootArchive, runtimeState.manifest.Root); err != nil {
+			return "", fmt.Errorf("%w: existing root artifact", err)
 		}
 	} else if isNotExist(err) {
-		result, extractErr := hauler.Extract(ctx, kit.Store, runtimeState.manifest.Root.Reference, rootArchive)
+		result, extractErr := hauler.Extract(ctx, kit.Store, runtimeState.manifest.Root.Reference, rootOutput)
 		if extractErr != nil || result.ExitCode != 0 {
 			return "", fmt.Errorf("extract root artifact: %w", extractErr)
 		}
-		observed, observeErr := observeFile(filepath.Base(rootArchive), rootArchive)
-		if observeErr != nil || observed.SHA256 != runtimeState.manifest.Root.SHA256 || observed.Size != runtimeState.manifest.Root.Size {
-			return "", fmt.Errorf("%w: extracted root artifact", ErrIdentityMismatch)
+		if err := validateExtractedRoot(rootOutput, rootArchive, runtimeState.manifest.Root); err != nil {
+			return "", fmt.Errorf("%w: extracted root artifact", err)
 		}
 	} else {
 		return "", err
@@ -250,6 +254,33 @@ func (runtimeState *productionHydrationRuntime) ExtractRoot(ctx context.Context,
 		return "", err
 	}
 	return stage, nil
+}
+
+func rootExtractionPaths(runtimeRoot, reference string) (string, string, error) {
+	canonical, err := haulkit.NormalizeRootReference(reference)
+	if err != nil {
+		return "", "", err
+	}
+	name := strings.TrimSuffix(strings.TrimPrefix(canonical, "hauler/"), ":latest")
+	output := filepath.Join(runtimeRoot, "root.tar.zst")
+	return output, filepath.Join(output, name), nil
+}
+
+func validateExtractedRoot(output, archive string, expected haulkit.RootIdentity) error {
+	outputFD, _, err := openOperationDirectory(output)
+	if err != nil {
+		return fmt.Errorf("%w: extracted root output: %v", ErrIdentityMismatch, err)
+	}
+	defer unix.Close(outputFD)
+	names, err := readDirectoryNames(outputFD)
+	if err != nil || len(names) != 1 || names[0] != filepath.Base(archive) {
+		return fmt.Errorf("%w: extracted root output shape", ErrIdentityMismatch)
+	}
+	observed, err := observeFile(filepath.Base(archive), archive)
+	if err != nil || observed.SHA256 != expected.SHA256 || observed.Size != expected.Size {
+		return fmt.Errorf("%w: extracted root artifact", ErrIdentityMismatch)
+	}
+	return nil
 }
 
 func (runtimeState *productionHydrationRuntime) InstallTools(request Request, kit verifiedRuntimeKit) error {
@@ -287,8 +318,8 @@ func (runtimeState *productionHydrationRuntime) InstallTools(request Request, ki
 	return syncOperationDirectory(runtimeRoot)
 }
 
-func (*productionHydrationRuntime) Promote(stage, workspace string) error {
-	return promoteHydratedRoot(stage, workspace, nil)
+func (runtimeState *productionHydrationRuntime) Promote(stage, workspace string) error {
+	return promoteHydratedRoot(stage, workspace, runtimeState.kit, nil)
 }
 
 func (*productionHydrationRuntime) Publish(request Request, receipt HydrationReceipt) error {
@@ -299,7 +330,7 @@ func (*productionHydrationRuntime) Publish(request Request, receipt HydrationRec
 	return publishReceipt(filepath.Join(request.WorkspaceRoot, ".camp", "runtime", "hydrate.receipt.json"), append(body, '\n'))
 }
 
-func promoteHydratedRoot(stage, workspace string, boundary func(string) error) error {
+func promoteHydratedRoot(stage, workspace string, kit FileIdentity, boundary func(string) error) error {
 	stageFD, stageStat, err := openOperationDirectory(stage)
 	if err != nil {
 		return fmt.Errorf("%w: open root stage: %v", ErrUnsafeHydration, err)
@@ -313,7 +344,7 @@ func promoteHydratedRoot(stage, workspace string, boundary func(string) error) e
 	if stageStat.Dev != workspaceStat.Dev {
 		return fmt.Errorf("%w: stage and workspace cross devices", ErrUnsafeHydration)
 	}
-	if err := validateInitialWorkspace(workspaceFD); err != nil {
+	if err := validateInitialWorkspace(workspaceFD, kit); err != nil {
 		return err
 	}
 	names, err := readDirectoryNames(stageFD)
@@ -416,7 +447,7 @@ func openOperationDirectory(path string) (int, unix.Stat_t, error) {
 	return fd, stat, nil
 }
 
-func validateInitialWorkspace(workspaceFD int) error {
+func validateInitialWorkspace(workspaceFD int, kit FileIdentity) error {
 	names, err := readDirectoryNames(workspaceFD)
 	if err != nil {
 		return err
@@ -425,6 +456,10 @@ func validateInitialWorkspace(workspaceFD int) error {
 		switch name {
 		case ".camp-bootstrap":
 			if err := requireDirectoryAt(workspaceFD, name); err != nil {
+				return err
+			}
+		case kit.Name:
+			if err := requireInitialKitAt(workspaceFD, kit); err != nil {
 				return err
 			}
 		case ".camp":
@@ -446,6 +481,24 @@ func validateInitialWorkspace(workspaceFD int) error {
 		default:
 			return fmt.Errorf("%w: unexpected initial workspace entry %q", ErrUnsafeHydration, name)
 		}
+	}
+	return nil
+}
+
+func requireInitialKitAt(parentFD int, expected FileIdentity) error {
+	fileDescriptor, err := unix.Openat(parentFD, expected.Name, unix.O_RDONLY|unix.O_CLOEXEC|unix.O_NOFOLLOW, 0)
+	if err != nil {
+		return fmt.Errorf("%w: bootstrap kit is unsafe: %v", ErrUnsafeHydration, err)
+	}
+	file := os.NewFile(uintptr(fileDescriptor), expected.Name)
+	defer file.Close()
+	info, err := file.Stat()
+	if err != nil || !info.Mode().IsRegular() || info.Size() != expected.Size {
+		return fmt.Errorf("%w: bootstrap kit identity", ErrUnsafeHydration)
+	}
+	digest := sha256.New()
+	if _, err := io.Copy(digest, file); err != nil || fmt.Sprintf("%x", digest.Sum(nil)) != expected.SHA256 {
+		return fmt.Errorf("%w: bootstrap kit identity", ErrUnsafeHydration)
 	}
 	return nil
 }
