@@ -33,7 +33,7 @@ func TestRenderBootstrapExecutesHelperBeforeEveryLifecycleForm(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			if got := entryNames(entries); strings.Join(got, ",") != ".camp-bootstrap,camp-hauler-kit.tar.zst" {
+			if got := entryNames(entries); strings.Join(got, ",") != ".camp-bootstrap,chunks" {
 				t.Fatalf("bootstrap root entries = %v", got)
 			}
 			publishedManifest, err := os.ReadFile(filepath.Join(result.Root, ".camp-bootstrap", fixture.request.InitializeRequest.Expected.Manifest.Name))

@@ -10,12 +10,13 @@ import (
 	"path/filepath"
 	"strings"
 
+	"github.com/joshyorko/camp/internal/haulkit"
 	"github.com/joshyorko/camp/internal/remoteworker"
 	"golang.org/x/sys/unix"
 )
 
 const (
-	BootstrapRegularFileLimit = 16
+	BootstrapRegularFileLimit = 262
 	BootstrapMetadataLimit    = 1 << 20
 )
 
@@ -41,6 +42,7 @@ type BootstrapVerification struct {
 	Helper        remoteworker.FileIdentity
 	Kit           remoteworker.FileIdentity
 	Manifest      remoteworker.FileIdentity
+	Chunks        []haulkit.ChunkIdentity
 	Config        remoteworker.FileIdentity
 	Initialize    remoteworker.Request
 	Hydrate       remoteworker.Request
@@ -64,7 +66,7 @@ func VerifyBootstrap(request BootstrapVerificationRequest) (BootstrapVerificatio
 	}
 	defer root.Close()
 	if err := verifyDirectoryEntries(root, map[string]bool{
-		".camp-bootstrap": true, "camp-hauler-kit.tar.zst": false,
+		".camp-bootstrap": true, "chunks": true,
 	}); err != nil {
 		return BootstrapVerification{}, err
 	}
@@ -80,24 +82,38 @@ func VerifyBootstrap(request BootstrapVerificationRequest) (BootstrapVerificatio
 	}); err != nil {
 		return BootstrapVerification{}, err
 	}
-	result := BootstrapVerification{RegularFiles: 7}
-	if result.RegularFiles > BootstrapRegularFileLimit {
-		return BootstrapVerification{}, fmt.Errorf("%w: bootstrap file limit", ErrInvalidBootstrap)
-	}
-	kit, err := observeRelativeFile(root, "camp-hauler-kit.tar.zst", request.Expected.Kit.Name)
-	if err != nil || kit != request.Expected.Kit {
-		return BootstrapVerification{}, fmt.Errorf("%w: kit identity", ErrInvalidBootstrap)
-	}
 	helper, helperMode, err := observeRelativeFileWithMode(private, "camp-bootstrap", request.Expected.Helper.Name)
 	if err != nil || helper != request.Expected.Helper || helperMode&0o111 == 0 {
 		return BootstrapVerification{}, fmt.Errorf("%w: helper identity", ErrInvalidBootstrap)
 	}
-	result.Kit, result.Helper = kit, helper
+	result.Helper = helper
 	manifest, err := observeRelativeFile(private, request.Expected.Manifest.Name, request.Expected.Manifest.Name)
 	if err != nil || manifest != request.Expected.Manifest {
 		return BootstrapVerification{}, fmt.Errorf("%w: manifest identity", ErrInvalidBootstrap)
 	}
 	result.Manifest = manifest
+	manifestBody, err := readRelativeFile(private, request.Expected.Manifest.Name, BootstrapMetadataLimit)
+	if err != nil {
+		return BootstrapVerification{}, err
+	}
+	decodedManifest, err := haulkit.DecodeCanonical(manifestBody)
+	if err != nil || decodedManifest.Archive.SHA256 != request.Expected.Kit.SHA256 || decodedManifest.Archive.Size != request.Expected.Kit.Size {
+		return BootstrapVerification{}, fmt.Errorf("%w: kit manifest identity", ErrInvalidBootstrap)
+	}
+	chunks, err := openRelativeDirectory(root, "chunks")
+	if err != nil {
+		return BootstrapVerification{}, err
+	}
+	defer chunks.Close()
+	if err := verifyChunkDirectory(chunks, decodedManifest.Chunks); err != nil {
+		return BootstrapVerification{}, err
+	}
+	result.Kit = request.Expected.Kit
+	result.Chunks = append([]haulkit.ChunkIdentity(nil), decodedManifest.Chunks...)
+	result.RegularFiles = 6 + len(result.Chunks)
+	if result.RegularFiles > BootstrapRegularFileLimit {
+		return BootstrapVerification{}, fmt.Errorf("%w: bootstrap file limit", ErrInvalidBootstrap)
+	}
 	config, err := observeRelativeFile(private, "devcontainer.json", request.Config.Name)
 	if err != nil || config != request.Config {
 		return BootstrapVerification{}, fmt.Errorf("%w: devcontainer config identity", ErrInvalidBootstrap)

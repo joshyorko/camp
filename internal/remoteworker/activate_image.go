@@ -70,9 +70,8 @@ func (runtimeState *productionActivationRuntime) Verify(ctx context.Context, req
 	}
 	private := filepath.Dir(executable)
 	sourceManifest := filepath.Join(private, request.Expected.Manifest.Name)
-	sourceKit := filepath.Join(filepath.Dir(private), request.Expected.Kit.Name)
 	for path, expected := range map[string]FileIdentity{
-		executable: request.Expected.Helper, sourceManifest: request.Expected.Manifest, sourceKit: request.Expected.Kit,
+		executable: request.Expected.Helper, sourceManifest: request.Expected.Manifest,
 	} {
 		observed, err := observeFile(expected.Name, path)
 		if err != nil || observed != expected {
@@ -91,11 +90,18 @@ func (runtimeState *productionActivationRuntime) Verify(ctx context.Context, req
 		request.Expected.Architecture != "linux/"+runtime.GOARCH {
 		return verifiedRuntimeKit{}, fmt.Errorf("%w: activation manifest scope", ErrIdentityMismatch)
 	}
+	if manifest.Archive.SHA256 != request.Expected.Kit.SHA256 || manifest.Archive.Size != request.Expected.Kit.Size {
+		return verifiedRuntimeKit{}, fmt.Errorf("%w: activation archive identity", ErrIdentityMismatch)
+	}
 	imageDigest, err := activationImageDigest(manifest.Store, request.Expected.SourceImage, request.Expected.Architecture)
 	if err != nil {
 		return verifiedRuntimeKit{}, err
 	}
 	if err := secureMkdirAllOperation(request.RuntimeRoot); err != nil {
+		return verifiedRuntimeKit{}, err
+	}
+	sourceKit := filepath.Join(request.RuntimeRoot, request.Expected.Kit.Name)
+	if err := reassembleBootstrapKit(ctx, filepath.Join(filepath.Dir(private), "chunks"), manifest.Chunks, sourceKit, request.Expected.Kit); err != nil {
 		return verifiedRuntimeKit{}, err
 	}
 	ready := filepath.Join(request.RuntimeRoot, "kit")
@@ -144,6 +150,30 @@ func (runtimeState *productionActivationRuntime) Verify(ctx context.Context, req
 	}
 	runtimeState.kit = verifiedRuntimeKit{Store: filepath.Join(ready, "store"), RootSHA256: manifest.Root.SHA256, ImageDigest: imageDigest}
 	return runtimeState.kit, nil
+}
+
+func reassembleBootstrapKit(ctx context.Context, chunksDirectory string, chunks []haulkit.ChunkIdentity, output string, expected FileIdentity) error {
+	if info, err := os.Lstat(output); err == nil {
+		if !info.Mode().IsRegular() || info.Mode()&os.ModeSymlink != 0 {
+			return fmt.Errorf("%w: existing reconstructed kit", ErrIdentityMismatch)
+		}
+		observed, observeErr := observeFile(expected.Name, output)
+		if observeErr != nil || observed != expected {
+			return fmt.Errorf("%w: existing reconstructed kit", ErrIdentityMismatch)
+		}
+		return nil
+	} else if !isNotExist(err) {
+		return err
+	}
+	if err := haulkit.Reassemble(ctx, chunksDirectory, chunks, output, haulkit.DefaultChunkSize); err != nil {
+		return err
+	}
+	observed, err := observeFile(expected.Name, output)
+	if err != nil || observed != expected {
+		_ = os.Remove(output)
+		return fmt.Errorf("%w: reconstructed kit", ErrIdentityMismatch)
+	}
+	return nil
 }
 
 func (runtimeState *productionActivationRuntime) StartRegistry(ctx context.Context, request Request, kit verifiedRuntimeKit) (temporaryRegistry, error) {

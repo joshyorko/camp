@@ -15,6 +15,7 @@ import (
 	"strings"
 	"unicode"
 
+	"github.com/joshyorko/camp/internal/haulkit"
 	"github.com/joshyorko/camp/internal/jsonstrict"
 	"github.com/joshyorko/camp/internal/remoteworker"
 	"golang.org/x/sys/unix"
@@ -25,7 +26,7 @@ var ErrInvalidBootstrap = errors.New("invalid remote bootstrap source")
 type BootstrapRequest struct {
 	Root              string
 	DevcontainerPath  string
-	KitArchivePath    string
+	ChunkDirectory    string
 	ManifestPath      string
 	OuterImage        string
 	InitializeRequest remoteworker.Request
@@ -51,7 +52,7 @@ func RenderBootstrap(request BootstrapRequest) (Bootstrap, error) {
 
 func renderBootstrap(request BootstrapRequest, openHelper func() (*os.File, error)) (Bootstrap, error) {
 	if !filepath.IsAbs(request.Root) || filepath.Clean(request.Root) != request.Root ||
-		!filepath.IsAbs(request.DevcontainerPath) || !filepath.IsAbs(request.KitArchivePath) ||
+		!filepath.IsAbs(request.DevcontainerPath) || !filepath.IsAbs(request.ChunkDirectory) ||
 		!filepath.IsAbs(request.ManifestPath) || openHelper == nil {
 		return Bootstrap{}, fmt.Errorf("%w: paths must be absolute", ErrInvalidBootstrap)
 	}
@@ -117,19 +118,6 @@ func renderBootstrap(request BootstrapRequest, openHelper func() (*os.File, erro
 			return Bootstrap{}, fmt.Errorf("%w: request scopes differ", ErrInvalidBootstrap)
 		}
 	}
-	kit, err := openRegularBootstrap(request.KitArchivePath)
-	if err != nil {
-		return Bootstrap{}, err
-	}
-	defer kit.Close()
-	if observed, err := observeOpenFile(kit, expected.Kit.Name); err != nil {
-		return Bootstrap{}, err
-	} else if observed != expected.Kit {
-		return Bootstrap{}, fmt.Errorf("%w: kit identity", ErrInvalidBootstrap)
-	}
-	if _, err := kit.Seek(0, io.SeekStart); err != nil {
-		return Bootstrap{}, err
-	}
 	manifest, err := openRegularBootstrap(request.ManifestPath)
 	if err != nil {
 		return Bootstrap{}, err
@@ -141,6 +129,22 @@ func renderBootstrap(request BootstrapRequest, openHelper func() (*os.File, erro
 		return Bootstrap{}, fmt.Errorf("%w: manifest identity", ErrInvalidBootstrap)
 	}
 	if _, err := manifest.Seek(0, io.SeekStart); err != nil {
+		return Bootstrap{}, err
+	}
+	manifestBody, err := io.ReadAll(manifest)
+	if err != nil {
+		return Bootstrap{}, err
+	}
+	decodedManifest, err := haulkit.DecodeCanonical(manifestBody)
+	if err != nil || decodedManifest.Archive.SHA256 != expected.Kit.SHA256 || decodedManifest.Archive.Size != expected.Kit.Size {
+		return Bootstrap{}, fmt.Errorf("%w: kit manifest identity", ErrInvalidBootstrap)
+	}
+	chunkDirectory, err := openDirectoryBootstrap(request.ChunkDirectory)
+	if err != nil {
+		return Bootstrap{}, err
+	}
+	defer chunkDirectory.Close()
+	if err := verifyChunkDirectory(chunkDirectory, decodedManifest.Chunks); err != nil {
 		return Bootstrap{}, err
 	}
 	helper, err := openHelper()
@@ -230,10 +234,32 @@ func renderBootstrap(request BootstrapRequest, openHelper func() (*os.File, erro
 	if err := verifyRelativeIdentity(privateDirectory, expected.Manifest.Name, expected.Manifest); err != nil {
 		return Bootstrap{}, err
 	}
-	if err := copyOpenFileAt(kit, stageDirectory, "camp-hauler-kit.tar.zst", 0o600); err != nil {
+	if err := unix.Mkdirat(int(stageDirectory.Fd()), "chunks", 0o700); err != nil {
 		return Bootstrap{}, err
 	}
-	if err := verifyRelativeIdentity(stageDirectory, "camp-hauler-kit.tar.zst", expected.Kit); err != nil {
+	stagedChunks, err := openRelativeDirectory(stageDirectory, "chunks")
+	if err != nil {
+		return Bootstrap{}, err
+	}
+	defer stagedChunks.Close()
+	for _, chunk := range decodedManifest.Chunks {
+		source, err := openRelativeRegular(chunkDirectory, chunk.Name)
+		if err != nil {
+			return Bootstrap{}, err
+		}
+		expectedChunk := remoteworker.FileIdentity{Name: chunk.Name, SHA256: chunk.SHA256, Size: chunk.Size}
+		if err := copyOpenFileAt(source, stagedChunks, chunk.Name, 0o600); err != nil {
+			_ = source.Close()
+			return Bootstrap{}, err
+		}
+		if err := source.Close(); err != nil {
+			return Bootstrap{}, err
+		}
+		if err := verifyRelativeIdentity(stagedChunks, chunk.Name, expectedChunk); err != nil {
+			return Bootstrap{}, err
+		}
+	}
+	if err := stagedChunks.Sync(); err != nil {
 		return Bootstrap{}, err
 	}
 	if err := privateDirectory.Sync(); err != nil {
@@ -390,6 +416,23 @@ func verifyRelativeIdentity(parent *os.File, name string, expected remoteworker.
 	}
 	if observed != expected {
 		return fmt.Errorf("%w: staged %s identity", ErrInvalidBootstrap, expected.Name)
+	}
+	return nil
+}
+
+func verifyChunkDirectory(directory *os.File, chunks []haulkit.ChunkIdentity) error {
+	expected := make(map[string]bool, len(chunks))
+	for _, chunk := range chunks {
+		expected[chunk.Name] = false
+	}
+	if err := verifyDirectoryEntries(directory, expected); err != nil {
+		return err
+	}
+	for _, chunk := range chunks {
+		identity, err := observeRelativeFile(directory, chunk.Name, chunk.Name)
+		if err != nil || identity.SHA256 != chunk.SHA256 || identity.Size != chunk.Size {
+			return fmt.Errorf("%w: chunk identity", ErrInvalidBootstrap)
+		}
 	}
 	return nil
 }
