@@ -14,7 +14,43 @@ import (
 	hauleradapter "github.com/joshyorko/camp/internal/adapters/hauler"
 	supervisoradapter "github.com/joshyorko/camp/internal/adapters/supervisor"
 	"github.com/joshyorko/camp/internal/domain"
+	"github.com/joshyorko/camp/internal/ports"
 )
+
+type recordingStoreInitializerRunner struct {
+	commands []ports.Command
+}
+
+func (runner *recordingStoreInitializerRunner) Run(_ context.Context, command ports.Command) (ports.Result, error) {
+	runner.commands = append(runner.commands, command)
+	return ports.Result{}, nil
+}
+
+func TestInitializeRemoteFileserverStoreSeedsHaulerStore(t *testing.T) {
+	workspace := t.TempDir()
+	store := filepath.Join(workspace, ".camp", "transfer", "fileserver-store")
+	if err := os.MkdirAll(store, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	runner := &recordingStoreInitializerRunner{}
+	request := validRequest()
+	request.WorkspaceRoot = workspace
+	request.SessionID = "session-fileserver"
+	if err := initializeRemoteFileserverStore(t.Context(), request, "/runtime/hauler", runner); err != nil {
+		t.Fatal(err)
+	}
+	seed := filepath.Join(workspace, ".camp", "transfer", "fileserver-seed")
+	body, err := os.ReadFile(seed)
+	if err != nil || string(body) != "session-fileserver\n" {
+		t.Fatalf("seed = %q, %v", body, err)
+	}
+	want := ports.Command{Executable: "/runtime/hauler", Argv: []string{
+		"store", "--store", store, "add", "file", seed, "--name", "camp-session-seed",
+	}}
+	if len(runner.commands) != 1 || !reflect.DeepEqual(runner.commands[0], want) {
+		t.Fatalf("commands = %#v, want %#v", runner.commands, want)
+	}
+}
 
 type recordingRemoteController struct {
 	ensured   []supervisoradapter.ServiceSpec

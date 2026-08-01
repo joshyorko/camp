@@ -326,8 +326,10 @@ Do not use Hauler v2.0.2's live `_catalog` response as proof that all direct reg
   generated trees to bypass this whole-root safety check.
   fileserver authority is only the canonical manifest and its named 1 GiB
   chunks; the complete archive and enclosing directories are never valid
-  allow-list entries. The supervised fileserver uses an otherwise empty store
-  and serves only `.camp/transfer/export`; that root contains exactly one
+  allow-list entries. Before supervision, Camp initializes the fileserver's
+  otherwise empty Hauler store with the session-bound `camp-session-seed` file;
+  creating only the store directory is insufficient because Hauler exits with
+  `no store found`. The fileserver serves only `.camp/transfer/export`; that root contains exactly one
   mode-0700 attempt directory whose descriptor-verified mode-0400 regular
   files have single-link, stable inode, size, and digest identity. Extra
   entries, symlinks, hardlinks, replacements, and directory drift fail closed.

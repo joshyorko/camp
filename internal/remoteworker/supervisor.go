@@ -89,6 +89,10 @@ func (runtimeState *productionServicesRuntime) Ensure(ctx context.Context, reque
 			return domain.ProcessRecord{}, nil, err
 		}
 	}
+	haulerPath := filepath.Join(request.WorkspaceRoot, ".camp", "runtime", "hauler")
+	if err := initializeRemoteFileserverStore(ctx, request, haulerPath, subprocess.NewRunner()); err != nil {
+		return domain.ProcessRecord{}, nil, err
+	}
 	lock, err := lockRemoteServices(serviceRoot)
 	if err != nil {
 		return domain.ProcessRecord{}, nil, err
@@ -161,6 +165,23 @@ func (runtimeState *productionServicesRuntime) Ensure(ctx context.Context, reque
 		return domain.ProcessRecord{}, nil, err
 	}
 	return supervisorRecord, records, nil
+}
+
+func initializeRemoteFileserverStore(ctx context.Context, request Request, haulerPath string, runner ports.Runner) error {
+	transferRoot := filepath.Join(request.WorkspaceRoot, ".camp", "transfer")
+	seedPath := filepath.Join(transferRoot, "fileserver-seed")
+	body := []byte(request.SessionID + "\n")
+	digest := sha256.Sum256(body)
+	expected := FileIdentity{Name: filepath.Base(seedPath), SHA256: hex.EncodeToString(digest[:]), Size: int64(len(body))}
+	if err := publishStableBytes(seedPath, body, expected); err != nil {
+		return fmt.Errorf("initialize remote fileserver seed: %w", err)
+	}
+	store := filepath.Join(transferRoot, "fileserver-store")
+	result, err := hauleradapter.NewClient(haulerPath, runner).AddFile(ctx, store, seedPath, "camp-session-seed")
+	if err != nil || result.ExitCode != 0 {
+		return errors.Join(err, errors.New("initialize remote fileserver Hauler store"))
+	}
+	return nil
 }
 
 func lockRemoteServices(root string) (*os.File, error) {
