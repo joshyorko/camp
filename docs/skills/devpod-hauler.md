@@ -80,8 +80,15 @@ Do not use Hauler v2.0.2's live `_catalog` response as proof that all direct reg
   `onCreateCommand` runs `activateImage` and then `hydrate` inside the created
   container before the preserved user hook; `postStartCommand` similarly runs
   `startServices` before its user hook. The generated config sets
-  `containerUser` to `root` for those system-runtime operations while preserving
-  the selected `remoteUser`. String, argv-array, and named-object lifecycle values
+  `containerUser` to `root` for container startup while preserving the selected
+  `remoteUser`; pinned DevPod v0.26.1 runs lifecycle hooks as that `remoteUser`.
+  Camp derives the rendered lifecycle user (`remoteUser`, or root when absent),
+  persists it in the immutable remote data-plane record, revalidates it against
+  the bootstrap on reuse, and passes it explicitly to receipt-observation SSH.
+  This is required because the preserved DevPod workspace showed unset SSH as
+  root with `/var/lib/containers/storage` and no image, while `--user podman`
+  used `/home/podman/.local/share/containers/storage` and observed the exact
+  activated config ID. String, argv-array, and named-object lifecycle values
   retain their top-level JSON form, and each original command or argv appears
   exactly once behind a fail-closed helper boundary. String hooks use a
   same-shell `helper || exit $?` prelude followed by the original text; argv
@@ -211,6 +218,12 @@ Do not use Hauler v2.0.2's live `_catalog` response as proof that all direct reg
   the receipt and requiring the final local config image ID to match. Docker
   may report that ID as `sha256:<digest>` while Podman reports the same ID as a
   bare 64-character digest; Camp normalizes either valid form before equality.
+  A later read-only activation observation distinguishes a provider-image
+  inspection failure from an observed-versus-expected local image-ID mismatch;
+  both displayed values are validated SHA-256 identities, never registry
+  credentials or image references. A failed provider inspection includes only
+  bounded, control-escaped stderr after credential-shaped lines and tokens are
+  redacted.
 - Container-side `hydrate` repeats helper, kit, manifest, tool, architecture,
   store, and root verification. The persisted/bootstrap manifest digest is a
   required verifier authority at preparation, reentry, provider activation,

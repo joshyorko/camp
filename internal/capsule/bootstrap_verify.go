@@ -45,6 +45,7 @@ type BootstrapVerification struct {
 	Initialize    remoteworker.Request
 	Hydrate       remoteworker.Request
 	Services      remoteworker.Request
+	LifecycleUser string
 }
 
 func VerifyBootstrap(request BootstrapVerificationRequest) (BootstrapVerification, error) {
@@ -138,6 +139,11 @@ func VerifyBootstrap(request BootstrapVerificationRequest) (BootstrapVerificatio
 	if err != nil {
 		return BootstrapVerification{}, err
 	}
+	lifecycleUser, err := lifecycleRemoteUser(document)
+	if err != nil {
+		return BootstrapVerification{}, err
+	}
+	result.LifecycleUser = lifecycleUser
 	var image string
 	if err := decodeRawString(document["image"], &image); err != nil || image != request.Expected.SourceImage {
 		return BootstrapVerification{}, fmt.Errorf("%w: devcontainer image identity", ErrInvalidBootstrap)

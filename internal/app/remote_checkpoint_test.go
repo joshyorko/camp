@@ -198,8 +198,9 @@ func remoteCheckpointSnapshot() domain.JournalSnapshot {
 		HelperSHA256: testAppSHA("a"), HelperSize: 10,
 		KitSHA256: testAppSHA("b"), KitSize: 20,
 		ManifestSHA256: testAppSHA("c"), ManifestSize: 30,
-		SourceImage: "example.test/image@sha256:" + testAppSHA("d"),
-		OuterImage:  "sha256:" + testAppSHA("e"),
+		SourceImage:   "example.test/image@sha256:" + testAppSHA("d"),
+		OuterImage:    "sha256:" + testAppSHA("e"),
+		LifecycleUser: "podman",
 	}
 	return domain.JournalSnapshot{
 		SchemaVersion: domain.SchemaVersion, SessionID: "session-1", Capsule: "brain",

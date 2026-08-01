@@ -59,6 +59,9 @@ func TestRenderBootstrapExecutesHelperBeforeEveryLifecycleForm(t *testing.T) {
 			if containerErr != nil || remoteErr != nil || containerUser != "root" || remoteUser != "podman" {
 				t.Fatalf("bootstrap users = container:%q remote:%q errors:%v/%v", containerUser, remoteUser, containerErr, remoteErr)
 			}
+			if result.LifecycleUser != remoteUser {
+				t.Fatalf("lifecycle user = %q, want %q", result.LifecycleUser, remoteUser)
+			}
 			runLifecycle(t, result.Root, document["initializeCommand"])
 			assertLifecycleForm(t, name, document["onCreateCommand"])
 			runLifecycle(t, result.Root, document["onCreateCommand"])
@@ -69,6 +72,13 @@ func TestRenderBootstrapExecutesHelperBeforeEveryLifecycleForm(t *testing.T) {
 			}
 			assertLifecycleTrace(t, name, string(body))
 		})
+	}
+}
+
+func TestLifecycleRemoteUserDefaultsToForcedContainerUser(t *testing.T) {
+	user, err := lifecycleRemoteUser(map[string]json.RawMessage{"containerUser": json.RawMessage(`"root"`)})
+	if err != nil || user != "root" {
+		t.Fatalf("lifecycleRemoteUser() = %q, %v", user, err)
 	}
 }
 
@@ -406,6 +416,9 @@ func TestVerifyBootstrapAcceptsCompleteRenderedSourceAndAccountsPayloadClasses(t
 	verified, err := VerifyBootstrap(bootstrapVerificationRequest(t, fixture, bootstrap))
 	if err != nil {
 		t.Fatal(err)
+	}
+	if verified.LifecycleUser != "podman" {
+		t.Fatalf("verified lifecycle user = %q", verified.LifecycleUser)
 	}
 	if verified.RegularFiles != 7 || verified.MetadataBytes <= 0 || verified.MetadataBytes > BootstrapMetadataLimit {
 		t.Fatalf("verified bootstrap accounting = %#v", verified)

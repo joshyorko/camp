@@ -13,6 +13,7 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"unicode"
 
 	"github.com/joshyorko/camp/internal/jsonstrict"
 	"github.com/joshyorko/camp/internal/remoteworker"
@@ -35,6 +36,7 @@ type BootstrapRequest struct {
 type Bootstrap struct {
 	Root             string
 	DevcontainerPath string
+	LifecycleUser    string
 }
 
 func RenderBootstrap(request BootstrapRequest) (Bootstrap, error) {
@@ -160,6 +162,10 @@ func renderBootstrap(request BootstrapRequest, openHelper func() (*os.File, erro
 
 	document["image"] = json.RawMessage(mustJSON(request.OuterImage))
 	document["containerUser"] = json.RawMessage(mustJSON("root"))
+	lifecycleUser, err := lifecycleRemoteUser(document)
+	if err != nil {
+		return Bootstrap{}, err
+	}
 	hooks := []struct {
 		field    string
 		requests []string
@@ -258,7 +264,21 @@ func renderBootstrap(request BootstrapRequest, openHelper func() (*os.File, erro
 	return Bootstrap{
 		Root:             request.Root,
 		DevcontainerPath: filepath.Join(request.Root, ".camp-bootstrap", "devcontainer.json"),
+		LifecycleUser:    lifecycleUser,
 	}, nil
+}
+
+func lifecycleRemoteUser(document map[string]json.RawMessage) (string, error) {
+	user := "root"
+	if raw, exists := document["remoteUser"]; exists {
+		if err := decodeRawString(raw, &user); err != nil {
+			return "", fmt.Errorf("%w: remoteUser", ErrInvalidBootstrap)
+		}
+	}
+	if user == "" || strings.ContainsAny(user, `/\\`) || strings.IndexFunc(user, unicode.IsControl) >= 0 {
+		return "", fmt.Errorf("%w: remoteUser", ErrInvalidBootstrap)
+	}
+	return user, nil
 }
 
 func rollbackPublishedBootstrap(parent *os.File, target string, published *os.File, stageName, stagePath *string) error {

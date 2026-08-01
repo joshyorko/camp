@@ -1172,10 +1172,15 @@ func validRemoteDataPlaneResult(result RemoteDataPlaneResult, selected domain.Re
 		len(record.KitSHA256) == 64 && record.KitSize > 0 &&
 		len(record.ManifestSHA256) == 64 && record.ManifestSize > 0 &&
 		immutableImage(record.SourceImage) && localImageID(record.OuterImage) &&
+		validLifecycleUser(record.LifecycleUser) &&
 		record.RequestSchema != 0 && strings.HasSuffix(record.AttemptID, "-hauler-kit-v1") &&
 		record.RequestSession == strings.TrimSuffix(record.AttemptID, "-hauler-kit-v1") &&
 		validRoot(record.WorkspaceRoot) && validRoot(record.RuntimeRoot) && validRoot(record.ManifestPath) &&
 		strings.HasPrefix(record.Architecture, "linux/") && len(record.ConfigSHA256) == 64 && record.ConfigSize > 0
+}
+
+func validLifecycleUser(user string) bool {
+	return user != "" && !strings.ContainsAny(user, `/\\`) && strings.IndexFunc(user, unicode.IsControl) < 0
 }
 
 func validateSnapshotBackend(snapshot domain.JournalSnapshot, backend config.Backend) error {

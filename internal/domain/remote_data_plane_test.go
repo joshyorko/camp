@@ -12,6 +12,7 @@ func TestRemoteDataPlaneRecordRoundTripsWithoutChangingJournalSchema(t *testing.
 		KitSHA256: strings.Repeat("a", 64), KitSize: 42, ManifestSHA256: strings.Repeat("b", 64), ManifestSize: 21,
 		SourceImage:   "example.test/room@sha256:" + strings.Repeat("c", 64),
 		OuterImage:    "sha256:" + strings.Repeat("e", 64),
+		LifecycleUser: "podman",
 		RequestSchema: 1, RequestSession: "session", WorkspaceRoot: "/workspaces/brain",
 		RuntimeRoot: "/var/lib/camp/session", ManifestPath: "/var/lib/camp/session/camp-hauler-kit.json",
 		Architecture: "linux/amd64", ConfigSHA256: strings.Repeat("d", 64), ConfigSize: 512,

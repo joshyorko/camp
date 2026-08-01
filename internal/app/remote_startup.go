@@ -22,6 +22,7 @@ func (o *Open) observeRemoteStartup(ctx context.Context, snapshot domain.Journal
 		record.WorkspaceRoot == "" || record.RuntimeRoot == "" || record.ManifestPath == "" ||
 		record.HelperSHA256 == "" || record.HelperSize <= 0 || record.KitSHA256 == "" || record.KitSize <= 0 ||
 		record.ManifestSHA256 == "" || record.ManifestSize <= 0 || record.SourceImage == "" || record.OuterImage == "" ||
+		!validLifecycleUser(record.LifecycleUser) ||
 		input.ID == "" || input.Context == "" {
 		return errors.New("remote startup observation identity is incomplete")
 	}
@@ -45,7 +46,7 @@ func (o *Open) observeRemoteStartup(ctx context.Context, snapshot domain.Journal
 	stdout := newBoundedRemoteWriter(remoteworker.DiagnosticLimit)
 	stderr := newBoundedRemoteWriter(4 << 10)
 	result, runErr := o.deps.DevPod.SSH(ctx, devpodadapter.SSHOptions{
-		WorkspaceID: input.ID, Context: input.Context, StartServices: false,
+		WorkspaceID: input.ID, Context: input.Context, User: record.LifecycleUser, StartServices: false,
 		ForwardedArgv: []string{"--command", ".camp-bootstrap/camp-bootstrap __remote-worker"},
 		Stdin:         bytes.NewReader(body), Stdout: stdout, Stderr: stderr,
 	})

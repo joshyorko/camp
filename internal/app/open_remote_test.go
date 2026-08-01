@@ -1230,6 +1230,7 @@ func (r *recordingRemoteDataPlane) Prepare(_ context.Context, request RemoteData
 			ManifestSHA256: strings.Repeat("b", 64), ManifestSize: 1,
 			SourceImage:   "example.test/room@sha256:" + strings.Repeat("c", 64),
 			OuterImage:    "sha256:" + strings.Repeat("e", 64),
+			LifecycleUser: "podman",
 			RequestSchema: remoteworker.ProtocolSchemaVersion, RequestSession: request.SessionID,
 			WorkspaceRoot: "/workspaces/brain", RuntimeRoot: "/var/lib/camp/" + request.SessionID,
 			ManifestPath: "/var/lib/camp/" + request.SessionID + "/camp-hauler-kit.json", Architecture: "linux/" + runtime.GOARCH,

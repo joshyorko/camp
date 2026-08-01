@@ -108,7 +108,7 @@ func TestOpenReconcileRemoteWorkspaceUpAcceptsBoundStartupReceipts(t *testing.T)
 	if err != nil {
 		t.Fatalf("reconciled remote Open() error = %v", err)
 	}
-	if result.Snapshot.State != domain.SessionOpen || len(devpod.ups) != 1 || devpod.startupObservations != 1 {
+	if result.Snapshot.State != domain.SessionOpen || len(devpod.ups) != 1 || devpod.startupObservations != 1 || devpod.startupUser != "podman" {
 		t.Fatalf("reconciled result=%#v ups=%d startup observations=%d", result, len(devpod.ups), devpod.startupObservations)
 	}
 }
@@ -1024,6 +1024,7 @@ type unknownOutcomeWorkspaceDevPod struct {
 	replacementSourceAfterFirstList string
 	startupReady                    bool
 	startupObservations             int
+	startupUser                     string
 }
 
 func (d *unknownOutcomeWorkspaceDevPod) Up(_ context.Context, options devpodadapter.UpOptions) (ports.Result, error) {
@@ -1084,6 +1085,7 @@ func (d *unknownOutcomeWorkspaceDevPod) SSH(_ context.Context, options devpodada
 	d.sshCalls++
 	if len(options.ForwardedArgv) != 0 {
 		d.startupObservations++
+		d.startupUser = options.User
 		if !d.startupReady {
 			receiptBody, err := json.Marshal(remoteworker.ErrorReceipt{Status: "error", Code: "remote_worker_failed", Diagnostic: "remote activation receipt is incomplete"})
 			if err != nil {

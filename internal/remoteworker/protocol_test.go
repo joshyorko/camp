@@ -97,6 +97,14 @@ func TestBoundedDiagnosticNormalizesBeforeApplyingByteCap(t *testing.T) {
 	}
 }
 
+func TestBoundedStderrDiagnosticRedactsControlsSecretsAndExcess(t *testing.T) {
+	secret := "provider-token-should-not-escape"
+	diagnostic := boundedStderrDiagnostic([]byte(strings.Repeat("x", maxDiagnosticBytes+1) + "\nTOKEN=" + secret + "\n\x1b[31mfailed\x1b[0m"))
+	if len(diagnostic) > maxDiagnosticBytes || strings.Contains(diagnostic, secret) || strings.Contains(diagnostic, "\x1b") || !strings.Contains(diagnostic, "[redacted]") || !strings.Contains(diagnostic, `\u001b`) {
+		t.Fatalf("diagnostic = %q", diagnostic)
+	}
+}
+
 func TestRunDispatchesProductionCheckpointAndEmitsOneBoundedError(t *testing.T) {
 	request := validRequest()
 	request.Operation = OperationCheckpoint

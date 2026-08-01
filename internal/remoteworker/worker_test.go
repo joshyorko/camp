@@ -113,6 +113,52 @@ func TestPodmanActivationPullUsesLoopbackRegistryWithoutTLS(t *testing.T) {
 	}
 }
 
+func TestInspectProviderImageRedactsAndBoundsProviderStderr(t *testing.T) {
+	directory := t.TempDir()
+	podman := filepath.Join(directory, "podman")
+	secret := "provider-token-should-not-escape"
+	if err := os.WriteFile(podman, []byte("#!/bin/sh\nprintf '"+secret+"\\n' >&2\nprintf '\\033[31mprovider failed\\033[0m\\n' >&2\nexit 125\n"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	_, err := inspectProviderImage(t.Context(), podman, "sha256:"+strings.Repeat("a", 64))
+	if err == nil || !strings.Contains(err.Error(), "[redacted") || strings.Contains(err.Error(), secret) || strings.Contains(err.Error(), "\x1b") {
+		t.Fatalf("inspectProviderImage() error = %q", err)
+	}
+}
+
+func TestVerifyActivatedProviderImageReportsInspectionAndIdentitySeparately(t *testing.T) {
+	directory := t.TempDir()
+	podman := filepath.Join(directory, "podman")
+	expected := "sha256:" + strings.Repeat("a", 64)
+
+	for _, test := range []struct {
+		name    string
+		script  string
+		message string
+	}{
+		{
+			name:    "inspection failure",
+			script:  "#!/bin/sh\nexit 125\n",
+			message: "inspect activated provider image: inspect activation image",
+		},
+		{
+			name:    "identity mismatch",
+			script:  "#!/bin/sh\nprintf '" + strings.Repeat("b", 64) + "\\n'\n",
+			message: "activated provider image changed: observed sha256:" + strings.Repeat("b", 64) + ", expected " + expected,
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			if err := os.WriteFile(podman, []byte(test.script), 0o700); err != nil {
+				t.Fatal(err)
+			}
+			err := verifyActivatedProviderImage(t.Context(), podman, expected)
+			if !errors.Is(err, ErrIdentityMismatch) || !strings.Contains(err.Error(), test.message) {
+				t.Fatalf("verifyActivatedProviderImage() error = %v, want %q", err, test.message)
+			}
+		})
+	}
+}
+
 func TestActivationUsesPlatformManifestDigestStoredByHauler(t *testing.T) {
 	source := "quay.io/podman/stable@sha256:" + strings.Repeat("a", 64)
 	digest, err := activationImageDigest(haulkit.StoreIdentity{Entries: []haulkit.StoreEntry{{

@@ -102,6 +102,7 @@ func TestValidRemoteDataPlaneResultAcceptsPreparedSourceAndLocalImageIdentities(
 		Mode: domain.DataPlaneHaulerKitV1, AttemptID: selected.AttemptID, BootstrapRoot: "/controller/attempt/bootstrap",
 		KitSHA256: digest, KitSize: 1, ManifestSHA256: digest, ManifestSize: 1,
 		SourceImage: "example.test/workspace@sha256:" + digest, OuterImage: "sha256:" + digest,
+		LifecycleUser: "podman",
 		RequestSchema: 1, RequestSession: "session-1", WorkspaceRoot: "/workspaces/brain",
 		RuntimeRoot: "/var/lib/camp/session-1", ManifestPath: "/var/lib/camp/session-1/camp-hauler-kit.json",
 		Architecture: "linux/amd64", ConfigSHA256: digest, ConfigSize: 1,
@@ -109,6 +110,10 @@ func TestValidRemoteDataPlaneResultAcceptsPreparedSourceAndLocalImageIdentities(
 	result := RemoteDataPlaneResult{BootstrapRoot: record.BootstrapRoot, Record: record}
 	if !validRemoteDataPlaneResult(result, selected, "/controller/materialization") {
 		t.Fatalf("production-shaped remote data-plane result was rejected: %#v", result)
+	}
+	result.Record.LifecycleUser = "../unsafe"
+	if validRemoteDataPlaneResult(result, selected, "/controller/materialization") {
+		t.Fatal("unsafe lifecycle user was accepted")
 	}
 }
 
@@ -551,7 +556,7 @@ func writeFakeRenderedBootstrap(request capsule.BootstrapRequest) (capsule.Boots
 	if err := os.WriteFile(path, []byte(document), 0o600); err != nil {
 		return capsule.Bootstrap{}, err
 	}
-	return capsule.Bootstrap{Root: request.Root, DevcontainerPath: path}, nil
+	return capsule.Bootstrap{Root: request.Root, DevcontainerPath: path, LifecycleUser: "root"}, nil
 }
 
 func digestString(body []byte) string {

@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"unicode"
 	"unicode/utf8"
@@ -28,6 +29,7 @@ var (
 	ErrUnsupportedOperation  = errors.New("remote-worker operation is not implemented")
 	ErrUnsupportedCapability = errors.New("remote-worker capability is unsupported")
 	ErrIdentityMismatch      = errors.New("remote-worker identity mismatch")
+	opaqueDiagnosticSecret   = regexp.MustCompile(`(?i)\b(?:[A-Za-z0-9._~+/=-]{20,}|[A-Za-z0-9]{32,})\b`)
 )
 
 type Operation string
@@ -209,6 +211,56 @@ func boundedDiagnostic(err error) string {
 		value = value[:len(value)-1]
 	}
 	return value
+}
+
+func boundedStderrDiagnostic(stderr []byte) string {
+	if len(stderr) > maxDiagnosticBytes {
+		stderr = stderr[len(stderr)-maxDiagnosticBytes:]
+	}
+	var sanitized strings.Builder
+	for _, line := range strings.Split(strings.ToValidUTF8(string(stderr), "\uFFFD"), "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" {
+			continue
+		}
+		if key, _, ok := strings.Cut(line, "="); ok && diagnosticKeyLooksSecret(key) {
+			line = strings.TrimSpace(key) + "=[redacted]"
+		} else if key, _, ok := strings.Cut(line, ":"); ok && diagnosticKeyLooksSecret(key) {
+			line = strings.TrimSpace(key) + ": [redacted]"
+		} else if diagnosticContainsSecretMarker(line) {
+			line = "[redacted provider diagnostic]"
+		} else {
+			line = opaqueDiagnosticSecret.ReplaceAllString(line, "[redacted provider secret]")
+		}
+		for _, value := range line {
+			if value == '\t' {
+				sanitized.WriteRune(value)
+			} else if unicode.IsControl(value) || unicode.In(value, unicode.Cf) {
+				fmt.Fprintf(&sanitized, `\u%04x`, value)
+			} else {
+				sanitized.WriteRune(value)
+			}
+		}
+		if sanitized.Len() < maxDiagnosticBytes {
+			sanitized.WriteByte('\n')
+		}
+	}
+	return strings.TrimSpace(boundedDiagnostic(errors.New(sanitized.String())))
+}
+
+func diagnosticKeyLooksSecret(key string) bool {
+	key = strings.ToLower(strings.TrimSpace(strings.TrimPrefix(key, "export ")))
+	return diagnosticContainsSecretMarker(key)
+}
+
+func diagnosticContainsSecretMarker(value string) bool {
+	lower := strings.ToLower(value)
+	for _, marker := range []string{"secret", "token", "password", "passphrase", "credential", "api_key", "api-key", "apikey", "access_key", "access-key", "private_key", "private-key", "client_secret", "client-secret"} {
+		if strings.Contains(lower, marker) {
+			return true
+		}
+	}
+	return false
 }
 
 func encodeResult(writer io.Writer, operation Operation, receipt any) error {

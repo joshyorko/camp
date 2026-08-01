@@ -263,6 +263,7 @@ func (p *RemoteDataPlanePreparer) Prepare(ctx context.Context, request RemoteDat
 		HelperSHA256: manifest.Tools.Camp.SHA256, HelperSize: manifest.Tools.Camp.Size,
 		ManifestSHA256: manifestIdentity.SHA256, ManifestSize: manifestIdentity.Size,
 		SourceImage: outerImage, OuterImage: localImage,
+		LifecycleUser: bootstrap.LifecycleUser,
 		RequestSchema: scope.SchemaVersion, RequestSession: scope.SessionID, WorkspaceRoot: scope.WorkspaceRoot,
 		RuntimeRoot: scope.RuntimeRoot, ManifestPath: scope.ManifestPath, Architecture: scope.Architecture,
 		ConfigSHA256: configIdentity.SHA256, ConfigSize: configIdentity.Size,
@@ -325,13 +326,17 @@ func (p *RemoteDataPlanePreparer) reusePrepared(ctx context.Context, request Rem
 		completion.KitSize != manifest.Archive.Size || completion.ManifestSHA256 != manifestIdentity.SHA256 ||
 		completion.HelperSHA256 != manifest.Tools.Camp.SHA256 || completion.HelperSize != manifest.Tools.Camp.Size ||
 		completion.ManifestSize != manifestIdentity.Size || !immutableImage(completion.SourceImage) ||
-		!localImageID(completion.OuterImage) {
+		!localImageID(completion.OuterImage) || completion.LifecycleUser == "" {
 		return RemoteDataPlaneResult{}, errors.New("prior completion marker is not bound to the requested attempt")
 	}
-	if _, err := capsule.VerifyBootstrap(capsule.BootstrapVerificationRequest{
+	bootstrapVerification, err := capsule.VerifyBootstrap(capsule.BootstrapVerificationRequest{
 		Root: bootstrapRoot, Expected: expected, Scope: scope, Config: config,
-	}); err != nil {
+	})
+	if err != nil {
 		return RemoteDataPlaneResult{}, fmt.Errorf("verify prior remote bootstrap: %w", err)
+	}
+	if bootstrapVerification.LifecycleUser != completion.LifecycleUser {
+		return RemoteDataPlaneResult{}, errors.New("prior completion marker lifecycle user differs from bootstrap")
 	}
 	return RemoteDataPlaneResult{BootstrapRoot: bootstrapRoot, Record: completion}, nil
 }

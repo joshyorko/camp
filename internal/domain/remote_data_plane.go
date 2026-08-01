@@ -19,6 +19,7 @@ type RemoteDataPlaneRecord struct {
 	ManifestSize   int64         `json:"manifestSize,omitempty" yaml:"manifestSize,omitempty"`
 	SourceImage    string        `json:"sourceImage,omitempty" yaml:"sourceImage,omitempty"`
 	OuterImage     string        `json:"outerImage,omitempty" yaml:"outerImage,omitempty"`
+	LifecycleUser  string        `json:"lifecycleUser,omitempty" yaml:"lifecycleUser,omitempty"`
 	RequestSchema  uint32        `json:"requestSchema,omitempty" yaml:"requestSchema,omitempty"`
 	RequestSession string        `json:"requestSession,omitempty" yaml:"requestSession,omitempty"`
 	WorkspaceRoot  string        `json:"workspaceRoot,omitempty" yaml:"workspaceRoot,omitempty"`

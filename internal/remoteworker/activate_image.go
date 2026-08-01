@@ -253,6 +253,12 @@ func inspectProviderImage(ctx context.Context, engine, reference string) (string
 	runner := subprocess.NewRunner()
 	inspected, err := runner.Run(ctx, ports.Command{Executable: engine, Argv: []string{"image", "inspect", "--format", "{{.Id}}", reference}})
 	if err != nil || inspected.ExitCode != 0 {
+		if err == nil {
+			err = fmt.Errorf("exit status %d", inspected.ExitCode)
+		}
+		if diagnostic := boundedStderrDiagnostic(inspected.Stderr); diagnostic != "" {
+			return "", fmt.Errorf("inspect activation image: %w: %s", err, diagnostic)
+		}
 		return "", fmt.Errorf("inspect activation image: %w", err)
 	}
 	value := strings.TrimSpace(string(inspected.Stdout))
@@ -288,11 +294,21 @@ func (*productionActivationRuntime) Observe(ctx context.Context, request Request
 	if err != nil {
 		return ActivationReceipt{}, false, err
 	}
-	observed, err := inspectProviderImage(ctx, engine, request.Expected.Image)
-	if err != nil || observed != request.Expected.Image {
-		return ActivationReceipt{}, false, fmt.Errorf("%w: activated provider image changed", ErrIdentityMismatch)
+	if err := verifyActivatedProviderImage(ctx, engine, request.Expected.Image); err != nil {
+		return ActivationReceipt{}, false, err
 	}
 	return receipt, true, nil
+}
+
+func verifyActivatedProviderImage(ctx context.Context, engine, expected string) error {
+	observed, err := inspectProviderImage(ctx, engine, expected)
+	if err != nil {
+		return fmt.Errorf("%w: inspect activated provider image: %v", ErrIdentityMismatch, err)
+	}
+	if observed != expected {
+		return fmt.Errorf("%w: activated provider image changed: observed %s, expected %s", ErrIdentityMismatch, observed, expected)
+	}
+	return nil
 }
 
 func (*productionActivationRuntime) Publish(request Request, receipt ActivationReceipt) error {
