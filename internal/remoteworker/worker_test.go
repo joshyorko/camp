@@ -13,6 +13,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/joshyorko/camp/internal/haulkit"
 	"golang.org/x/sys/unix"
 )
 
@@ -109,6 +110,19 @@ func TestPodmanActivationPullUsesLoopbackRegistryWithoutTLS(t *testing.T) {
 	}
 	if got != "sha256:"+strings.Repeat("a", 64) {
 		t.Fatalf("local image ID = %q", got)
+	}
+}
+
+func TestActivationUsesPlatformManifestDigestStoredByHauler(t *testing.T) {
+	source := "quay.io/podman/stable@sha256:" + strings.Repeat("a", 64)
+	digest, err := activationImageDigest(haulkit.StoreIdentity{Entries: []haulkit.StoreEntry{{
+		Reference: source, Type: "image", Platform: "linux/amd64", Digest: strings.Repeat("b", 64),
+	}}}, source, "linux/amd64")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if digest != "sha256:"+strings.Repeat("b", 64) {
+		t.Fatalf("activation digest = %q", digest)
 	}
 }
 

@@ -12,3 +12,4 @@ __pycache__/
 /camp
 /build/
 dist/
+.clawpatch

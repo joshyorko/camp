@@ -27,6 +27,10 @@ type generationRunner struct {
 		err    error
 	}
 	syncCall int
+	loadRun *struct {
+		result ports.Result
+		err    error
+	}
 }
 
 func (r *generationRunner) Run(_ context.Context, command ports.Command) (ports.Result, error) {
@@ -41,6 +45,9 @@ func (r *generationRunner) Run(_ context.Context, command ports.Command) (ports.
 		run := r.syncRuns[r.syncCall]
 		r.syncCall++
 		return run.result, run.err
+	}
+	if len(command.Argv) >= 4 && command.Argv[3] == "load" && r.loadRun != nil {
+		return r.loadRun.result, r.loadRun.err
 	}
 	for index, argument := range command.Argv {
 		if argument == "save" && index+2 < len(command.Argv) && command.Argv[index+1] == "--filename" {
@@ -303,6 +310,23 @@ func TestClientPreparesStoreThroughOfficialSaveLoadAndObservedVersion(t *testing
 	}
 	if got := runner.commands[1].Argv; !reflect.DeepEqual(got[:4], []string{"store", "--store", destination, "load"}) {
 		t.Fatalf("load argv = %#v", got)
+	}
+}
+
+func TestClientPrepareStoreReportsLoadStderr(t *testing.T) {
+	t.Parallel()
+	root := t.TempDir()
+	source := filepath.Join(root, "source")
+	if err := os.Mkdir(source, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	runner := &generationRunner{loadRun: &struct {
+		result ports.Result
+		err    error
+	}{result: ports.Result{ExitCode: 1, Stderr: []byte("archive checksum mismatch")}, err: errors.New("exit status 1")}}
+	_, err := NewClientWithVersion("/opt/hauler", "v2.0.2", runner).PrepareStore(context.Background(), source, filepath.Join(root, "destination"))
+	if err == nil || !strings.Contains(err.Error(), "archive checksum mismatch") {
+		t.Fatalf("PrepareStore() error = %v", err)
 	}
 }
 

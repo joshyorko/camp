@@ -53,6 +53,12 @@ func (o *Open) observeRemoteStartup(ctx context.Context, snapshot domain.Journal
 		return errors.New("remote startup observation exceeded the protocol limit")
 	}
 	if runErr != nil || result.ExitCode != 0 {
+		if envelope, decodeErr := decodeRemoteWorkerEnvelope(stdout.Bytes(), remoteworker.OperationObserve); decodeErr == nil {
+			var remoteError remoteworker.ErrorReceipt
+			if json.Unmarshal(envelope.Receipt, &remoteError) == nil && remoteError.Status == "error" && remoteError.Code != "" && remoteError.Diagnostic != "" {
+				return fmt.Errorf("observe remote startup receipts: %s: %s", remoteError.Code, remoteError.Diagnostic)
+			}
+		}
 		return fmt.Errorf("observe remote startup receipts: %w: %s", runErr, string(stderr.Bytes()))
 	}
 	envelope, err := decodeRemoteWorkerEnvelope(stdout.Bytes(), remoteworker.OperationObserve)

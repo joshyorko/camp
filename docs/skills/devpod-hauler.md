@@ -204,7 +204,11 @@ Do not use Hauler v2.0.2's live `_catalog` response as proof that all direct reg
   provider-plugin or network-pull fallback. Podman pulls from Camp's temporary
   loopback HTTP registry with `--tls-verify=false`; without that explicit
   provider-specific flag, rootless Podman attempts HTTPS, exits 125, and never
-  reaches the otherwise healthy Hauler registry.
+  reaches the otherwise healthy Hauler registry. Hauler may resolve a locked
+  multi-platform source digest to a different platform-manifest digest in its
+  verified store. Activation therefore pulls the exact image entry digest from
+  the canonical StoreIdentity while retaining the locked source reference in
+  the receipt and requiring the final local config image ID to match.
 - Container-side `hydrate` repeats helper, kit, manifest, tool, architecture,
   store, and root verification. The persisted/bootstrap manifest digest is a
   required verifier authority at preparation, reentry, provider activation,

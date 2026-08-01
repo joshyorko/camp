@@ -77,8 +77,8 @@ func TestOpenReconcileRemoteWorkspaceUpRequiresActivationAndHydrationReceipts(t 
 	}
 
 	_, err := environment.open.Run(context.Background(), request)
-	if err == nil {
-		t.Fatal("reconciled remote Open() accepted a running workspace without immutable activation and hydration receipts")
+	if err == nil || !strings.Contains(err.Error(), "remote activation receipt is incomplete") {
+		t.Fatalf("reconciled remote Open() error = %v, want typed missing activation receipt", err)
 	}
 	if len(devpod.ups) != 1 {
 		t.Fatalf("reconciliation issued %d DevPod ups, want 1", len(devpod.ups))
@@ -1085,6 +1085,17 @@ func (d *unknownOutcomeWorkspaceDevPod) SSH(_ context.Context, options devpodada
 	if len(options.ForwardedArgv) != 0 {
 		d.startupObservations++
 		if !d.startupReady {
+			receiptBody, err := json.Marshal(remoteworker.ErrorReceipt{Status: "error", Code: "remote_worker_failed", Diagnostic: "remote activation receipt is incomplete"})
+			if err != nil {
+				return ports.Result{ExitCode: 1}, err
+			}
+			envelope, err := json.Marshal(remoteworker.Result{SchemaVersion: remoteworker.ProtocolSchemaVersion, Operation: remoteworker.OperationObserve, Receipt: receiptBody})
+			if err != nil {
+				return ports.Result{ExitCode: 1}, err
+			}
+			if _, err := options.Stdout.Write(append(envelope, '\n')); err != nil {
+				return ports.Result{ExitCode: 1}, err
+			}
 			return ports.Result{ExitCode: 1}, errors.New("remote startup receipts are missing")
 		}
 		body, err := io.ReadAll(options.Stdin)

@@ -91,6 +91,10 @@ func (runtimeState *productionActivationRuntime) Verify(ctx context.Context, req
 		request.Expected.Architecture != "linux/"+runtime.GOARCH {
 		return verifiedRuntimeKit{}, fmt.Errorf("%w: activation manifest scope", ErrIdentityMismatch)
 	}
+	imageDigest, err := activationImageDigest(manifest.Store, request.Expected.SourceImage, request.Expected.Architecture)
+	if err != nil {
+		return verifiedRuntimeKit{}, err
+	}
 	if err := secureMkdirAllOperation(request.RuntimeRoot); err != nil {
 		return verifiedRuntimeKit{}, err
 	}
@@ -120,7 +124,7 @@ func (runtimeState *productionActivationRuntime) Verify(ctx context.Context, req
 		if err := publishStableBytes(request.ManifestPath, body, request.Expected.Manifest); err != nil {
 			return verifiedRuntimeKit{}, err
 		}
-		runtimeState.kit = verifiedRuntimeKit{Store: store, RootSHA256: manifest.Root.SHA256}
+		runtimeState.kit = verifiedRuntimeKit{Store: store, RootSHA256: manifest.Root.SHA256, ImageDigest: imageDigest}
 		return runtimeState.kit, nil
 	} else if !isNotExist(statErr) {
 		return verifiedRuntimeKit{}, statErr
@@ -138,7 +142,7 @@ func (runtimeState *productionActivationRuntime) Verify(ctx context.Context, req
 	if err := publishStableBytes(request.ManifestPath, body, request.Expected.Manifest); err != nil {
 		return verifiedRuntimeKit{}, err
 	}
-	runtimeState.kit = verifiedRuntimeKit{Store: filepath.Join(ready, "store"), RootSHA256: manifest.Root.SHA256}
+	runtimeState.kit = verifiedRuntimeKit{Store: filepath.Join(ready, "store"), RootSHA256: manifest.Root.SHA256, ImageDigest: imageDigest}
 	return runtimeState.kit, nil
 }
 
@@ -206,12 +210,15 @@ func (runtimeState *productionActivationRuntime) StartRegistry(ctx context.Conte
 		case <-time.After(50 * time.Millisecond):
 		}
 	}
-	repository, digest, err := splitImmutableImage(request.Expected.SourceImage)
+	repository, _, err := splitImmutableImage(request.Expected.SourceImage)
 	if err != nil {
 		return temporaryRegistry{}, errors.Join(err, stop())
 	}
+	if !strings.HasPrefix(kit.ImageDigest, "sha256:") || len(kit.ImageDigest) != 71 {
+		return temporaryRegistry{}, errors.Join(ErrIdentityMismatch, stop())
+	}
 	return temporaryRegistry{
-		Reference: "127.0.0.1:" + strconv.Itoa(port) + "/" + repository + "@" + digest,
+		Reference: "127.0.0.1:" + strconv.Itoa(port) + "/" + repository + "@" + kit.ImageDigest,
 		Stop:      stop,
 	}, nil
 }
@@ -294,8 +301,26 @@ func (*productionActivationRuntime) Publish(request Request, receipt ActivationR
 }
 
 type verifiedRuntimeKit struct {
-	Store      string
-	RootSHA256 string
+	Store       string
+	RootSHA256  string
+	ImageDigest string
+}
+
+func activationImageDigest(store haulkit.StoreIdentity, sourceImage, architecture string) (string, error) {
+	var digest string
+	for _, entry := range store.Entries {
+		if entry.Type != "image" || entry.Reference != sourceImage || entry.Platform != architecture {
+			continue
+		}
+		if digest != "" || !validDigest(entry.Digest) {
+			return "", fmt.Errorf("%w: activation store image", ErrIdentityMismatch)
+		}
+		digest = "sha256:" + entry.Digest
+	}
+	if digest == "" {
+		return "", fmt.Errorf("%w: activation store image", ErrIdentityMismatch)
+	}
+	return digest, nil
 }
 
 type temporaryRegistry struct {

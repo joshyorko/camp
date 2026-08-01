@@ -257,6 +257,9 @@ func (c *Client) PrepareStore(ctx context.Context, source, destination string) (
 	}()
 	result, err = c.Load(ctx, destination, []string{archive})
 	if err != nil || result.ExitCode != 0 {
+		if stderr := strings.TrimSpace(string(result.Stderr)); stderr != "" {
+			return haulkit.StoreIdentity{}, fmt.Errorf("load private Hauler store: %w; stderr: %s", err, stderr)
+		}
 		return haulkit.StoreIdentity{}, fmt.Errorf("load private Hauler store: %w", err)
 	}
 	identity, err := c.ValidateStore(ctx, destination)
