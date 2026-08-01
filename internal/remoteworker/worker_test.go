@@ -160,9 +160,10 @@ func TestVerifyActivatedProviderImageReportsInspectionAndIdentitySeparately(t *t
 }
 
 func TestActivationUsesPlatformManifestDigestStoredByHauler(t *testing.T) {
-	source := "quay.io/podman/stable@sha256:" + strings.Repeat("a", 64)
+	source := "quay.io/podman/stable:latest@sha256:" + strings.Repeat("a", 64)
+	canonical := "quay.io/podman/stable@sha256:" + strings.Repeat("a", 64)
 	digest, err := activationImageDigest(haulkit.StoreIdentity{Entries: []haulkit.StoreEntry{{
-		Reference: source, Type: "image", Platform: "linux/amd64", Digest: strings.Repeat("b", 64),
+		Reference: canonical, Type: "image", Platform: "linux/amd64", Digest: strings.Repeat("b", 64),
 	}}}, source, "linux/amd64")
 	if err != nil {
 		t.Fatal(err)

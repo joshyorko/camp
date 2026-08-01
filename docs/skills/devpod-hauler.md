@@ -106,7 +106,10 @@ Do not use Hauler v2.0.2's live `_catalog` response as proof that all direct reg
   activated config ID. DevPod never receives the monolithic Kit archive.
   Activation verifies the canonical manifest, atomically reassembles its exact
   chunk allowlist under the runtime root, verifies the resulting archive, and
-  only then extracts it. Initial hydration admits only `.camp-bootstrap`,
+  only then extracts it. Hauler may canonicalize `repository:tag@sha256:...` as
+  `repository@sha256:...`; activation matches the normalized repository, source
+  digest, platform, and stored platform digest rather than rejecting equivalent
+  tagged reference spelling. Initial hydration admits only `.camp-bootstrap`,
   `chunks/`, and Camp's runtime directory, and rejects missing, extra,
   symlinked, or digest-mismatched chunks. String, argv-array, and named-object lifecycle values
   retain their top-level JSON form, and each original command or argv appears

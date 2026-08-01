@@ -356,9 +356,17 @@ type verifiedRuntimeKit struct {
 }
 
 func activationImageDigest(store haulkit.StoreIdentity, sourceImage, architecture string) (string, error) {
+	sourceRepository, sourceDigest, err := splitImmutableImage(sourceImage)
+	if err != nil {
+		return "", fmt.Errorf("%w: activation source image", ErrIdentityMismatch)
+	}
 	var digest string
 	for _, entry := range store.Entries {
-		if entry.Type != "image" || entry.Reference != sourceImage || entry.Platform != architecture {
+		if entry.Type != "image" || entry.Platform != architecture {
+			continue
+		}
+		entryRepository, entryDigest, err := splitImmutableImage(entry.Reference)
+		if err != nil || entryRepository != sourceRepository || entryDigest != sourceDigest {
 			continue
 		}
 		if digest != "" || !validDigest(entry.Digest) {
@@ -525,6 +533,9 @@ func splitImmutableImage(reference string) (string, string, error) {
 		if strings.Contains(first, ".") || strings.Contains(first, ":") || first == "localhost" {
 			name = name[firstSlash+1:]
 		}
+	}
+	if tag := strings.LastIndexByte(name, ':'); tag > strings.LastIndexByte(name, '/') {
+		name = name[:tag]
 	}
 	if name == "" || strings.Contains(name, "..") || strings.ContainsAny(name, "\\\x00") {
 		return "", "", ErrInvalidRequest
